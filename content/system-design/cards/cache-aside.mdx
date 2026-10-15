@@ -1,0 +1,118 @@
+---
+id: cache-aside
+tech: system-design
+title: Caching with Cache-Aside
+topic: caching
+level: intermediate
+heat: 3
+hook: "Read: check the cache; on a miss, load from the database and store it. Write: update the database, then delete the cached copy."
+needs: [scalability]
+leadsTo: []
+related: [sharding-and-replication]
+confusedWith: []
+tags: [caching, performance, redis]
+visual: flow
+sources:
+  - title: "Cache-Aside pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
+    verifiedOn: "2026-10-15"
+  - title: "Caching strategies for Memcached (Amazon ElastiCache docs)"
+    url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html"
+    verifiedOn: "2026-10-15"
+  - title: "Key eviction (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/reference/eviction/"
+    verifiedOn: "2026-10-15"
+  - title: "redis.conf, maxmemory-policy (Redis source, GitHub)"
+    url: "https://raw.githubusercontent.com/redis/redis/unstable/redis.conf"
+    verifiedOn: "2026-10-15"
+  - title: "Scaling Memcache at Facebook (Nishtala et al., NSDI 2013)"
+    url: "https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf"
+    verifiedOn: "2026-10-15"
+  - title: "Caching (Hello Interview, system design core concepts)"
+    url: "https://www.hellointerview.com/learn/system-design/core-concepts/caching"
+    verifiedOn: "2026-10-15"
+---
+
+## Why it exists
+
+Reading from a database is slow compared to reading from memory, and most apps read the same data again and again. A cache such as Redis or Memcached keeps hot data in memory. Cache-aside is the most common way to use one: the app itself decides what goes into the cache.
+
+## How it works
+
+<Mermaid
+  alt="Cache-aside flow. Read path: the app checks the cache. On a hit it returns the value. On a miss it reads the database, stores the value in the cache with a TTL, then returns it. Write path: the app updates the database first, then deletes the key from the cache."
+  chart={`flowchart TD
+  R([Read key]) --> C{In cache?}
+  C -- hit --> RET([Return value])
+  C -- miss --> DB[(Read database)]
+  DB --> SET[Store in cache with TTL]
+  SET --> RET
+  W([Write key]) --> U[(1. Update database)]
+  U --> DEL[2. Delete key from cache]`}
+/>
+
+- **Read:** check the cache. On a hit, return it. On a miss, read the database, store the value in the cache with a TTL, and return it.
+- **Write:** update the database first, then delete the cache entry. The next read loads the fresh value.
+- AWS calls this pattern **lazy loading**, because data is cached only when someone reads it.
+
+## Example
+
+```python
+def get_user(user_id):
+    key = f"user:{user_id}"
+    user = cache.get(key)
+    if user is None:                     # miss
+        user = db.find_user(user_id)
+        cache.set(key, user, ttl=300)    # 5 minutes
+    return user
+
+def update_user(user_id, data):
+    db.update_user(user_id, data)        # 1. database first
+    cache.delete(f"user:{user_id}")      # 2. then invalidate
+```
+
+## Rules & defaults
+
+- **Write order:** update the database, then delete the cache entry. If you delete first, another reader can load the old row and put it back.
+- **Delete, do not update,** the cached value on writes. Facebook's memcache paper chose deletes because they are idempotent: repeating a delete does no harm.
+- **Always set a TTL.** It limits how long stale data can live. It does not guarantee fresh data.
+- **Self-hosted Redis has no memory limit by default** (64-bit), and the default `maxmemory-policy` is `noeviction`: once you set `maxmemory`, writes fail when it is full. For a cache, set `maxmemory` and a policy such as `allkeys-lru`. Managed services may use other defaults.
+- **A miss costs three trips:** ask the cache, read the database, write the cache.
+
+## Can / Cannot
+
+### Can
+
+- Keep the cache small: only data that is actually read gets cached.
+- Keep working if a cache node fails: reads fall back to the database, which must then absorb the extra load.
+
+### Cannot
+
+- Guarantee fresh data: another process can change the database, and readers can briefly see an old value.
+- Avoid a slow first read, unless you pre-load ("prime") the cache.
+
+## Interview Qs
+
+### Walk me through cache-aside.
+
+Read: check the cache; on a miss, load from the database, store it with a TTL, and return it. Write: update the database, then delete the cache key so the next read reloads it.
+
+### Why delete the key after the database write, not before?
+
+If you delete first, a reader can miss, read the old row, and put it back in the cache before your write lands. The cache then stays stale until the TTL runs out.
+
+### Cache-aside vs write-through?
+
+Cache-aside loads data on reads, so the cache stays small, but misses are slow and data can be stale. Write-through updates the cache on every write, so data is fresher, but every write is slower and the cache fills with data nobody reads.
+
+### A hot key expires and the database gets flooded. What do you do?
+
+That is a thundering herd (also called a cache stampede). Let one request rebuild the value while the others wait (request coalescing, or leases as Facebook does). Refresh very hot keys before they expire, or expire them early at random (probabilistic early expiration) so one request refreshes ahead of the crowd.
+
+## Mistake alert
+
+"Delete the cache, then update the database." A reader can then put the old value back. Update the database first. A small race remains even then, so keep a TTL as a safety net.
+
+## Say it like this
+
+"With cache-aside the app reads from the cache and, on a miss, loads from the database and caches it with a TTL. On writes it updates the database and then deletes the key. It is simple and caches only what is used, but data can be briefly stale."

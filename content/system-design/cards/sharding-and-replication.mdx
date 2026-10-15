@@ -1,0 +1,124 @@
+---
+id: sharding-and-replication
+tech: system-design
+title: Sharding vs Replication
+topic: databases
+level: interview
+heat: 3
+hook: "Replication copies the same data to many nodes (availability, more reads). Sharding splits different data across nodes (more writes, more storage)."
+needs: [scalability]
+leadsTo: [cap-theorem]
+related: [sql-vs-nosql, cache-aside]
+confusedWith: [sharding-vs-replication]
+tags: [databases, sharding, replication, partitioning]
+visual: flow
+sources:
+  - title: "Sharding pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding"
+    verifiedOn: "2026-10-15"
+  - title: "Sharding (MongoDB Manual)"
+    url: "https://www.mongodb.com/docs/manual/sharding/"
+    verifiedOn: "2026-10-15"
+  - title: "Choose a Shard Key (MongoDB Manual)"
+    url: "https://www.mongodb.com/docs/manual/core/sharding-choose-a-shard-key/"
+    verifiedOn: "2026-10-15"
+  - title: "Replication (MongoDB Manual)"
+    url: "https://www.mongodb.com/docs/manual/replication/"
+    verifiedOn: "2026-10-15"
+  - title: "Log-Shipping Standby Servers (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/warm-standby.html"
+    verifiedOn: "2026-10-15"
+  - title: "Working with DB instance read replicas (Amazon RDS docs)"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.html"
+    verifiedOn: "2026-10-15"
+  - title: "Redundancy, replication, and backup (Microsoft Learn)"
+    url: "https://learn.microsoft.com/en-us/azure/reliability/concept-redundancy-replication-backup"
+    verifiedOn: "2026-10-15"
+  - title: "Consistent Hashing and Random Trees (Karger et al., STOC 1997)"
+    url: "https://doi.org/10.1145/258533.258660"
+    verifiedOn: "2026-10-15"
+  - title: "Sharding (Hello Interview, system design core concepts)"
+    url: "https://www.hellointerview.com/learn/system-design/core-concepts/sharding"
+    verifiedOn: "2026-10-15"
+---
+
+## Why it exists
+
+One database server eventually runs out of room: too many reads, too many writes, or too much data. And if that one server dies, everything stops. Replication and sharding are the two tools for this, and they solve different problems.
+
+## How it works
+
+<Mermaid
+  alt="Two diagrams. Replication: a primary database copies every write to replica 1 and replica 2, so all three hold the same data. Sharding: a router sends users A to M to shard 1 and users N to Z to shard 2, so each shard holds different data."
+  chart={`flowchart TD
+  subgraph REP [Replication: same data, many copies]
+    P[(Primary)] -- copies writes --> R1[(Replica 1)]
+    P -- copies writes --> R2[(Replica 2)]
+  end
+  subgraph SHD [Sharding: different data on each node]
+    RT[Router] -- users A to M --> S1[(Shard 1)]
+    RT -- users N to Z --> S2[(Shard 2)]
+  end`}
+/>
+
+- **Replication:** every replica holds a full copy. In leader-based setups, all writes go to the primary, which copies them to the replicas. Replicas serve reads and can take over if the primary fails.
+- **Sharding** (horizontal partitioning): each shard holds a different slice of the rows, picked by a shard key such as `user_id`. Writes and storage spread across shards.
+- **Real systems do both.** In MongoDB, every shard must be deployed as a replica set.
+
+## Example
+
+Hash sharding with 4 shards:
+
+```text
+shard = hash(user_id) % 4
+user 42 -> hash 1337 -> 1337 % 4 = 1 -> shard 1
+```
+
+Grow to 5 shards and `% 5` sends most keys to a different shard, so most data must move. Consistent hashing fixes this: it moves only the keys the new shard takes over, about 1 in 5.
+
+## Rules & defaults
+
+- **Replication is asynchronous by default** in PostgreSQL streaming replication and Amazon RDS read replicas, so replicas can lag behind the primary.
+- **Synchronous replication** means a committed write is not lost if the primary dies, but every write waits for a replica.
+- **A good shard key** never changes, has many distinct values, spreads load evenly, and appears in most queries. Avoid ever-increasing keys such as timestamps: all new writes land on one shard.
+- **Queries without the shard key** must ask every shard (scatter-gather), and the slowest shard sets the response time.
+- **Replication is not a backup:** an accidental delete is copied to every replica.
+
+## Can / Cannot
+
+### Can
+
+- Replicas: add read capacity, and fail over when the primary dies.
+- Shards: grow write capacity and total storage beyond one machine.
+
+### Cannot
+
+- Read replicas cannot scale writes: every write still goes to the primary.
+- Sharding alone does not survive a node failure: a shard with no replicas is offline when its node is down.
+- Hash sharding cannot spread a single hot key, such as a celebrity's profile: one key always maps to one shard.
+
+## Interview Qs
+
+### What is the difference between sharding and replication?
+
+Replication keeps copies of the same data on several nodes, for availability and read scaling. Sharding splits different data across nodes, to scale writes and storage. Large systems use both: each shard is replicated.
+
+### How do you choose a shard key?
+
+Pick a key with many distinct values that spreads load evenly and appears in most queries, so each query hits one shard. Avoid keys that always increase, such as timestamps, because they send all new writes to one shard.
+
+### Why is hash(key) % N a problem, and what fixes it?
+
+Changing N remaps most keys, so adding a shard means moving most of the data. Consistent hashing moves only the keys that the new node takes over.
+
+### A user updates their profile but still sees the old one. Why?
+
+The read went to an asynchronous replica that has not caught up yet (replication lag). Read your own writes from the primary for a short time after a write, or use stronger read and write settings.
+
+## Mistake alert
+
+"Add read replicas to handle more writes." Replicas only add read capacity; every write still goes to the primary. To scale writes, you shard.
+
+## Say it like this
+
+"Replication copies the same data for availability and read throughput; sharding splits data by a shard key to scale writes and storage. I start with replicas and caching, and I shard only when one primary cannot keep up, replicating each shard."
