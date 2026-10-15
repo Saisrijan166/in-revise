@@ -10,3 +10,9 @@ export const LEVEL_LABEL = { beginner: "Beginner", intermediate: "Intermediate",
 export function cx(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(" ");
 }
+
+/** ISO "YYYY-MM-DD" → "DD-MM-YYYY" for display. */
+export function formatDate(iso: string): string {
+  const [y, m, d] = iso.split("-");
+  return `${d}-${m}-${y}`;
+}

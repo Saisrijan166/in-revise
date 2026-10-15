@@ -18,10 +18,6 @@ export function Mermaid({ chart, alt }: { chart: string; alt: string }) {
   useEffect(() => {
     const el = box.current;
     if (!el) return;
-    if (!("IntersectionObserver" in window)) {
-      setVisible(true);
-      return;
-    }
     const io = new IntersectionObserver(
       (entries) => {
         if (entries.some((e) => e.isIntersecting)) {

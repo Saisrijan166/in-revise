@@ -51,11 +51,10 @@ export function Steps({ label, children }: { label?: string; children: ReactNode
 
   useEffect(() => {
     if (!auto || active === null) return;
-    if (active >= steps.length - 1) {
-      setAuto(false);
-      return;
-    }
-    const t = window.setTimeout(() => setActive((a) => (a === null ? 0 : a + 1)), 1700);
+    const t = window.setTimeout(() => {
+      if (active >= steps.length - 1) setAuto(false);
+      else setActive(active + 1);
+    }, 1700);
     return () => window.clearTimeout(t);
   }, [auto, active, steps.length]);
 

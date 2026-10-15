@@ -9,6 +9,8 @@ const nextConfig: NextConfig = {
   trailingSlash: true,
   images: { unoptimized: true },
   turbopack: {
+    // Pin the root: a lockfile in a parent folder must not change module resolution.
+    root: process.cwd(),
     rules: {
       "*.css": {
         loaders: ["@tailwindcss/turbopack"],

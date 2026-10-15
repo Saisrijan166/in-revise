@@ -107,7 +107,6 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
     );
   }, [query, data, tech, techs.length]);
 
-  useEffect(() => setActive(0), [query]);
   useEffect(() => {
     listRef.current?.querySelector(`[data-index="${active}"]`)?.scrollIntoView({ block: "nearest" });
   }, [active]);
@@ -147,7 +146,10 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
             <input
               autoFocus
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setActive(0);
+              }}
               onKeyDown={onKeyDown}
               placeholder="Search cards, comparisons, terms…"
               className="min-h-14 w-full bg-transparent text-base text-ink outline-none placeholder:text-ink-3"

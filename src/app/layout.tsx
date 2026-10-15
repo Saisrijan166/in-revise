@@ -10,7 +10,14 @@ import { ShellEffects } from "@/components/site/ShellEffects";
 import "./globals.css";
 
 // Body: built for legibility. Display: a characterful grotesque for the "map" identity.
-const body = Atkinson_Hyperlegible_Next({ subsets: ["latin"], variable: "--font-body", display: "swap" });
+const body = Atkinson_Hyperlegible_Next({
+  subsets: ["latin"],
+  variable: "--font-body",
+  display: "swap",
+  // next/font has no metrics for this family yet, so name the fallback stack explicitly.
+  adjustFontFallback: false,
+  fallback: ["system-ui", "Segoe UI", "Arial", "sans-serif"],
+});
 const display = Bricolage_Grotesque({ subsets: ["latin"], variable: "--font-display-face", display: "swap" });
 const code = JetBrains_Mono({ subsets: ["latin"], variable: "--font-code", display: "swap" });
 
