@@ -8,7 +8,14 @@ import { SEARCH_INDEX_URL, SEARCH_KEYS, type SearchDoc, type SearchKind } from "
 import { useUi } from "@/lib/store/ui";
 import { urls } from "@/lib/urls";
 import { cx } from "@/lib/ui";
-import { IconBook, IconCards, IconColumns, IconMap, IconSearch, IconSheet } from "@/components/ui/icons";
+import {
+  IconBook,
+  IconCards,
+  IconColumns,
+  IconMap,
+  IconSearch,
+  IconSheet,
+} from "@/components/ui/icons";
 import { useContextTech, type TechLite } from "./useCurrentTech";
 
 /** Search / command palette (CLAUDE.md 5.2 #9). Index is built at build time and fetched on first open. */
@@ -35,7 +42,11 @@ function loadIndex() {
   return indexPromise;
 }
 
-const KIND_LABEL: Record<SearchKind, string> = { card: "Cards", compare: "Comparisons", term: "Glossary" };
+const KIND_LABEL: Record<SearchKind, string> = {
+  card: "Cards",
+  compare: "Comparisons",
+  term: "Glossary",
+};
 const KIND_ICON: Record<SearchKind, ComponentType<{ size?: number; className?: string }>> = {
   card: IconCards,
   compare: IconColumns,
@@ -78,16 +89,51 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
     if (!q) {
       const quick: Item[] = tech
         ? [
-            { key: "q-map", title: "Concept map", sub: tech.name, href: urls.map(tech.slug), group: "Go to", icon: IconMap },
-            { key: "q-drill", title: "Drill flashcards", sub: tech.name, href: urls.drill(tech.slug), group: "Go to", icon: IconCards },
-            { key: "q-sheet", title: "Cheat sheets", sub: tech.name, href: urls.cheatsheetIndex(tech.slug), group: "Go to", icon: IconSheet },
-            { key: "q-gloss", title: "Glossary", sub: tech.name, href: urls.glossary(tech.slug), group: "Go to", icon: IconBook },
+            {
+              key: "q-map",
+              title: "Concept map",
+              sub: tech.name,
+              href: urls.map(tech.slug),
+              group: "Go to",
+              icon: IconMap,
+            },
+            {
+              key: "q-drill",
+              title: "Drill flashcards",
+              sub: tech.name,
+              href: urls.drill(tech.slug),
+              group: "Go to",
+              icon: IconCards,
+            },
+            {
+              key: "q-sheet",
+              title: "Cheat sheets",
+              sub: tech.name,
+              href: urls.cheatsheetIndex(tech.slug),
+              group: "Go to",
+              icon: IconSheet,
+            },
+            {
+              key: "q-gloss",
+              title: "Glossary",
+              sub: tech.name,
+              href: urls.glossary(tech.slug),
+              group: "Go to",
+              icon: IconBook,
+            },
           ]
         : [];
       const cards = (data?.docs ?? [])
         .filter((d) => d.kind === "card" && (!tech || d.tech === tech.slug))
         .slice(0, 6)
-        .map((d) => ({ key: d.key, title: d.title, sub: d.text, href: d.href, group: "Cards", icon: IconCards }));
+        .map((d) => ({
+          key: d.key,
+          title: d.title,
+          sub: d.text,
+          href: d.href,
+          group: "Cards",
+          icon: IconCards,
+        }));
       return [...quick, ...cards];
     }
     if (!data) return [];
@@ -108,7 +154,9 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
   }, [query, data, tech, techs.length]);
 
   useEffect(() => {
-    listRef.current?.querySelector(`[data-index="${active}"]`)?.scrollIntoView({ block: "nearest" });
+    listRef.current
+      ?.querySelector(`[data-index="${active}"]`)
+      ?.scrollIntoView({ block: "nearest" });
   }, [active]);
 
   const go = (item: Item | undefined) => {
@@ -160,9 +208,17 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
               aria-autocomplete="list"
               aria-label="Search"
             />
-            <Dialog.Close className="touch-target rounded-xl px-2 text-sm font-semibold text-ink-3 hover:text-ink">Esc</Dialog.Close>
+            <Dialog.Close className="touch-target rounded-xl px-2 text-sm font-semibold text-ink-3 hover:text-ink">
+              Esc
+            </Dialog.Close>
           </div>
-          <ul id={listId} ref={listRef} role="listbox" aria-label="Results" className="min-h-0 flex-1 overflow-y-auto p-2">
+          <ul
+            id={listId}
+            ref={listRef}
+            role="listbox"
+            aria-label="Results"
+            className="min-h-0 flex-1 overflow-y-auto p-2"
+          >
             {items.map((item, i) => {
               const header = item.group !== lastGroup ? item.group : null;
               lastGroup = item.group;
@@ -170,7 +226,10 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
               return (
                 <li key={item.key} role="presentation">
                   {header && (
-                    <p role="presentation" className="px-3 pt-3 pb-1 text-xs font-bold tracking-wider text-ink-3 uppercase">
+                    <p
+                      role="presentation"
+                      className="px-3 pt-3 pb-1 text-xs font-bold tracking-wider text-ink-3 uppercase"
+                    >
                       {header}
                     </p>
                   )}
@@ -186,7 +245,13 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
                       i === active ? "bg-accent-soft" : "hover:bg-surface-2",
                     )}
                   >
-                    <Icon size={18} className={cx("mt-0.5 flex-none", i === active ? "text-accent-ink" : "text-ink-3")} />
+                    <Icon
+                      size={18}
+                      className={cx(
+                        "mt-0.5 flex-none",
+                        i === active ? "text-accent-ink" : "text-ink-3",
+                      )}
+                    />
                     <span className="min-w-0">
                       <span className="block font-semibold text-ink">{item.title}</span>
                       <span className="line-clamp-1 text-sm text-ink-2">{item.sub}</span>
@@ -197,12 +262,19 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
             })}
           </ul>
           {query.trim() && data && items.length === 0 && (
-            <p className="px-5 pb-6 text-ink-2">No matches for “{query.trim()}”. Try a shorter word, like “cache” or “shard”.</p>
+            <p className="px-5 pb-6 text-ink-2">
+              No matches for “{query.trim()}”. Try a shorter word, like “cache” or “shard”.
+            </p>
           )}
-          {error && <p className="px-5 pb-6 text-bad">The search index could not load. Check your connection and try again.</p>}
+          {error && (
+            <p className="px-5 pb-6 text-bad">
+              The search index could not load. Check your connection and try again.
+            </p>
+          )}
           <p className="hidden border-t border-line px-4 py-2 text-xs text-ink-3 sm:block">
-            <kbd className="font-mono">↑</kbd> <kbd className="font-mono">↓</kbd> to move · <kbd className="font-mono">Enter</kbd> to open ·{" "}
-            <kbd className="font-mono">Esc</kbd> to close
+            <kbd className="font-mono">↑</kbd> <kbd className="font-mono">↓</kbd> to move ·{" "}
+            <kbd className="font-mono">Enter</kbd> to open · <kbd className="font-mono">Esc</kbd> to
+            close
           </p>
         </Dialog.Content>
       </Dialog.Portal>

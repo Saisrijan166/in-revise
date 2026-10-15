@@ -15,7 +15,9 @@ export function ShellEffects() {
       if (e.key === STORAGE_KEY) void useProgress.persist.rehydrate();
     };
     const onKey = (e: KeyboardEvent) => {
-      const typing = e.target instanceof HTMLElement && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName));
+      const typing =
+        e.target instanceof HTMLElement &&
+        (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName));
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         useUi.getState().setPaletteOpen(!useUi.getState().paletteOpen);

@@ -11,7 +11,9 @@ export function generateStaticParams() {
   return getDecks().flatMap((d) => d.comparisons.map((c) => ({ tech: d.slug, id: c.id })));
 }
 
-export async function generateMetadata({ params }: PageProps<"/[tech]/compare/[id]">): Promise<Metadata> {
+export async function generateMetadata({
+  params,
+}: PageProps<"/[tech]/compare/[id]">): Promise<Metadata> {
   const { tech, id } = await params;
   const c = getDeck(tech).comparisonById.get(id);
   return c ? { title: c.title, description: c.verdict } : {};

@@ -24,7 +24,18 @@ let highlighter: Promise<Highlighter> | null = null;
 function getHighlighter() {
   highlighter ??= createHighlighter({
     themes: ["github-light", "github-dark"],
-    langs: ["python", "sql", "json", "nginx", "text", "yaml", "bash", "java", "typescript", "javascript"],
+    langs: [
+      "python",
+      "sql",
+      "json",
+      "nginx",
+      "text",
+      "yaml",
+      "bash",
+      "java",
+      "typescript",
+      "javascript",
+    ],
   });
   return highlighter;
 }
@@ -36,8 +47,9 @@ interface Ctx {
   seen: Set<string>;
 }
 
-export function termPreview(deck: Deck, t: GlossaryTerm) {
-  const see = t.see ? deck.cardById.get(t.see) : undefined;
+/** Glossary preview. No "Open card" button when the term's card is the page you are on. */
+export function termPreview(deck: Deck, t: GlossaryTerm, currentCardId?: string) {
+  const see = t.see && t.see !== currentCardId ? deck.cardById.get(t.see) : undefined;
   return {
     kind: "term" as const,
     term: t.term,
@@ -67,8 +79,14 @@ function components(ctx: Ctx): MDXComponents {
       const m = /^(card|compare|term):([a-z0-9-]+)$/.exec(href);
       if (m) {
         const [, kind, id] = m;
-        if (kind === "card") return <PreviewLink preview={cardPreview(deck, id)}>{children}</PreviewLink>;
-        if (kind === "term") return <PreviewLink preview={termPreview(deck, deck.termById.get(id)!)}>{children}</PreviewLink>;
+        if (kind === "card")
+          return <PreviewLink preview={cardPreview(deck, id)}>{children}</PreviewLink>;
+        if (kind === "term")
+          return (
+            <PreviewLink preview={termPreview(deck, deck.termById.get(id)!, ctx.cardId)}>
+              {children}
+            </PreviewLink>
+          );
         return <a href={urls.compare(deck.slug, id)}>{children}</a>;
       }
       const external = /^https?:\/\//.test(href);
@@ -81,18 +99,32 @@ function components(ctx: Ctx): MDXComponents {
       );
     },
     table: (props: ComponentProps<"table">) => (
-      <div className="scroll-box" role="region" aria-label="Table, scrolls sideways on small screens" tabIndex={0}>
+      <div
+        className="scroll-box"
+        role="region"
+        aria-label="Table, scrolls sideways on small screens"
+        tabIndex={0}
+      >
         <table {...props} />
       </div>
     ),
     pre: (props: ComponentProps<"pre">) => (
-      <div className="scroll-box bg-surface-2/60" role="region" aria-label="Code example" tabIndex={0}>
+      <div
+        className="scroll-box bg-surface-2/60"
+        role="region"
+        aria-label="Code example"
+        tabIndex={0}
+      >
         <pre {...props} />
       </div>
     ),
     Term: ({ id, children }: { id: string; children: ReactNode }) => {
       const t = deck.termById.get(id);
-      return t ? <PreviewLink preview={termPreview(deck, t)}>{children}</PreviewLink> : <>{children}</>;
+      return t ? (
+        <PreviewLink preview={termPreview(deck, t, ctx.cardId)}>{children}</PreviewLink>
+      ) : (
+        <>{children}</>
+      );
     },
     Analogy,
     Note,
@@ -121,7 +153,10 @@ async function renderMd(md: string, ctx: Ctx): Promise<ReactNode> {
 export function renderInline(text: string): ReactNode {
   return text.split(/(`[^`]+`)/g).map((part, i) =>
     part.startsWith("`") && part.endsWith("`") ? (
-      <code key={i} className="rounded-md border border-line bg-surface-2 px-1 py-0.5 font-mono text-[0.88em]">
+      <code
+        key={i}
+        className="rounded-md border border-line bg-surface-2 px-1 py-0.5 font-mono text-[0.88em]"
+      >
         {part.slice(1, -1)}
       </code>
     ) : (
@@ -158,7 +193,12 @@ export function renderCard(deck: Deck, card: Card): Promise<RenderedCard> {
 }
 
 async function doRenderCard(deck: Deck, card: Card): Promise<RenderedCard> {
-  const ctx: Ctx = { deck, cardId: card.meta.id, matchers: buildMatchers(deck.glossary, card.meta.id), seen: new Set() };
+  const ctx: Ctx = {
+    deck,
+    cardId: card.meta.id,
+    matchers: buildMatchers(deck.glossary),
+    seen: new Set(),
+  };
   const s = card.sections;
   // Sequential, in reading order, so the first mention of each term is the one that gets linked.
   const r: RenderedCard = { questions: [], terms: [] };

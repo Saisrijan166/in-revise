@@ -23,7 +23,16 @@ import { cardKey } from "@/lib/urls";
 import { LEVEL_LABEL, cx, topicColor } from "@/lib/ui";
 import { StationMark } from "@/components/deck/StatusDot";
 import { HeatChip, LevelChip } from "@/components/ui/chips";
-import { IconArrowRight, IconClose, IconColumns, IconFit, IconList, IconMap, IconMinus, IconPlus } from "@/components/ui/icons";
+import {
+  IconArrowRight,
+  IconClose,
+  IconColumns,
+  IconFit,
+  IconList,
+  IconMap,
+  IconMinus,
+  IconPlus,
+} from "@/components/ui/icons";
 
 /**
  * Interactive concept graph (CLAUDE.md 5.2 #4). Pan, pinch-zoom and tap work on touch.
@@ -40,10 +49,27 @@ type ConceptNodeData = MapNode & {
   selected: boolean;
 } & Record<string, unknown>;
 
-const EDGE_STYLE: Record<EdgeKind, { label: string; stroke: string; dash?: string; width: number; arrow: boolean }> = {
-  needs: { label: "Needs (learn first)", stroke: "var(--ink-3)", width: 2.5, arrow: true },
-  leadsTo: { label: "Leads to (learn next)", stroke: "var(--accent)", dash: "7 6", width: 2.5, arrow: true },
-  related: { label: "Related (same family)", stroke: "var(--line-strong)", dash: "2 7", width: 2.5, arrow: false },
+const EDGE_STYLE: Record<
+  EdgeKind,
+  { label: string; hint: string; stroke: string; dash?: string; width: number; arrow: boolean }
+> = {
+  needs: { label: "Needs", hint: "learn first", stroke: "var(--ink-3)", width: 2.5, arrow: true },
+  leadsTo: {
+    label: "Leads to",
+    hint: "learn next",
+    stroke: "var(--accent)",
+    dash: "7 6",
+    width: 2.5,
+    arrow: true,
+  },
+  related: {
+    label: "Related",
+    hint: "same family",
+    stroke: "var(--line-strong)",
+    dash: "2 7",
+    width: 2.5,
+    arrow: false,
+  },
 };
 
 function ConceptNode({ data }: NodeProps<Node<ConceptNodeData>>) {
@@ -56,21 +82,31 @@ function ConceptNode({ data }: NodeProps<Node<ConceptNodeData>>) {
         data.dim && "opacity-30",
       )}
     >
-      <Handle type="target" position={data.vertical ? Position.Top : Position.Left} isConnectable={false} />
+      <Handle
+        type="target"
+        position={data.vertical ? Position.Top : Position.Left}
+        isConnectable={false}
+      />
       <div className="h-2" style={{ background: color }} aria-hidden="true" />
       <div className="flex items-start gap-2 px-3 pt-2.5 pb-3">
         <span className="mt-1">
           <StationMark status={data.status} color={color} size={15} />
         </span>
         <div className="min-w-0">
-          <p className="font-display text-[0.98rem] leading-tight font-bold text-ink">{data.title}</p>
+          <p className="font-display text-[0.98rem] leading-tight font-bold text-ink">
+            {data.title}
+          </p>
           <p className="mt-1 text-[0.72rem] font-semibold text-ink-3">
             {data.topicTitle} · {LEVEL_LABEL[data.level]} · {"●".repeat(data.heat)}
             <span className="opacity-40">{"●".repeat(3 - data.heat)}</span>
           </p>
         </div>
       </div>
-      <Handle type="source" position={data.vertical ? Position.Bottom : Position.Right} isConnectable={false} />
+      <Handle
+        type="source"
+        position={data.vertical ? Position.Bottom : Position.Right}
+        isConnectable={false}
+      />
     </div>
   );
 }
@@ -92,16 +128,32 @@ function layout(data: MapData, o: Orientation) {
 
 function MapControls({ onList }: { onList: () => void }) {
   const rf = useReactFlow();
-  const btn = "touch-target grid place-items-center rounded-xl border border-line bg-surface text-ink-2 shadow-[var(--shadow)] hover:text-ink";
+  const btn =
+    "touch-target grid place-items-center rounded-xl border border-line bg-surface text-ink-2 shadow-[var(--shadow)] hover:text-ink";
   return (
     <div className="absolute right-3 bottom-3 z-10 flex flex-col gap-1.5">
-      <button type="button" className={btn} onClick={() => rf.zoomIn({ duration: 200 })} aria-label="Zoom in">
+      <button
+        type="button"
+        className={btn}
+        onClick={() => rf.zoomIn({ duration: 200 })}
+        aria-label="Zoom in"
+      >
         <IconPlus size={20} />
       </button>
-      <button type="button" className={btn} onClick={() => rf.zoomOut({ duration: 200 })} aria-label="Zoom out">
+      <button
+        type="button"
+        className={btn}
+        onClick={() => rf.zoomOut({ duration: 200 })}
+        aria-label="Zoom out"
+      >
         <IconMinus size={20} />
       </button>
-      <button type="button" className={btn} onClick={() => rf.fitView({ padding: 0.15, duration: 300 })} aria-label="Fit the whole map">
+      <button
+        type="button"
+        className={btn}
+        onClick={() => rf.fitView({ padding: 0.15, duration: 300 })}
+        aria-label="Fit the whole map"
+      >
         <IconFit size={20} />
       </button>
       <button type="button" className={btn} onClick={onList} aria-label="Show as a list">
@@ -185,8 +237,16 @@ function Flow({
           type: "smoothstep",
           focusable: false,
           selectable: false,
-          style: { stroke, strokeWidth: touches ? 3.5 : s.width, strokeDasharray: s.dash, opacity: faded ? 0.18 : 1, strokeLinecap: "round" },
-          markerEnd: s.arrow ? { type: MarkerType.ArrowClosed, color: stroke, width: 16, height: 16 } : undefined,
+          style: {
+            stroke,
+            strokeWidth: touches ? 3.5 : s.width,
+            strokeDasharray: s.dash,
+            opacity: faded ? 0.18 : 1,
+            strokeLinecap: "round",
+          },
+          markerEnd: s.arrow
+            ? { type: MarkerType.ArrowClosed, color: stroke, width: 16, height: 16 }
+            : undefined,
         } satisfies Edge;
       }),
     [visibleEdges, selected],
@@ -236,7 +296,11 @@ export function ConceptMap({ tech, data }: { tech: string; data: MapData }) {
   const [view, setView] = useState<"map" | "list">("map");
   // undefined = nothing picked yet, so fall back to the ?focus= deep link.
   const [picked, setPicked] = useState<string | null | undefined>(undefined);
-  const [kinds, setKinds] = useState<Record<EdgeKind, boolean>>({ needs: true, leadsTo: true, related: true });
+  const [kinds, setKinds] = useState<Record<EdgeKind, boolean>>({
+    needs: true,
+    leadsTo: true,
+    related: true,
+  });
   const nodeById = useMemo(() => new Map(data.nodes.map((n) => [n.id, n])), [data.nodes]);
   // Deep link: /map/?focus=card-id (shareable URL). Read once from the address bar.
   const urlFocus = useSyncExternalStore(
@@ -265,12 +329,24 @@ export function ConceptMap({ tech, data }: { tech: string; data: MapData }) {
     return out;
   };
   const relLabel = (kind: EdgeKind, dir: "in" | "out") =>
-    kind === "related" ? "Related" : kind === "needs" ? (dir === "in" ? "Needs" : "Needed by") : dir === "out" ? "Leads to" : "Comes after";
+    kind === "related"
+      ? "Related"
+      : kind === "needs"
+        ? dir === "in"
+          ? "Needs"
+          : "Needed by"
+        : dir === "out"
+          ? "Leads to"
+          : "Comes after";
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div role="group" aria-label="View" className="inline-flex rounded-2xl border border-line bg-surface-2 p-1">
+        <div
+          role="group"
+          aria-label="View"
+          className="inline-flex rounded-2xl border border-line bg-surface-2 p-1"
+        >
           {(["map", "list"] as const).map((v) => (
             <button
               key={v}
@@ -279,7 +355,9 @@ export function ConceptMap({ tech, data }: { tech: string; data: MapData }) {
               onClick={() => setView(v)}
               className={cx(
                 "inline-flex min-h-10 items-center gap-1.5 rounded-xl px-3 text-sm font-semibold",
-                view === v ? "bg-surface text-ink shadow-[var(--shadow)]" : "text-ink-2 hover:text-ink",
+                view === v
+                  ? "bg-surface text-ink shadow-[var(--shadow)]"
+                  : "text-ink-2 hover:text-ink",
               )}
             >
               {v === "map" ? <IconMap size={16} /> : <IconList size={16} />}
@@ -296,7 +374,9 @@ export function ConceptMap({ tech, data }: { tech: string; data: MapData }) {
               onClick={() => setKinds((s) => ({ ...s, [k]: !s[k] }))}
               className={cx(
                 "inline-flex min-h-10 items-center gap-2 rounded-full border px-3 text-sm font-semibold",
-                kinds[k] ? "border-line-strong bg-surface text-ink" : "border-line bg-transparent text-ink-3 line-through",
+                kinds[k]
+                  ? "border-line-strong bg-surface text-ink"
+                  : "border-line bg-transparent text-ink-3 line-through",
               )}
             >
               <svg width="26" height="8" aria-hidden="true">
@@ -305,17 +385,26 @@ export function ConceptMap({ tech, data }: { tech: string; data: MapData }) {
                   y1="4"
                   x2="25"
                   y2="4"
-                  style={{ stroke: EDGE_STYLE[k].stroke, strokeWidth: 3, strokeDasharray: EDGE_STYLE[k].dash, strokeLinecap: "round" }}
+                  style={{
+                    stroke: EDGE_STYLE[k].stroke,
+                    strokeWidth: 3,
+                    strokeDasharray: EDGE_STYLE[k].dash,
+                    strokeLinecap: "round",
+                  }}
                 />
               </svg>
               {EDGE_STYLE[k].label}
+              <span className="hidden text-ink-3 sm:inline">({EDGE_STYLE[k].hint})</span>
             </button>
           ))}
         </div>
       </div>
 
       {view === "map" ? (
-        <div className="relative h-[calc(100dvh-15.5rem)] min-h-[420px] overflow-hidden rounded-3xl border border-line bg-surface md:h-[calc(100dvh-13rem)]" data-no-swipe>
+        <div
+          className="relative h-[calc(100dvh-15.5rem)] min-h-[420px] overflow-hidden rounded-3xl border border-line bg-surface md:h-[calc(100dvh-13rem)]"
+          data-no-swipe
+        >
           <ReactFlowProvider>
             <Flow
               data={data}
@@ -328,10 +417,17 @@ export function ConceptMap({ tech, data }: { tech: string; data: MapData }) {
             />
           </ReactFlowProvider>
 
-          <ul className="pointer-events-none absolute top-3 left-3 z-10 hidden flex-col gap-1 rounded-xl border border-line bg-surface/90 px-3 py-2 text-xs font-semibold text-ink-2 sm:flex" aria-label="Topic colours">
+          <ul
+            className="pointer-events-none absolute top-3 left-3 z-10 hidden flex-col gap-1 rounded-xl border border-line bg-surface/90 px-3 py-2 text-xs font-semibold text-ink-2 sm:flex"
+            aria-label="Topic colours"
+          >
             {data.topics.map((t) => (
               <li key={t.id} className="flex items-center gap-2">
-                <span className="h-2 w-5 rounded-full" style={{ background: topicColor(t.index) }} aria-hidden="true" />
+                <span
+                  className="h-2 w-5 rounded-full"
+                  style={{ background: topicColor(t.index) }}
+                  aria-hidden="true"
+                />
                 {t.title}
               </li>
             ))}
@@ -348,24 +444,35 @@ export function ConceptMap({ tech, data }: { tech: string; data: MapData }) {
                   <LevelChip level={sel.level} />
                   <HeatChip heat={sel.heat} compact />
                 </div>
-                <button type="button" onClick={() => setSelected(null)} className="touch-target -mt-2 -mr-2 grid place-items-center rounded-xl text-ink-3 hover:text-ink" aria-label="Close preview">
+                <button
+                  type="button"
+                  onClick={() => setSelected(null)}
+                  className="touch-target -mt-2 -mr-2 grid place-items-center rounded-xl text-ink-3 hover:text-ink"
+                  aria-label="Close preview"
+                >
                   <IconClose size={18} />
                 </button>
               </div>
               <p className="mt-1 font-display text-xl font-extrabold">{sel.title}</p>
-              <p className="mt-1 text-[0.95rem] text-ink-2">{sel.hook}</p>
+              <p className="mt-1 text-base text-ink-2">{sel.hook}</p>
               {sel.comparisons.length > 0 && (
                 <ul className="mt-2 flex flex-wrap gap-1.5">
                   {sel.comparisons.map((c) => (
                     <li key={c.href}>
-                      <Link href={c.href} className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-dashed border-line-strong px-2.5 text-xs font-semibold text-ink-2 hover:text-ink">
+                      <Link
+                        href={c.href}
+                        className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-dashed border-line-strong px-2.5 text-xs font-semibold text-ink-2 hover:text-ink"
+                      >
                         <IconColumns size={14} /> {c.title}
                       </Link>
                     </li>
                   ))}
                 </ul>
               )}
-              <Link href={sel.href} className="mt-3 inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-accent px-4 font-bold text-on-accent">
+              <Link
+                href={sel.href}
+                className="mt-3 inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-accent px-4 font-bold text-on-accent"
+              >
                 Open card <IconArrowRight size={17} />
               </Link>
             </div>
@@ -376,19 +483,31 @@ export function ConceptMap({ tech, data }: { tech: string; data: MapData }) {
           {data.nodes.map((n) => (
             <li key={n.id} className="rounded-2xl border border-line bg-surface p-4">
               <div className="flex items-center gap-2">
-                <span className="h-2 w-6 rounded-full" style={{ background: topicColor(n.topicIndex) }} aria-hidden="true" />
-                <span className="text-xs font-bold tracking-wider text-ink-3 uppercase">{n.topicTitle}</span>
+                <span
+                  className="h-2 w-6 rounded-full"
+                  style={{ background: topicColor(n.topicIndex) }}
+                  aria-hidden="true"
+                />
+                <span className="text-xs font-bold tracking-wider text-ink-3 uppercase">
+                  {n.topicTitle}
+                </span>
               </div>
-              <Link href={n.href} className="mt-1 block font-display text-lg font-bold text-ink hover:text-accent-ink">
+              <Link
+                href={n.href}
+                className="mt-1 block font-display text-lg font-bold text-ink hover:text-accent-ink"
+              >
                 {n.title}
               </Link>
-              <p className="text-[0.95rem] text-ink-2">{n.hook}</p>
+              <p className="text-base text-ink-2">{n.hook}</p>
               {links(n.id).length > 0 && (
                 <ul className="mt-2 flex flex-col gap-1 text-sm">
                   {links(n.id).map((l, i) => (
                     <li key={i}>
                       <span className="font-semibold text-ink-3">{relLabel(l.kind, l.dir)}: </span>
-                      <Link href={l.node.href} className="font-semibold text-accent-ink underline underline-offset-2">
+                      <Link
+                        href={l.node.href}
+                        className="font-semibold text-accent-ink underline underline-offset-2"
+                      >
                         {l.node.title}
                       </Link>
                     </li>

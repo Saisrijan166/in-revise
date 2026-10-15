@@ -13,7 +13,7 @@ export function ModeSwitch({ className, size = "md" }: { className?: string; siz
     <div
       role="group"
       aria-label="Study mode"
-      className={cx("inline-flex rounded-2xl border border-line bg-surface-2 p-1", className)}
+      className={cx("rounded-2xl border border-line bg-surface-2 p-1", className ?? "inline-flex")}
     >
       {MODES.map((m) => (
         <button

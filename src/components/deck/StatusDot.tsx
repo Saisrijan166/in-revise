@@ -5,8 +5,23 @@ import { cardKey } from "@/lib/urls";
 import { cx } from "@/lib/ui";
 
 /** A station marker: hollow = not marked, filled = known, half = shaky, red ring = unknown. */
-export function StationMark({ status, color, size = 14 }: { status?: Status; color?: string; size?: number }) {
-  const ring = status === "known" ? "var(--good)" : status === "shaky" ? "var(--warn)" : status === "unknown" ? "var(--bad)" : (color ?? "var(--line-strong)");
+export function StationMark({
+  status,
+  color,
+  size = 14,
+}: {
+  status?: Status;
+  color?: string;
+  size?: number;
+}) {
+  const ring =
+    status === "known"
+      ? "var(--good)"
+      : status === "shaky"
+        ? "var(--warn)"
+        : status === "unknown"
+          ? "var(--bad)"
+          : (color ?? "var(--line-strong)");
   const fill =
     status === "known"
       ? "var(--good)"
@@ -22,7 +37,19 @@ export function StationMark({ status, color, size = 14 }: { status?: Status; col
   );
 }
 
-export function StatusDot({ tech, id, color, size, withLabel }: { tech: string; id: string; color?: string; size?: number; withLabel?: boolean }) {
+export function StatusDot({
+  tech,
+  id,
+  color,
+  size,
+  withLabel,
+}: {
+  tech: string;
+  id: string;
+  color?: string;
+  size?: number;
+  withLabel?: boolean;
+}) {
   const hydrated = useHydrated();
   const status = useStatus(cardKey(tech, id));
   const s = hydrated ? status : undefined;
@@ -30,7 +57,9 @@ export function StatusDot({ tech, id, color, size, withLabel }: { tech: string; 
     <span className="inline-flex items-center gap-1.5">
       <StationMark status={s} color={color} size={size} />
       {withLabel ? (
-        <span className={cx("text-xs font-semibold", s ? "text-ink-2" : "text-ink-3")}>{s ? STATUS_META[s].label : "Not marked"}</span>
+        <span className={cx("text-xs font-semibold", s ? "text-ink-2" : "text-ink-3")}>
+          {s ? STATUS_META[s].label : "Not marked"}
+        </span>
       ) : (
         <span className="sr-only">{s ? STATUS_META[s].label : "Not marked"}</span>
       )}

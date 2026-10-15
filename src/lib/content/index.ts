@@ -16,7 +16,9 @@ export function getDecks(): Deck[] {
   const errors = issues.filter((i) => i.severity === "error");
   if (errors.length) {
     const list = errors.map((e) => `  ${e.file}: ${e.message}`).join("\n");
-    throw new Error(`Content has ${errors.length} error(s). Run "npm run validate:content".\n${list}`);
+    throw new Error(
+      `Content has ${errors.length} error(s). Run "npm run validate:content".\n${list}`,
+    );
   }
   cache = decks;
   return decks;
@@ -124,7 +126,11 @@ export function deckNav(deck: Deck): DeckNav {
       index: t.index,
       cards: deck.cards
         .filter((c) => c.meta.topic === t.id)
-        .map((c) => ({ id: c.meta.id, title: c.meta.title, href: urls.card(deck.slug, c.meta.id) })),
+        .map((c) => ({
+          id: c.meta.id,
+          title: c.meta.title,
+          href: urls.card(deck.slug, c.meta.id),
+        })),
     })),
   };
 }
@@ -135,7 +141,8 @@ export function neighbours(deck: Deck, id: string) {
   const card = deck.cards[i];
   const inTopic = deck.cards.filter((c) => c.meta.topic === card.meta.topic);
   const j = inTopic.findIndex((c) => c.meta.id === id);
-  const link = (c: Card | undefined) => (c ? { id: c.meta.id, title: c.meta.title, href: urls.card(deck.slug, c.meta.id) } : null);
+  const link = (c: Card | undefined) =>
+    c ? { id: c.meta.id, title: c.meta.title, href: urls.card(deck.slug, c.meta.id) } : null;
   return {
     prev: link(deck.cards[i - 1]),
     next: link(deck.cards[i + 1]),

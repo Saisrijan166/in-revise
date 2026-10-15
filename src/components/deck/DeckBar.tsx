@@ -13,7 +13,9 @@ export function DeckBar({ nav }: { nav: DeckNav }) {
   const open = useUi((s) => s.navOpen);
   const setOpen = useUi((s) => s.setNavOpen);
   const pathname = usePathname() ?? "";
-  const here = nav.topics.flatMap((t) => t.cards.map((c) => ({ ...c, topic: t.title }))).find((c) => pathname.startsWith(c.href));
+  const here = nav.topics
+    .flatMap((t) => t.cards.map((c) => ({ ...c, topic: t.title })))
+    .find((c) => pathname.startsWith(c.href));
 
   return (
     <div className="no-print sticky top-14 z-30 border-b border-line bg-[color-mix(in_oklab,var(--bg)_92%,transparent)] backdrop-blur-md lg:hidden">
@@ -34,7 +36,10 @@ export function DeckBar({ nav }: { nav: DeckNav }) {
             >
               <div className="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-surface px-4 py-1">
                 <Dialog.Title className="font-display text-base font-bold">Contents</Dialog.Title>
-                <Dialog.Close className="touch-target grid place-items-center rounded-xl text-ink-2 hover:text-ink" aria-label="Close contents">
+                <Dialog.Close
+                  className="touch-target grid place-items-center rounded-xl text-ink-2 hover:text-ink"
+                  aria-label="Close contents"
+                >
                   <IconClose size={20} />
                 </Dialog.Close>
               </div>
@@ -46,7 +51,7 @@ export function DeckBar({ nav }: { nav: DeckNav }) {
           <span className="font-semibold text-ink-2">{nav.name}</span>
           {here && <span> · {here.topic}</span>}
         </p>
-        <ModeSwitch size="sm" className="flex-none md:hidden" />
+        <ModeSwitch size="sm" className="inline-flex flex-none md:hidden" />
       </div>
     </div>
   );

@@ -85,12 +85,16 @@ export function Mermaid({ chart, alt }: { chart: string; alt: string }) {
         {svg ? (
           <div className="w-full [&>svg]:mx-auto" dangerouslySetInnerHTML={{ __html: svg }} />
         ) : (
-          <p className="px-4 text-center text-sm text-ink-3">{failed ? "Diagram could not load. The text version is below." : "Drawing diagram…"}</p>
+          <p className="px-4 text-center text-sm text-ink-3">
+            {failed ? "Diagram could not load. The text version is below." : "Drawing diagram…"}
+          </p>
         )}
       </div>
       <figcaption className="mt-2 border-t border-line pt-2 text-sm text-ink-2">
         <details>
-          <summary className="touch-target flex cursor-pointer items-center font-semibold text-ink-3 hover:text-ink">Text version of this diagram</summary>
+          <summary className="touch-target flex cursor-pointer items-center font-semibold text-ink-3 hover:text-ink">
+            Text version of this diagram
+          </summary>
           <p className="pb-2 leading-relaxed">{alt}</p>
         </details>
       </figcaption>

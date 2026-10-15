@@ -8,7 +8,10 @@ export default function NotFound() {
       <LogoMark size={64} />
       <h1 className="mt-6 text-3xl font-extrabold">This station is not on the map</h1>
       <p className="mt-2 text-ink-2">The page may have moved, or the link has a typo.</p>
-      <Link href={urls.home()} className="mt-6 inline-flex min-h-12 items-center rounded-xl bg-accent px-5 font-bold text-on-accent">
+      <Link
+        href={urls.home()}
+        className="mt-6 inline-flex min-h-12 items-center rounded-xl bg-accent px-5 font-bold text-on-accent"
+      >
         Back to all decks
       </Link>
     </div>

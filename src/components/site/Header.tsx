@@ -18,13 +18,17 @@ export function Header({ techs }: { techs: TechLite[] }) {
   return (
     <header className="no-print sticky top-0 z-40 border-b border-line bg-[color-mix(in_oklab,var(--bg)_88%,transparent)] backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-[1440px] items-center gap-2 px-3 sm:px-5">
-        <Link href={urls.home()} className="touch-target -ml-1 flex items-center rounded-xl px-1" aria-label="Concept Map home">
+        <Link
+          href={urls.home()}
+          className="touch-target -ml-1 flex items-center rounded-xl px-1"
+          aria-label="Concept Map home"
+        >
           <Wordmark />
         </Link>
         {tech && (
           <Link
             href={urls.deck(tech.slug)}
-            className="ml-1 hidden min-h-9 items-center gap-2 rounded-full border border-line bg-surface px-3 text-sm font-semibold text-ink-2 hover:text-ink sm:inline-flex"
+            className="ml-1 hidden min-h-11 items-center gap-2 rounded-full border border-line bg-surface px-3 text-sm font-semibold text-ink-2 hover:text-ink sm:inline-flex"
           >
             <span aria-hidden="true" className="h-2.5 w-2.5 rounded-full bg-accent" />
             {tech.name}

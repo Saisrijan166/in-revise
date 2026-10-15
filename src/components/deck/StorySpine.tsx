@@ -11,8 +11,17 @@ export function StorySpine({ deck }: { deck: Deck }) {
       {deck.spine.map((s, i) => {
         const last = i === deck.spine.length - 1;
         return (
-          <li key={s.index} id={`story-${s.index + 1}`} className="relative flex scroll-mt-32 gap-4 pb-6 last:pb-0">
-            {!last && <span aria-hidden="true" className="absolute top-8 bottom-0 left-[15px] w-[4px] rounded-full bg-accent/35" />}
+          <li
+            key={s.index}
+            id={`story-${s.index + 1}`}
+            className="relative flex scroll-mt-32 gap-4 pb-6 last:pb-0"
+          >
+            {!last && (
+              <span
+                aria-hidden="true"
+                className="absolute top-8 bottom-0 left-[15px] w-[4px] rounded-full bg-accent/35"
+              />
+            )}
             <span
               aria-hidden="true"
               className={

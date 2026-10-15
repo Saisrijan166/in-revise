@@ -20,7 +20,9 @@ export function GlossaryList({ entries }: { entries: GlossaryEntry[] }) {
   const [q, setQ] = useState("");
   const needle = q.trim().toLowerCase();
   const shown = needle
-    ? entries.filter((e) => [e.term, ...e.aka, e.definition].some((s) => s.toLowerCase().includes(needle)))
+    ? entries.filter((e) =>
+        [e.term, ...e.aka, e.definition].some((s) => s.toLowerCase().includes(needle)),
+      )
     : entries;
   const groups = new Map<string, GlossaryEntry[]>();
   for (const e of shown) {
@@ -46,7 +48,11 @@ export function GlossaryList({ entries }: { entries: GlossaryEntry[] }) {
         {!needle && (
           <nav aria-label="Jump to letter" className="mt-2 flex flex-wrap gap-1">
             {letters.map((l) => (
-              <a key={l} href={`#letter-${l}`} className="grid h-9 min-w-9 place-items-center rounded-lg border border-line bg-surface px-2 text-sm font-bold text-ink-2 hover:text-ink">
+              <a
+                key={l}
+                href={`#letter-${l}`}
+                className="grid h-11 min-w-11 place-items-center rounded-lg border border-line bg-surface px-2 text-sm font-bold text-ink-2 hover:text-ink"
+              >
                 {l}
               </a>
             ))}
@@ -57,12 +63,24 @@ export function GlossaryList({ entries }: { entries: GlossaryEntry[] }) {
       <p className="sr-only" aria-live="polite">
         {shown.length} terms shown
       </p>
-      {shown.length === 0 && <p className="rounded-2xl border border-dashed border-line p-5 text-ink-2">No term matches “{q.trim()}”.</p>}
+      {shown.length === 0 && (
+        <p className="rounded-2xl border border-dashed border-line p-5 text-ink-2">
+          No term matches “{q.trim()}”.
+        </p>
+      )}
 
       <div className="flex flex-col gap-8">
         {letters.map((l) => (
-          <section key={l} id={`letter-${l}`} aria-labelledby={`letter-h-${l}`} className="scroll-mt-48">
-            <h2 id={`letter-h-${l}`} className="mb-2 font-display text-2xl font-extrabold text-accent">
+          <section
+            key={l}
+            id={`letter-${l}`}
+            aria-labelledby={`letter-h-${l}`}
+            className="scroll-mt-48"
+          >
+            <h2
+              id={`letter-h-${l}`}
+              className="mb-2 font-display text-2xl font-extrabold text-accent"
+            >
               {l}
             </h2>
             <dl className="flex flex-col gap-2">
@@ -74,16 +92,28 @@ export function GlossaryList({ entries }: { entries: GlossaryEntry[] }) {
                 >
                   <dt className="font-display text-lg font-bold text-ink">
                     {e.term}
-                    {e.aka.length > 0 && <span className="ml-2 text-sm font-semibold text-ink-3">also: {e.aka.join(", ")}</span>}
+                    {e.aka.length > 0 && (
+                      <span className="ml-2 text-sm font-semibold text-ink-3">
+                        also: {e.aka.join(", ")}
+                      </span>
+                    )}
                   </dt>
                   <dd className="mt-1 text-ink-2">{e.definition}</dd>
                   <dd className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
                     {e.seeHref && (
-                      <Link href={e.seeHref} className="inline-flex min-h-9 items-center gap-1 font-bold text-accent-ink hover:underline">
+                      <Link
+                        href={e.seeHref}
+                        className="inline-flex min-h-11 items-center gap-1 font-bold text-accent-ink hover:underline"
+                      >
                         {e.seeTitle} <IconArrowRight size={15} />
                       </Link>
                     )}
-                    <a href={e.sourceUrl} target="_blank" rel="noopener noreferrer" className="text-ink-3 underline underline-offset-2 hover:text-ink">
+                    <a
+                      href={e.sourceUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex min-h-11 items-center text-ink-3 underline underline-offset-2 hover:text-ink"
+                    >
                       Source: {e.sourceTitle}
                     </a>
                   </dd>

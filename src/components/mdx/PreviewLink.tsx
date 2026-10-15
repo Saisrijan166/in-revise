@@ -15,9 +15,17 @@ import { IconArrowRight, IconBook } from "@/components/ui/icons";
 
 export type Preview =
   | { kind: "card"; title: string; hook: string; level: Level; heat: number; href: string }
-  | { kind: "term"; term: string; definition: string; glossaryHref: string; seeHref?: string; seeTitle?: string };
+  | {
+      kind: "term";
+      term: string;
+      definition: string;
+      glossaryHref: string;
+      seeHref?: string;
+      seeTitle?: string;
+    };
 
-const canHover = () => typeof window !== "undefined" && window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+const canHover = () =>
+  typeof window !== "undefined" && window.matchMedia("(hover: hover) and (pointer: fine)").matches;
 
 export function PreviewLink({ preview, children }: { preview: Preview; children: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -82,7 +90,7 @@ export function PreviewLink({ preview, children }: { preview: Preview; children:
         <Popover.Trigger asChild>
           <button
             type="button"
-            className={`inline p-0 text-left font-[inherit] ${triggerClass}`}
+            className={`term-trigger inline p-0 text-left font-[inherit] ${triggerClass}`}
             onPointerEnter={scheduleOpen}
             onPointerLeave={scheduleClose}
             aria-label={`${preview.term}: show definition`}

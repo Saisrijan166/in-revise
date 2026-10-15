@@ -1,6 +1,14 @@
 "use client";
 
-import { Children, cloneElement, isValidElement, useEffect, useState, type ReactElement, type ReactNode } from "react";
+import {
+  Children,
+  cloneElement,
+  isValidElement,
+  useEffect,
+  useState,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import { IconArrowLeft, IconArrowRight, IconPlay, IconRestart } from "@/components/ui/icons";
 import { cx } from "@/lib/ui";
 
@@ -61,7 +69,10 @@ export function Steps({ label, children }: { label?: string; children: ReactNode
   const reduced = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   return (
-    <figure className="my-5 rounded-2xl border border-line bg-surface p-4 sm:p-5" aria-label={label}>
+    <figure
+      className="my-5 rounded-2xl border border-line bg-surface p-4 sm:p-5"
+      aria-label={label}
+    >
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         {label && <figcaption className="text-sm font-semibold text-ink-3">{label}</figcaption>}
         <div className="flex items-center gap-1">
@@ -90,7 +101,10 @@ export function Steps({ label, children }: { label?: string; children: ReactNode
               >
                 <IconArrowLeft size={18} />
               </button>
-              <span className="min-w-14 text-center text-sm font-semibold text-ink-2" aria-live="polite">
+              <span
+                className="min-w-14 text-center text-sm font-semibold text-ink-2"
+                aria-live="polite"
+              >
                 {active + 1} / {steps.length}
               </span>
               <button
@@ -102,7 +116,11 @@ export function Steps({ label, children }: { label?: string; children: ReactNode
                 }}
                 className="touch-target grid place-items-center rounded-xl border border-line text-ink-2 hover:text-ink"
               >
-                {active >= steps.length - 1 ? <IconRestart size={18} /> : <IconArrowRight size={18} />}
+                {active >= steps.length - 1 ? (
+                  <IconRestart size={18} />
+                ) : (
+                  <IconArrowRight size={18} />
+                )}
               </button>
             </>
           )}
@@ -113,7 +131,8 @@ export function Steps({ label, children }: { label?: string; children: ReactNode
           cloneElement(s, {
             key: i,
             index: i,
-            state: active === null ? "idle" : i === active ? "active" : i < active ? "done" : "todo",
+            state:
+              active === null ? "idle" : i === active ? "active" : i < active ? "done" : "todo",
           }),
         )}
       </ol>

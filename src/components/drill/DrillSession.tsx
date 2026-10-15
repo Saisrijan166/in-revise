@@ -29,7 +29,15 @@ const RATE: { status: Status; label: string; key: string; cls: string }[] = [
  * Flashcard run. Rating an answer updates the card's Known/Shaky/Unknown status:
  * the card keeps the weakest rating it got in this session.
  */
-export function DrillSession({ tech, items, onRestart }: { tech: string; items: DrillItem[]; onRestart?: () => void }) {
+export function DrillSession({
+  tech,
+  items,
+  onRestart,
+}: {
+  tech: string;
+  items: DrillItem[];
+  onRestart?: () => void;
+}) {
   const [i, setI] = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [rated, setRated] = useState<Record<string, Status>>({});
@@ -63,15 +71,28 @@ export function DrillSession({ tech, items, onRestart }: { tech: string; items: 
   };
 
   if (!items.length) {
-    return <p className="rounded-2xl border border-dashed border-line p-6 text-ink-2">No questions match these filters.</p>;
+    return (
+      <p className="rounded-2xl border border-dashed border-line p-6 text-ink-2">
+        No questions match these filters.
+      </p>
+    );
   }
 
   if (done) {
     const counts = { known: 0, shaky: 0, unknown: 0 };
     Object.values(rated).forEach((s) => counts[s]++);
-    const weak = [...new Map(items.filter((it) => rated[it.key] && rated[it.key] !== "known").map((it) => [it.cardId, it])).values()];
+    const weak = [
+      ...new Map(
+        items
+          .filter((it) => rated[it.key] && rated[it.key] !== "known")
+          .map((it) => [it.cardId, it]),
+      ).values(),
+    ];
     return (
-      <div className="rounded-3xl border border-line bg-surface p-6 text-center shadow-[var(--shadow)]" aria-live="polite">
+      <div
+        className="rounded-3xl border border-line bg-surface p-6 text-center shadow-[var(--shadow)]"
+        aria-live="polite"
+      >
         <p className="font-display text-2xl font-extrabold">Run complete</p>
         <p className="mt-2 text-ink-2">
           {counts.known} got it · {counts.shaky} shaky · {counts.unknown} missed
@@ -82,7 +103,10 @@ export function DrillSession({ tech, items, onRestart }: { tech: string; items: 
             <ul className="flex flex-wrap gap-2">
               {weak.map((w) => (
                 <li key={w.cardId}>
-                  <Link href={w.cardHref} className="inline-flex min-h-11 items-center rounded-xl border border-line px-3 font-semibold text-accent-ink hover:bg-accent-soft">
+                  <Link
+                    href={w.cardHref}
+                    className="inline-flex min-h-11 items-center rounded-xl border border-line px-3 font-semibold text-accent-ink hover:bg-accent-soft"
+                  >
                     {w.cardTitle}
                   </Link>
                 </li>
@@ -90,7 +114,11 @@ export function DrillSession({ tech, items, onRestart }: { tech: string; items: 
             </ul>
           </div>
         )}
-        <button type="button" onClick={restart} className="touch-target mt-6 inline-flex items-center gap-2 rounded-xl bg-accent px-4 font-bold text-on-accent">
+        <button
+          type="button"
+          onClick={restart}
+          className="touch-target mt-6 inline-flex items-center gap-2 rounded-xl bg-accent px-4 font-bold text-on-accent"
+        >
           <IconRestart size={18} /> Run again
         </button>
       </div>
@@ -102,10 +130,12 @@ export function DrillSession({ tech, items, onRestart }: { tech: string; items: 
       data-no-swipe
       className="outline-none"
       onKeyDown={(e) => {
-        if (e.target instanceof HTMLElement && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+        if (e.target instanceof HTMLElement && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName))
+          return;
         if (e.key === "ArrowRight") go(i + 1);
         else if (e.key === "ArrowLeft") go(i - 1);
-        else if (flipped && ["1", "2", "3"].includes(e.key)) rate(RATE.find((r) => r.key === e.key)!.status);
+        else if (flipped && ["1", "2", "3"].includes(e.key))
+          rate(RATE.find((r) => r.key === e.key)!.status);
       }}
       onTouchStart={(e) => {
         touch.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -123,15 +153,28 @@ export function DrillSession({ tech, items, onRestart }: { tech: string; items: 
         <span className="font-semibold text-ink-2" aria-live="polite">
           Card {i + 1} of {items.length}
         </span>
-        <Link href={item.cardHref} className="truncate font-semibold text-accent-ink hover:underline">
+        <Link
+          href={item.cardHref}
+          className="inline-flex min-h-11 min-w-0 items-center truncate font-semibold text-accent-ink hover:underline"
+        >
           {item.cardTitle}
         </Link>
       </div>
       <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-surface-2" aria-hidden="true">
-        <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${(i / items.length) * 100}%` }} />
+        <div
+          className="h-full rounded-full bg-accent transition-[width] duration-300"
+          style={{ width: `${(i / items.length) * 100}%` }}
+        />
       </div>
 
-      <Flashcard key={item.key} front={item.q} back={item.a} eyebrow={item.eyebrow} flipped={flipped} onFlip={() => setFlipped((f) => !f)} />
+      <Flashcard
+        key={item.key}
+        front={item.q}
+        back={item.a}
+        eyebrow={item.eyebrow}
+        flipped={flipped}
+        onFlip={() => setFlipped((f) => !f)}
+      />
 
       <div className="mt-4 min-h-[52px]">
         {flipped ? (
@@ -141,10 +184,15 @@ export function DrillSession({ tech, items, onRestart }: { tech: string; items: 
                 key={r.status}
                 type="button"
                 onClick={() => rate(r.status)}
-                className={cx("min-h-12 rounded-xl border-2 bg-surface font-bold transition-colors", r.cls)}
+                className={cx(
+                  "min-h-12 rounded-xl border-2 bg-surface font-bold transition-colors",
+                  r.cls,
+                )}
               >
                 {r.label}
-                <span className="ml-1.5 hidden font-mono text-xs opacity-70 sm:inline">{r.key}</span>
+                <span className="ml-1.5 hidden font-mono text-xs opacity-70 sm:inline">
+                  {r.key}
+                </span>
               </button>
             ))}
           </div>
@@ -158,7 +206,9 @@ export function DrillSession({ tech, items, onRestart }: { tech: string; items: 
             >
               <IconArrowLeft size={18} /> Back
             </button>
-            <p className="hidden text-xs text-ink-3 sm:block">Space or Enter flips · 1 2 3 rate · ← → move</p>
+            <p className="hidden text-xs text-ink-3 sm:block">
+              Space or Enter flips · 1 2 3 rate · ← → move
+            </p>
             <button
               type="button"
               onClick={() => go(i + 1)}

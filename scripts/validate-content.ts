@@ -13,7 +13,11 @@ async function compileCheck(file: string, label: string, source: string, issues:
     await compile(source, { remarkPlugins: [remarkGfm] });
   } catch (err) {
     const e = err as { message?: string; line?: number };
-    issues.push({ file, message: `${label}: MDX does not compile: ${e.message ?? String(err)}`, severity: "error" });
+    issues.push({
+      file,
+      message: `${label}: MDX does not compile: ${e.message ?? String(err)}`,
+      severity: "error",
+    });
   }
 }
 
@@ -44,7 +48,9 @@ async function main() {
 
   const ms = Date.now() - started;
   if (errors.length) {
-    console.error(`\n✗ Content validation failed: ${errors.length} error(s), ${warnings.length} warning(s) in ${ms}ms`);
+    console.error(
+      `\n✗ Content validation failed: ${errors.length} error(s), ${warnings.length} warning(s) in ${ms}ms`,
+    );
     process.exit(1);
   }
   console.log(`\n✓ Content valid: ${warnings.length} warning(s) in ${ms}ms`);

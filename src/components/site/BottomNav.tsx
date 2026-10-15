@@ -15,11 +15,32 @@ export function BottomNav({ techs }: { techs: TechLite[] }) {
   const tech = useContextTech(techs);
   const paletteOpen = useUi((s) => s.paletteOpen);
 
-  const tabs: { label: string; href?: string; icon: ComponentType<{ size?: number }>; active: boolean; onClick?: () => void }[] = [
+  const tabs: {
+    label: string;
+    href?: string;
+    icon: ComponentType<{ size?: number }>;
+    active: boolean;
+    onClick?: () => void;
+  }[] = [
     { label: "Home", href: urls.home(), icon: IconHome, active: pathname === "/" },
-    { label: "Map", href: tech ? urls.map(tech.slug) : undefined, icon: IconMap, active: /\/map\/?$/.test(pathname) },
-    { label: "Drill", href: tech ? urls.drill(tech.slug) : undefined, icon: IconCards, active: /\/drill\/?$/.test(pathname) },
-    { label: "Search", icon: IconSearch, active: paletteOpen, onClick: () => useUi.getState().setPaletteOpen(true) },
+    {
+      label: "Map",
+      href: tech ? urls.map(tech.slug) : undefined,
+      icon: IconMap,
+      active: /\/map\/?$/.test(pathname),
+    },
+    {
+      label: "Drill",
+      href: tech ? urls.drill(tech.slug) : undefined,
+      icon: IconCards,
+      active: /\/drill\/?$/.test(pathname),
+    },
+    {
+      label: "Search",
+      icon: IconSearch,
+      active: paletteOpen,
+      onClick: () => useUi.getState().setPaletteOpen(true),
+    },
   ];
 
   return (
@@ -40,7 +61,11 @@ export function BottomNav({ techs }: { techs: TechLite[] }) {
               >
                 <Icon size={21} />
               </span>
-              <span className={cx("text-[0.72rem] font-semibold", t.active ? "text-ink" : "text-ink-3")}>{t.label}</span>
+              <span
+                className={cx("text-[0.72rem] font-semibold", t.active ? "text-ink" : "text-ink-3")}
+              >
+                {t.label}
+              </span>
             </>
           );
           const cls = "flex min-h-16 w-full flex-col items-center justify-center gap-0.5";

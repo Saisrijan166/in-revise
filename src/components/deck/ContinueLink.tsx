@@ -6,7 +6,15 @@ import { urls } from "@/lib/urls";
 import { IconArrowRight } from "@/components/ui/icons";
 
 /** "Continue where I left off" for one deck, or "Start" when nothing was visited yet. */
-export function ContinueLink({ tech, firstHref, titles }: { tech: string; firstHref: string; titles: Record<string, string> }) {
+export function ContinueLink({
+  tech,
+  firstHref,
+  titles,
+}: {
+  tech: string;
+  firstHref: string;
+  titles: Record<string, string>;
+}) {
   const hydrated = useHydrated();
   const last = useProgress((s) => s.lastVisited[tech]);
   const resume = hydrated && last && titles[last.id] ? last : null;

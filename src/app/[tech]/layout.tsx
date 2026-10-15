@@ -14,7 +14,10 @@ export default async function DeckLayout({ children, params }: LayoutProps<"/[te
   const deck = getDeck(tech);
   const nav = deckNav(deck);
   return (
-    <div data-accent={deck.accent} className="mx-auto w-full max-w-[1440px] lg:grid lg:grid-cols-[288px_minmax(0,1fr)]">
+    <div
+      data-accent={deck.accent}
+      className="mx-auto w-full max-w-[1440px] lg:grid lg:grid-cols-[288px_minmax(0,1fr)] print:block"
+    >
       <aside className="no-print sticky top-14 hidden h-[calc(100dvh-3.5rem)] overflow-y-auto border-r border-line lg:block">
         <DeckNavList nav={nav} />
       </aside>

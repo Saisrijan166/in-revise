@@ -24,8 +24,12 @@ export function StatusControls({ tech, id, title }: { tech: string; id: string; 
   const current = hydrated ? status : undefined;
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div role="group" aria-label={`How well do you know ${title}?`} className="flex flex-wrap gap-1.5">
+    <div className="contents">
+      <div
+        role="group"
+        aria-label={`How well do you know ${title}?`}
+        className="flex flex-wrap gap-1.5"
+      >
         {(Object.keys(STATUS_META) as Status[]).map((s) => {
           const Icon = ICONS[s];
           const on = current === s;
@@ -37,8 +41,10 @@ export function StatusControls({ tech, id, title }: { tech: string; id: string; 
               title={STATUS_META[s].hint}
               onClick={() => setStatus(key, on ? null : s)}
               className={cx(
-                "inline-flex min-h-11 items-center gap-1.5 rounded-xl border-2 px-3 text-sm font-bold transition-colors",
-                on ? ON[s] : "border-line bg-surface text-ink-2 hover:border-line-strong hover:text-ink",
+                "inline-flex min-h-11 items-center gap-1.5 rounded-xl border-2 px-2.5 text-sm font-bold transition-colors sm:px-3",
+                on
+                  ? ON[s]
+                  : "border-line bg-surface text-ink-2 hover:border-line-strong hover:text-ink",
               )}
             >
               <Icon size={16} />
@@ -53,7 +59,9 @@ export function StatusControls({ tech, id, title }: { tech: string; id: string; 
         onClick={() => toggleBookmark(key)}
         className={cx(
           "inline-flex min-h-11 items-center gap-1.5 rounded-xl border-2 px-3 text-sm font-bold transition-colors",
-          hydrated && bookmarked ? "border-accent bg-accent-soft text-accent-ink" : "border-line bg-surface text-ink-2 hover:text-ink",
+          hydrated && bookmarked
+            ? "border-accent bg-accent-soft text-accent-ink"
+            : "border-line bg-surface text-ink-2 hover:text-ink",
         )}
       >
         <IconBookmark size={16} filled={hydrated && bookmarked} />

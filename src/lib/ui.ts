@@ -5,7 +5,11 @@ export function topicColor(index: number): string {
   return index < 8 ? `var(--t${index + 1})` : "var(--t-other)";
 }
 
-export const LEVEL_LABEL = { beginner: "Beginner", intermediate: "Intermediate", interview: "Interview" } as const;
+export const LEVEL_LABEL = {
+  beginner: "Beginner",
+  intermediate: "Intermediate",
+  interview: "Interview",
+} as const;
 
 export function cx(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(" ");
@@ -15,4 +19,9 @@ export function cx(...parts: (string | false | null | undefined)[]): string {
 export function formatDate(iso: string): string {
   const [y, m, d] = iso.split("-");
   return `${d}-${m}-${y}`;
+}
+
+/** "1 card", "2 cards". */
+export function plural(n: number, word: string, many = `${word}s`): string {
+  return `${n} ${n === 1 ? word : many}`;
 }

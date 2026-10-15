@@ -27,7 +27,15 @@ export function LevelChip({ level, className }: { level: Level; className?: stri
 }
 
 /** Heat: how often interviewers ask it (1–3 flames). */
-export function HeatChip({ heat, className, compact }: { heat: number; className?: string; compact?: boolean }) {
+export function HeatChip({
+  heat,
+  className,
+  compact,
+}: {
+  heat: number;
+  className?: string;
+  compact?: boolean;
+}) {
   const label = heat === 3 ? "Asked a lot" : heat === 2 ? "Asked often" : "Asked sometimes";
   return (
     <span
@@ -39,7 +47,12 @@ export function HeatChip({ heat, className, compact }: { heat: number; className
     >
       <span aria-hidden="true" className="inline-flex" style={{ color: "var(--flame)" }}>
         {[1, 2, 3].map((f) => (
-          <IconFlame key={f} size={13} filled={f <= heat} className={f <= heat ? "" : "opacity-35"} />
+          <IconFlame
+            key={f}
+            size={13}
+            filled={f <= heat}
+            className={f <= heat ? "" : "opacity-35"}
+          />
         ))}
       </span>
       {compact ? <span className="sr-only">{label}</span> : <span>{label}</span>}
@@ -57,7 +70,7 @@ export function TopicChip({ title, color, href }: { title: string; color: string
   const cls =
     "inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-0.5 text-xs font-semibold text-ink-2";
   return href ? (
-    <a href={href} className={cx(cls, "hover:border-line-strong hover:text-ink")}>
+    <a href={href} className={cx(cls, "hit-44 hover:border-line-strong hover:text-ink")}>
       {inner}
     </a>
   ) : (

@@ -34,9 +34,17 @@ export default async function ReviewPage({ params }: PageProps<"/[tech]/review">
   }
   return (
     <div className="mx-auto max-w-4xl px-4 pt-5 pb-12 sm:px-6 lg:px-10">
-      <Breadcrumbs items={[{ label: "Home", href: urls.home() }, { label: deck.name, href: urls.deck(tech) }, { label: "Review list" }]} />
+      <Breadcrumbs
+        items={[
+          { label: "Home", href: urls.home() },
+          { label: deck.name, href: urls.deck(tech) },
+          { label: "Review list" },
+        ]}
+      />
       <h1 className="text-3xl font-extrabold sm:text-4xl">Review list</h1>
-      <p className="mt-1 mb-5 text-ink-2">Only the cards you flagged, in the fast Revise view. Ideal the night before.</p>
+      <p className="mt-1 mb-5 text-ink-2">
+        Only the cards you flagged, in the fast Revise view. Ideal the night before.
+      </p>
       <ReviewList tech={tech} entries={entries} />
     </div>
   );

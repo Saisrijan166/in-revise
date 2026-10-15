@@ -78,7 +78,10 @@ export const IconSheet = (p: IconProps) => (
 );
 export const IconFlame = ({ filled, ...p }: IconProps & { filled?: boolean }) => (
   <Base {...p} strokeWidth={1.8} fill={filled ? "currentColor" : "none"}>
-    <path d="M12 2.5c.6 3.2 4.8 5.4 4.8 10.1A4.8 4.8 0 0 1 12 17.4a4.8 4.8 0 0 1-4.8-4.8c0-2 .9-3.3 2-4.4.2 1.4.9 2.4 2 2.9-.6-3.1.3-6.2.8-8.6z" transform="translate(0 2.5)" />
+    <path
+      d="M12 2.5c.6 3.2 4.8 5.4 4.8 10.1A4.8 4.8 0 0 1 12 17.4a4.8 4.8 0 0 1-4.8-4.8c0-2 .9-3.3 2-4.4.2 1.4.9 2.4 2 2.9-.6-3.1.3-6.2.8-8.6z"
+      transform="translate(0 2.5)"
+    />
   </Base>
 );
 export const IconSun = (p: IconProps) => (

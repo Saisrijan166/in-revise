@@ -39,7 +39,9 @@ export function ConnectsPanel({ deck, card }: { deck: Deck; card: Card }) {
                         <StatusDot tech={deck.slug} id={id} color={topicColor(topic.index)} />
                       </span>
                       <span className="min-w-0">
-                        <span className="block font-semibold text-ink group-hover:text-accent-ink">{c.meta.title}</span>
+                        <span className="block font-semibold text-ink group-hover:text-accent-ink">
+                          {c.meta.title}
+                        </span>
                         <span className="line-clamp-2 text-sm text-ink-2">{c.meta.hook}</span>
                       </span>
                     </Link>
@@ -52,7 +54,9 @@ export function ConnectsPanel({ deck, card }: { deck: Deck; card: Card }) {
 
       {comparisons.length > 0 && (
         <section aria-label="Often confused">
-          <p className="mb-2 text-xs font-bold tracking-wider text-ink-3 uppercase">Often confused</p>
+          <p className="mb-2 text-xs font-bold tracking-wider text-ink-3 uppercase">
+            Often confused
+          </p>
           <ul className="flex flex-col gap-1.5">
             {comparisons.map((c) => (
               <li key={c.id}>
@@ -62,7 +66,9 @@ export function ConnectsPanel({ deck, card }: { deck: Deck; card: Card }) {
                 >
                   <IconColumns size={18} className="mt-0.5 flex-none text-accent" />
                   <span className="min-w-0">
-                    <span className="block font-semibold text-ink group-hover:text-accent-ink">{c.title}</span>
+                    <span className="block font-semibold text-ink group-hover:text-accent-ink">
+                      {c.title}
+                    </span>
                     <span className="line-clamp-2 text-sm text-ink-2">{c.verdict}</span>
                   </span>
                 </Link>

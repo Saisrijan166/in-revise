@@ -31,7 +31,15 @@ export function Section({
   );
 }
 
-export function CanCannot({ can, cannot, compact }: { can?: ReactNode; cannot?: ReactNode; compact?: boolean }) {
+export function CanCannot({
+  can,
+  cannot,
+  compact,
+}: {
+  can?: ReactNode;
+  cannot?: ReactNode;
+  compact?: boolean;
+}) {
   if (!can && !cannot) return null;
   return (
     <div className={cx("grid gap-3", !compact && "sm:grid-cols-2")}>
@@ -61,24 +69,51 @@ export function CanCannot({ can, cannot, compact }: { can?: ReactNode; cannot?: 
   );
 }
 
-export function MistakeBox({ children }: { children: ReactNode }) {
+/** The label doubles as the section heading when `headingId` is given (no repeated titles). */
+function BoxLabel({
+  id,
+  className,
+  children,
+}: {
+  id?: string;
+  className: string;
+  children: ReactNode;
+}) {
+  return id ? (
+    <h2 id={id} className={cx(className, "scroll-mt-32 font-sans")}>
+      {children}
+    </h2>
+  ) : (
+    <p className={className}>{children}</p>
+  );
+}
+
+export function MistakeBox({ children, headingId }: { children: ReactNode; headingId?: string }) {
   return (
     <div className="rounded-2xl border border-[color-mix(in_oklab,var(--warn)_45%,var(--line))] bg-warn-soft p-4">
-      <p className="mb-1.5 flex items-center gap-2 text-sm font-bold tracking-wide text-warn uppercase">
-        <IconAlert size={17} /> Common wrong answer
-      </p>
+      <BoxLabel
+        id={headingId}
+        className="mb-1.5 flex items-center gap-2 text-sm font-bold tracking-wide text-warn uppercase"
+      >
+        <IconAlert size={17} /> Mistake alert: the common wrong answer
+      </BoxLabel>
       <div className="prose-card">{children}</div>
     </div>
   );
 }
 
-export function SayItBox({ children }: { children: ReactNode }) {
+export function SayItBox({ children, headingId }: { children: ReactNode; headingId?: string }) {
   return (
-    <figure className="relative rounded-2xl bg-accent-soft p-4 pl-12">
+    <div className="relative rounded-2xl bg-accent-soft p-4 pl-12">
       <IconQuote size={22} className="absolute top-4 left-4 text-accent" />
-      <figcaption className="mb-1 text-sm font-bold tracking-wide text-accent-ink uppercase">Say it like this</figcaption>
+      <BoxLabel
+        id={headingId}
+        className="mb-1 text-sm font-bold tracking-wide text-accent-ink uppercase"
+      >
+        Say it like this
+      </BoxLabel>
       <blockquote className="prose-card font-medium text-ink [&_p]:m-0">{children}</blockquote>
-    </figure>
+    </div>
   );
 }
 

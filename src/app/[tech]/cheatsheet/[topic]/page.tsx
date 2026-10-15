@@ -15,7 +15,9 @@ export function generateStaticParams() {
   return getDecks().flatMap((d) => d.topics.map((t) => ({ tech: d.slug, topic: t.id })));
 }
 
-export async function generateMetadata({ params }: PageProps<"/[tech]/cheatsheet/[topic]">): Promise<Metadata> {
+export async function generateMetadata({
+  params,
+}: PageProps<"/[tech]/cheatsheet/[topic]">): Promise<Metadata> {
   const { tech, topic } = await params;
   const deck = getDeck(tech);
   const t = deck.topics.find((x) => x.id === topic);
@@ -41,9 +43,14 @@ export default async function CheatSheetPage({ params }: PageProps<"/[tech]/chea
           { label: topic.title },
         ]}
       />
-      <header className="flex flex-wrap items-end justify-between gap-3 border-b-4 pb-4" style={{ borderColor: topicColor(topic.index) }}>
+      <header
+        className="flex flex-wrap items-end justify-between gap-3 border-b-4 pb-4"
+        style={{ borderColor: topicColor(topic.index) }}
+      >
         <div>
-          <p className="text-xs font-bold tracking-widest text-ink-3 uppercase">{deck.name} · cheat sheet</p>
+          <p className="text-xs font-bold tracking-widest text-ink-3 uppercase">
+            {deck.name} · cheat sheet
+          </p>
           <h1 className="text-3xl font-extrabold sm:text-4xl">{topic.title}</h1>
           {topic.blurb && <p className="mt-1 text-ink-2">{topic.blurb}</p>}
         </div>
@@ -54,7 +61,10 @@ export default async function CheatSheetPage({ params }: PageProps<"/[tech]/chea
         <ol className="flex flex-wrap gap-2 text-sm">
           {cards.map((c, i) => (
             <li key={c.meta.id}>
-              <a href={`#cs-${c.meta.id}`} className="inline-flex min-h-10 items-center rounded-full border border-line bg-surface px-3 font-semibold text-ink-2 hover:text-ink">
+              <a
+                href={`#cs-${c.meta.id}`}
+                className="inline-flex min-h-10 items-center rounded-full border border-line bg-surface px-3 font-semibold text-ink-2 hover:text-ink"
+              >
                 {i + 1}. {c.meta.title}
               </a>
             </li>
@@ -66,14 +76,20 @@ export default async function CheatSheetPage({ params }: PageProps<"/[tech]/chea
         {cards.map((c, i) => {
           const r = rendered[i];
           return (
-            <article key={c.meta.id} id={`cs-${c.meta.id}`} className="print-card scroll-mt-32 rounded-3xl border border-line bg-surface p-5 print:rounded-none print:border-0 print:border-t print:p-0 print:pt-4">
+            <article
+              key={c.meta.id}
+              id={`cs-${c.meta.id}`}
+              className="print-card scroll-mt-32 rounded-3xl border border-line bg-surface p-5 print:rounded-none print:border-0 print:border-t print:p-0 print:pt-4"
+            >
               <h2 className="text-2xl font-extrabold">
                 <span className="text-accent">{i + 1}.</span>{" "}
                 <Link href={urls.card(tech, c.meta.id)} className="hover:text-accent-ink">
                   {c.meta.title}
                 </Link>
               </h2>
-              <p className="mt-1 font-display text-lg leading-snug font-semibold text-ink">{c.meta.hook}</p>
+              <p className="mt-1 font-display text-lg leading-snug font-semibold text-ink">
+                {c.meta.hook}
+              </p>
               {r.example && (
                 <div className="mt-4">
                   <h3 className="mb-2 text-base font-extrabold text-ink-2">Example</h3>
@@ -87,7 +103,9 @@ export default async function CheatSheetPage({ params }: PageProps<"/[tech]/chea
           );
         })}
       </div>
-      <p className="mt-8 hidden text-xs text-ink-3 print:block">Printed from Concept Map · {deck.name} · {topic.title}</p>
+      <p className="mt-8 hidden text-xs text-ink-3 print:block">
+        Printed from Concept Map · {deck.name} · {topic.title}
+      </p>
     </div>
   );
 }

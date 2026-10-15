@@ -23,7 +23,10 @@ import {
  * Pure Node: no Next.js or React imports, so the validator can run it with tsx.
  */
 
-export const CONTENT_DIR = path.join(process.cwd(), "content");
+/** CONTENT_DIR env var lets tests point the build at another content tree; defaults to ./content. */
+export const CONTENT_DIR = process.env.CONTENT_DIR
+  ? path.resolve(process.env.CONTENT_DIR)
+  : path.join(process.cwd(), "content");
 
 export interface Issue {
   file: string;
@@ -93,7 +96,11 @@ function readYaml(file: string, issues: Issue[]): unknown {
     text = text.replace(/^---\s*\n/, "").replace(/\n---\s*$/, "\n");
     return YAML.parse(text);
   } catch (err) {
-    issues.push({ file: rel(file), message: `YAML parse error: ${(err as Error).message}`, severity: "error" });
+    issues.push({
+      file: rel(file),
+      message: `YAML parse error: ${(err as Error).message}`,
+      severity: "error",
+    });
     return undefined;
   }
 }
@@ -106,7 +113,9 @@ function zodIssues(file: string, error: z.ZodError, issues: Issue[]) {
 }
 
 /** Splits `---\nyaml\n---\nbody`. */
-export function splitFrontmatter(text: string): { data: string; body: string; bodyLine: number } | null {
+export function splitFrontmatter(
+  text: string,
+): { data: string; body: string; bodyLine: number } | null {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
   if (!m) return null;
   const bodyLine = m[0].split("\n").length;
@@ -114,7 +123,10 @@ export function splitFrontmatter(text: string): { data: string; body: string; bo
 }
 
 /** Splits markdown at a heading level, ignoring headings inside code fences. */
-export function splitHeadings(md: string, level: 2 | 3): { preamble: string; parts: { heading: string; body: string }[] } {
+export function splitHeadings(
+  md: string,
+  level: 2 | 3,
+): { preamble: string; parts: { heading: string; body: string }[] } {
   const marker = "#".repeat(level) + " ";
   const lines = md.split(/\r?\n/);
   const parts: { heading: string; body: string[] }[] = [];
@@ -142,14 +154,22 @@ function parseCard(file: string, techSlug: string, issues: Issue[]): Card | null
   const text = fs.readFileSync(file, "utf8");
   const fm = splitFrontmatter(text);
   if (!fm) {
-    issues.push({ file: rel(file), message: "missing frontmatter (--- ... ---)", severity: "error" });
+    issues.push({
+      file: rel(file),
+      message: "missing frontmatter (--- ... ---)",
+      severity: "error",
+    });
     return null;
   }
   let raw: unknown;
   try {
     raw = YAML.parse(fm.data);
   } catch (err) {
-    issues.push({ file: rel(file), message: `frontmatter YAML error: ${(err as Error).message}`, severity: "error" });
+    issues.push({
+      file: rel(file),
+      message: `frontmatter YAML error: ${(err as Error).message}`,
+      severity: "error",
+    });
     return null;
   }
   const parsed = cardMetaSchema.safeParse(raw);
@@ -172,7 +192,9 @@ function parseCard(file: string, techSlug: string, issues: Issue[]): Card | null
   for (const part of parts) {
     const idx = SECTION_DEFS.findIndex((d) => d.heading === part.heading);
     if (idx === -1) {
-      err(`unknown section "## ${part.heading}". Allowed: ${SECTION_DEFS.map((d) => d.heading).join(", ")}`);
+      err(
+        `unknown section "## ${part.heading}". Allowed: ${SECTION_DEFS.map((d) => d.heading).join(", ")}`,
+      );
       continue;
     }
     const key = SECTION_DEFS[idx].key;
@@ -183,18 +205,21 @@ function parseCard(file: string, techSlug: string, issues: Issue[]): Card | null
     sections[key] = part.body;
   }
   for (const def of SECTION_DEFS) {
-    if (def.required && sections[def.key] === undefined) err(`missing required section "## ${def.heading}"`);
+    if (def.required && sections[def.key] === undefined)
+      err(`missing required section "## ${def.heading}"`);
   }
 
   const questions: Question[] = [];
   if (sections.questions !== undefined) {
     const qs = splitHeadings(sections.questions, 3);
-    if (qs.preamble) err("Interview Qs: write each question as `### Question?` followed by the answer");
+    if (qs.preamble)
+      err("Interview Qs: write each question as `### Question?` followed by the answer");
     for (const p of qs.parts) {
       if (!p.body) err(`Interview Qs: "${p.heading}" has no answer`);
       questions.push({ q: p.heading, markdown: p.body });
     }
-    if (questions.length < 2 || questions.length > 4) err(`Interview Qs: need 2–4 questions, found ${questions.length}`);
+    if (questions.length < 2 || questions.length > 4)
+      err(`Interview Qs: need 2–4 questions, found ${questions.length}`);
   }
 
   let can: string | undefined;
@@ -204,7 +229,10 @@ function parseCard(file: string, techSlug: string, issues: Issue[]): Card | null
     for (const p of cc.parts) {
       if (p.heading === "Can") can = p.body;
       else if (p.heading === "Cannot") cannot = p.body;
-      else err(`Can / Cannot: unknown sub-heading "### ${p.heading}" (use "### Can" and "### Cannot")`);
+      else
+        err(
+          `Can / Cannot: unknown sub-heading "### ${p.heading}" (use "### Can" and "### Cannot")`,
+        );
     }
     if (cc.preamble) err("Can / Cannot: put items under `### Can` and `### Cannot`");
     if (!can || !cannot) err("Can / Cannot: needs both `### Can` and `### Cannot` lists");
@@ -228,7 +256,8 @@ function orderCards(cards: Card[], topics: Topic[], issues: Issue[]): Card[] {
     const indeg = new Map<string, number>();
     for (const c of inTopic) indeg.set(c.meta.id, c.meta.needs.filter((n) => ids.has(n)).length);
     const cmp = (a: Card, b: Card) =>
-      LEVEL_RANK[a.meta.level] - LEVEL_RANK[b.meta.level] || a.meta.title.localeCompare(b.meta.title);
+      LEVEL_RANK[a.meta.level] - LEVEL_RANK[b.meta.level] ||
+      a.meta.title.localeCompare(b.meta.title);
     const ready = inTopic.filter((c) => indeg.get(c.meta.id) === 0).sort(cmp);
     const done = new Set<string>();
     while (ready.length) {
@@ -256,6 +285,9 @@ function orderCards(cards: Card[], topics: Topic[], issues: Issue[]): Card[] {
       out.push(...left.sort(cmp));
     }
   }
+  // Cards whose topic is unknown are kept (and reported by the topic check), never dropped.
+  const known = new Set(topics.map((t) => t.id));
+  out.push(...cards.filter((c) => !known.has(c.meta.topic)));
   return out;
 }
 
@@ -263,15 +295,19 @@ const LINK_RE = /\]\((card|compare|term):([^)\s]*)\)/g;
 const COMPONENT_RE = /<([A-Z][A-Za-z0-9]*)/g;
 
 /** Checks body-level references that the build would otherwise render as broken links. */
-function checkBody(card: Card, deck: Deck, issues: Issue[]) {
+function checkBody(card: Card, deck: Deck, issues: Issue[], fileIds: Set<string>) {
   const err = (message: string, severity: Issue["severity"] = "error") =>
     issues.push({ file: card.file, message, severity });
   const all = Object.values(card.sections).join("\n\n");
   for (const m of all.matchAll(LINK_RE)) {
     const [, kind, id] = m;
     const ok =
-      kind === "card" ? deck.cardById.has(id) : kind === "compare" ? deck.comparisonById.has(id) : deck.termById.has(id);
-    if (!ok) err(`broken link "${kind}:${id}"`);
+      kind === "card"
+        ? deck.cardById.has(id)
+        : kind === "compare"
+          ? deck.comparisonById.has(id)
+          : deck.termById.has(id);
+    if (!ok && !(kind !== "term" && fileIds.has(id))) err(`broken link "${kind}:${id}"`);
     if (kind === "card" && id === card.meta.id) err(`card links to itself ("card:${id}")`);
   }
   const allowed = new Set<string>(ALLOWED_COMPONENTS);
@@ -280,9 +316,11 @@ function checkBody(card: Card, deck: Deck, issues: Issue[]) {
     if (!allowed.has(m[1])) err(`unknown component <${m[1]}>. Allowed: ${[...allowed].join(", ")}`);
   }
   for (const m of stripped.matchAll(/<Mermaid\b([\s\S]*?)\/>/g)) {
-    if (!/\balt="[^"]{10,}"/.test(m[1])) err('<Mermaid> needs a text alternative: alt="..." (10+ chars)');
+    if (!/\balt="[^"]{10,}"/.test(m[1]))
+      err('<Mermaid> needs a text alternative: alt="..." (10+ chars)');
   }
-  if (/lorem ipsum|\bTODO\b|\bTBD\b|\bFIXME\b/i.test(all + card.meta.hook)) err("placeholder text found (TODO/TBD/lorem ipsum)");
+  if (/lorem ipsum|\bTODO\b|\bTBD\b|\bFIXME\b/i.test(all + card.meta.hook))
+    err("placeholder text found (TODO/TBD/lorem ipsum)");
   if (/\p{Extended_Pictographic}/u.test(stripped)) err("emojis are not allowed in body text");
 
   // Code examples stay tiny (CLAUDE.md 3.1: max ~15 lines).
@@ -293,15 +331,19 @@ function checkBody(card: Card, deck: Deck, issues: Issue[]) {
 
   // The declared primary memory aid must actually be present.
   const v = card.meta.visual;
-  if (v === "analogy" && !card.sections.analogy && !/<Analogy\b/.test(all)) err('visual "analogy" but no "## Analogy" section');
-  if (v === "flow" && !/<(Steps|Mermaid)\b/.test(all)) err('visual "flow" but no <Steps> or <Mermaid> diagram');
+  if (v === "analogy" && !card.sections.analogy && !/<Analogy\b/.test(all))
+    err('visual "analogy" but no "## Analogy" section');
+  if (v === "flow" && !/<(Steps|Mermaid)\b/.test(all))
+    err('visual "flow" but no <Steps> or <Mermaid> diagram');
   if (v === "table" && !/^\s*\|.*\|\s*$/m.test(all)) err('visual "table" but no markdown table');
   if (v === "code" && !/```/.test(all)) err('visual "code" but no code block');
 
   // Readability budget (CLAUDE.md 2.2): the core idea and the Revise view should each read in about a minute.
   const stats = readingStats(card);
-  if (stats.core > 280) err(`core (why/how/analogy/example) is ${stats.core} words; aim for 280 or fewer`, "warning");
-  if (stats.revise > 300) err(`Revise view is ${stats.revise} words; aim for 300 or fewer`, "warning");
+  if (stats.core > 280)
+    err(`core (why/how/analogy/example) is ${stats.core} words; aim for 280 or fewer`, "warning");
+  if (stats.revise > 300)
+    err(`Revise view is ${stats.revise} words; aim for 300 or fewer`, "warning");
 }
 
 /** Prose words only: code, diagram source and table pipes are not "read". */
@@ -337,7 +379,8 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
     return null;
   }
   const tech = techParsed.data;
-  const terr = (message: string) => issues.push({ file: rel(techFile), message, severity: "error" });
+  const terr = (message: string) =>
+    issues.push({ file: rel(techFile), message, severity: "error" });
   if (tech.slug !== slug) terr(`slug "${tech.slug}" must equal the folder name "${slug}"`);
   if (RESERVED_SLUGS.includes(slug)) terr(`slug "${slug}" is reserved`);
 
@@ -364,8 +407,14 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
   // Cards
   const cardsDir = path.join(dir, "cards");
   const cardFiles = fs.existsSync(cardsDir)
-    ? fs.readdirSync(cardsDir).filter((f) => f.endsWith(".mdx")).sort()
+    ? fs
+        .readdirSync(cardsDir)
+        .filter((f) => f.endsWith(".mdx"))
+        .sort()
     : [];
+  // Ids of every card/comparison file, even ones that failed to parse. A link to a broken
+  // file is not reported again: the file's own error is the one to fix.
+  const fileIds = new Set([...cardFiles.map((f) => f.replace(/\.mdx$/, ""))]);
   const rawCards: Card[] = [];
   for (const f of cardFiles) {
     const c = parseCard(path.join(cardsDir, f), slug, issues);
@@ -375,8 +424,12 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
   // Comparisons
   const compDir = path.join(dir, "comparisons");
   const compFiles = fs.existsSync(compDir)
-    ? fs.readdirSync(compDir).filter((f) => /\.ya?ml$/.test(f)).sort()
+    ? fs
+        .readdirSync(compDir)
+        .filter((f) => /\.ya?ml$/.test(f))
+        .sort()
     : [];
+  for (const f of compFiles) fileIds.add(f.replace(/\.ya?ml$/, ""));
   const comparisons: ComparisonData[] = [];
   for (const f of compFiles) {
     const file = path.join(compDir, f);
@@ -387,14 +440,34 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
     }
     const c = parsed.data;
     const base = f.replace(/\.ya?ml$/, "");
-    if (c.id !== base) issues.push({ file: rel(file), message: `id "${c.id}" must equal the file name "${base}"`, severity: "error" });
-    if (c.tech !== slug) issues.push({ file: rel(file), message: `tech "${c.tech}" must equal "${slug}"`, severity: "error" });
+    if (c.id !== base)
+      issues.push({
+        file: rel(file),
+        message: `id "${c.id}" must equal the file name "${base}"`,
+        severity: "error",
+      });
+    if (c.tech !== slug)
+      issues.push({
+        file: rel(file),
+        message: `tech "${c.tech}" must equal "${slug}"`,
+        severity: "error",
+      });
     const cols = ["a", "b", "c", "d"].slice(0, c.compares.length) as ("a" | "b" | "c" | "d")[];
     c.rows.forEach((row, i) => {
       for (const col of ["a", "b", "c", "d"] as const) {
         const want = cols.includes(col);
-        if (want && !row[col]) issues.push({ file: rel(file), message: `rows.${i}: missing "${col}"`, severity: "error" });
-        if (!want && row[col]) issues.push({ file: rel(file), message: `rows.${i}: "${col}" has no matching item in compares`, severity: "error" });
+        if (want && !row[col])
+          issues.push({
+            file: rel(file),
+            message: `rows.${i}: missing "${col}"`,
+            severity: "error",
+          });
+        if (!want && row[col])
+          issues.push({
+            file: rel(file),
+            message: `rows.${i}: "${col}" has no matching item in compares`,
+            severity: "error",
+          });
       }
     });
     comparisons.push(c);
@@ -403,16 +476,31 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
   // Unique ids. Cards and comparisons share one namespace so a bare id is never ambiguous.
   const seen = new Map<string, string>();
   for (const c of rawCards) {
-    if (seen.has(c.meta.id)) issues.push({ file: c.file, message: `duplicate id "${c.meta.id}" (also in ${seen.get(c.meta.id)})`, severity: "error" });
+    if (seen.has(c.meta.id))
+      issues.push({
+        file: c.file,
+        message: `duplicate id "${c.meta.id}" (also in ${seen.get(c.meta.id)})`,
+        severity: "error",
+      });
     seen.set(c.meta.id, c.file);
   }
   for (const c of comparisons) {
-    if (seen.has(c.id)) issues.push({ file: `comparisons/${c.id}`, message: `duplicate id "${c.id}" (also in ${seen.get(c.id)})`, severity: "error" });
+    if (seen.has(c.id))
+      issues.push({
+        file: `comparisons/${c.id}`,
+        message: `duplicate id "${c.id}" (also in ${seen.get(c.id)})`,
+        severity: "error",
+      });
     seen.set(c.id, `comparisons/${c.id}`);
   }
   const termIds = new Set<string>();
   for (const t of glossary) {
-    if (termIds.has(t.id)) issues.push({ file: rel(glossaryFile), message: `duplicate term id "${t.id}"`, severity: "error" });
+    if (termIds.has(t.id))
+      issues.push({
+        file: rel(glossaryFile),
+        message: `duplicate term id "${t.id}"`,
+        severity: "error",
+      });
     termIds.add(t.id);
   }
 
@@ -443,18 +531,20 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
     if (!topicIds.has(c.meta.topic)) e(`topic "${c.meta.topic}" is not in _tech.yaml`);
     for (const key of ["needs", "leadsTo", "related"] as const) {
       for (const id of c.meta[key]) {
-        if (!deck.cardById.has(id)) e(`${key}: card "${id}" does not exist`);
+        if (!deck.cardById.has(id) && !fileIds.has(id)) e(`${key}: card "${id}" does not exist`);
         if (id === c.meta.id) e(`${key}: card links to itself`);
       }
     }
     for (const id of c.meta.confusedWith) {
-      if (!deck.comparisonById.has(id)) e(`confusedWith: comparison "${id}" does not exist`);
+      if (!deck.comparisonById.has(id) && !fileIds.has(id))
+        e(`confusedWith: comparison "${id}" does not exist`);
     }
     if (!c.meta.needs.length && !c.meta.leadsTo.length && !c.meta.related.length) {
       e("Connects to: needs, leadsTo or related must link at least one card");
     }
     for (const s of c.meta.sources) {
-      if (Date.parse(`${s.verifiedOn}T00:00:00Z`) > Date.now() + 86_400_000) e(`source "${s.title}": verifiedOn is in the future`);
+      if (Date.parse(`${s.verifiedOn}T00:00:00Z`) > Date.now() + 86_400_000)
+        e(`source "${s.title}": verifiedOn is in the future`);
     }
     if (!spine.some((s) => s.cards.includes(c.meta.id))) {
       e("card is not placed on the story spine (add its id to a storySpine step's cards)");
@@ -462,21 +552,32 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
   }
   for (const s of spine) {
     if (!s.fix) terr(`storySpine step ${s.index + 1} must read "problem → fix"`);
-    for (const id of s.cards) if (!deck.cardById.has(id)) terr(`storySpine step ${s.index + 1}: card "${id}" does not exist`);
+    for (const id of s.cards) {
+      if (!deck.cardById.has(id) && !fileIds.has(id))
+        terr(`storySpine step ${s.index + 1}: card "${id}" does not exist`);
+    }
   }
   for (const c of comparisons) {
     for (const id of c.compares) {
-      if (!deck.cardById.has(id) && !deck.termById.has(id)) {
-        issues.push({ file: `content/${slug}/comparisons/${c.id}.yaml`, message: `compares: "${id}" is neither a card nor a glossary term`, severity: "error" });
+      if (!deck.cardById.has(id) && !deck.termById.has(id) && !fileIds.has(id)) {
+        issues.push({
+          file: `content/${slug}/comparisons/${c.id}.yaml`,
+          message: `compares: "${id}" is neither a card nor a glossary term`,
+          severity: "error",
+        });
       }
     }
   }
   for (const t of glossary) {
-    if (t.see && !deck.cardById.has(t.see)) {
-      issues.push({ file: rel(glossaryFile), message: `term "${t.id}": see "${t.see}" is not a card`, severity: "error" });
+    if (t.see && !deck.cardById.has(t.see) && !fileIds.has(t.see)) {
+      issues.push({
+        file: rel(glossaryFile),
+        message: `term "${t.id}": see "${t.see}" is not a card`,
+        severity: "error",
+      });
     }
   }
-  for (const c of cards) checkBody(c, deck, issues);
+  for (const c of cards) checkBody(c, deck, issues, fileIds);
 
   return deck;
 }
@@ -485,7 +586,10 @@ export function loadDecks(contentDir = CONTENT_DIR): LoadResult {
   const issues: Issue[] = [];
   const decks: Deck[] = [];
   if (!fs.existsSync(contentDir)) {
-    return { decks, issues: [{ file: "content", message: "content folder not found", severity: "error" }] };
+    return {
+      decks,
+      issues: [{ file: "content", message: "content folder not found", severity: "error" }],
+    };
   }
   const slugs = fs
     .readdirSync(contentDir, { withFileTypes: true })

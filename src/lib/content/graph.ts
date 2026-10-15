@@ -50,7 +50,8 @@ export function buildGraph(deck: Deck): MapData {
   const add = (source: string, target: string, kind: EdgeKind) => {
     const pair = [source, target].sort().join("|");
     const prev = byPair.get(pair);
-    if (!prev || rank[kind] > rank[prev.kind]) byPair.set(pair, { id: `${kind}:${source}->${target}`, source, target, kind });
+    if (!prev || rank[kind] > rank[prev.kind])
+      byPair.set(pair, { id: `${kind}:${source}->${target}`, source, target, kind });
   };
   for (const c of deck.cards) {
     for (const n of c.meta.needs) add(n, c.meta.id, "needs");

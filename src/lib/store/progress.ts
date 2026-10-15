@@ -80,7 +80,10 @@ export const useProgress = create<ProgressState>()(
           return { bookmarks };
         }),
       visit: (tech, id) =>
-        set((s) => ({ lastVisited: { ...s.lastVisited, [tech]: { id, at: Date.now() } }, lastTech: tech })),
+        set((s) => ({
+          lastVisited: { ...s.lastVisited, [tech]: { id, at: Date.now() } },
+          lastTech: tech,
+        })),
       importData: (data, mode) =>
         set((s) =>
           mode === "replace"
@@ -139,38 +142,53 @@ export const EXPORT_FORMAT = "concept-map-progress";
 export function exportProgress(): string {
   const { statuses, bookmarks, lastVisited, lastTech } = useProgress.getState();
   return JSON.stringify(
-    { format: EXPORT_FORMAT, version: 1, exportedAt: new Date().toISOString(), statuses, bookmarks, lastVisited, lastTech },
+    {
+      format: EXPORT_FORMAT,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      statuses,
+      bookmarks,
+      lastVisited,
+      lastTech,
+    },
     null,
     2,
   );
 }
 
 /** Parses and checks an exported file. Unknown keys are dropped; bad values are rejected. */
-export function parseProgress(text: string): { ok: true; data: ProgressData } | { ok: false; error: string } {
+export function parseProgress(
+  text: string,
+): { ok: true; data: ProgressData } | { ok: false; error: string } {
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
     return { ok: false, error: "This file is not valid JSON." };
   }
-  if (!raw || typeof raw !== "object") return { ok: false, error: "This file is not a progress export." };
+  if (!raw || typeof raw !== "object")
+    return { ok: false, error: "This file is not a progress export." };
   const r = raw as Record<string, unknown>;
-  if (r.format !== EXPORT_FORMAT) return { ok: false, error: "This file was not exported from Concept Map." };
+  if (r.format !== EXPORT_FORMAT)
+    return { ok: false, error: "This file was not exported from Concept Map." };
   const keyOk = (k: string) => /^[a-z0-9-]+\/[a-z0-9-]+$/.test(k);
   const statuses: Record<string, Status> = {};
   for (const [k, v] of Object.entries((r.statuses as object) ?? {})) {
-    if (!keyOk(k) || (v !== "known" && v !== "shaky" && v !== "unknown")) return { ok: false, error: `Bad status entry "${k}".` };
+    if (!keyOk(k) || (v !== "known" && v !== "shaky" && v !== "unknown"))
+      return { ok: false, error: `Bad status entry "${k}".` };
     statuses[k] = v;
   }
   const bookmarks: Record<string, number> = {};
   for (const [k, v] of Object.entries((r.bookmarks as object) ?? {})) {
-    if (!keyOk(k) || typeof v !== "number") return { ok: false, error: `Bad bookmark entry "${k}".` };
+    if (!keyOk(k) || typeof v !== "number")
+      return { ok: false, error: `Bad bookmark entry "${k}".` };
     bookmarks[k] = v;
   }
   const lastVisited: Record<string, { id: string; at: number }> = {};
   for (const [k, v] of Object.entries((r.lastVisited as object) ?? {})) {
     const e = v as { id?: unknown; at?: unknown };
-    if (typeof e?.id !== "string" || typeof e?.at !== "number") return { ok: false, error: `Bad last-visited entry "${k}".` };
+    if (typeof e?.id !== "string" || typeof e?.at !== "number")
+      return { ok: false, error: `Bad last-visited entry "${k}".` };
     lastVisited[k] = { id: e.id, at: e.at };
   }
   const lastTech = typeof r.lastTech === "string" ? r.lastTech : null;

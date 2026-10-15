@@ -18,7 +18,11 @@ const body = Atkinson_Hyperlegible_Next({
   adjustFontFallback: false,
   fallback: ["system-ui", "Segoe UI", "Arial", "sans-serif"],
 });
-const display = Bricolage_Grotesque({ subsets: ["latin"], variable: "--font-display-face", display: "swap" });
+const display = Bricolage_Grotesque({
+  subsets: ["latin"],
+  variable: "--font-display-face",
+  display: "swap",
+});
 const code = JetBrains_Mono({ subsets: ["latin"], variable: "--font-code", display: "swap" });
 
 export const metadata: Metadata = {

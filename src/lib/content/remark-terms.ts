@@ -2,8 +2,7 @@ import type { GlossaryTerm } from "./schema";
 
 /**
  * remark plugin: wraps the first mention of each glossary term in a card with <Term id="...">,
- * so terms get a hover/tap preview automatically (CLAUDE.md 3.5). Skips code, links,
- * headings, and terms whose `see` card is the current card.
+ * so terms get a hover/tap preview automatically (CLAUDE.md 3.5). Skips code, links and headings.
  */
 
 interface MdNode {
@@ -21,9 +20,8 @@ export interface TermMatcher {
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-export function buildMatchers(terms: GlossaryTerm[], skipCardId?: string): TermMatcher[] {
+export function buildMatchers(terms: GlossaryTerm[]): TermMatcher[] {
   return terms
-    .filter((t) => !(skipCardId && t.see === skipCardId))
     .map((t) => {
       // A term is matched by its name (minus any "(...)" note) only when that stays specific;
       // names with a note, like "Availability (nines)", are matched by their `aka` only.
@@ -35,12 +33,25 @@ export function buildMatchers(terms: GlossaryTerm[], skipCardId?: string): TermM
         .map((n) => escape(n));
       if (!alts.length) return null;
       // Whole words only; allow a plural "s"/"es". Dashes count as word characters ("cache-aside").
-      return { id: t.id, regex: new RegExp(`(?<![\\w-])(?:${alts.join("|")})(?:e?s)?(?![\\w-])`, "i") };
+      return {
+        id: t.id,
+        regex: new RegExp(`(?<![\\w-])(?:${alts.join("|")})(?:e?s)?(?![\\w-])`, "i"),
+      };
     })
     .filter((m): m is TermMatcher => m !== null);
 }
 
-const SKIP = new Set(["code", "inlineCode", "link", "linkReference", "heading", "definition", "html", "mdxFlowExpression", "mdxTextExpression"]);
+const SKIP = new Set([
+  "code",
+  "inlineCode",
+  "link",
+  "linkReference",
+  "heading",
+  "definition",
+  "html",
+  "mdxFlowExpression",
+  "mdxTextExpression",
+]);
 const SKIP_JSX = new Set(["Term", "Mermaid"]);
 
 export function remarkTerms(options: { matchers: TermMatcher[]; seen: Set<string> }) {
@@ -51,7 +62,8 @@ export function remarkTerms(options: { matchers: TermMatcher[]; seen: Set<string
     for (const m of matchers) {
       if (seen.has(m.id)) continue;
       const hit = m.regex.exec(value);
-      if (hit && (!best || hit.index < best.index)) best = { index: hit.index, length: hit[0].length, id: m.id };
+      if (hit && (!best || hit.index < best.index))
+        best = { index: hit.index, length: hit[0].length, id: m.id };
     }
     if (!best) return null;
     seen.add(best.id);
@@ -84,7 +96,11 @@ export function remarkTerms(options: { matchers: TermMatcher[]; seen: Set<string
         next.push(child);
         continue;
       }
-      if ((child.type === "mdxJsxTextElement" || child.type === "mdxJsxFlowElement") && child.name && SKIP_JSX.has(child.name)) {
+      if (
+        (child.type === "mdxJsxTextElement" || child.type === "mdxJsxFlowElement") &&
+        child.name &&
+        SKIP_JSX.has(child.name)
+      ) {
         next.push(child);
         continue;
       }
