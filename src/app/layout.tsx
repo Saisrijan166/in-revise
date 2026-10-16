@@ -46,7 +46,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   const techs = getDecks().map((d) => ({ slug: d.slug, name: d.name, accent: d.accent }));
   return (
     <html
-      lang="en"
+      lang="en-IN"
       data-mode="learn"
       data-accent={techs[0]?.accent ?? "blue"}
       suppressHydrationWarning

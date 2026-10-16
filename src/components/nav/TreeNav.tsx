@@ -109,9 +109,8 @@ export function TreeNav({ nav, onNavigate }: { nav: TechNav; onNavigate?: () => 
                 <span className="min-w-0">{n.label}</span>
               </Link>
             </div>
-            {n.children.length > 0 && (
-              <div hidden={!open}>{renderNodes(n.children, depth + 1, color)}</div>
-            )}
+            {/* Closed branches render nothing: the full tree is ~500 nodes, far too much DOM for every page. */}
+            {open && n.children.length > 0 && renderNodes(n.children, depth + 1, color)}
           </li>
         );
       })}

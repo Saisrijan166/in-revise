@@ -390,7 +390,13 @@ function buildTree(
       err(`topic "${t.id}" has no branch in tree.yaml`);
       continue;
     }
-    tree.push({ topic: t, nodes: nodes.map((n) => walk(n, t.id, 0)) });
+    const built = nodes.map((n) => walk(n, t.id, 0));
+    // Every topic lists concepts at its top level (CLAUDE.md 3.4): a bare grouping label would
+    // show as an odd row with no page, level or one-liner. Make the family a concept instead.
+    for (const n of built) {
+      if (!n.cardId) err(`topic "${t.id}": top-level node "${n.id}" must be a concept (add cards/${n.id}.mdx)`);
+    }
+    tree.push({ topic: t, nodes: built });
   }
   for (const id of Object.keys(raw)) {
     if (!topics.some((t) => t.id === id)) err(`tree.yaml topic "${id}" is not in _tech.yaml`);
