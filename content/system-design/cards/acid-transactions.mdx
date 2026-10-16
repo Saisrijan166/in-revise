@@ -1,0 +1,121 @@
+---
+id: acid-transactions
+tech: system-design
+title: ACID and Isolation Levels
+topic: databases
+level: intermediate
+heat: 3
+hook: "A transaction is all or nothing and survives crashes. The isolation level sets what it sees of concurrent transactions: weaker is faster but allows anomalies."
+points:
+  - { k: "Atomicity", v: "all of the changes commit, or none do" }
+  - { k: "Consistency", v: "constraints hold; a transaction that breaks one rolls back" }
+  - { k: "Isolation", v: "uncommitted changes stay hidden from other transactions" }
+  - { k: "Durability", v: "once committed, data survives a crash (write-ahead log)" }
+  - { k: "PostgreSQL 18 default", v: "Read Committed; its Repeatable Read is snapshot isolation", kind: default }
+  - { k: "MySQL 8.4 InnoDB default", v: "Repeatable Read", kind: default }
+trap:
+  wrong: "Inside a transaction, my read-then-write is safe from other users."
+  right: "Not at the default level. Under Read Committed, two read-then-write transactions can lose an update. Use an atomic UPDATE, a row lock or a stronger level."
+sayIt: "ACID covers one transaction; isolation covers many at once. I keep the default level for most work and protect hot read-then-write paths with an atomic UPDATE or SELECT FOR UPDATE. Where a rule spans many rows, I use Serializable and retry on serialization failures."
+relations:
+  - { from: read-committed, to: lost-update, type: causes, why: "Two read-then-write transactions can overwrite each other's change." }
+  - { from: snapshot-isolation, to: lost-update, type: solves, why: "A second concurrent writer of the same row gets an error and retries." }
+  - { from: snapshot-isolation, to: write-skew, type: causes, why: "Each transaction checks a rule on its own snapshot; both writes commit." }
+  - { from: ssi, to: write-skew, type: solves, why: "PostgreSQL spots the read/write conflict and aborts one transaction." }
+  - { from: snapshot-isolation, to: mvcc, type: uses, why: "Old row versions give each transaction its snapshot without read locks." }
+  - { to: concurrency-control, type: pairs, why: "Locks and version checks guard the gaps that weaker levels leave open." }
+confusedWith: [isolation-levels]
+tags: [databases, transactions, isolation, consistency]
+visual: table
+sources:
+  - title: "Transaction Isolation (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/transaction-iso.html"
+    verifiedOn: "2026-10-16"
+  - title: "Glossary: Atomicity, Consistency, Isolation, Durability (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/glossary.html"
+    verifiedOn: "2026-10-16"
+  - title: "Write-Ahead Logging (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/wal-intro.html"
+    verifiedOn: "2026-10-16"
+  - title: "MVCC Introduction (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/mvcc-intro.html"
+    verifiedOn: "2026-10-16"
+  - title: "Client Connection Defaults: default_transaction_isolation (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/runtime-config-client.html"
+    verifiedOn: "2026-10-16"
+  - title: "Serializable Snapshot Isolation (PostgreSQL wiki)"
+    url: "https://wiki.postgresql.org/wiki/SSI"
+    verifiedOn: "2026-10-16"
+  - title: "Transaction Isolation Levels (MySQL 8.4 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html"
+    verifiedOn: "2026-10-16"
+  - title: "Consistent Nonlocking Reads (MySQL 8.4 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/8.4/en/innodb-consistent-read.html"
+    verifiedOn: "2026-10-16"
+  - title: "InnoDB and the ACID Model (MySQL 8.4 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/8.4/en/mysql-acid.html"
+    verifiedOn: "2026-10-16"
+  - title: "A Critique of ANSI SQL Isolation Levels (Berenson, Bernstein, Gray et al., SIGMOD 1995)"
+    url: "https://arxiv.org/abs/cs/0701157"
+    verifiedOn: "2026-10-16"
+  - title: "The System Design Primer: ACID (donnemartin, GitHub)"
+    url: "https://github.com/donnemartin/system-design-primer"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+Money and stock counts must never end up half-changed, and many users change the same rows at once. Transactions make each change all or nothing; isolation levels decide how much concurrent transactions can see of each other.
+
+## How it works
+
+<Compare id="isolation-levels" />
+
+- **Anomalies:** a dirty read sees uncommitted data, a non-repeatable read sees a row change between two reads, and a phantom read sees the set of matching rows change.
+- **PostgreSQL Serializable** uses SSI: no extra blocking, but a conflicting transaction fails with SQLSTATE `40001` and must be retried.
+
+## Example
+
+A lost update under Read Committed:
+
+```text
+stock = 10
+T1: SELECT stock        -> 10
+T2: SELECT stock        -> 10
+T2: UPDATE stock = 9; COMMIT
+T1: UPDATE stock = 9; COMMIT    -- two sales, but stock is 9
+```
+
+Do the check and the write in one statement. PostgreSQL makes the second one wait, then re-checks `WHERE` on the new row:
+
+```sql
+UPDATE items SET stock = stock - 1
+WHERE id = 7 AND stock > 0;   -- 0 rows updated means sold out
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Isolation level | Read Committed | PostgreSQL 18 |
+| Isolation level | Repeatable Read | MySQL 8.4 (InnoDB) |
+| Read Uncommitted | Runs as Read Committed | PostgreSQL 18 |
+| Serialization failure | Error SQLSTATE 40001: retry the whole transaction | PostgreSQL 18 |
+
+## Interview Qs
+
+### What does ACID mean?
+
+Atomicity: all of a transaction's changes commit, or none do. Consistency: constraints hold after every commit. Isolation: others do not see its changes before it commits. Durability: once committed, data survives a crash, because the change is in the write-ahead log first.
+
+### Dirty read, non-repeatable read, phantom read?
+
+Dirty: you read a change another transaction has not committed. Non-repeatable: you read a row twice and a commit in between changed it. Phantom: you rerun a query and other commits added or removed matching rows.
+
+### Which isolation level would you use for payments?
+
+Keep transactions short at Read Committed and make each critical step safe: an atomic conditional UPDATE, or SELECT ... FOR UPDATE on the rows you change. If a rule spans many rows, use Serializable and retry on serialization failures.
+
+### What is write skew?
+
+Two transactions read the same rows, check a rule, then each updates a different row. Neither overwrites the other, yet the rule breaks: two on-call doctors each see the other on call, and both go off call. Snapshot isolation allows it; Serializable stops it.

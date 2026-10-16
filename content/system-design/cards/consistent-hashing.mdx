@@ -1,0 +1,159 @@
+---
+id: consistent-hashing
+tech: system-design
+title: Consistent Hashing
+topic: databases
+level: intermediate
+heat: 3
+hook: "Put servers and keys on one hash ring; each key belongs to the next server clockwise. Add a server and only the keys next to it move."
+points:
+  - { k: "Ring", v: "the hash range bent into a circle; the top value wraps to 0" }
+  - { k: "Owner", v: "the first server point clockwise from the key's hash" }
+  - { k: "Add a server", v: "only about 1/(N+1) of keys move, all to the new server", kind: plus }
+  - { k: "Virtual nodes", v: "many points per server: even spread, failures shared out" }
+  - { k: "Cassandra 4.0+", v: "num_tokens: 16 vnodes per node (256 in 3.11)", kind: default }
+  - { k: "Redis Cluster", v: "not a ring: 16,384 fixed hash slots", kind: minus }
+trap:
+  wrong: "Consistent hashing spreads keys evenly on its own."
+  right: "With one random point per server, arcs differ in size, so load is uneven. Give each server many virtual nodes."
+sayIt: "I put servers on a hash ring with many virtual nodes each. A key goes to the next server clockwise, so adding or removing a server moves only the keys in its arcs. Dynamo, Cassandra and nginx's consistent hash work this way."
+relations:
+  - { from: hash-ring, to: hotspot, type: causes, why: "One random point per server gives uneven arcs, so some servers get more keys." }
+  - { from: virtual-nodes, to: hotspot, type: solves, why: "Many points per server even out the data and load each one gets." }
+  - { to: replication, type: pairs, why: "Dynamo copies each key to the next N-1 distinct servers clockwise." }
+  - { to: distributed-cache, type: pairs, why: "Adding a cache server moves few keys, so most lookups still hit." }
+  - { from: wide-column-store, to: consistent-hashing, type: uses, why: "Cassandra hashes each partition key onto a token ring, with vnodes per node." }
+  - { to: hash-slots, type: vs, why: "A ring of server points, or a fixed table of slots moved between nodes." }
+confusedWith: []
+tags: [databases, sharding, partitioning, caching]
+visual: flow
+sources:
+  - title: "Dynamo: Amazon's Highly Available Key-value Store (DeCandia et al., SOSP 2007)"
+    url: "https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "Consistent Hashing and Random Trees (Karger et al., STOC 1997)"
+    url: "https://www.cs.princeton.edu/courses/archive/fall09/cos518/papers/chash.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "Dynamo (Apache Cassandra docs)"
+    url: "https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html"
+    verifiedOn: "2026-10-16"
+  - title: "cassandra.yaml file configuration (Apache Cassandra 4.0 docs)"
+    url: "https://cassandra.apache.org/doc/4.0/cassandra/configuration/cass_yaml_file.html"
+    verifiedOn: "2026-10-16"
+  - title: "cassandra.yaml file configuration (Apache Cassandra 3.11 docs)"
+    url: "https://cassandra.apache.org/doc/3.11/cassandra/configuration/cass_yaml_file.html"
+    verifiedOn: "2026-10-16"
+  - title: "cassandra.yaml file configuration (Apache Cassandra 5.0 docs)"
+    url: "https://cassandra.apache.org/doc/latest/cassandra/managing/configuration/cass_yaml_file.html"
+    verifiedOn: "2026-10-16"
+  - title: "Module ngx_http_upstream_module: hash (nginx docs)"
+    url: "https://nginx.org/en/docs/http/ngx_http_upstream_module.html#hash"
+    verifiedOn: "2026-10-16"
+  - title: "Scale with Redis Cluster (Redis docs)"
+    url: "https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/"
+    verifiedOn: "2026-10-16"
+  - title: "Redis cluster specification (Redis docs)"
+    url: "https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/"
+    verifiedOn: "2026-10-16"
+  - title: "Sharding pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding"
+    verifiedOn: "2026-10-16"
+  - title: "TreeMap (Java SE 21 API)"
+    url: "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/TreeMap.html"
+    verifiedOn: "2026-10-16"
+  - title: "Checksum.update(byte[]) (Java SE 21 API)"
+    url: "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/zip/Checksum.html"
+    verifiedOn: "2026-10-16"
+  - title: "bisect (Python docs)"
+    url: "https://docs.python.org/3/library/bisect.html"
+    verifiedOn: "2026-10-16"
+  - title: "zlib.crc32 (Python docs)"
+    url: "https://docs.python.org/3/library/zlib.html#zlib.crc32"
+    verifiedOn: "2026-10-16"
+  - title: "Consistent Hashing (Hello Interview, system design core concepts)"
+    url: "https://www.hellointerview.com/learn/system-design/core-concepts/consistent-hashing"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+With `hash(key) % N`, changing N sends most keys to a different server, so adding one cache or database node moves most of the data. Consistent hashing moves only the keys the new node takes over.
+
+## How it works
+
+<Mermaid
+  alt="A hash ring from 0 to 99 with three servers: A at 10, B at 40 and C at 75, linked clockwise, and C links back to A past 99. A key with hash 52 goes to C, the next server clockwise. A key with hash 90 wraps around to A."
+  chart={`flowchart LR
+  A(("A at 10")) -- clockwise --> B(("B at 40"))
+  B -- clockwise --> C(("C at 75"))
+  C -- "wraps past 99" --> A
+  K1["key hash 52"] -.-> C
+  K2["key hash 90"] -.-> A`}
+/>
+
+- **Owner:** from the key's hash, walk clockwise; the first server point owns it. So C owns 41 to 75.
+- **Change:** add D at 60, and only keys 41 to 60 move, from C to D. Remove C, and its keys go to A, the next point.
+- **Virtual nodes:** each server gets many points, like `A#0` to `A#99`. Arcs even out, and a failed server's keys spread over all the others.
+
+## Example
+
+A tiny ring with virtual nodes. CRC32 is a stable hash, fine for a demo; Cassandra uses Murmur3.
+
+```java
+TreeMap<Long, String> ring = new TreeMap<>();   // ring position -> server
+
+long hash(String s) {
+    CRC32 crc = new CRC32();
+    crc.update(s.getBytes(StandardCharsets.UTF_8));
+    return crc.getValue();                       // 0 .. 2^32 - 1
+}
+void addServer(String server, int vnodes) {      // vnodes points per server
+    for (int i = 0; i < vnodes; i++) ring.put(hash(server + "#" + i), server);
+}
+String serverFor(String key) {
+    var e = ring.ceilingEntry(hash(key));        // first point clockwise
+    return (e != null ? e : ring.firstEntry()).getValue();  // wrap around
+}
+```
+
+```python
+import bisect, zlib
+
+ring = []  # sorted list of (position, server)
+
+def add_server(server: str, vnodes: int) -> None:
+    for i in range(vnodes):                  # vnodes points per server
+        bisect.insort(ring, (zlib.crc32(f"{server}#{i}".encode()), server))
+
+def server_for(key: str) -> str:
+    pos = zlib.crc32(key.encode())           # 0 .. 2**32 - 1
+    i = bisect.bisect_left(ring, (pos, ""))  # first point clockwise
+    return ring[i % len(ring)][1]            # wrap around
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Virtual nodes per node (`num_tokens`) | 16 (was 256 in 3.11) | Apache Cassandra 4.0 and later |
+| Hash used to place rows (`partitioner`) | Murmur3Partitioner | Apache Cassandra 5.0 |
+| `hash $key` without `consistent` | Adding or removing a server can remap most keys | nginx 1.7.2 and later |
+| `hash $key consistent` | Ketama ring: only a few keys remap | nginx 1.7.2 and later |
+
+## Interview Qs
+
+### Why not just use hash(key) % N?
+
+Changing N changes the result for most keys, so adding or removing a server reshuffles most of the data or cache. A ring moves only the keys in the arcs next to the change, about 1/(N+1) of them when you add one server.
+
+### What are virtual nodes, and why use them?
+
+Each physical server gets many points on the ring. Data and load spread more evenly, a failed server's keys go to many servers instead of one, and a bigger server can take more points.
+
+### How do you replicate data on a ring?
+
+Store each key on its owner and on the next N-1 servers clockwise. Dynamo calls this the preference list, and it skips extra points of the same server so the copies land on distinct machines.
+
+### Does Redis Cluster use consistent hashing?
+
+No. Every key maps to one of 16,384 hash slots, `CRC16(key) mod 16384`, and each primary owns some slots. To add a node, you move some slots to it, with no downtime.

@@ -1,0 +1,147 @@
+---
+id: search-index
+tech: system-design
+title: Search and Inverted Indexes
+topic: databases
+level: intermediate
+heat: 2
+hook: "A search index maps each word to the documents that contain it, so a text search reads a few short lists instead of every row."
+points:
+  - { k: "Inverted index", v: "term → the list of documents that contain it" }
+  - { k: "Analysis", v: "split text into terms and normalise them, e.g. lowercase" }
+  - { k: "Ranking", v: "rare terms and repeated terms score higher (BM25)" }
+  - { k: "Elasticsearch 9.x", v: "BM25 scoring; new docs searchable after a 1 s refresh", kind: default }
+  - { k: "A copy, not the truth", v: "fed from the database, usually async, so it can lag", kind: minus }
+trap:
+  wrong: "Just run WHERE description LIKE '%phone%' on the big table."
+  right: "A leading wildcard cannot use a B-tree index, so every row is read, with no stemming or ranking. Use an inverted index: PostgreSQL GIN or a search engine."
+sayIt: "For text search I use an inverted index such as Elasticsearch: it analyses text into terms and ranks matches with BM25. The database stays the source of truth; I stream its changes to the index with CDC and accept about a second of lag."
+relations:
+  - { from: relational, to: inverted-index, type: uses, why: "PostgreSQL full-text search uses a GIN index, which is an inverted index." }
+  - { from: inverted-index, to: sharding, type: uses, why: "Elasticsearch splits an index into shards; each shard is a Lucene index." }
+  - { from: search-sync, to: event-streaming, type: uses, why: "Debezium streams database changes into Kafka; a sink connector feeds Elasticsearch." }
+  - { from: search-sync, to: eventual-consistency, type: causes, why: "The index updates after the database, so a new item can be missing briefly." }
+  - { from: inverted-index, to: b-tree, type: vs, why: "Find words inside text, or find whole values by =, range or prefix." }
+confusedWith: []
+tags: [search, databases, indexing, elasticsearch, full-text]
+visual: flow
+sources:
+  - title: "Index File Formats: Inverted Indexing (Apache Lucene 10.3.0 docs)"
+    url: "https://lucene.apache.org/core/10_3_0/core/org/apache/lucene/codecs/lucene103/package-summary.html"
+    verifiedOn: "2026-10-16"
+  - title: "Text analysis (Elasticsearch docs)"
+    url: "https://www.elastic.co/docs/manage-data/data-store/text-analysis"
+    verifiedOn: "2026-10-16"
+  - title: "Standard analyzer (Elasticsearch docs)"
+    url: "https://www.elastic.co/docs/reference/text-analysis/analysis-standard-analyzer"
+    verifiedOn: "2026-10-16"
+  - title: "Similarity settings: BM25 default (Elasticsearch docs)"
+    url: "https://www.elastic.co/docs/reference/elasticsearch/index-settings/similarity"
+    verifiedOn: "2026-10-16"
+  - title: "Near real-time search (Elasticsearch docs)"
+    url: "https://www.elastic.co/docs/manage-data/data-store/near-real-time-search"
+    verifiedOn: "2026-10-16"
+  - title: "Clusters, nodes, and shards (Elasticsearch docs)"
+    url: "https://www.elastic.co/docs/deploy-manage/distributed-architecture/clusters-nodes-shards"
+    verifiedOn: "2026-10-16"
+  - title: "Elasticsearch release notes (latest 9.5.x)"
+    url: "https://www.elastic.co/docs/release-notes/elasticsearch"
+    verifiedOn: "2026-10-16"
+  - title: "TFIDFSimilarity (Apache Lucene 10.3.0 API)"
+    url: "https://lucene.apache.org/core/10_3_0/core/org/apache/lucene/search/similarities/TFIDFSimilarity.html"
+    verifiedOn: "2026-10-16"
+  - title: "Full Text Search: Introduction (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/textsearch-intro.html"
+    verifiedOn: "2026-10-16"
+  - title: "Tables and Indexes for text search (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/textsearch-tables.html"
+    verifiedOn: "2026-10-16"
+  - title: "Preferred Index Types for Text Search (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/textsearch-indexes.html"
+    verifiedOn: "2026-10-16"
+  - title: "Controlling Text Search: ranking (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/textsearch-controls.html"
+    verifiedOn: "2026-10-16"
+  - title: "Index Types: B-tree and LIKE (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/indexes-types.html"
+    verifiedOn: "2026-10-16"
+  - title: "pg_trgm (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/pgtrgm.html"
+    verifiedOn: "2026-10-16"
+  - title: "Debezium Architecture (Debezium docs)"
+    url: "https://debezium.io/documentation/reference/stable/architecture.html"
+    verifiedOn: "2026-10-16"
+  - title: "Choose a search data store (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/data-guide/technology-choices/search-options"
+    verifiedOn: "2026-10-16"
+  - title: "Elasticsearch deep dive (Hello Interview)"
+    url: "https://www.hellointerview.com/learn/system-design/deep-dives/elasticsearch"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+People search text by words, in any form and order, and want the best matches first. Scanning every row with `LIKE '%word%'` is slow and cannot rank.
+
+## How it works
+
+<Mermaid
+  alt="Building and using an inverted index. Three documents: 1 Red Shoes, 2 red socks, 3 Blue shoes. Analysis splits them into words and lowercases them. The index then lists red in documents 1 and 2, shoes in 1 and 3, socks in 2, and blue in 3. A search for red shoes looks up the lists for red and shoes; document 1 has both words, so it ranks first."
+  chart={`flowchart TD
+  D["Docs: 1 Red Shoes, 2 red socks, 3 Blue shoes"] --> A["Analyse: split into words, lowercase"]
+  A --> T1["red: 1, 2"]
+  A --> T2["shoes: 1, 3"]
+  A --> T3["socks: 2"]
+  A --> T4["blue: 3"]
+  T1 --> Q(["Search: red shoes"])
+  T2 --> Q
+  Q --> R(["Doc 1 has both words: ranked first"])`}
+/>
+
+- The query goes through the same analysis, so "Shoes" matches "shoes".
+- Elasticsearch splits each index into shards, so search scales out across nodes.
+- The database stays the source of truth. Changes reach the index a little later, often through change data capture, so search is near real-time.
+
+## Example
+
+PostgreSQL 18 full-text search, with no extra system:
+
+```sql
+-- A stored tsvector column, plus a GIN (inverted) index on it
+ALTER TABLE products ADD COLUMN search tsvector
+  GENERATED ALWAYS AS (to_tsvector('english', coalesce(name, ''))) STORED;
+CREATE INDEX products_search_idx ON products USING GIN (search);
+
+-- The 'english' config stems words, so "Running Shoes" matches
+SELECT id, name, ts_rank(search, q) AS rank
+FROM products, to_tsquery('english', 'run & shoe') AS q
+WHERE search @@ q
+ORDER BY rank DESC LIMIT 10;
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Relevance score | BM25, with k1 = 1.2 and b = 0.75 | Elasticsearch 9.x |
+| Text analyzer | `standard`: split on word boundaries, lowercase, keep stop words | Elasticsearch 9.x |
+| New documents searchable | After a refresh, every 1 s, for indices searched in the last 30 s | Elasticsearch 9.x |
+| Index for full-text search | GIN preferred; GiST also works | PostgreSQL 18 |
+
+## Interview Qs
+
+### What is an inverted index?
+
+A map from each term to the documents that contain it: the reverse of a document listing its words. A search looks up each query term and combines the lists, so it never scans every document.
+
+### Why not LIKE '%term%'?
+
+A B-tree serves only patterns anchored at the start, like `LIKE 'term%'`. A leading wildcard reads every row, and LIKE has no stemming or ranking. If you only need substring matching, PostgreSQL's pg_trgm extension can index `LIKE '%term%'`.
+
+### How do you keep Elasticsearch in sync with the database?
+
+Keep the database as the source of truth. Capture its changes with CDC, for example Debezium reading the WAL or binlog into Kafka, and index them asynchronously. Expect a short lag, and rebuild the index from the database if it drifts.
+
+### How are results ranked?
+
+By a relevance score. Elasticsearch uses BM25 by default: a term counts more when it is rare across documents and frequent in this one, repeats give diminishing returns, and matches in shorter fields count more.

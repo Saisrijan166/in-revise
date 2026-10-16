@@ -1,0 +1,126 @@
+---
+id: distributed-transactions
+tech: system-design
+title: "Distributed Transactions: 2PC and Sagas"
+topic: distributed-systems
+level: interview
+heat: 2
+hook: "Two-phase commit makes several databases commit together, but stalls if its coordinator dies. A saga commits step by step and undoes failures with compensating actions."
+points:
+  - { k: "2PC phase 1", v: "prepare: each participant saves its work to disk and votes" }
+  - { k: "2PC phase 2", v: "all voted yes: commit everywhere; any no: roll back everywhere" }
+  - { k: "Blocking", v: "coordinator dies after prepare: participants wait, locks held", kind: minus }
+  - { k: "Compensation", v: "a new action that undoes a step, like a refund; make it idempotent" }
+  - { k: "Two saga styles", v: "choreography (services react to events) or orchestration (a coordinator)" }
+  - { k: "PostgreSQL 18", v: "max_prepared_transactions = 0: prepared (2PC) transactions are off", kind: default }
+trap:
+  wrong: "If a saga step fails, the earlier steps roll back like one database transaction."
+  right: "Earlier steps are already committed. Run compensating actions, like a refund; others may have seen the middle state."
+sayIt: "Across services that own their databases, I use a saga: local transactions with compensating actions, idempotent steps and an outbox for events. 2PC is atomic but blocks if the coordinator fails, so I keep it for a few databases that support it."
+relations:
+  - { from: two-phase-commit, to: saga, type: vs, why: "One atomic commit that can block, or local commits with undo actions." }
+  - { from: two-phase-commit, to: single-point-of-failure, type: causes, why: "If the coordinator dies after prepare, participants wait with rows locked." }
+  - { from: saga, to: eventual-consistency, type: causes, why: "Each step commits alone, so others can see the half-done state for a while." }
+  - { from: compensating-transaction, to: idempotency, type: needs, why: "A compensation may run again on retry, so repeating it must be safe." }
+  - { from: transactional-outbox, to: at-least-once, type: causes, why: "The relay may publish an event twice, so consumers must drop duplicates." }
+  - { from: choreography, to: orchestration, type: vs, why: "Services react to each other's events, or one orchestrator directs each step." }
+confusedWith: [two-phase-commit-vs-saga]
+tags: [distributed-systems, transactions, microservices, consistency]
+visual: table
+sources:
+  - title: "PREPARE TRANSACTION (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/sql-prepare-transaction.html"
+    verifiedOn: "2026-10-16"
+  - title: "Resource Consumption: max_prepared_transactions (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/runtime-config-resource.html"
+    verifiedOn: "2026-10-16"
+  - title: "XA Transactions (MySQL 8.4 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/8.4/en/xa.html"
+    verifiedOn: "2026-10-16"
+  - title: "Two-Phase Commit (Unmesh Joshi, Patterns of Distributed Systems, martinfowler.com)"
+    url: "https://martinfowler.com/articles/patterns-of-distributed-systems/two-phase-commit.html"
+    verifiedOn: "2026-10-16"
+  - title: "Consensus on Transaction Commit (Gray & Lamport, Microsoft Research)"
+    url: "https://arxiv.org/abs/cs/0408036"
+    verifiedOn: "2026-10-16"
+  - title: "Sagas (Garcia-Molina & Salem, SIGMOD 1987)"
+    url: "https://www.cs.cornell.edu/andru/cs711/2002fa/reading/sagas.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "Saga design pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/saga"
+    verifiedOn: "2026-10-16"
+  - title: "Compensating Transaction pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/compensating-transaction"
+    verifiedOn: "2026-10-16"
+  - title: "Pattern: Saga (Chris Richardson, microservices.io)"
+    url: "https://microservices.io/patterns/data/saga.html"
+    verifiedOn: "2026-10-16"
+  - title: "Pattern: Transactional outbox (Chris Richardson, microservices.io)"
+    url: "https://microservices.io/patterns/data/transactional-outbox.html"
+    verifiedOn: "2026-10-16"
+  - title: "Sharding pattern: cross-shard transactions (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding"
+    verifiedOn: "2026-10-16"
+  - title: "Multi-step processes (Hello Interview, system design patterns)"
+    url: "https://www.hellointerview.com/learn/system-design/patterns/multi-step-processes"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+One business action, like placing an order, can change data in several databases or services. A local ACID transaction cannot cover them all, so you need another way to stay consistent when one step fails.
+
+## How it works
+
+<Compare id="two-phase-commit-vs-saga" />
+
+- **2PC in practice:** databases expose it to a transaction manager, as XA in MySQL or `PREPARE TRANSACTION` in PostgreSQL.
+- **Saga recovery:** after a failure, run the compensations of the steps that already committed, often in reverse order.
+- **Outbox:** each step writes its event to an outbox table in the same local transaction; a relay publishes it, so no event is lost.
+
+## Example
+
+An order saga across three services. Step 3 fails, so the saga refunds the card, then cancels the order.
+
+| Step | Local transaction | Compensation |
+| --- | --- | --- |
+| 1. Order service | Create order as PENDING | Mark order CANCELLED |
+| 2. Payment service | Charge the card | Refund the card |
+| 3. Stock service | Reserve items: fails, out of stock | Nothing to undo |
+
+The same idea with 2PC on PostgreSQL, run by a transaction manager:
+
+```sql
+-- On each participant (needs max_prepared_transactions > 0)
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+PREPARE TRANSACTION 'tx-42';  -- phase 1: saved to disk, locks still held
+
+-- When every participant has prepared:
+COMMIT PREPARED 'tx-42';      -- phase 2 (or ROLLBACK PREPARED 'tx-42')
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Prepared transactions (`max_prepared_transactions`) | 0: `PREPARE TRANSACTION` is disabled | PostgreSQL 18 |
+| XA (2PC) transactions | Supported by the InnoDB engine | MySQL 8.4 |
+
+## Interview Qs
+
+### How do you keep data consistent across microservices?
+
+Not with one ACID transaction, because each service owns its database. Use a saga: local transactions, each with a compensating action, plus idempotent steps and a transactional outbox so events are not lost. Accept that data is eventually consistent.
+
+### Why avoid two-phase commit across services?
+
+It blocks: if the coordinator fails after participants prepare, they wait with locks held until it recovers. Every participant must support prepare, which some databases and message brokers do not, and the extra round trips add latency.
+
+### Choreography or orchestration?
+
+Choreography: each service reacts to the previous event; no extra component, but the flow gets hard to follow as steps grow. Orchestration: one orchestrator sends each command and runs compensations; clearer for complex flows, but it is one more part that can fail.
+
+### A compensation fails. What now?
+
+Retry it: compensations must be idempotent, and the saga saves its progress so it can resume from the failed step. If retries keep failing, raise an alert for a person to fix it.

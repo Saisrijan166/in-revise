@@ -1,0 +1,148 @@
+---
+id: idempotency
+tech: system-design
+title: Idempotency
+topic: apis
+level: intermediate
+heat: 3
+hook: "Doing it twice has the same effect as doing it once, so a client can safely retry when it never got an answer."
+points:
+  - { k: "Idempotent methods", v: "GET, HEAD, OPTIONS, TRACE, PUT, DELETE (RFC 9110)" }
+  - { k: "Not idempotent", v: "POST and PATCH: a repeat can create or change twice", kind: minus }
+  - { k: "Safe vs idempotent", v: "safe means read-only; PUT and DELETE change data yet repeat safely" }
+  - { k: "Idempotency key", v: "client sends a unique ID; the server replays the first result" }
+  - { k: "Atomic claim", v: "check-then-insert races; use a unique insert or SET NX", kind: minus }
+  - { k: "Stripe keys", v: "up to 255 chars; may be pruned once 24 hours old", kind: default }
+trap:
+  wrong: "Idempotent means every repeat gets the same response."
+  right: "It means the same effect on the server. A second DELETE may return 404, but nothing more was deleted."
+sayIt: "Networks time out and clients retry, so a retried POST can charge twice. I make writes idempotent: the client sends an idempotency key, the server claims it atomically, stores the result, and replays it for any retry with that key."
+relations:
+  - { from: timeouts-retries, to: idempotency, type: needs, why: "After a timeout the first try may have worked, so a retry can repeat it." }
+  - { to: at-least-once, type: pairs, why: "A message can arrive twice; an idempotent consumer makes the repeat harmless." }
+  - { from: idempotency-key, to: uuid, type: uses, why: "Stripe and the IETF draft suggest a random UUID v4 as the key." }
+  - { from: idempotency-key, to: ttl, type: uses, why: "Saved keys expire; Stripe may prune a key once it is 24 hours old." }
+  - { from: idempotency-key, to: acid, type: uses, why: "Save the key and the result in one atomic step, so a crash cannot split them." }
+confusedWith: []
+tags: [api-design, retries, reliability, payments]
+visual: flow
+sources:
+  - title: "RFC 9110: HTTP Semantics, 9.2.1 Safe Methods and 9.2.2 Idempotent Methods (IETF, 2022)"
+    url: "https://www.rfc-editor.org/rfc/rfc9110.html#name-idempotent-methods"
+    verifiedOn: "2026-10-16"
+  - title: "RFC 5789: PATCH Method for HTTP (IETF, 2010)"
+    url: "https://www.rfc-editor.org/rfc/rfc5789.html"
+    verifiedOn: "2026-10-16"
+  - title: "Idempotent requests (Stripe API reference)"
+    url: "https://docs.stripe.com/api/idempotent_requests"
+    verifiedOn: "2026-10-16"
+  - title: "The Idempotency-Key HTTP Header Field, draft-ietf-httpapi-idempotency-key-header-07 (IETF Internet-Draft)"
+    url: "https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/"
+    verifiedOn: "2026-10-16"
+  - title: "Making retries safe with idempotent APIs (Amazon Builders' Library)"
+    url: "https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/"
+    verifiedOn: "2026-10-16"
+  - title: "Amazon SQS at-least-once delivery (Amazon SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/standard-queues-at-least-once-delivery.html"
+    verifiedOn: "2026-10-16"
+  - title: "SET command, NX option (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/set/"
+    verifiedOn: "2026-10-16"
+  - title: "Constraints: unique constraints (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/ddl-constraints.html"
+    verifiedOn: "2026-10-16"
+  - title: "API Design (Hello Interview, system design core concepts)"
+    url: "https://www.hellointerview.com/learn/system-design/core-concepts/api-design"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+After a timeout, the client cannot tell whether the server did the work. The only way forward is to retry, and without idempotency a retry can charge a card or create an order twice.
+
+## How it works
+
+<Mermaid
+  alt="Idempotency key flow. A POST to /payments arrives with an Idempotency-Key header K. If K is new, the server claims K atomically, charges the card once, saves K with the response, and returns it. If K was seen and the first request finished, the server returns the saved response. If K was seen and the first request is still running, the server answers 409 Conflict and the client retries later."
+  chart={`flowchart TD
+  R(["POST /payments with Idempotency-Key K"]) --> S{Seen key K?}
+  S -- new --> CL[Claim K atomically]
+  CL --> PAY[Charge the card once]
+  PAY --> SAVE[Save K with the response]
+  SAVE --> OUT([Return the response])
+  S -- finished --> REP([Return the saved response])
+  S -- running --> BUSY(["409 Conflict: retry later"])`}
+/>
+
+- **Some writes are idempotent already:** `PUT /users/42` sets a value, so repeats are harmless. `balance += 100` is not.
+- **POST is not,** but an idempotency key makes a POST endpoint safe to retry. The `Idempotency-Key` header is an IETF draft, not yet an RFC; Stripe and Adyen already use it.
+
+## Analogy
+
+<Analogy title="The lift button" limit="A real server must also remember the key, and for a limited time only. The lift button needs no memory.">
+Pressing a lift's call button five times still brings one lift. An "add ₹100" button is not like that: five presses, ₹500.
+</Analogy>
+
+## Example
+
+```java
+Response pay(String key, PaymentRequest req) {
+    String hash = req.fingerprint();
+    // atomic: only one request can claim a new key (unique insert or SET NX)
+    Saved old = store.putIfAbsent(key, Saved.running(hash));
+    if (old != null) {
+        if (!old.hash().equals(hash)) return Response.status(422); // key reused
+        if (old.running()) return Response.status(409);             // still running
+        return old.response();                                      // replay result
+    }
+    Response res = payments.charge(req);                            // once per key
+    store.put(key, Saved.done(hash, res), Duration.ofHours(24));
+    return res;
+}
+```
+
+```python
+def pay(key, req):
+    fp = req.fingerprint()
+    # atomic: only one request can claim a new key (unique insert or SET NX)
+    old = store.put_if_absent(key, {"hash": fp, "state": "running"})
+    if old is not None:
+        if old["hash"] != fp:
+            return Response(status=422)       # key reused with a new body
+        if old["state"] == "running":
+            return Response(status=409)       # first try still running
+        return old["response"]                # replay the saved result
+    res = payments.charge(req)                # runs once per key
+    store.set(key, {"hash": fp, "state": "done", "response": res}, ttl=24 * 3600)
+    return res
+```
+
+## Defaults
+
+| What | Value | Where |
+| --- | --- | --- |
+| Idempotent methods | GET, HEAD, OPTIONS, TRACE, PUT, DELETE | RFC 9110 |
+| Not idempotent | POST (RFC 9110), PATCH (RFC 5789) | HTTP |
+| Key length | Up to 255 characters | Stripe API v1 |
+| How long a key is kept | May be pruned once at least 24 hours old | Stripe API v1 |
+| What is replayed | Status and body of the first run, even a 500 | Stripe API v1 |
+| Same key, different body | 422 Unprocessable Content | IETF draft |
+| Retry while the first still runs | 409 Conflict | IETF draft |
+
+## Interview Qs
+
+### Which HTTP methods are idempotent?
+
+GET, HEAD, OPTIONS and TRACE (the safe, read-only ones), plus PUT and DELETE. POST is not, and PATCH is not by default. Idempotent means repeats have the same effect on the server, not that every response is identical.
+
+### How do you stop a retried payment from charging twice?
+
+The client creates a UUID idempotency key per payment and sends it on every retry. The server claims the key atomically, charges once, stores the response with the key, and replays that response for any retry.
+
+### Two requests with the same key arrive at once. What happens?
+
+With check-then-insert, both can pass the check and both charge. Claim the key atomically, with a unique insert or Redis `SET NX`, so only one wins. The other gets 409 Conflict and retries later.
+
+### Is idempotency the same as exactly-once delivery?
+
+No. Retries and redelivery mean a message can arrive more than once (at-least-once). An idempotent receiver makes the repeats harmless, so the effect happens once.

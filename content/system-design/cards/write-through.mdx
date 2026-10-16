@@ -1,0 +1,104 @@
+---
+id: write-through
+tech: system-design
+title: Write-Through and Write-Behind
+topic: caching
+level: intermediate
+heat: 3
+hook: "Write-through saves each write to the cache and the database together: fresh reads. Write-behind saves to the cache now and the database later: faster, but riskier."
+points:
+  - { k: "Write-through", v: "cache and DB in one write; confirmed when both succeed" }
+  - { k: "Write-behind", v: "confirmed after the cache write; DB updated later, in batches" }
+  - { k: "Read-through", v: "on a miss, the cache loads from the DB, not the app" }
+  - { k: "Refresh-ahead", v: "a key read near expiry is reloaded in the background" }
+  - { k: "Write cost", v: "two writes each time; most written data is never read", kind: minus }
+trap:
+  wrong: "Write-behind is just a faster write-through."
+  right: "It confirms before the database has the data. Until the flush, the cache holds the only copy, so a crash loses the write."
+sayIt: "Write-through updates the cache and the database in one write: fresh reads, slower writes, and cold data in the cache, so I add a TTL. Write-behind gives the fastest writes but can lose the latest ones, so I keep it for data like view counts."
+relations:
+  - { to: stale-data, type: solves, why: "Readers get the new value right after a successful write." }
+  - { to: ttl, type: pairs, why: "Most written data is never read; a TTL clears it out of the cache." }
+  - { from: read-through, to: write-through, type: pairs, why: "Together the app talks only to the cache: it loads misses and saves writes." }
+  - { from: write-behind, to: write-through, type: vs, why: "Confirm after the cache write only, or after the database write too." }
+  - { from: write-behind, to: at-least-once, type: uses, why: "Redis write-behind keeps retrying failed database writes until they succeed." }
+  - { from: write-behind, to: idempotency, type: needs, why: "A retried flush can apply twice, so each database write must be safe to repeat." }
+confusedWith: [cache-aside-vs-write-through]
+tags: [caching, consistency, redis]
+visual: flow
+sources:
+  - title: "Caching strategies for Memcached: write-through and TTL (Amazon ElastiCache docs)"
+    url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html"
+    verifiedOn: "2026-10-16"
+  - title: "Caching guidance: keep the cache consistent on writes (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/best-practices/caching"
+    verifiedOn: "2026-10-16"
+  - title: "Cache-Aside pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
+    verifiedOn: "2026-10-16"
+  - title: "Caching Data Sources: read-through, write-through, write-behind and refresh-ahead (Oracle Coherence 14.1.1 docs)"
+    url: "https://docs.oracle.com/en/middleware/standalone/coherence/14.1.1.2206/develop-applications/caching-data-sources.html"
+    verifiedOn: "2026-10-16"
+  - title: "Caching solutions: write-through and write-behind (Redis)"
+    url: "https://redis.io/solutions/caching/"
+    verifiedOn: "2026-10-16"
+  - title: "Write-behind architecture (Redis docs)"
+    url: "https://redis.io/docs/latest/integrate/write-behind/architecture/"
+    verifiedOn: "2026-10-16"
+  - title: "The System Design Primer: Cache update strategies (donnemartin, GitHub)"
+    url: "https://github.com/donnemartin/system-design-primer"
+    verifiedOn: "2026-10-16"
+  - title: "Caching (Hello Interview, system design core concepts)"
+    url: "https://www.hellointerview.com/learn/system-design/core-concepts/caching"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+With [cache-aside](card:cache-aside), the cache changes only on reads, so a read right after a write can miss or see old data. Write-through keeps the cache current on every write; write-behind also makes writes fast.
+
+## How it works
+
+<Mermaid
+  alt="Two write paths. Write-through: the app writes to the cache, the same write goes on to the database, and only then is the write confirmed. Write-behind: the app writes to the cache and is confirmed at once; later the cache writes the changes to the database in batches."
+  chart={`flowchart TD
+  subgraph WT["Write-through"]
+    A1([App writes]) --> C1[Cache]
+    C1 -->|same write| D1[(Database)]
+    D1 --> OK1([Confirmed])
+  end
+  subgraph WB["Write-behind"]
+    A2([App writes]) --> C2[Cache]
+    C2 --> OK2([Confirmed at once])
+    C2 -.->|"later, in batches"| D2[(Database)]
+  end`}
+/>
+
+- **Write-through** can run inside the cache product, or in the app: write the database, then set the key (the AWS example).
+- **Write-behind** (write-back) queues changes; several changes to one key in the delay become one database write.
+- Two read-side helpers go with these: **read-through** (the cache loads misses itself) and **refresh-ahead** (a key read close to expiry is reloaded in the background).
+
+## Example
+
+A view counter changes 500 times in 10 seconds.
+
+- **Write-through:** 500 cache writes and 500 database writes. Every read is fresh.
+- **Write-behind**, flushing every 10 seconds: 500 cache writes, 1 database write. A cache crash before the flush loses those 500 views.
+
+## Interview Qs
+
+### Write-through vs write-behind?
+
+Write-through confirms a write only after the cache and the database both have it: fresh reads, slower writes. Write-behind confirms after the cache write and flushes later: fast writes and fewer database writes, but data is lost if the cache fails before the flush.
+
+### When would you use write-behind?
+
+For write-heavy data where losing the last few seconds is acceptable, such as view counts, likes or metrics. Not for payments or orders, where the database must hold the write before you confirm it.
+
+### What is read-through, and how is it different from cache-aside?
+
+Both load from the database on a miss. In cache-aside the app does it; in read-through the cache does it through a loader, so the app talks only to the cache.
+
+### What problems does write-through bring?
+
+Every write pays for two writes, and most written data is never read, so the cache fills with cold data; add a TTL. A new cache node also starts empty until data is written again, so pair it with lazy loading.

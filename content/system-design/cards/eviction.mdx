@@ -1,0 +1,147 @@
+---
+id: eviction
+tech: system-design
+title: Cache Eviction (LRU, LFU)
+topic: caching
+level: intermediate
+heat: 3
+hook: "A full cache must drop something to make room. The eviction policy chooses: LRU drops the key unused the longest, LFU the key used the least."
+points:
+  - { k: "Eviction", v: "removes keys because memory is full, even if still valid" }
+  - { k: "LRU", v: "drop the least recently used key: the usual default" }
+  - { k: "LFU", v: "drop the least often used key: keeps steady favourites" }
+  - { k: "Approximated", v: "Redis samples 5 keys and evicts the best candidate" }
+  - { k: "Redis OSS default", v: "noeviction: once maxmemory is reached, writes fail", kind: default }
+  - { k: "Memcached default", v: "64 MB, then it evicts with a segmented LRU", kind: default }
+trap:
+  wrong: "Eviction and expiry are the same thing."
+  right: "Expiry deletes a key when its TTL runs out. Eviction deletes keys early, even valid ones, because memory is full."
+sayIt: "When the cache reaches its memory limit, an eviction policy picks what to drop. I default to LRU, since a few keys get most reads; LFU suits keys that stay popular. In Redis I set maxmemory and allkeys-lru, because the default noeviction makes writes fail."
+relations:
+  - { to: ttl, type: pairs, why: "TTLs drop old data on time; eviction drops data when memory runs out." }
+  - { from: volatile-ttl, to: ttl, type: needs, why: "Redis volatile policies only evict keys that have a TTL set." }
+  - { from: lru, to: lfu, type: vs, why: "Drop the key unused the longest, or the key used the fewest times." }
+  - { from: in-process-cache, to: lru, type: uses, why: "Python's functools.lru_cache keeps the 128 most recent results by default." }
+  - { to: cache-hit-ratio, type: limits, why: "Evicting keys that are still needed lowers the hit ratio." }
+confusedWith: []
+tags: [caching, eviction, redis, memcached]
+visual: table
+sources:
+  - title: "Key eviction (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/reference/eviction/"
+    verifiedOn: "2026-10-16"
+  - title: "redis.conf, MEMORY MANAGEMENT section (Redis source, GitHub)"
+    url: "https://raw.githubusercontent.com/redis/redis/unstable/redis.conf"
+    verifiedOn: "2026-10-16"
+  - title: "Best practices for memory management (Azure Managed Redis docs)"
+    url: "https://learn.microsoft.com/en-us/azure/redis/best-practices-memory-management"
+    verifiedOn: "2026-10-16"
+  - title: "Caching guidance: eviction (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/best-practices/caching"
+    verifiedOn: "2026-10-16"
+  - title: "Modern LRU: segmented HOT, WARM, COLD (memcached blog)"
+    url: "https://memcached.org/blog/modern-lru/"
+    verifiedOn: "2026-10-16"
+  - title: "memcached.c: -m default and -M option (memcached source, GitHub)"
+    url: "https://github.com/memcached/memcached/blob/master/memcached.c"
+    verifiedOn: "2026-10-16"
+  - title: "LinkedHashMap (Java SE 21 API)"
+    url: "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/LinkedHashMap.html"
+    verifiedOn: "2026-10-16"
+  - title: "OrderedDict objects (Python docs)"
+    url: "https://docs.python.org/3/library/collections.html#ordereddict-objects"
+    verifiedOn: "2026-10-16"
+  - title: "functools.lru_cache (Python docs)"
+    url: "https://docs.python.org/3/library/functools.html#functools.lru_cache"
+    verifiedOn: "2026-10-16"
+  - title: "Caching challenges and strategies (Amazon Builders' Library)"
+    url: "https://aws.amazon.com/builders-library/caching-challenges-and-strategies/"
+    verifiedOn: "2026-10-16"
+  - title: "Caching (Hello Interview, system design core concepts)"
+    url: "https://www.hellointerview.com/learn/system-design/core-concepts/caching"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+A cache has far less memory than the database has data, so it cannot keep everything. When it is full it must throw keys away, and a bad choice drops the data people still read.
+
+## How it works
+
+| Policy | Drops first | Good when |
+| --- | --- | --- |
+| **LRU** | The key not used for the longest time | A few keys get most reads (most apps) |
+| **LFU** | The key used the fewest times | Some keys stay popular for a long time |
+| **Random** | Any key | All keys are read about equally |
+| **Shortest TTL** | The key closest to expiring | Your code gives short TTLs to keys it can lose |
+
+- Real caches approximate LRU: Redis samples 5 keys (`maxmemory-samples`) and drops the oldest. That is close to true LRU and uses less memory.
+- One big scan can push every hot key out of plain LRU. Memcached's segmented LRU (HOT, WARM, COLD queues) shields busy keys from such scans.
+- In Redis, `allkeys-*` policies may drop any key; `volatile-*` only keys with a TTL, and act like `noeviction` if no key has one.
+
+## Example
+
+A tiny LRU cache: it drops the least recently used entry once it holds more than `capacity`.
+
+```java
+class LruCache<K, V> extends LinkedHashMap<K, V> {
+    private final int capacity;
+
+    LruCache(int capacity) {
+        super(16, 0.75f, true);                  // true = keep access order
+        this.capacity = capacity;
+    }
+
+    @Override
+    protected boolean removeEldestEntry(Map.Entry<K, V> eldest) {
+        return size() > capacity;                // drop the least recent
+    }
+}
+```
+
+```python
+from collections import OrderedDict
+class LruCache:
+    def __init__(self, capacity):
+        self.capacity, self.data = capacity, OrderedDict()
+
+    def get(self, key):
+        if key in self.data:
+            self.data.move_to_end(key)           # now the most recent
+        return self.data.get(key)
+
+    def put(self, key, value):
+        self.data[key] = value
+        self.data.move_to_end(key)
+        if len(self.data) > self.capacity:
+            self.data.popitem(last=False)        # drop the least recent
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Memory limit (`maxmemory`) | 0, meaning no limit on 64-bit; 3 GB on 32-bit | Redis Open Source |
+| Policy when full (`maxmemory-policy`) | `noeviction`: commands that add data fail; reads work | Redis Open Source |
+| Policy when full | `volatile-lru`: only keys with a TTL can be evicted | Azure Managed Redis |
+| Keys sampled per eviction | 5 (`maxmemory-samples`) | Redis Open Source |
+| Memory limit (`-m`) | 64 MB; when full it evicts (`-M` returns errors instead) | Memcached 1.6 |
+| Function cache size (`maxsize`) | 128 entries, LRU | Python `functools.lru_cache` |
+
+## Interview Qs
+
+### What is the difference between LRU and LFU?
+
+LRU drops the key unused for the longest time; LFU drops the key used the fewest times. LFU keeps steady favourites but must forget old popularity, so Redis decays its LFU counters over time (lfu-decay-time, 1 minute by default).
+
+### How would you build an LRU cache with O(1) get and put?
+
+A hash map for lookups plus a doubly linked list in use order. On each get or put, move the entry to the front; when full, remove the entry at the back. Java's LinkedHashMap in access order does exactly this.
+
+### Which Redis eviction policy would you pick for a cache?
+
+`allkeys-lru` when unsure: Redis recommends it for the common case where a few keys get most reads. Also set `maxmemory`, because Redis Open Source has no limit on 64-bit and defaults to `noeviction`.
+
+### What happens when Redis is full and the policy is noeviction?
+
+Commands that add data return an error, while reads keep working. A `volatile-*` policy behaves the same way when no key has a TTL.

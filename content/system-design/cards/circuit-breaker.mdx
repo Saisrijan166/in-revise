@@ -1,0 +1,142 @@
+---
+id: circuit-breaker
+tech: system-design
+title: Circuit Breaker
+topic: reliability
+level: intermediate
+heat: 3
+hook: "A switch in front of a remote call: after too many failures it trips and fails fast, then later tests whether the service is back."
+points:
+  - { k: "Closed", v: "calls pass through; failures in a recent window are counted" }
+  - { k: "Open", v: "calls fail at once, with no remote call, until a timer ends" }
+  - { k: "Half-open", v: "a few trial calls: if they succeed, close; if one fails, open again" }
+  - { k: "Protects both sides", v: "your threads stop waiting; the sick service gets time to recover", kind: plus }
+  - { k: "Tuning", v: "open too long: errors after recovery; too short: it flaps", kind: minus }
+  - { k: "Resilience4j 2.x default", v: "opens at 50% failures in the last 100 calls; stays open 60 s", kind: default }
+trap:
+  wrong: "A circuit breaker keeps retrying the call until it works."
+  right: "It does the opposite: it stops calling. Retry handles short blips; the breaker handles longer outages. Use both together."
+sayIt: "I wrap each remote dependency in a circuit breaker. Past a failure-rate threshold it opens and fails fast with a fallback, like cached data. After a cool-down, trial calls decide whether it closes."
+relations:
+  - { to: cascading-failure, type: solves, why: "Failing fast stops threads piling up on a dead dependency, so the caller stays up." }
+  - { from: cb-open, to: graceful-degradation, type: uses, why: "While open, return a default or cached answer instead of an error." }
+  - { to: timeouts-retries, type: pairs, why: "Retry through the breaker, but stop retrying once it is open." }
+  - { to: load-shedding, type: pairs, why: "The breaker protects from the caller's side; shedding is the overloaded server's own guard." }
+  - { from: microservices, to: circuit-breaker, type: needs, why: "Many service-to-service calls mean many ways to fail; breakers keep a failure local." }
+confusedWith: []
+tags: [reliability, resilience, fault-tolerance, microservices]
+visual: flow
+sources:
+  - title: "CircuitBreaker (Martin Fowler, bliki, 2014)"
+    url: "https://martinfowler.com/bliki/CircuitBreaker.html"
+    verifiedOn: "2026-10-16"
+  - title: "Circuit Breaker pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker"
+    verifiedOn: "2026-10-16"
+  - title: "REL05-BP01 Implement graceful degradation (AWS Well-Architected, Reliability Pillar)"
+    url: "https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_mitigate_interaction_failure_graceful_degradation.html"
+    verifiedOn: "2026-10-16"
+  - title: "Avoiding fallback in distributed systems (Amazon Builders' Library)"
+    url: "https://aws.amazon.com/builders-library/avoiding-fallback-in-distributed-systems/"
+    verifiedOn: "2026-10-16"
+  - title: "CircuitBreaker (Resilience4j docs)"
+    url: "https://resilience4j.readme.io/docs/circuitbreaker"
+    verifiedOn: "2026-10-16"
+  - title: "CircuitBreakerConfig.java defaults (Resilience4j source, GitHub)"
+    url: "https://github.com/resilience4j/resilience4j/blob/master/resilience4j-circuitbreaker/src/main/java/io/github/resilience4j/circuitbreaker/CircuitBreakerConfig.java"
+    verifiedOn: "2026-10-16"
+  - title: "Resilience4j releases (v2.4.0, 2026-03-14)"
+    url: "https://github.com/resilience4j/resilience4j/releases"
+    verifiedOn: "2026-10-16"
+  - title: "pybreaker README and source (danielfm, GitHub; 1.4.1 on PyPI)"
+    url: "https://github.com/danielfm/pybreaker"
+    verifiedOn: "2026-10-16"
+  - title: "Hystrix README: maintenance mode (Netflix, GitHub)"
+    url: "https://github.com/Netflix/Hystrix"
+    verifiedOn: "2026-10-16"
+  - title: "Networking Essentials: circuit breakers (Hello Interview)"
+    url: "https://www.hellointerview.com/learn/system-design/core-concepts/networking-essentials"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+When a dependency is down or very slow, every caller waits for its timeout and holds threads and connections meanwhile. They pile up until the caller fails too, and the failure spreads.
+
+## How it works
+
+<Mermaid
+  alt="Circuit breaker states. Closed: calls go through. When failures pass the threshold, it moves to Open. Open: calls fail at once. When the wait time ends, it moves to Half-open. Half-open: if the trial calls succeed, it moves back to Closed; if a trial call fails, it goes back to Open."
+  chart={`flowchart LR
+  C([Closed]) -- "failures pass threshold" --> O([Open])
+  O -- "wait time ends" --> H([Half-open])
+  H -- "trial calls succeed" --> C
+  H -- "a trial call fails" --> O`}
+/>
+
+- Count **timeouts** as failures too, so a slow service trips the breaker, not only a dead one.
+- Half-open lets only a few calls through, because a recovering service can fall over again under full traffic.
+- Use one breaker per dependency, or per shard: one shared breaker would block the healthy ones too.
+- When open, return a **fallback**: cached data, a default, or a clear "try later". Keep it simple and test it.
+- Popularised by Michael Nygard's book *Release It!*. Netflix Hystrix is in maintenance mode; Netflix points new projects to Resilience4j.
+
+## Example
+
+```java
+CircuitBreakerConfig config = CircuitBreakerConfig.custom()
+    .failureRateThreshold(50)                          // open at 50% failures...
+    .slidingWindowSize(20).minimumNumberOfCalls(10)    // ...in the last 20 calls
+    .waitDurationInOpenState(Duration.ofSeconds(30))   // then go half-open
+    .permittedNumberOfCallsInHalfOpenState(3)          // 3 trial calls
+    .build();
+CircuitBreaker breaker = CircuitBreaker.of("prices", config);
+
+Price getPrice(String id) {
+    try {
+        return breaker.executeSupplier(() -> priceClient.fetch(id));
+    } catch (CallNotPermittedException e) {            // open: fail fast
+        return cache.getPrice(id);                     // fallback
+    }
+}
+```
+
+```python
+import pybreaker
+
+# Opens after 5 failures in a row; after 30 s, one trial call goes through
+breaker = pybreaker.CircuitBreaker(fail_max=5, reset_timeout=30)
+
+def get_price(item_id):
+    try:
+        return breaker.call(price_client.fetch, item_id)
+    except pybreaker.CircuitBreakerError:      # open: fail fast
+        return cache.get_price(item_id)        # fallback
+```
+
+## Defaults
+
+| Setting | Resilience4j 2.x | pybreaker 1.4 |
+| --- | --- | --- |
+| Opens when | 50% of calls fail | 5 failures in a row |
+| Measured over | Last 100 calls (at least 100 recorded) | Consecutive failures |
+| Wait before half-open | 60 s | 60 s |
+| Trial calls in half-open | 10 | 1 |
+| Counts as failure | Every exception, unless configured | Every exception, unless excluded |
+
+## Interview Qs
+
+### Explain the three states.
+
+Closed: calls go through and failures are counted. Open: calls fail at once without touching the service, until a timer ends. Half-open: a few trial calls go through; if they succeed it closes, and if one fails it opens again.
+
+### Circuit breaker vs retry?
+
+Retry assumes the fault is short and tries again. A circuit breaker assumes it is not, and stops calling. Use both: retry inside the breaker, and stop retrying when the breaker is open.
+
+### What does the user see when the circuit is open?
+
+A fallback: cached or default data, a page without that feature, or a clear "try again later". Keep the fallback simple and test it, because a path that rarely runs can fail exactly when you need it.
+
+### Where do you put circuit breakers?
+
+In the caller, around each remote dependency: other services, databases and third-party APIs. A service mesh sidecar can add them without changing application code.

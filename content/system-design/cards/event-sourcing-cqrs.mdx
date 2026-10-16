@@ -1,0 +1,103 @@
+---
+id: event-sourcing-cqrs
+tech: system-design
+title: Event Sourcing and CQRS
+topic: messaging
+level: interview
+heat: 2
+hook: "Event sourcing saves every change as an event and rebuilds state by replaying them. CQRS uses separate models for writing and reading."
+points:
+  - { k: "Event sourcing", v: "append-only events are the truth; state = replay them" }
+  - { k: "CQRS", v: "commands go to a write model; queries to a read model" }
+  - { k: "Projection", v: "a read view built from events; rebuild it any time" }
+  - { k: "Snapshot", v: "saved state every N events, so replay stays short", kind: plus }
+  - { k: "Audit and time travel", v: "full history; replay up to any past moment", kind: plus }
+  - { k: "Read side lags", v: "eventually consistent: a new order can show up late", kind: minus }
+trap:
+  wrong: "CQRS and event sourcing always go together and suit every service."
+  right: "Each works alone, and most CRUD apps need neither. Use them where audit history or very uneven reads and writes justify it."
+sayIt: "Event sourcing stores each change as an immutable event: I get an audit trail and can rebuild any view by replay. CQRS serves reads from a separate query model. Both add complexity and a lagging read side, so I use them for ledgers, not plain CRUD."
+relations:
+  - { from: event-sourcing, to: cqrs, type: pairs, why: "The event store is the write model; projections built from it are the read model." }
+  - { from: cqrs, to: eventual-consistency, type: causes, why: "The read store is updated after the write, so a read can be briefly stale." }
+  - { from: read-model, to: denormalisation, type: uses, why: "Read data is stored shaped for each screen, so queries skip joins." }
+  - { from: event-store, to: optimistic-locking, type: uses, why: "An append is rejected if the stream changed since it was read." }
+  - { from: projection, to: idempotent-consumer, type: needs, why: "Events arrive at least once; a duplicate must not change the view twice." }
+  - { from: event-store, to: event-streaming, type: pairs, why: "Kafka can fan events out to projections, but it is not an event store." }
+confusedWith: []
+tags: [messaging, architecture, patterns, event-driven]
+visual: flow
+sources:
+  - title: "Event Sourcing (Martin Fowler, 2005)"
+    url: "https://martinfowler.com/eaaDev/EventSourcing.html"
+    verifiedOn: "2026-10-16"
+  - title: "CQRS (Martin Fowler, bliki, 2011)"
+    url: "https://martinfowler.com/bliki/CQRS.html"
+    verifiedOn: "2026-10-16"
+  - title: "Event Sourcing pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing"
+    verifiedOn: "2026-10-16"
+  - title: "CQRS pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs"
+    verifiedOn: "2026-10-16"
+  - title: "EP166: What is Event Sourcing? (ByteByteGo Newsletter)"
+    url: "https://blog.bytebytego.com/p/ep166-what-is-event-sourcing"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+A normal table keeps only the latest value, so the history of how it got there is lost. One data model also struggles to serve strict writes and many fast, differently shaped reads.
+
+## How it works
+
+<Mermaid
+  alt="Event sourcing with CQRS. A command such as PlaceOrder goes to the write model, which checks the rules and appends events to the event store. A projector reads new events and updates a read database. A query such as my orders reads only from the read database."
+  chart={`flowchart TD
+  C(["Command: PlaceOrder"]) --> W[Write model checks the rules]
+  W -- append event --> ES[(Event store)]
+  ES -- new events --> P[Projector]
+  P --> RD[(Read database)]
+  Q(["Query: my orders"]) --> RD`}
+/>
+
+- **Event sourcing:** each change is an immutable event, like `OrderPlaced`, appended to that entity's stream. Current state = replay its events; a [snapshot](card:event-snapshot) every N events keeps replay short.
+- **CQRS:** commands go to the write model; queries read a separate model shaped for screens. With separate stores, events update the read side a little later.
+- Each works alone: CQRS can use one database, and event sourcing can answer reads by replaying.
+
+## Analogy
+
+<Analogy title="A ledger, not a whiteboard" limit="A ledger is small and read by people. A real event store also needs versioned event formats, snapshots and projections.">
+A whiteboard shows only today's balance; rub it out and the past is gone. An accountant's ledger lists every entry, and the balance is their sum. A mistake is fixed by adding a reversing entry, never by erasing a line.
+</Analogy>
+
+## Example
+
+One bank account's event stream:
+
+| # | Event | Balance after replay |
+| --- | --- | --- |
+| 1 | `AccountOpened` | 0 |
+| 2 | `Deposited 500` | 500 |
+| 3 | `Withdrew 200` (a wrong charge) | 300 |
+| 4 | `WithdrawalReversed 200` | 500 |
+
+Event 4 is a compensating event: event 3 stays in history. A projection keeps `balance = 500` in the read database, so reads skip the replay.
+
+## Interview Qs
+
+### What is event sourcing?
+
+Instead of overwriting the current state, store each change as an immutable event in an append-only log. State is rebuilt by replaying an entity's events, with snapshots to keep it fast. You get a full audit trail and the state at any past time.
+
+### What is CQRS, and does it need event sourcing?
+
+CQRS uses separate models for writes (commands) and reads (queries), sometimes in separate databases kept in sync by events. It does not need event sourcing, but they pair well: the events can feed the read model.
+
+### When would you not use them?
+
+For simple CRUD domains, short-lived MVPs, and screens that must show a write immediately. They add event versioning, projections, replays and a lagging read side. Fowler warns that for most systems CQRS adds risky complexity.
+
+### How do you fix a wrong event or change an event's format?
+
+Never edit stored events. Append a compensating event that reverses the effect. For a new format, add a version to each event and upcast old versions to the new shape when reading them.

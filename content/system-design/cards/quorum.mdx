@@ -1,0 +1,133 @@
+---
+id: quorum
+tech: system-design
+title: Quorums (R + W > N)
+topic: distributed-systems
+level: interview
+heat: 2
+hook: "Keep N copies. A write waits for W of them, a read asks R. If R + W > N, every read reaches at least one copy that has the latest write."
+points:
+  - { k: "N, W, R", v: "copies kept; acks a write waits for; replicas a read asks" }
+  - { k: "Majority", v: "floor(N/2) + 1: 2 of 3, 3 of 5; two majorities always overlap" }
+  - { k: "R + W ≤ N", v: "faster and more available, but a read can be stale (eventual)" }
+  - { k: "R = 1, W = N", v: "fast reads, but one replica down blocks every write" }
+  - { k: "Slowest replica", v: "each request waits for the slowest of its R or W replicas", kind: minus }
+  - { k: "Cassandra drivers", v: "default LOCAL_ONE: R = W = 1, so no guaranteed overlap; set QUORUM", kind: default }
+trap:
+  wrong: "R + W > N always gives strong consistency."
+  right: "Not always. Dynamo's sloppy quorum writes to stand-in nodes when owners are down, so a read can still miss the latest write."
+sayIt: "With 3 replicas I write and read at QUORUM, 2 of 3. Since 2 + 2 > 3, every read meets the latest write, and one replica can be down."
+relations:
+  - { from: leaderless, to: quorum, type: uses, why: "With no leader, Dynamo-style stores write to W replicas and read from R." }
+  - { from: strict-quorum, to: availability, type: limits, why: "If fewer than W replicas can be reached, a strict quorum write fails." }
+  - { from: tunable-consistency, to: eventual-consistency, type: causes, why: "Low levels like ONE (R + W ≤ N) let a read miss the newest copy for a while." }
+  - { from: ap-choice, to: sloppy-quorum, type: uses, why: "Dynamo stays writable in failures by using the first N healthy nodes." }
+confusedWith: []
+tags: [replication, consistency, distributed-systems, cassandra]
+visual: flow
+sources:
+  - title: "Dynamo: Amazon's Highly Available Key-value Store (DeCandia et al., SOSP 2007)"
+    url: "https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "Eventually Consistent - Revisited (Werner Vogels, 2008)"
+    url: "https://www.allthingsdistributed.com/2008/12/eventually_consistent.html"
+    verifiedOn: "2026-10-16"
+  - title: "Dynamo: tunable consistency (Apache Cassandra 5.0 docs)"
+    url: "https://cassandra.apache.org/doc/latest/cassandra/architecture/dynamo.html"
+    verifiedOn: "2026-10-16"
+  - title: "Data manipulation: IF NOT EXISTS uses Paxos (Apache Cassandra 5.0 docs)"
+    url: "https://cassandra.apache.org/doc/latest/cassandra/developing/cql/dml.html"
+    verifiedOn: "2026-10-16"
+  - title: "reference.conf: basic.request.consistency (Apache Cassandra Java driver 4.x, GitHub)"
+    url: "https://github.com/apache/cassandra-java-driver/blob/4.x/core/src/main/resources/reference.conf"
+    verifiedOn: "2026-10-16"
+  - title: "cassandra/cluster.py: default consistency level (DataStax Python driver, GitHub)"
+    url: "https://github.com/datastax/python-driver/blob/master/cassandra/cluster.py"
+    verifiedOn: "2026-10-16"
+  - title: "Paxos Made Simple (Leslie Lamport, 2001)"
+    url: "https://lamport.azurewebsites.net/pubs/paxos-simple.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "Please stop calling databases CP or AP (Martin Kleppmann, 2015)"
+    url: "https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html"
+    verifiedOn: "2026-10-16"
+  - title: "Design a key-value store: quorum consensus (ByteByteGo, System Design Interview)"
+    url: "https://bytebytego.com/courses/system-design-interview/design-a-key-value-store"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+Copies of the same data can disagree for a while. A quorum rule makes every read set overlap every write set, so a read reaches an up-to-date copy without waiting for all of them.
+
+## How it works
+
+<Mermaid
+  alt="N = 3 replicas. A write of x = 7 with W = 2 reaches replicas A and B; replica C is behind and still has x = 5. A read with R = 2 asks replicas B and C. B has x = 7, so the read returns the newer value. The write set and the read set overlap at B."
+  chart={`flowchart LR
+  W(["Write x = 7, W = 2"]) --> A[("Replica A: x = 7")]
+  W --> B[("Replica B: x = 7")]
+  C[("Replica C: x = 5, behind")]
+  R(["Read, R = 2"]) --> B
+  R --> C`}
+/>
+
+- Any R replicas include at least one that took the write. The read keeps the newest version; stale copies are fixed later, for example by read repair.
+- Cassandra sets R and W per query with [consistency levels](card:tunable-consistency) such as ONE, QUORUM and ALL.
+
+## Example
+
+N = 3, so a majority is 3 / 2 + 1 = 2 (integer division).
+
+- **W = 2, R = 2:** 2 + 2 = 4 > 3. Reads always overlap the write, and one replica can be down.
+- **W = 1, R = 1:** 1 + 1 = 2 ≤ 3. Fast, but a read can hit the one replica that missed the write.
+
+```java
+SimpleStatement write = SimpleStatement
+    .newInstance("UPDATE users SET name = ? WHERE id = ?", "Asha", 42)
+    .setConsistencyLevel(DefaultConsistencyLevel.QUORUM);   // W = 2 of 3
+session.execute(write);
+
+SimpleStatement read = SimpleStatement
+    .newInstance("SELECT name FROM users WHERE id = ?", 42)
+    .setConsistencyLevel(DefaultConsistencyLevel.QUORUM);   // R = 2 of 3
+Row row = session.execute(read).one();
+```
+
+```python
+from cassandra import ConsistencyLevel
+from cassandra.query import SimpleStatement
+
+write = SimpleStatement("UPDATE users SET name = %s WHERE id = %s",
+                        consistency_level=ConsistencyLevel.QUORUM)  # W = 2 of 3
+session.execute(write, ("Asha", 42))
+
+read = SimpleStatement("SELECT name FROM users WHERE id = %s",
+                       consistency_level=ConsistencyLevel.QUORUM)   # R = 2 of 3
+row = session.execute(read, (42,)).one()
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Common (N, R, W) | (3, 2, 2) | Amazon Dynamo paper, 2007 |
+| QUORUM level | A majority of replicas, n / 2 + 1: 2 of 3 | Apache Cassandra 5.0 |
+| Consistency level when you set none | LOCAL_ONE: one replica in the local data centre | Cassandra Java driver 4.x; DataStax Python driver 3.0 and later |
+
+## Interview Qs
+
+### What does R + W > N mean?
+
+N is the number of copies, W how many must confirm a write, and R how many a read asks. If R + W > N, the replicas a read asks always include one that has the latest confirmed write.
+
+### N = 3. Which R and W would you choose?
+
+W = 2 and R = 2 is the usual choice: reads see the latest write, and one replica can be down. For read-heavy data, R = 1 and W = 3 gives the fastest reads, but any replica that is down blocks writes.
+
+### What happens when fewer than W replicas are up?
+
+With a strict quorum the write fails: the system gives up availability to stay consistent. Dynamo uses a sloppy quorum instead: it writes to the next healthy nodes, which hand the data back when the owner returns (hinted handoff).
+
+### Does a quorum make reads linearizable?
+
+Not by itself. Sloppy quorums, concurrent writes and partly failed writes can still give stale reads, and Kleppmann warns against relying on it. For compare-and-set, use consensus, such as Cassandra's Paxos-based `IF NOT EXISTS`.

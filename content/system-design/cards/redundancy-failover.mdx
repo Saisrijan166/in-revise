@@ -1,0 +1,132 @@
+---
+id: redundancy-failover
+tech: system-design
+title: Redundancy and Failover
+topic: reliability
+level: beginner
+heat: 3
+hook: "Run two or more of everything that matters, in places that fail separately, and switch to a healthy copy when one dies."
+points:
+  - { k: "Single point of failure", v: "one part whose failure stops everything; run a second copy" }
+  - { k: "Active-passive", v: "only the primary serves; a standby takes over on failure" }
+  - { k: "Active-active", v: "all copies serve; each needs room for a lost peer's load" }
+  - { k: "Fail separately", v: "spread copies over zones or regions, not one rack", kind: plus }
+  - { k: "Split brain", v: "two nodes both act as primary; fence one or use a majority vote", kind: minus }
+  - { k: "RDS Multi-AZ failover", v: "typically 60–120 s; the DNS name moves to the standby", kind: default }
+trap:
+  wrong: "With a standby, failover is instant and loses nothing."
+  right: "Detection, promotion and DNS caching take time, and an asynchronous standby can miss the last writes."
+sayIt: "I find each single point of failure and run it at least twice across zones. Stateless servers run active-active behind a load balancer; the database runs active-passive with automatic failover and fencing, so there is never more than one primary."
+relations:
+  - { to: single-point-of-failure, type: solves, why: "A second copy takes over, so one failure no longer stops the system." }
+  - { from: active-passive, to: active-active, type: vs, why: "A standby waits idle, or every copy serves traffic all the time." }
+  - { from: active-active, to: load-balancer, type: needs, why: "Something must spread traffic over all copies and skip a failed one." }
+  - { from: failover, to: fencing, type: needs, why: "Stop the old primary first, or two primaries may accept writes (split brain)." }
+  - { from: failover, to: quorum, type: uses, why: "A majority vote picks one new primary; a cut-off minority cannot elect one (MongoDB)." }
+  - { from: async-replication, to: failover, type: limits, why: "Writes not yet copied to the standby are lost when it takes over." }
+confusedWith: [active-passive-vs-active-active]
+tags: [reliability, availability, failover, redundancy]
+visual: flow
+sources:
+  - title: "Redundancy, replication, and backup (Microsoft Learn, Azure reliability)"
+    url: "https://learn.microsoft.com/en-us/azure/reliability/concept-redundancy-replication-backup"
+    verifiedOn: "2026-10-16"
+  - title: "Failover and failback (Microsoft Learn, Azure reliability)"
+    url: "https://learn.microsoft.com/en-us/azure/reliability/concept-failover-failback"
+    verifiedOn: "2026-10-16"
+  - title: "REL11-BP02 Fail over to healthy resources (AWS Well-Architected, Reliability Pillar)"
+    url: "https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_failover2good.html"
+    verifiedOn: "2026-10-16"
+  - title: "Disaster recovery options in the cloud (AWS whitepaper: Disaster Recovery of Workloads on AWS)"
+    url: "https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html"
+    verifiedOn: "2026-10-16"
+  - title: "HealthCheckConfig: RequestInterval and FailureThreshold (Amazon Route 53 API Reference)"
+    url: "https://docs.aws.amazon.com/Route53/latest/APIReference/API_HealthCheckConfig.html"
+    verifiedOn: "2026-10-16"
+  - title: "Values specific for failover records: TTL (Amazon Route 53 Developer Guide)"
+    url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resource-record-sets-values-failover.html"
+    verifiedOn: "2026-10-16"
+  - title: "Active-active and active-passive failover (Amazon Route 53 Developer Guide)"
+    url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover-types.html"
+    verifiedOn: "2026-10-16"
+  - title: "Failing over a Multi-AZ DB instance (Amazon RDS User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.Failover.html"
+    verifiedOn: "2026-10-16"
+  - title: "Multi-AZ DB instance deployments (Amazon RDS User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZSingleStandby.html"
+    verifiedOn: "2026-10-16"
+  - title: "Failover (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/warm-standby-failover.html"
+    verifiedOn: "2026-10-16"
+  - title: "Replica Set Elections (MongoDB 9.0 Manual)"
+    url: "https://www.mongodb.com/docs/manual/core/replica-set-elections/"
+    verifiedOn: "2026-10-16"
+  - title: "Fencing (Pacemaker Explained, ClusterLabs)"
+    url: "https://clusterlabs.org/projects/pacemaker/doc/3.0/Pacemaker_Explained/html/fencing.html"
+    verifiedOn: "2026-10-16"
+  - title: "The System Design Primer: Fail-over (donnemartin, GitHub)"
+    url: "https://github.com/donnemartin/system-design-primer"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+Every server, disk, network link and data centre fails sometimes. If only one copy of a part exists, its failure takes the whole system down.
+
+## How it works
+
+<Steps label="Automatic failover in four steps">
+<Step title="Detect">
+Health checks or heartbeats fail several times in a row. A short grace period avoids failing over just because a node was busy.
+</Step>
+<Step title="Decide">
+A tool or a person triggers failover. For a whole region, teams often press the button themselves, because a false alarm also costs downtime.
+</Step>
+<Step title="Promote one">
+One standby becomes the new primary. The old primary is fenced off, so two primaries never accept writes.
+</Step>
+<Step title="Redirect">
+The load balancer, a moved IP address or a DNS record now points to the new primary. Clients with a cached DNS answer wait until its TTL runs out.
+</Step>
+</Steps>
+
+<Compare id="active-passive-vs-active-active" />
+
+- Copies must fail separately: different [zones](card:multi-az) or [regions](card:multi-region), not two servers on one rack.
+
+## Example
+
+How long until users reach the standby with DNS failover? With Amazon Route 53 defaults:
+
+- **Detect:** a check every 30 s, unhealthy after 3 failures in a row, so about 90 s.
+- **Redirect:** resolvers may serve the old answer until its TTL ends; AWS advises 60 s or less, so up to 60 s more.
+- **Total:** about 2.5 minutes before most clients reach the standby. Plan the RTO around it.
+
+How much spare room does active-active need? Peak load needs 6 servers spread over 3 zones. If one zone fails, only 2 of 3 zones remain, so run 6 × 3/2 = 9 servers (Azure guidance).
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Failover time | Typically 60–120 s | Amazon RDS Multi-AZ DB instance |
+| Can the standby serve reads? | No, it only waits for failover | Amazon RDS Multi-AZ DB instance |
+| When an election starts | Primary unreachable for 10 s; median election ≤ 12 s | MongoDB 9.0 replica set |
+| Failure detection and failover | Not built in; use external tools | PostgreSQL 18 |
+
+## Interview Qs
+
+### How do you remove single points of failure?
+
+List every part on the request path: DNS, load balancer, app servers, cache, database. Run each at least twice, in different zones. Stateless parts go active-active behind a load balancer; the database gets a standby with automatic failover.
+
+### Active-passive or active-active?
+
+Active-passive is simpler and has one writer, but the standby sits idle and failover takes time. Active-active uses all capacity and needs no failover step, but each copy needs spare room and concurrent writes must be reconciled.
+
+### What is split brain, and how do you prevent it?
+
+After a network split, two nodes both act as primary and accept writes, so the data diverges. Prevent it with a majority vote, where only the side with a [quorum](card:quorum) may elect a primary, and by fencing the old primary.
+
+### Why is failover not instant?
+
+Detection needs several missed checks, promotion takes time, and clients keep cached DNS answers until the TTL expires. Amazon RDS Multi-AZ typically takes 60–120 seconds. Size your RTO around it.

@@ -1,0 +1,151 @@
+---
+id: bloom-filter
+tech: system-design
+title: Bloom Filters
+topic: databases
+level: intermediate
+heat: 2
+hook: "A small bit array that can prove an item was never added, so you skip slow lookups for things that are not there."
+points:
+  - { k: "Add", v: "k hash functions pick k bits; set them all to 1" }
+  - { k: "Check", v: "any of the k bits is 0 → definitely never added", kind: plus }
+  - { k: "False positives", v: "other items may have set all k bits: 'maybe' can be wrong", kind: minus }
+  - { k: "No delete", v: "clearing a bit can erase other items too", kind: minus }
+  - { k: "Size for 1% errors", v: "about 9.6 bits per item, 7 hashes" }
+  - { k: "Red flag", v: "if an exact set fits in memory, use the set", kind: minus }
+trap:
+  wrong: "The filter said yes, so the item is in the set."
+  right: "Yes only means maybe. Check the real store before trusting it; only no is certain."
+sayIt: "A Bloom filter never gives false negatives, so I put it in front of expensive lookups: an LSM store skipping SSTables, a crawler skipping seen URLs. I size it from the expected item count and the error rate I can accept."
+relations:
+  - { from: wide-column-store, to: bloom-filter, type: uses, why: "Cassandra checks each SSTable's Bloom filter before reading that file." }
+  - { to: sstable, type: pairs, why: "With a filter policy set, RocksDB writes a Bloom filter into each new SST file." }
+  - { from: counting-bloom-filter, to: bloom-filter, type: vs, why: "Small counters instead of bits make deletes possible, at about 4x the memory." }
+  - { from: cuckoo-filter, to: bloom-filter, type: vs, why: "Cuckoo filters allow deletes and check faster; Bloom filters insert faster." }
+confusedWith: []
+tags: [probabilistic, data-structures, databases, redis, cassandra]
+visual: flow
+sources:
+  - title: "Space/Time Trade-offs in Hash Coding with Allowable Errors (Burton H. Bloom, Communications of the ACM 13(7), July 1970)"
+    url: "https://www.cs.princeton.edu/courses/archive/spr05/cos598E/bib/p422-bloom.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "Network Applications of Bloom Filters: A Survey (Broder & Mitzenmacher, Internet Mathematics, 2004)"
+    url: "https://www.eecs.harvard.edu/~michaelm/postscripts/im2005b.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "Bloom filter (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/probabilistic/bloom-filter/"
+    verifiedOn: "2026-10-16"
+  - title: "Probabilistic configuration parameters (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/probabilistic/configuration/"
+    verifiedOn: "2026-10-16"
+  - title: "BF.ADD (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/bf.add/"
+    verifiedOn: "2026-10-16"
+  - title: "Cuckoo filter (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/probabilistic/cuckoo-filter/"
+    verifiedOn: "2026-10-16"
+  - title: "Bloom Filters (Apache Cassandra 5.0 documentation)"
+    url: "https://cassandra.apache.org/doc/5.0/cassandra/managing/operating/bloom_filters.html"
+    verifiedOn: "2026-10-16"
+  - title: "RocksDB Bloom Filter (RocksDB wiki, GitHub)"
+    url: "https://github.com/facebook/rocksdb/wiki/RocksDB-Bloom-Filter"
+    verifiedOn: "2026-10-16"
+  - title: "BloomFilter (Guava 33.7.2-jre API)"
+    url: "https://guava.dev/releases/33.7.2-jre/api/docs/com/google/common/hash/BloomFilter.html"
+    verifiedOn: "2026-10-16"
+  - title: "Data Structures for Big Data (Hello Interview deep dive)"
+    url: "https://www.hellointerview.com/learn/system-design/deep-dives/data-structures-for-big-data"
+    verifiedOn: "2026-10-16"
+  - title: "Design a Web Crawler (Hello Interview problem breakdown)"
+    url: "https://www.hellointerview.com/learn/system-design/problem-breakdowns/web-crawler"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+Some lookups are slow, like a disk read or a network call, and usually find nothing. A Bloom filter answers "definitely not here" from memory, so most of those lookups are skipped.
+
+## How it works
+
+<Mermaid
+  alt="An 8-bit Bloom filter with 3 hash functions. Adding cat sets bits 1, 4 and 7; adding owl sets bits 2, 4 and 6. The bits now read 0 1 1 0 1 0 1 1. Checking dog looks at bits 1, 3 and 6; bit 3 is 0, so dog was definitely never added. Checking cow looks at bits 2, 6 and 7; all are 1 because cat and owl set them, so the answer is maybe, even though cow was never added: a false positive."
+  chart={`flowchart TD
+  A1["add cat: bits 1, 4, 7"] --> B["Bits 0 to 7: 0 1 1 0 1 0 1 1"]
+  A2["add owl: bits 2, 4, 6"] --> B
+  B --> D{"check dog: bits 1, 3, 6"}
+  D -- "bit 3 is 0" --> N(["Definitely never added"])
+  B --> C{"check cow: bits 2, 6, 7"}
+  C -- "all are 1" --> M(["Maybe: a false positive, cow was never added"])`}
+/>
+
+- More bits per item means fewer false positives. The best number of hash functions is about (bits ÷ items) × ln 2.
+- Bits are never cleared, so a fuller filter says "maybe" more often. Redis 8 adds a bigger sub-filter when one is full.
+- Burton Bloom described it in 1970, to keep most word lookups for a hyphenation program off a slow disk.
+
+## Example
+
+A tiny filter: `m` bits and `k` hash functions.
+
+```java
+BitSet bits = new BitSet(m);                   // m bits, all 0
+
+int spot(String item, int i) {                 // double hashing: h1 + i * h2
+    int h1 = item.hashCode() * 0x9E3779B9, h2 = (h1 >>> 16) | 1;
+    return Math.floorMod(h1 + i * h2, m);
+}
+
+void add(String item) {
+    for (int i = 0; i < k; i++) bits.set(spot(item, i));
+}
+
+boolean mightContain(String item) {
+    for (int i = 0; i < k; i++) if (!bits.get(spot(item, i))) return false;
+    return true;                               // maybe: could be a false positive
+}
+```
+
+```python
+import hashlib
+class BloomFilter:
+    def __init__(self, m: int, k: int):
+        self.m, self.k, self.bits = m, k, bytearray(m)   # 1 byte per bit, for clarity
+
+    def _spots(self, item: str):                         # k independent hashes
+        for i in range(self.k):
+            yield int(hashlib.sha256(f"{i}:{item}".encode()).hexdigest(), 16) % self.m
+
+    def add(self, item: str):
+        for p in self._spots(item):
+            self.bits[p] = 1
+
+    def might_contain(self, item: str) -> bool:
+        return all(self.bits[p] for p in self._spots(item))   # True means maybe
+```
+
+With m = 1,000, k = 7 and 100 items, theory gives about 0.8% false positives; both demos measure close to 1%. In production, use Guava's `BloomFilter` or Redis `BF.ADD` and `BF.EXISTS`.
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Filter created by `BF.ADD` | 1% error rate, room for 100 items, next sub-filter 2x bigger | Redis 8 |
+| `bloom_filter_fp_chance` | 0.01; 0.1 with LeveledCompactionStrategy | Cassandra 5.0 |
+| `BloomFilter.create(funnel, n)` | 3% false positives | Guava 33.7 |
+
+## Interview Qs
+
+### What is a Bloom filter, and when would you use one?
+
+A compact bit array that tests set membership and answers "definitely not" or "maybe". Use it in front of a slow lookup that usually finds nothing: an LSM store skipping files, a crawler skipping seen URLs, a quick "username may be taken" check.
+
+### Why false positives, but never false negatives?
+
+Adding an item sets all of its k bits, and bits are never cleared, so a real member always finds its bits set. An item never added can still find all its bits set by other items.
+
+### How big should it be?
+
+Pick n, the expected items, and p, the error rate. Bits m ≈ −n × ln(p) ÷ (ln 2)², and hashes k ≈ (m ÷ n) × ln 2. For 1%, that is about 9.6 bits per item and 7 hashes. Add more items than planned and false positives rise.
+
+### Can you delete from a Bloom filter?
+
+Not from a basic one: a bit may be shared with other items, so clearing it causes false negatives. Use a counting Bloom filter (small counters instead of bits), a cuckoo filter (Redis `CF.DEL`), or rebuild the filter from the data.

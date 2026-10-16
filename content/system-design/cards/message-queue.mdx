@@ -1,0 +1,151 @@
+---
+id: message-queue
+tech: system-design
+title: Message Queues
+topic: messaging
+level: beginner
+heat: 3
+hook: "The producer drops a job in the queue and moves on; workers take jobs one at a time, at their own pace."
+points:
+  - { k: "Decouple", v: "the producer never waits for a worker, even one that is down" }
+  - { k: "Load levelling", v: "bursts wait in the queue; size workers for the average load", kind: plus }
+  - { k: "Competing consumers", v: "many workers share one queue; each message goes to one" }
+  - { k: "No ack in time", v: "the message is delivered again: make jobs idempotent", kind: minus }
+  - { k: "Dead-letter queue", v: "after N failed tries, the message is set aside" }
+  - { k: "SQS visibility timeout", v: "30 s default, max 12 h; extend it for long jobs", kind: default }
+trap:
+  wrong: "A queue absorbs any load, so let it grow."
+  right: "If producers outpace workers, the queue and the wait grow without limit. Cap it, push back (HTTP 503), add workers."
+sayIt: "I put slow work like emails or video encoding on a queue, so the API answers at once. Workers delete a message only after the job succeeds, so a crash means a retry, not a loss. I scale workers on queue depth."
+relations:
+  - { from: competing-consumers, to: horizontal-scaling, type: uses, why: "Add workers to drain the queue faster; each message still goes to one." }
+  - { to: at-least-once, type: uses, why: "SQS and RabbitMQ deliver a message again if the consumer does not ack it." }
+  - { to: idempotency, type: needs, why: "A redelivered job runs twice; idempotent work makes that harmless." }
+  - { from: dead-letter-queue, to: poison-message, type: solves, why: "A message that always fails is moved aside instead of retrying forever." }
+  - { from: back-pressure, to: timeouts-retries, type: pairs, why: "A full queue answers 503; clients retry later with exponential backoff." }
+  - { to: pub-sub, type: vs, why: "Each message goes to one worker, or every subscriber gets a copy." }
+confusedWith: [queue-vs-pubsub-vs-stream]
+tags: [messaging, async, queues, sqs, rabbitmq]
+visual: flow
+sources:
+  - title: "Amazon SQS visibility timeout (Amazon SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html"
+    verifiedOn: "2026-10-16"
+  - title: "Using dead-letter queues in Amazon SQS (Amazon SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html"
+    verifiedOn: "2026-10-16"
+  - title: "Amazon SQS message quotas (Amazon SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/quotas-messages.html"
+    verifiedOn: "2026-10-16"
+  - title: "Amazon SQS standard queues (Amazon SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/standard-queues.html"
+    verifiedOn: "2026-10-16"
+  - title: "Amazon SQS short and long polling (Amazon SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-short-and-long-polling.html"
+    verifiedOn: "2026-10-16"
+  - title: "Consumer Acknowledgements and Publisher Confirms (RabbitMQ docs)"
+    url: "https://www.rabbitmq.com/docs/confirms"
+    verifiedOn: "2026-10-16"
+  - title: "Consumers: delivery acknowledgement timeout (RabbitMQ docs)"
+    url: "https://www.rabbitmq.com/docs/consumers"
+    verifiedOn: "2026-10-16"
+  - title: "Quorum Queues: poison message handling (RabbitMQ docs)"
+    url: "https://www.rabbitmq.com/docs/quorum-queues"
+    verifiedOn: "2026-10-16"
+  - title: "Work Queues tutorial (RabbitMQ)"
+    url: "https://www.rabbitmq.com/tutorials/tutorial-two-python"
+    verifiedOn: "2026-10-16"
+  - title: "Queue-Based Load Leveling pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/queue-based-load-leveling"
+    verifiedOn: "2026-10-16"
+  - title: "Competing Consumers pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/competing-consumers"
+    verifiedOn: "2026-10-16"
+  - title: "The System Design Primer: Asynchronism (donnemartin, GitHub)"
+    url: "https://github.com/donnemartin/system-design-primer"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+Some work is slow, like sending email or encoding video, or it arrives in bursts. Doing it inside the request makes users wait and can overload the service; a queue holds the work until a worker is free.
+
+## How it works
+
+<Mermaid
+  alt="Message queue flow. A producer sends a message to the queue. A worker receives it, and the message is hidden from other workers. When the job is done, the worker deletes or acks it, and it is removed from the queue. If the worker crashes or runs past the timeout, the message becomes visible in the queue again. A message that fails too many times moves to a dead-letter queue."
+  chart={`flowchart TD
+  P[Producer] -- send --> Q[(Queue)]
+  Q -- "receive: now hidden" --> W[Worker]
+  W -- "done: delete or ack" --> X([Removed from queue])
+  W -. "crash or timeout: visible again" .-> Q
+  Q -- "failed too many times" --> DLQ[(Dead-letter queue)]`}
+/>
+
+- A received message stays in the queue until the worker acks it. Amazon SQS hides it for the visibility timeout; if it is not deleted by then, it shows again.
+- **Back pressure:** when workers fall behind, cap the queue and reject new work (for example HTTP 503) so clients retry later.
+- A task queue, such as Celery or a RabbitMQ work queue, is the same idea for background jobs.
+
+## Example
+
+The API enqueues a resize job and replies at once; many workers share the queue.
+
+```java
+int upload(long imageId) {
+    queue.send(new ResizeJob(imageId));   // enqueue the job
+    return 202;                           // Accepted: done later
+}
+
+void workOnce() {                         // each worker calls this in a loop
+    Message msg = queue.receive();        // waits; now hidden from others
+    try {
+        resize(msg.body());
+        queue.delete(msg);                // ack only after success
+    } catch (Exception e) {
+        log.warn("will retry", e);        // no delete: it comes back later
+    }
+}
+```
+
+```python
+def upload(image_id):
+    queue.send({"image_id": image_id})    # enqueue the job
+    return 202                            # Accepted: done later
+
+def work_once():                          # each worker calls this in a loop
+    msg = queue.receive()                 # waits; now hidden from others
+    try:
+        resize(msg.body)
+        queue.delete(msg)                 # ack only after success
+    except Exception:
+        log.warning("will retry")         # no delete: it comes back later
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Visibility timeout | 30 s (0 s to 12 h) | Amazon SQS |
+| How long a message is kept | 4 days (1 minute to 14 days) | Amazon SQS |
+| Largest message | 1 MiB | Amazon SQS |
+| Receive wait | 0 s, short polling (long polling waits up to 20 s) | Amazon SQS |
+| Deliveries before drop or dead-letter | 20 | RabbitMQ 4.0+ quorum queues |
+| Time to ack a delivery | 30 minutes, then the channel is closed | RabbitMQ (quorum queues only from 4.3) |
+
+## Interview Qs
+
+### Why put a queue between two services?
+
+The caller does not wait for slow work, bursts wait in the queue instead of overloading the worker, and nothing is lost while a worker is down. You can also scale workers on their own. The cost: one more system to run, and results arrive later.
+
+### A worker crashes halfway through a job. What happens?
+
+It never deleted or acked the message, so the broker delivers it again: SQS after the visibility timeout, RabbitMQ when the connection closes. Another worker runs the job, so the job must be idempotent.
+
+### What is a dead-letter queue?
+
+A side queue for messages that keep failing. SQS moves a message there after `maxReceiveCount` receives; RabbitMQ 4.0+ quorum queues dead-letter (or drop) it after 20 deliveries by default. Alert on it, fix the bug, then redrive the messages.
+
+### The queue keeps growing. What do you do?
+
+Producers are faster than workers. Add workers and scale them on queue depth, then set a limit: when the queue is full, reject new work with HTTP 503 so clients retry later with backoff. Watch the age of the oldest message.

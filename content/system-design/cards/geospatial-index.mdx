@@ -1,0 +1,134 @@
+---
+id: geospatial-index
+tech: system-design
+title: Geospatial Indexing
+topic: databases
+level: interview
+heat: 2
+hook: "Turn 2D locations into searchable keys: grid cells (geohash, H3) or a tree of shrinking boxes (quadtree, R-tree). Then check the exact distance."
+points:
+  - { k: "B-tree on (lat, lng)", v: "narrows by latitude only, then scans a strip around the globe", kind: minus }
+  - { k: "Geohash", v: "lat/long as one base32 string; a longer string is a smaller cell" }
+  - { k: "Quadtree", v: "a square splits into 4 when it holds too many points" }
+  - { k: "R-tree", v: "nested bounding boxes for shapes; PostGIS builds it on GiST" }
+  - { k: "Candidates only", v: "every index returns a rough set: filter by exact distance", kind: minus }
+trap:
+  wrong: "Same geohash prefix means near, so a different prefix means far."
+  right: "Near does not mean a shared prefix: two points 22 m apart across the equator share none. Always search the 8 neighbouring cells too."
+sayIt: "For nearby search I store a geohash per place, query the user's cell plus its 8 neighbours, then filter by exact distance. If density is very uneven, a quadtree splits busy areas finer. For shapes like delivery zones I use PostGIS, an R-tree."
+relations:
+  - { from: geohash, to: quadtree, type: vs, why: "A fixed grid of cell ids, or a tree that splits busy areas finer." }
+  - { from: geohash, to: b-tree, type: uses, why: "A geohash is a sortable key; MongoDB's 2d index stores geohash values in a B-tree." }
+  - { from: redis-geo, to: geohash, type: uses, why: "Each point is a sorted-set member whose score is its 52-bit geohash." }
+  - { from: neighbour-cells, to: cell-edge-problem, type: solves, why: "A point just across the edge sits in a neighbouring cell, which is searched too." }
+  - { from: h3, to: geohash, type: vs, why: "Hexagon cells: all six neighbours' centres are the same distance away." }
+confusedWith: [geohash-vs-quadtree]
+tags: [geospatial, indexing, location, redis, postgis]
+visual: flow
+sources:
+  - title: "Multicolumn Indexes (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/indexes-multicolumn.html"
+    verifiedOn: "2026-10-16"
+  - title: "Geohash (Wikipedia)"
+    url: "https://en.wikipedia.org/wiki/Geohash"
+    verifiedOn: "2026-10-16"
+  - title: "Geohash grid aggregation: cell sizes (Elasticsearch docs)"
+    url: "https://www.elastic.co/docs/reference/aggregations/search-aggregations-bucket-geohashgrid-aggregation"
+    verifiedOn: "2026-10-16"
+  - title: "GEOADD (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/geoadd/"
+    verifiedOn: "2026-10-16"
+  - title: "GEOSEARCH (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/geosearch/"
+    verifiedOn: "2026-10-16"
+  - title: "2d Index Internals (MongoDB Manual)"
+    url: "https://www.mongodb.com/docs/manual/core/indexes/index-types/geospatial/2d/internals/"
+    verifiedOn: "2026-10-16"
+  - title: "Indexes (MongoDB Manual)"
+    url: "https://www.mongodb.com/docs/manual/indexes/"
+    verifiedOn: "2026-10-16"
+  - title: "The Quadtree and Related Hierarchical Data Structures (Hanan Samet, ACM Computing Surveys, 1984)"
+    url: "https://www.cs.umd.edu/users/hjs/pubs/SameCSUR84-ocr.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "SP-GiST built-in operator classes (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/spgist.html"
+    verifiedOn: "2026-10-16"
+  - title: "Spatial indexes: GiST (PostGIS manual)"
+    url: "https://postgis.net/docs/using_postgis_dbmanagement.html"
+    verifiedOn: "2026-10-16"
+  - title: "Spatial Indexing (PostGIS workshop)"
+    url: "https://postgis.net/workshops/postgis-intro/indexing.html"
+    verifiedOn: "2026-10-16"
+  - title: "H3: Uber's Hexagonal Hierarchical Spatial Index (Uber Engineering blog, 2018)"
+    url: "https://www.uber.com/blog/h3/"
+    verifiedOn: "2026-10-16"
+  - title: "Proximity Search deep dive (Hello Interview)"
+    url: "https://www.hellointerview.com/learn/system-design/deep-dives/proximity-search"
+    verifiedOn: "2026-10-16"
+  - title: "Proximity Service and Quadtree (ByteByteGo system-design-101, GitHub)"
+    url: "https://github.com/ByteByteGoHq/system-design-101/blob/main/data/guides/quadtree.md"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+"Find drivers within 3 km" needs closeness in two dimensions. A normal index sorts one value, so an index on `(lat, lng)` narrows by latitude only and still scans a strip around the globe.
+
+## How it works
+
+<Steps label="Nearby search with a geohash">
+<Step title="Encode">
+Store each place's geohash. Central Bengaluru is `tdr1v9q`; its first 6 characters name a cell of about 1.2 km by 0.6 km.
+</Step>
+<Step title="Add the neighbours">
+Take the user's cell and the 8 cells around it, so places just across an edge are not missed.
+</Step>
+<Step title="Range-scan the index">
+Fetch places whose geohash starts with one of those 9 prefixes, from a B-tree or a Redis sorted set.
+</Step>
+<Step title="Filter exactly">
+Compute the real distance for each candidate, drop those outside the radius, and sort.
+</Step>
+</Steps>
+
+<Compare id="geohash-vs-quadtree" />
+
+- **Shapes** such as delivery zones need an R-tree of bounding boxes. PostGIS builds it on GiST: `USING GIST (geom)`.
+- **Uber's H3** uses hexagons: a cell's centre is the same distance from all six neighbours.
+
+## Example
+
+Redis GEO (`GEOSEARCH` needs Redis 6.2+). Longitude comes first:
+
+```text
+GEOADD drivers 77.5946 12.9716 driver:17
+GEOADD drivers 77.6100 12.9800 driver:8
+GEOADD drivers 77.6245 12.9352 driver:42
+GEOSEARCH drivers FROMLONLAT 77.6000 12.9700 BYRADIUS 3 km ASC
+1) "driver:17"     # about 0.6 km away
+2) "driver:8"      # about 1.6 km away; driver:42 (4.7 km) is outside
+```
+
+## Defaults
+
+| What | Default or limit | Where |
+| --- | --- | --- |
+| Argument order | Longitude, then latitude | Redis `GEOADD` |
+| Latitudes you can index | -85.05112878 to 85.05112878 (no poles) | Redis GEO |
+| Distance error | Up to 0.5%: Earth is treated as a sphere | Redis GEO |
+| Spatial index | R-tree built on GiST | PostGIS |
+| Index for `point` with SP-GiST | `quad_point_ops`, a quadtree | PostgreSQL 18 |
+
+## Interview Qs
+
+### Why can't a normal index find nearby places?
+
+A B-tree sorts by one value. With an index on `(lat, lng)`, the latitude range limits the scan, but longitude is only checked inside it, so you read a strip around the globe. A geospatial index keeps nearby points close together.
+
+### Geohash or quadtree?
+
+Geohash: a fixed grid stored as plain keys in any database or Redis, with cheap updates for moving points. Quadtree: adapts to density by splitting busy areas finer, but is usually kept in memory and changes shape as points move.
+
+### How do you find nearby drivers when locations change every few seconds?
+
+Keep current locations in memory, for example Redis GEO: each update is one `GEOADD` that overwrites the old position, and `GEOSEARCH` returns drivers within a radius, nearest first.

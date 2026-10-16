@@ -1,0 +1,131 @@
+---
+id: reverse-proxy
+tech: system-design
+title: Reverse Proxy
+topic: traffic
+level: beginner
+heat: 2
+hook: "One public front door for your servers: clients talk only to the proxy, and it forwards each request to a server they never see."
+points:
+  - { k: "Single entry", v: "clients see one address; the servers stay private" }
+  - { k: "TLS termination", v: "decrypts HTTPS once, so app servers skip that work" }
+  - { k: "Also does", v: "caching, compression, static files, blocking bad IPs" }
+  - { k: "Works with one server", v: "unlike a load balancer, it helps even with one", kind: plus }
+  - { k: "Only one proxy", v: "a single point of failure: run a redundant pair", kind: minus }
+  - { k: "nginx defaults", v: "gzip off, proxy_cache off, 60 s upstream timeouts", kind: default }
+trap:
+  wrong: "A reverse proxy hides the client, like a company proxy or VPN."
+  right: "That is a forward proxy, which acts for clients. A reverse proxy acts for servers: it hides them from the clients."
+sayIt: "I put nginx in front as a reverse proxy: it terminates TLS, compresses and caches responses, serves static files, and forwards the rest to private app servers. I run two proxies, so it is not a single point of failure."
+relations:
+  - { to: single-point-of-failure, type: causes, why: "One proxy in front of everything fails alone; run a redundant pair." }
+  - { from: api-gateway, to: reverse-proxy, type: uses, why: "An API gateway is a reverse proxy that adds API jobs: auth, rate limits, aggregation." }
+  - { from: cdn, to: reverse-proxy, type: uses, why: "Each CDN edge is a caching reverse proxy that sits in front of your origin." }
+  - { from: forward-proxy, to: reverse-proxy, type: vs, why: "A forward proxy acts for clients going out; a reverse proxy acts for servers." }
+  - { from: hide-backends, to: horizontal-scaling, type: pairs, why: "Clients see only the proxy, so servers behind it can be added or swapped freely." }
+confusedWith: [lb-vs-proxy-vs-gateway]
+tags: [proxy, networking, security, nginx]
+visual: flow
+sources:
+  - title: "NGINX Reverse Proxy (NGINX docs)"
+    url: "https://docs.nginx.com/nginx/admin-guide/web-server/reverse-proxy/"
+    verifiedOn: "2026-10-16"
+  - title: "Module ngx_http_proxy_module (nginx docs)"
+    url: "https://nginx.org/en/docs/http/ngx_http_proxy_module.html"
+    verifiedOn: "2026-10-16"
+  - title: "Module ngx_http_gzip_module (nginx docs)"
+    url: "https://nginx.org/en/docs/http/ngx_http_gzip_module.html"
+    verifiedOn: "2026-10-16"
+  - title: "NGINX SSL Termination (NGINX docs)"
+    url: "https://docs.nginx.com/nginx/admin-guide/security-controls/terminating-ssl-http/"
+    verifiedOn: "2026-10-16"
+  - title: "nginx: download (stable 1.30, mainline 1.31)"
+    url: "https://nginx.org/en/download.html"
+    verifiedOn: "2026-10-16"
+  - title: "Reverse proxy vs load balancer (F5 glossary)"
+    url: "https://www.f5.com/glossary/reverse-proxy-vs-load-balancer"
+    verifiedOn: "2026-10-16"
+  - title: "Proxy server (MDN Glossary)"
+    url: "https://developer.mozilla.org/en-US/docs/Glossary/Proxy_server"
+    verifiedOn: "2026-10-16"
+  - title: "How Cloudflare works (Cloudflare docs)"
+    url: "https://developers.cloudflare.com/fundamentals/concepts/how-cloudflare-works/"
+    verifiedOn: "2026-10-16"
+  - title: "API gateways (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/microservices/design/gateway"
+    verifiedOn: "2026-10-16"
+  - title: "Gateway Offloading pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/gateway-offloading"
+    verifiedOn: "2026-10-16"
+  - title: "How Elastic Load Balancing works: HTTP headers (AWS docs)"
+    url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/userguide/how-elastic-load-balancing-works.html"
+    verifiedOn: "2026-10-16"
+  - title: "The System Design Primer: Reverse proxy (donnemartin, GitHub)"
+    url: "https://github.com/donnemartin/system-design-primer"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+If every server faces the internet, each one must handle TLS, compression and attacks, and clients must know every address. A reverse proxy does these jobs once, in front of the servers.
+
+## How it works
+
+<Mermaid
+  alt="A client sends an HTTPS request to the reverse proxy. The proxy ends TLS, serves cached replies and static files itself, and forwards other requests to app servers on the private network. Clients never see the app servers."
+  chart={`flowchart LR
+  C([Client]) -- HTTPS --> P["Reverse proxy: TLS, cache, gzip"]
+  P -- "/static" --> F[Static files]
+  P -- "everything else" --> A[App servers, private]`}
+/>
+
+- It reads HTTP, so it can route by path: `/static` from disk, the rest to the app servers.
+- nginx and HAProxy are reverse proxies that can also load-balance across several app servers.
+
+## Example
+
+nginx as a reverse proxy:
+
+```nginx
+server {
+    listen 443 ssl;                              # TLS ends here
+    ssl_certificate     /etc/nginx/site.crt;
+    ssl_certificate_key /etc/nginx/site.key;
+    gzip on;                                     # off by default
+    gzip_types text/css application/javascript;  # text/html is always included
+    location /static/ { root /var/www; }         # nginx serves these itself
+    location / {
+        proxy_pass http://app:8080;              # plain inside; https:// re-encrypts
+        proxy_set_header Host $host;             # default is the upstream name
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Compression | Off (`gzip off`); when on, only `text/html` unless you add types | nginx 1.30 |
+| Response cache | Off (`proxy_cache off`) | nginx 1.30 |
+| Upstream response | Buffered (`proxy_buffering on`) | nginx 1.30 |
+| Upstream timeouts | 60 s each for connect, send and read | nginx 1.30 |
+| `Host` header sent upstream | The upstream's name (`$proxy_host`), not the client's | nginx 1.30 |
+
+## Interview Qs
+
+### Reverse proxy vs load balancer?
+
+A load balancer spreads requests across many servers doing the same job. A reverse proxy is one front door that adds TLS, caching, compression and security, and is useful even with one server. Tools like nginx and HAProxy do both.
+
+### Forward proxy vs reverse proxy?
+
+A forward proxy sits in front of clients and sends their requests out to the internet. A reverse proxy sits in front of servers and takes requests from the internet for them. One hides the clients, the other hides the servers.
+
+### What is TLS termination?
+
+The proxy holds the certificate and decrypts HTTPS, so app servers skip that work and certificates live in one place. Traffic inside is plain unless the proxy re-encrypts it; Azure advises re-encrypting and trusting no network.
+
+### Behind a proxy, how does the app see the client's real IP?
+
+The proxy adds it to the `X-Forwarded-For` header; AWS ALB does this automatically, nginx with `proxy_set_header`. Trust that header only when it comes from your own proxy, since clients can fake it.

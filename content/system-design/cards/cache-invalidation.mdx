@@ -1,0 +1,145 @@
+---
+id: cache-invalidation
+tech: system-design
+title: Cache Invalidation
+topic: caching
+level: interview
+heat: 3
+hook: "A cached copy goes stale the moment the database changes. Invalidation removes or replaces it: after a time (TTL), on each write, or from a stream of change events."
+points:
+  - { k: "TTL", v: "simplest: stale for at most the TTL" }
+  - { k: "Delete on write", v: "update the DB, then delete the key" }
+  - { k: "Delete, not set", v: "deletes are idempotent; Facebook deletes rather than updates" }
+  - { k: "Versioned keys", v: "bump the version in the key; old keys go unread" }
+  - { k: "Hot key expires", v: "thundering herd: all its readers hit the DB at once", kind: minus }
+  - { k: "Stampede fix", v: "one request reloads; others wait or get the stale copy", kind: plus }
+trap:
+  wrong: "A short TTL keeps the cache correct."
+  right: "A TTL only caps how long data stays stale. If readers must see a write at once, also delete or update the key on each write."
+sayIt: "I give every key a TTL as a safety net and delete the key after each database write, so the next read loads fresh data. For hot keys, one request reloads while the others wait or get the stale value."
+relations:
+  - { from: ttl, to: stale-data, type: limits, why: "A value can be stale for at most its TTL." }
+  - { from: delete-on-write, to: stale-data, type: solves, why: "The next read misses and loads the new value from the database." }
+  - { from: cache-lease, to: stale-set, type: solves, why: "A delete cancels the lease, so a slow reader cannot put an old value back." }
+  - { from: request-coalescing, to: thundering-herd, type: solves, why: "Only one request loads the missing key; the others wait for its result." }
+  - { from: refresh-ahead, to: thundering-herd, type: solves, why: "A hot key is reloaded before it expires, so readers do not all miss at once." }
+  - { from: versioned-keys, to: eviction, type: needs, why: "Old versions are never read again; eviction reclaims their memory." }
+confusedWith: []
+tags: [caching, consistency, invalidation, memcached]
+visual: table
+sources:
+  - title: "Scaling Memcache at Facebook (Nishtala et al., NSDI 2013)"
+    url: "https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "Caching challenges and strategies (Amazon Builders' Library)"
+    url: "https://aws.amazon.com/builders-library/caching-challenges-and-strategies/"
+    verifiedOn: "2026-10-16"
+  - title: "Caching strategies for Memcached: adding TTL (Amazon ElastiCache docs)"
+    url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html"
+    verifiedOn: "2026-10-16"
+  - title: "Caching guidance: keep the cache consistent on writes (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/best-practices/caching"
+    verifiedOn: "2026-10-16"
+  - title: "Cache-Aside pattern: staleness after writes (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
+    verifiedOn: "2026-10-16"
+  - title: "Use cases: namespacing with a version key (memcached docs)"
+    url: "https://docs.memcached.org/userguide/usecases/"
+    verifiedOn: "2026-10-16"
+  - title: "Module ngx_http_proxy_module: proxy_cache_lock, proxy_cache_use_stale (nginx docs)"
+    url: "https://nginx.org/en/docs/http/ngx_http_proxy_module.html"
+    verifiedOn: "2026-10-16"
+  - title: "SET: NX and EX options (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/set/"
+    verifiedOn: "2026-10-16"
+  - title: "EXPIRE (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/expire/"
+    verifiedOn: "2026-10-16"
+  - title: "Optimal Probabilistic Cache Stampede Prevention (Vattani et al., VLDB 2015)"
+    url: "https://www.vldb.org/pvldb/vol8/p886-vattani.pdf"
+    verifiedOn: "2026-10-16"
+  - title: "Caching (Hello Interview, system design core concepts)"
+    url: "https://www.hellointerview.com/learn/system-design/core-concepts/caching"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+A cache holds copies. When the database changes, each copy is wrong until something removes or replaces it, and removing a hot key can flood the database.
+
+## How it works
+
+| Way | What happens | Stale for |
+| --- | --- | --- |
+| **TTL** | The key deletes itself after a set time | Up to the TTL |
+| **Delete on write** | After the database write, the app deletes the key | Until the delete lands |
+| **Update on write** | The write also sets the new value ([write-through](card:write-through)) | Until both writes finish |
+| **Versioned key** | Keys carry a version, like `user:42:v7`; a change bumps it | Old keys are never read again |
+| **Change events** | A process reads the database's change log and deletes keys | Until the event is applied |
+
+- Keep a TTL even with the others: if a delete is lost, the key still expires.
+- **Thundering herd:** when a hot key expires or is deleted, many requests miss at once. Fix it with [request coalescing](card:request-coalescing) or [leases](card:cache-lease) (one request reloads, the others wait), by [serving the stale copy](card:serve-stale) during the reload, or by [refreshing early](card:early-expiration).
+
+## Example
+
+A hot key expires. A simple lease with Redis `SET ... NX EX` lets one caller reload it; the others wait 50 ms and try again.
+
+```java
+String get(String key) throws InterruptedException {
+    while (true) {
+        String value = cache.get(key);
+        if (value != null) return value;                     // hit
+        // Miss: only the caller that wins this 10 s lock reloads.
+        if (cache.setIfAbsent("lock:" + key, "1", Duration.ofSeconds(10))) {
+            value = db.load(key);
+            cache.set(key, value, Duration.ofMinutes(5));
+            cache.delete("lock:" + key);
+            return value;
+        }
+        Thread.sleep(50);                                    // others wait, then retry
+    }
+}
+```
+
+```python
+def get(key):
+    while True:
+        value = cache.get(key)
+        if value is not None:
+            return value                                     # hit
+        # Miss: only the caller that wins this 10 s lock reloads.
+        if cache.set(f"lock:{key}", 1, nx=True, ex=10):
+            value = db.load(key)
+            cache.set(key, value, ex=300)
+            cache.delete(f"lock:{key}")
+            return value
+        time.sleep(0.05)                                     # others wait, then retry
+```
+
+At Facebook, memcache leases cut the peak database load for hot keys from 17,000 to 1,300 queries per second.
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Request coalescing (`proxy_cache_lock`) | Off; when on, a waiter goes to the backend itself after 5 s | nginx |
+| Serve stale while refreshing (`proxy_cache_use_stale updating`) | Off | nginx |
+| Lease tokens per key | At most one every 10 s | Facebook memcache (NSDI 2013) |
+
+## Interview Qs
+
+### How do you keep a cache consistent with the database?
+
+Choose by how fresh the data must be. A TTL alone allows staleness up to the TTL. Delete the key after each database write for near-fresh reads, or write through when a read must see the write at once. Keep a TTL as a safety net.
+
+### Why delete the cached value on a write instead of updating it?
+
+Deletes are idempotent, so a retried or reordered delete does no harm. Two racing updates, by contrast, can leave the older value in the cache. Facebook's memcache deletes on writes for this reason.
+
+### What is a cache stampede, and how do you prevent it?
+
+A hot key expires and many requests miss at once, all hitting the database. Let only one request reload it (request coalescing, a lock or a lease), serve the old value meanwhile, or refresh hot keys a little before they expire.
+
+### How do you invalidate caches across many servers or regions?
+
+Drive deletes from the database itself: a process reads committed changes and sends deletes to every cache. Facebook runs such a daemon, mcsqueal, on every database and batches its deletes.

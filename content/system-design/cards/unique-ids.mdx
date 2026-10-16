@@ -1,0 +1,139 @@
+---
+id: unique-ids
+tech: system-design
+title: Unique ID Generation
+topic: distributed-systems
+level: intermediate
+heat: 2
+hook: "Many servers must create IDs that never clash. Use one counter, a random UUID, or a time-first ID like UUID v7 or Snowflake that sorts by time."
+points:
+  - { k: "Auto-increment", v: "short and ordered, but one central counter", kind: minus }
+  - { k: "UUID v4", v: "122 random bits: made anywhere, but no order" }
+  - { k: "UUID v7", v: "48-bit ms timestamp first: sorts by creation time", kind: plus }
+  - { k: "Snowflake", v: "41-bit time + 10-bit machine id + 12-bit sequence = 64 bits" }
+  - { k: "Clock goes back", v: "Twitter's generator refuses IDs until time catches up", kind: minus }
+  - { k: "Built-in UUID v7", v: "Python 3.14 uuid7(), Java 26 UUID.ofEpochMillis, PostgreSQL 18 uuidv7()", kind: default }
+trap:
+  wrong: "Random UUIDs (v4) are ideal primary keys because they never clash."
+  right: "Unique, yes, but new keys land at random places in the index. Prefer time-ordered UUID v7 or Snowflake IDs."
+sayIt: "With one database, auto-increment is fine. When many servers create IDs, I use UUID v7 or Snowflake-style 64-bit IDs (time, machine id, sequence). Both sort roughly by time, so index inserts stay close together. I never use IDs as secrets."
+relations:
+  - { from: db-auto-increment, to: single-point-of-failure, type: causes, why: "One database hands out every ID; if it is down, nothing new gets an ID." }
+  - { from: db-auto-increment, to: sharding, type: limits, why: "Each shard counts on its own, so two shards can give out the same ID." }
+  - { from: uuid-v4, to: b-tree, type: limits, why: "Random keys go to random places in the index, so new rows are not close together." }
+  - { from: snowflake-id, to: hotspot, type: causes, why: "As a range shard key, time-ordered IDs send every new write to the last shard." }
+  - { from: uuid, to: idempotency-key, type: pairs, why: "Stripe suggests a v4 UUID as the client's idempotency key." }
+  - { from: snowflake-id, to: uuid, type: vs, why: "64 bits that fit a BIGINT, or 128 bits that need no machine ids." }
+confusedWith: [id-generation-options]
+tags: [distributed-systems, ids, databases]
+visual: table
+sources:
+  - title: "RFC 9562: Universally Unique IDentifiers (UUIDs) (IETF, May 2024)"
+    url: "https://www.rfc-editor.org/rfc/rfc9562.html"
+    verifiedOn: "2026-10-16"
+  - title: "Snowflake README and IdWorker.scala (Twitter, archived repo, snowflake-2010 tag)"
+    url: "https://github.com/twitter-archive/snowflake/tree/snowflake-2010"
+    verifiedOn: "2026-10-16"
+  - title: "Snowflakes (Discord developer docs, API reference)"
+    url: "https://docs.discord.com/developers/reference"
+    verifiedOn: "2026-10-16"
+  - title: "Ticket Servers: Distributed Unique Primary Keys on the Cheap (Flickr Engineering, 2010)"
+    url: "https://code.flickr.net/2010/02/08/ticket-servers-distributed-unique-primary-keys-on-the-cheap/"
+    verifiedOn: "2026-10-16"
+  - title: "auto_increment_increment and auto_increment_offset (MySQL 8.4 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/8.4/en/replication-options-source.html"
+    verifiedOn: "2026-10-16"
+  - title: "uuid (Python 3 docs)"
+    url: "https://docs.python.org/3/library/uuid.html"
+    verifiedOn: "2026-10-16"
+  - title: "UUID (Java SE 26 API)"
+    url: "https://docs.oracle.com/en/java/javase/26/docs/api/java.base/java/util/UUID.html"
+    verifiedOn: "2026-10-16"
+  - title: "UUID Functions (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/functions-uuid.html"
+    verifiedOn: "2026-10-16"
+  - title: "PostgreSQL 18.0 release notes"
+    url: "https://www.postgresql.org/docs/release/18.0/"
+    verifiedOn: "2026-10-16"
+  - title: "Sharding pattern: shard keys and auto-increment IDs (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding"
+    verifiedOn: "2026-10-16"
+  - title: "Idempotent requests (Stripe API reference)"
+    url: "https://docs.stripe.com/api/idempotent_requests"
+    verifiedOn: "2026-10-16"
+  - title: "Insecure Direct Object Reference Prevention Cheat Sheet (OWASP)"
+    url: "https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html"
+    verifiedOn: "2026-10-16"
+  - title: "Explaining 5 unique ID generators in distributed systems (ByteByteGo)"
+    url: "https://bytebytego.com/guides/explaining-5-unique-id-generators-in-distributed-systems/"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+Rows, orders and messages need an ID the moment they are created. With one database, a counter is enough; with many servers and shards, each server must make IDs on its own without ever repeating one.
+
+## How it works
+
+<Compare id="id-generation-options" />
+
+- **UUID v7** (RFC 9562, 2024) starts with a 48-bit Unix time in milliseconds, then random bits, so IDs sort by creation time, to the millisecond.
+- **Snowflake:** each generator packs time, its machine id and a sequence into 64 bits, and makes up to 4,096 IDs per millisecond.
+- **Counters across servers:** Flickr ran two ticket servers, one handing out odd IDs and one even (step 2, offsets 1 and 2).
+
+## Example
+
+Pack a Snowflake ID, and make UUIDs:
+
+```java
+static final long EPOCH = 1288834974657L;     // Twitter's custom epoch (Nov 2010), ms
+
+long snowflake(long nowMs, long machineId, long sequence) {
+    return ((nowMs - EPOCH) << 22)   // 41 bits: ms since EPOCH
+         | (machineId << 12)         // 10 bits: 0 to 1023
+         | sequence;                 // 12 bits: 0 to 4095 in the same ms
+}
+
+UUID random = UUID.randomUUID();                              // v4
+UUID timed = UUID.ofEpochMillis(System.currentTimeMillis());  // v7, Java 26+
+```
+
+```python
+import uuid
+
+EPOCH = 1288834974657  # Twitter's custom epoch (Nov 2010), ms
+
+def snowflake(now_ms: int, machine_id: int, sequence: int) -> int:
+    return ((now_ms - EPOCH) << 22) | (machine_id << 12) | sequence
+
+random_id = uuid.uuid4()  # v4
+timed_id = uuid.uuid7()   # v7, Python 3.14+
+```
+
+Read the time back with `(id >> 22) + EPOCH`. 41 bits of milliseconds last about 69 years.
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Counter step (`auto_increment_increment`) | 1 | MySQL 8.4 |
+| Counter start (`auto_increment_offset`) | 1; set to the server ID in multi-primary Group Replication | MySQL 8.4 |
+| `gen_random_uuid()` | Version 4 (random); `uuidv7()` added for version 7 | PostgreSQL 18 |
+
+## Interview Qs
+
+### Design a unique ID generator for a distributed system.
+
+Use Snowflake-style 64-bit IDs: 41 bits of milliseconds since a custom epoch, 10 bits of machine id, 12 bits of sequence. Each server makes IDs locally, up to 4,096 per millisecond, with no coordination, and IDs sort roughly by time.
+
+### UUID or auto-increment for a primary key?
+
+Auto-increment is small and ordered, but needs one central counter and reveals how many rows exist. UUIDs can be made anywhere. If you pick UUIDs, prefer v7: time-ordered keys keep index inserts close together; random v4 keys do not.
+
+### What if the server clock moves backwards?
+
+The generator could repeat or reorder IDs. Twitter's Snowflake refuses to make IDs until the clock passes the last timestamp it used. Run NTP in a mode that never steps the clock backwards.
+
+### Can a UUID be a secret token?
+
+No. RFC 9562 says UUIDs must not be used as security capabilities. Random IDs make guessing harder, but you must still check permissions on every request.

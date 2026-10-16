@@ -1,0 +1,145 @@
+---
+id: observability
+tech: system-design
+title: "Observability: Logs, Metrics, Traces"
+topic: reliability
+level: intermediate
+heat: 2
+hook: "Metrics say something is wrong, traces show where, logs show what happened. One trace ID ties all three together."
+points:
+  - { k: "Metrics", v: "numbers over time: cheap to keep, used for dashboards and alerts" }
+  - { k: "Traces", v: "one request's path across services, as a tree of timed spans" }
+  - { k: "Logs", v: "timestamped event records; structured JSON is easy to query" }
+  - { k: "Golden signals", v: "latency, traffic, errors, saturation (Google SRE)" }
+  - { k: "High cardinality", v: "a user ID label makes one time series per user", kind: minus }
+  - { k: "OpenTelemetry SDK", v: "W3C traceparent header; samples every new trace by default", kind: default }
+trap:
+  wrong: "Page the on-call engineer whenever CPU goes above 80%."
+  right: "Page on symptoms users feel, such as errors and slow requests burning the SLO. High CPU alone belongs on a dashboard."
+sayIt: "I track the four golden signals and alert on SLO burn rate. Each request carries a trace ID in its headers, so a trace shows the slow service, and logs tagged with the same ID show what happened."
+relations:
+  - { from: golden-signals, to: latency, type: uses, why: "Latency is a golden signal; track failed requests' latency apart from successes." }
+  - { from: alerting, to: slo, type: uses, why: "Page when errors burn the SLO's error budget fast, not on every spike." }
+  - { from: sli, to: metrics, type: needs, why: "An SLI is a number computed from metrics, like the share of fast requests." }
+  - { from: traces, to: context-propagation, type: needs, why: "Each service must pass the trace context on, or the trace breaks apart." }
+  - { from: high-cardinality, to: metrics, type: limits, why: "Every new label value makes a new time series to store (Prometheus)." }
+  - { from: traces, to: microservices, type: pairs, why: "One request crosses many services; a trace shows where its time went." }
+confusedWith: []
+tags: [reliability, monitoring, observability, opentelemetry]
+visual: table
+sources:
+  - title: "Monitoring Distributed Systems (Google SRE Book, chapter 6)"
+    url: "https://sre.google/sre-book/monitoring-distributed-systems/"
+    verifiedOn: "2026-10-16"
+  - title: "Service Level Objectives (Google SRE Book, chapter 4)"
+    url: "https://sre.google/sre-book/service-level-objectives/"
+    verifiedOn: "2026-10-16"
+  - title: "Alerting on SLOs (Google SRE Workbook, chapter 5)"
+    url: "https://sre.google/workbook/alerting-on-slos/"
+    verifiedOn: "2026-10-16"
+  - title: "Observability primer (OpenTelemetry docs)"
+    url: "https://opentelemetry.io/docs/concepts/observability-primer/"
+    verifiedOn: "2026-10-16"
+  - title: "Signals (OpenTelemetry docs)"
+    url: "https://opentelemetry.io/docs/concepts/signals/"
+    verifiedOn: "2026-10-16"
+  - title: "Traces (OpenTelemetry docs)"
+    url: "https://opentelemetry.io/docs/concepts/signals/traces/"
+    verifiedOn: "2026-10-16"
+  - title: "Metrics (OpenTelemetry docs)"
+    url: "https://opentelemetry.io/docs/concepts/signals/metrics/"
+    verifiedOn: "2026-10-16"
+  - title: "Logs (OpenTelemetry docs)"
+    url: "https://opentelemetry.io/docs/concepts/signals/logs/"
+    verifiedOn: "2026-10-16"
+  - title: "Context propagation (OpenTelemetry docs)"
+    url: "https://opentelemetry.io/docs/concepts/context-propagation/"
+    verifiedOn: "2026-10-16"
+  - title: "Sampling (OpenTelemetry docs)"
+    url: "https://opentelemetry.io/docs/concepts/sampling/"
+    verifiedOn: "2026-10-16"
+  - title: "Environment Variable Specification: OTEL_PROPAGATORS, OTEL_TRACES_SAMPLER (OpenTelemetry specification)"
+    url: "https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/"
+    verifiedOn: "2026-10-16"
+  - title: "Trace Context, W3C Recommendation (23 November 2021)"
+    url: "https://www.w3.org/TR/trace-context/"
+    verifiedOn: "2026-10-16"
+  - title: "Metric and label naming (Prometheus docs)"
+    url: "https://prometheus.io/docs/practices/naming/"
+    verifiedOn: "2026-10-16"
+  - title: "Configuration: global defaults (Prometheus 3.15 docs)"
+    url: "https://prometheus.io/docs/prometheus/latest/configuration/configuration/"
+    verifiedOn: "2026-10-16"
+  - title: "Overview (Prometheus docs)"
+    url: "https://prometheus.io/docs/introduction/overview/"
+    verifiedOn: "2026-10-16"
+  - title: "Architecture strategies for designing a monitoring system (Azure Well-Architected Framework, OE:07)"
+    url: "https://learn.microsoft.com/en-us/azure/well-architected/operational-excellence/observability"
+    verifiedOn: "2026-10-16"
+  - title: "Logging, tracing and metrics (ByteByteGo guide)"
+    url: "https://bytebytego.com/guides/logging-tracing-metrics/"
+    verifiedOn: "2026-10-16"
+---
+
+## Why it exists
+
+In a system of many services, a user's slow or failed request can break anywhere. You need data from the running system to notice the problem, find where it is, and see what went wrong.
+
+## How it works
+
+| Signal | Answers | Example |
+| --- | --- | --- |
+| **Metrics** | Is something wrong, and how much? | Checkout errors jump from 0.1% to 5% |
+| **Traces** | Where did this request spend its time? | 1.8 s of a 2 s request was in the payment service |
+| **Logs** | What exactly happened? | `card gateway timeout after 1.5 s` |
+
+- **Join them:** each service passes the trace context to the next in a request header and writes the trace ID into every log line.
+- **What to measure:** if you can track only four things, track latency, traffic, errors and saturation. Use percentiles such as p99, because averages hide the slow tail.
+- **What to alert on:** only urgent, actionable problems that users feel or soon will.
+
+## Example
+
+Every hop sends this W3C Trace Context header, the OpenTelemetry default:
+
+```text
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+  00                                 version
+  4bf92f3577b34da6a3ce929d0e0e4736   trace ID: 16 bytes, same in every service
+  00f067aa0ba902b7                   parent span ID: 8 bytes, the calling span
+  01                                 flags: sampled
+```
+
+The payment service writes a structured log line that carries the same trace ID:
+
+```json
+{"time": "2026-10-16T10:15:02Z", "level": "error", "service": "payment",
+ "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "msg": "card gateway timeout"}
+```
+
+Search the logs for that trace ID, and every service's lines for this one request appear together.
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| How trace context is sent | W3C Trace Context (`traceparent` header) and W3C Baggage | OpenTelemetry SDKs (`OTEL_PROPAGATORS`) |
+| Which traces are recorded | Every new trace; child spans follow the parent's choice | OpenTelemetry SDKs (`parentbased_always_on`) |
+| How often metrics are pulled | Every 1 minute, with a 10 s timeout | Prometheus 3.15 (`scrape_interval`, `scrape_timeout`) |
+
+## Interview Qs
+
+### Logs vs metrics vs traces?
+
+Metrics are numbers over time, cheap to keep, and drive dashboards and alerts. Traces follow one request across services as timed spans. Logs are detailed records of single events. Metrics show something is wrong, traces show where, logs show what happened.
+
+### What would you monitor for this service?
+
+The four golden signals: latency (successes and failures apart), traffic, errors, and saturation of the tightest resource, such as a connection pool. Track latency as percentiles like p99, not averages.
+
+### A request is slow in a microservices system. How do you find out why?
+
+Use distributed tracing. Each service passes the trace context in headers and records spans, so the trace shows which span took the time. Then search the logs by that trace ID to see what happened inside it.
+
+### What should wake someone up at night?
+
+Only urgent, actionable, user-visible problems, such as the error budget burning fast. Causes like high CPU or one failed request go to dashboards or tickets, not pages.
