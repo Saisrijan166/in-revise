@@ -64,9 +64,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             Skip to content
           </a>
           <Header techs={techs} />
-          <div id="main" className="pb-tabbar flex-1">
+          <main id="main" className="pb-tabbar flex-1">
             {children}
-          </div>
+          </main>
           <BottomNav techs={techs} />
           <CommandPalette techs={techs} />
           <ShellEffects />

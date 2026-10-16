@@ -47,26 +47,35 @@ interface MdNode {
   attributes?: unknown[];
 }
 
-/** remark plugin: adjacent code blocks become one <CodeTabs> group (Java | Python …). */
-function remarkCodeTabs() {
+/**
+ * remark plugin: adjacent code blocks in the tech's app languages (`codeLanguages`, e.g. Java and
+ * Python) become one <CodeTabs> group: the same example, one tab per language. Any other block,
+ * such as config after Java, stays a separate block so it is never hidden behind a tab.
+ */
+function remarkCodeTabs({ languages }: { languages: string[] }) {
+  const app = new Set(languages);
+  const tabs = (run: MdNode[]): MdNode => ({
+    type: "mdxJsxFlowElement",
+    name: "CodeTabs",
+    attributes: [{ type: "mdxJsxAttribute", name: "langs", value: run.map((c) => c.lang ?? "text").join(",") }],
+    children: run,
+  });
   const walk = (node: MdNode) => {
     if (!node.children) return;
     const out: MdNode[] = [];
     let run: MdNode[] = [];
     const flush = () => {
-      if (run.length > 1) {
-        out.push({
-          type: "mdxJsxFlowElement",
-          name: "CodeTabs",
-          attributes: [{ type: "mdxJsxAttribute", name: "langs", value: run.map((c) => c.lang ?? "text").join(",") }],
-          children: run,
-        });
-      } else out.push(...run);
+      if (run.length > 1) out.push(tabs(run));
+      else out.push(...run);
       run = [];
     };
     for (const child of node.children) {
       if (child.type === "code") {
+        const lang = child.lang ?? "text";
+        // A new tab group starts at a non-app language or a language the group already has.
+        if (!app.has(lang) || run.some((c) => c.lang === lang)) flush();
         run.push(child);
+        if (!app.has(lang)) flush();
         continue;
       }
       flush();
@@ -178,7 +187,7 @@ function components(ctx: Ctx): MDXComponents {
 async function renderMd(md: string, ctx: Ctx): Promise<ReactNode> {
   const { default: Content } = await evaluate(md, {
     ...runtime,
-    remarkPlugins: [remarkGfm, remarkCodeTabs, [remarkTerms, { matchers: ctx.matchers, seen: ctx.seen }]],
+    remarkPlugins: [remarkGfm, [remarkCodeTabs, { languages: ctx.deck.codeLanguages }], [remarkTerms, { matchers: ctx.matchers, seen: ctx.seen }]],
     rehypePlugins: [
       [
         rehypeShikiFromHighlighter,
