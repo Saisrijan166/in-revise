@@ -15,6 +15,8 @@ const LABEL: Record<string, string> = {
   yaml: "YAML",
   nginx: "nginx",
   proto: "Protobuf",
+  properties: "Properties",
+  xml: "XML",
   text: "Text",
 };
 

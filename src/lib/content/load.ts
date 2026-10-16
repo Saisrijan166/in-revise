@@ -98,6 +98,8 @@ export interface Deck {
   slug: string;
   accent: Accent;
   summary: string;
+  /** App-code languages from _tech.yaml (System Design: Java and Python; Spring Boot: Java only). */
+  codeLanguages: string[];
   spine: SpineStep[];
   topics: Topic[];
   /** Concepts in reading order: the order of the concept tree. */
@@ -311,7 +313,9 @@ function checkBody(card: Card, deck: Deck, issues: Issue[], fileIds: Set<string>
   if (/lorem ipsum|\bTODO\b|\bTBD\b|\bFIXME\b/i.test(textAll)) err("placeholder text found (TODO/TBD/lorem ipsum)");
   if (/\p{Extended_Pictographic}/u.test(stripped)) err("emojis are not allowed in body text");
 
-  // Code examples stay tiny (CLAUDE.md 3.1: max ~15 lines), and app code comes in Java and Python.
+  // Code examples stay tiny (CLAUDE.md 3.1: max ~15 lines), and app code comes in every language
+  // the tech lists in codeLanguages (two or more become tabs; one means no pairing).
+  const app = deck.codeLanguages;
   for (const [key, md] of Object.entries(card.sections)) {
     const langs = new Set<string>();
     for (const m of (md ?? "").matchAll(/```([a-z]*)[^\n]*\n([\s\S]*?)```/g)) {
@@ -319,8 +323,8 @@ function checkBody(card: Card, deck: Deck, issues: Issue[], fileIds: Set<string>
       if (lines > 15) err(`code block has ${lines} lines (max 15)`);
       langs.add(m[1]);
     }
-    if ((langs.has("java") || langs.has("python")) && !(langs.has("java") && langs.has("python"))) {
-      err(`section "${key}": app code must be shown in both Java and Python (two adjacent code blocks)`);
+    if (app.length > 1 && app.some((l) => langs.has(l)) && !app.every((l) => langs.has(l))) {
+      err(`section "${key}": app code must be shown in ${app.join(" and ")} (adjacent code blocks)`);
     }
   }
 
@@ -585,6 +589,7 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
     slug,
     accent: tech.accent,
     summary: tech.summary,
+    codeLanguages: tech.codeLanguages,
     spine,
     topics,
     cards: ordered,

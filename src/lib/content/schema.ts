@@ -159,6 +159,11 @@ export const techSchema = z
     slug: kebab,
     accent: z.enum(ACCENTS),
     summary: z.string().min(10).max(200),
+    /** App-code languages: an example in one of them is shown in all of them, as adjacent tabs. */
+    codeLanguages: z
+      .array(z.string().regex(/^[a-z]+$/))
+      .min(1)
+      .default(["java", "python"]),
     storySpine: z.array(spineStep).min(3),
     topics: z
       .array(
