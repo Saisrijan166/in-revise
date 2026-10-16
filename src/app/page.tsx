@@ -15,7 +15,7 @@ export default function HomePage() {
 
   return (
     <div className="mx-auto max-w-5xl px-4 pt-6 pb-14 sm:px-6">
-      <section className="map-paper relative overflow-hidden rounded-[2rem] border border-line bg-surface px-5 py-8 sm:px-10 sm:py-12">
+      <section className="grid-paper relative overflow-hidden rounded-[2rem] border border-line bg-surface px-5 py-8 sm:px-10 sm:py-12">
         <HeroLines />
         <div className="relative max-w-2xl">
           <p className="text-xs font-bold tracking-widest text-accent-ink uppercase">

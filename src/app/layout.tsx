@@ -9,7 +9,7 @@ import { Header } from "@/components/site/Header";
 import { ShellEffects } from "@/components/site/ShellEffects";
 import "./globals.css";
 
-// Body: built for legibility. Display: a characterful grotesque for the "map" identity.
+// Body: built for legibility. Display: a characterful grotesque for the brand.
 const body = Atkinson_Hyperlegible_Next({
   subsets: ["latin"],
   variable: "--font-body",

@@ -51,7 +51,7 @@ export const ALLOWED_COMPONENTS = ["Analogy", "Steps", "Step", "Mermaid", "Note"
 /** Route segments a tech slug must not use (top-level routes). */
 export const RESERVED_SLUGS = ["search-index.json", "_next", "404", "icon.svg"];
 /** Route segments a concept id must not use (they are pages inside a tech). */
-export const RESERVED_CONCEPT_IDS = ["map", "tree", "compare", "cheatsheet", "quiz", "glossary"];
+export const RESERVED_CONCEPT_IDS = ["tree", "compare", "cheatsheet", "quiz", "glossary"];
 
 const kebab = z
   .string()

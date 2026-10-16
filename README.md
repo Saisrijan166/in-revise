@@ -26,7 +26,7 @@ No code changes are needed. Run `npm run validate:content` until it passes.
 ## Layout
 
 - `content/`: one folder per tech (MDX concepts, YAML tree, comparisons and glossary)
-- `src/lib/content/`: schema, loader and validation rules, MDX rendering, map data, quiz items
+- `src/lib/content/`: schema, loader and validation rules, MDX rendering, quiz items
 - `src/app/`: routes (every dynamic route uses `generateStaticParams`)
 - `src/components/`: UI
 - `scripts/validate-content.ts`: content gate (fails the build on any error)

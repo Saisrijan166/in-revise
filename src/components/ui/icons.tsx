@@ -93,11 +93,6 @@ export const IconMonitor = (p: IconProps) => (
     <path d="M8 20h8M12 16v4" />
   </Base>
 );
-export const IconBookmark = ({ filled, ...p }: IconProps & { filled?: boolean }) => (
-  <Base {...p} fill={filled ? "currentColor" : "none"}>
-    <path d="M6 3.5h12v17l-6-4-6 4z" />
-  </Base>
-);
 export const IconArrowLeft = (p: IconProps) => (
   <Base {...p}>
     <path d="M19 12H5M11 6l-6 6 6 6" />
@@ -111,11 +106,6 @@ export const IconArrowRight = (p: IconProps) => (
 export const IconChevronRight = (p: IconProps) => (
   <Base {...p}>
     <path d="m9 6 6 6-6 6" />
-  </Base>
-);
-export const IconChevronDown = (p: IconProps) => (
-  <Base {...p}>
-    <path d="m6 9 6 6 6-6" />
   </Base>
 );
 export const IconMenu = (p: IconProps) => (
@@ -173,37 +163,9 @@ export const IconRestart = (p: IconProps) => (
     <path d="M4 4v4.5h4.5" />
   </Base>
 );
-export const IconDownload = (p: IconProps) => (
-  <Base {...p}>
-    <path d="M12 4v11M7 10l5 5 5-5M5 20h14" />
-  </Base>
-);
-export const IconUpload = (p: IconProps) => (
-  <Base {...p}>
-    <path d="M12 16V5M7 10l5-5 5 5M5 20h14" />
-  </Base>
-);
-export const IconList = (p: IconProps) => (
-  <Base {...p}>
-    <path d="M9 6h11M9 12h11M9 18h11" />
-    <circle cx="4.5" cy="6" r="1" />
-    <circle cx="4.5" cy="12" r="1" />
-    <circle cx="4.5" cy="18" r="1" />
-  </Base>
-);
 export const IconPlus = (p: IconProps) => (
   <Base {...p}>
     <path d="M12 5v14M5 12h14" />
-  </Base>
-);
-export const IconMinus = (p: IconProps) => (
-  <Base {...p}>
-    <path d="M5 12h14" />
-  </Base>
-);
-export const IconFit = (p: IconProps) => (
-  <Base {...p}>
-    <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
   </Base>
 );
 export const IconExternal = (p: IconProps) => (
@@ -215,11 +177,6 @@ export const IconLink = (p: IconProps) => (
   <Base {...p}>
     <path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" />
     <path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" />
-  </Base>
-);
-export const IconTrash = (p: IconProps) => (
-  <Base {...p}>
-    <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" />
   </Base>
 );
 export const IconSliders = (p: IconProps) => (

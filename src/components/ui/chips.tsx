@@ -59,21 +59,3 @@ export function HeatChip({
     </span>
   );
 }
-
-export function TopicChip({ title, color, href }: { title: string; color: string; href?: string }) {
-  const inner = (
-    <>
-      <span aria-hidden="true" className="h-2.5 w-5 rounded-full" style={{ background: color }} />
-      {title}
-    </>
-  );
-  const cls =
-    "inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-0.5 text-xs font-semibold text-ink-2";
-  return href ? (
-    <a href={href} className={cx(cls, "hit-44 hover:border-line-strong hover:text-ink")}>
-      {inner}
-    </a>
-  ) : (
-    <span className={cls}>{inner}</span>
-  );
-}
