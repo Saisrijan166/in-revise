@@ -12,7 +12,6 @@ import {
   IconBook,
   IconCards,
   IconColumns,
-  IconMap,
   IconSearch,
   IconSheet,
   IconTree,
@@ -92,14 +91,6 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
     if (!q) {
       const quick: Item[] = tech
         ? [
-            {
-              key: "q-map",
-              title: "Map",
-              sub: `${tech.name}: how ideas connect`,
-              href: urls.map(tech.slug),
-              group: "Go to",
-              icon: IconMap,
-            },
             {
               key: "q-tree",
               title: "Tree",

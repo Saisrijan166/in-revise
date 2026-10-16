@@ -43,28 +43,33 @@ export function NavSheet({ nav }: { nav: TechNav }) {
               </p>
               <ModeSwitch className="flex w-full [&>button]:flex-1" />
             </div>
-            <ul className="grid grid-cols-2 gap-1.5">
-              {TECH_TABS.map((t) => {
-                const Icon = t.icon;
-                return (
-                  <li key={t.key}>
-                    <Link
-                      href={t.href(nav.slug)}
-                      onClick={close}
-                      aria-current={tab === t.key ? "page" : undefined}
-                      className={cx(
-                        "flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm font-semibold",
-                        tab === t.key
-                          ? "bg-accent text-on-accent"
-                          : "bg-surface text-ink-2 hover:text-ink",
-                      )}
-                    >
-                      <Icon size={17} /> {t.label}
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
+            <div className="rounded-2xl border border-line-strong bg-surface p-1.5">
+              <p className="mb-1.5 inline-flex min-h-9 items-center rounded-xl bg-accent px-3 text-sm font-bold text-on-accent">
+                {nav.name}
+              </p>
+              <ul className="grid grid-cols-2 gap-1">
+                {TECH_TABS.map((t) => {
+                  const Icon = t.icon;
+                  return (
+                    <li key={t.key}>
+                      <Link
+                        href={t.href(nav.slug)}
+                        onClick={close}
+                        aria-current={tab === t.key ? "page" : undefined}
+                        className={cx(
+                          "flex min-h-11 items-center gap-2 rounded-xl px-3 text-sm",
+                          tab === t.key
+                            ? "bg-accent-soft font-bold text-accent-ink ring-1 ring-accent/40"
+                            : "font-semibold text-ink-2 hover:bg-surface-2 hover:text-ink",
+                        )}
+                      >
+                        <Icon size={17} /> {t.label}
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
             <TreeNav nav={nav} onNavigate={close} />
           </div>
         </Dialog.Content>

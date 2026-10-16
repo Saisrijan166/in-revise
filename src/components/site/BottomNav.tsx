@@ -6,10 +6,10 @@ import type { ComponentType } from "react";
 import { navStore, paletteStore } from "@/lib/store/ui";
 import { urls } from "@/lib/urls";
 import { cx } from "@/lib/ui";
-import { IconCards, IconHome, IconMap, IconSearch, IconTree } from "@/components/ui/icons";
+import { IconCards, IconHome, IconSearch, IconSheet, IconTree } from "@/components/ui/icons";
 import { useContextTech, useCurrentTech, type TechLite } from "./useCurrentTech";
 
-/** Phone tab bar: Home, Topics (the tree), Map, Quiz, Search. Hidden from md up. */
+/** Phone tab bar: Home, Topics (the tree), Cheat sheet, Quiz, Search. Hidden from md up. */
 export function BottomNav({ techs }: { techs: TechLite[] }) {
   const pathname = usePathname() ?? "/";
   const inTech = Boolean(useCurrentTech(techs));
@@ -34,10 +34,10 @@ export function BottomNav({ techs }: { techs: TechLite[] }) {
           active: false,
         },
     {
-      label: "Map",
-      href: tech ? urls.map(tech.slug) : undefined,
-      icon: IconMap,
-      active: /\/map\/?$/.test(pathname),
+      label: "Cheat sheet",
+      href: tech ? urls.cheatsheet(tech.slug) : undefined,
+      icon: IconSheet,
+      active: /\/cheatsheet\/?$/.test(pathname),
     },
     {
       label: "Quiz",

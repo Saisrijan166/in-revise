@@ -6,7 +6,7 @@ export interface NodeLike {
   cardId?: string;
 }
 
-/** A concept opens its page; any other node opens the map, focused on it. */
+/** A concept opens its page; any other node (a type or part) opens its place in the Tree. */
 export function nodeHref(tech: string, node: NodeLike): string {
-  return node.cardId ? urls.concept(tech, node.cardId) : urls.map(tech, node.id);
+  return node.cardId ? urls.concept(tech, node.cardId) : urls.tree(tech, node.id);
 }

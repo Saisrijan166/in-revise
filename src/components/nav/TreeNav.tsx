@@ -7,20 +7,25 @@ import type { NavNode, TechNav } from "@/lib/content";
 import { cx, topicColor } from "@/lib/ui";
 import { IconChevronRight } from "@/components/ui/icons";
 
-/** `?focus=` on the Map page, kept in sync when the map changes it. */
-export function useFocusParam(): string | null {
+/** Node id from a Tree page link (#node-<id>). Updated on in-app navigation via "cm:hash". */
+export function useHashId(): string | null {
   return useSyncExternalStore(
     (cb) => {
-      window.addEventListener("popstate", cb);
-      window.addEventListener("cm:focus", cb);
+      window.addEventListener("hashchange", cb);
+      window.addEventListener("cm:hash", cb);
       return () => {
-        window.removeEventListener("popstate", cb);
-        window.removeEventListener("cm:focus", cb);
+        window.removeEventListener("hashchange", cb);
+        window.removeEventListener("cm:hash", cb);
       };
     },
-    () => new URLSearchParams(window.location.search).get("focus"),
+    () => (window.location.hash.startsWith("#node-") ? window.location.hash.slice(6) : null),
     () => null,
   );
+}
+
+/** Tell hash listeners (sidebar, Tree page) that the URL changed, once Next has updated it. */
+export function announceHash() {
+  window.setTimeout(() => window.dispatchEvent(new Event("cm:hash")), 60);
 }
 
 function findPath(nodes: NavNode[], id: string, trail: string[] = []): string[] | null {
@@ -38,9 +43,9 @@ function findPath(nodes: NavNode[], id: string, trail: string[] = []): string[] 
  */
 export function TreeNav({ nav, onNavigate }: { nav: TechNav; onNavigate?: () => void }) {
   const pathname = usePathname() ?? "";
-  const focus = useFocusParam();
+  const hashId = useHashId();
   const segs = pathname.split("/").filter(Boolean);
-  const currentId = segs[1] === "map" ? focus : segs.length === 2 ? segs[1] : null;
+  const currentId = segs[1] === "tree" ? hashId : segs.length === 2 ? segs[1] : null;
   const [overrides, setOverrides] = useState<Record<string, boolean>>({});
 
   const openPath = useMemo(() => {
@@ -80,7 +85,10 @@ export function TreeNav({ nav, onNavigate }: { nav: TechNav; onNavigate?: () => 
               )}
               <Link
                 href={n.href}
-                onClick={onNavigate}
+                onClick={() => {
+                  announceHash();
+                  onNavigate?.();
+                }}
                 aria-current={active ? "page" : undefined}
                 className={cx(
                   "flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1 leading-snug lg:min-h-10",

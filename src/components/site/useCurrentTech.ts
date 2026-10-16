@@ -16,7 +16,7 @@ export function useCurrentTech(techs: TechLite[]): TechLite | undefined {
   return techs.find((t) => t.slug === first);
 }
 
-/** Tech for global tabs (Map, Quiz): the current one, else the first. */
+/** Tech for global tabs (Quiz, Cheat sheet): the current one, else the first. */
 export function useContextTech(techs: TechLite[]): TechLite | undefined {
   return useCurrentTech(techs) ?? techs[0];
 }

@@ -36,14 +36,6 @@ export const IconHome = (p: IconProps) => (
     <path d="M10 21v-6h4v6" />
   </Base>
 );
-export const IconMap = (p: IconProps) => (
-  <Base {...p}>
-    <circle cx="5" cy="6" r="2.2" />
-    <circle cx="19" cy="6" r="2.2" />
-    <circle cx="12" cy="18" r="2.2" />
-    <path d="M7.2 6h9.6M6.2 7.9l4.6 8.2M17.8 7.9l-4.6 8.2" />
-  </Base>
-);
 export const IconCards = (p: IconProps) => (
   <Base {...p}>
     <rect x="3" y="6" width="14" height="15" rx="2.5" />

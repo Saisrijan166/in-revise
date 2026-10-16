@@ -5,7 +5,6 @@ import {
   IconCards,
   IconColumns,
   IconHome,
-  IconMap,
   IconSheet,
   IconTree,
 } from "@/components/ui/icons";
@@ -27,7 +26,6 @@ export const TECH_TABS: TabDef[] = [
     icon: IconHome,
     hint: "The story and all topics",
   },
-  { key: "map", label: "Map", href: (t) => urls.map(t), icon: IconMap, hint: "How ideas connect" },
   {
     key: "tree",
     label: "Tree",
@@ -59,7 +57,7 @@ export const TECH_TABS: TabDef[] = [
   },
 ];
 
-/** Which tab a path belongs to: /tech/ → overview, /tech/map/ → map, a concept page → none. */
+/** Which tab a path belongs to: /tech/ → overview, /tech/tree/ → tree, a concept page → none. */
 export function activeTab(pathname: string): string | null {
   const segs = pathname.split("/").filter(Boolean);
   if (segs.length === 1) return "overview";

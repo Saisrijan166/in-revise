@@ -15,7 +15,7 @@ import { useShortcutLabel } from "./useShortcutLabel";
 
 /**
  * One header for every screen size:
- * desktop: brand · Home · the tech's pages · search · theme;
+ * desktop: brand · Home · [tech | its pages] in one bordered group · search · theme;
  * phone: brand · Learn/Revise/Quiz (on concept pages) · theme. Menus live in the bottom bar.
  */
 export function Header({ techs }: { techs: TechLite[] }) {
@@ -36,21 +36,29 @@ export function Header({ techs }: { techs: TechLite[] }) {
           <Wordmark compact={onConcept} />
         </Link>
 
-        <nav aria-label="Main" className="ml-3 hidden items-center gap-0.5 lg:flex">
+        <nav aria-label="Main" className="ml-3 hidden items-center gap-2 lg:flex">
           <Link
             href={urls.home()}
             aria-current={pathname === "/" ? "page" : undefined}
             className={cx(
               "inline-flex min-h-10 items-center gap-1.5 rounded-xl px-3 text-sm font-semibold",
-              pathname === "/" ? "bg-ink text-bg" : "text-ink-2 hover:bg-surface-2 hover:text-ink",
+              pathname === "/"
+                ? "bg-accent-soft font-bold text-accent-ink"
+                : "text-ink-2 hover:bg-surface-2 hover:text-ink",
             )}
           >
             <IconHome size={16} /> Home
           </Link>
           {tech && (
-            <>
-              <span className="mx-2 h-5 w-px bg-line-strong" aria-hidden="true" />
-              <span className="mr-1 text-sm font-bold text-accent-ink">{tech.name}</span>
+            /* One bordered group: the tech (filled) and its pages (filled only when selected). */
+            <div
+              role="group"
+              aria-label={`${tech.name} pages`}
+              className="flex items-center gap-0.5 rounded-2xl border border-line-strong bg-surface p-1 shadow-[var(--shadow)]"
+            >
+              <span className="mr-1 inline-flex min-h-9 items-center rounded-xl bg-accent px-3 text-sm font-bold text-on-accent">
+                {tech.name}
+              </span>
               {TECH_TABS.map((t) => (
                 <Link
                   key={t.key}
@@ -58,16 +66,16 @@ export function Header({ techs }: { techs: TechLite[] }) {
                   aria-current={tab === t.key ? "page" : undefined}
                   title={t.hint}
                   className={cx(
-                    "inline-flex min-h-10 items-center rounded-xl px-2.5 text-sm font-semibold xl:px-3",
+                    "inline-flex min-h-9 items-center rounded-xl px-2.5 text-sm xl:px-3",
                     tab === t.key
-                      ? "bg-accent text-on-accent"
-                      : "text-ink-2 hover:bg-surface-2 hover:text-ink",
+                      ? "bg-accent-soft font-bold text-accent-ink ring-1 ring-accent/40"
+                      : "font-semibold text-ink-2 hover:bg-surface-2 hover:text-ink",
                   )}
                 >
                   {t.label}
                 </Link>
               ))}
-            </>
+            </div>
           )}
         </nav>
 

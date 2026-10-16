@@ -6,7 +6,7 @@ export default function NotFound() {
   return (
     <div className="mx-auto flex max-w-xl flex-col items-center px-4 py-20 text-center">
       <LogoMark size={64} />
-      <h1 className="mt-6 text-3xl font-extrabold">This page is not on the map</h1>
+      <h1 className="mt-6 text-3xl font-extrabold">This page does not exist</h1>
       <p className="mt-2 text-ink-2">The page may have moved, or the link has a typo.</p>
       <Link
         href={urls.home()}

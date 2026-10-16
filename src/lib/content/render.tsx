@@ -110,8 +110,8 @@ export function nodePreview(deck: Deck, node: TreeNode): Preview {
     kind: "term",
     term: node.label,
     definition: node.note ?? term?.definition ?? "",
-    glossaryHref: urls.map(deck.slug, node.id),
-    glossaryLabel: "See how it connects",
+    glossaryHref: urls.tree(deck.slug, node.id),
+    glossaryLabel: "See it in the tree",
     seeHref: node.ownerCardId ? urls.concept(deck.slug, node.ownerCardId) : undefined,
     seeTitle: node.ownerCardId ? `Open: ${deck.cardById.get(node.ownerCardId)?.meta.title}` : undefined,
   };

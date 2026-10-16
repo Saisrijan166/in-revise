@@ -4,9 +4,9 @@ import { nodeHref } from "@/lib/content/nav";
 import { RELATION_TYPES, type RelationType } from "@/lib/content/schema";
 import { urls } from "@/lib/urls";
 import { cx } from "@/lib/ui";
-import { IconArrowRight, IconColumns, IconMap } from "@/components/ui/icons";
+import { IconArrowRight, IconColumns, IconTree } from "@/components/ui/icons";
 
-/** Colour per relation type, so the same verb always looks the same (map, concept, cheat sheet). */
+/** Colour per relation type, so the same verb always looks the same everywhere. */
 export const RELATION_TONE: Record<RelationType, string> = {
   needs: "bg-accent text-on-accent",
   uses: "bg-accent-soft text-accent-ink",
@@ -126,10 +126,10 @@ export function HowItConnects({ deck, cardId }: { deck: Deck; cardId: string }) 
         </ul>
       )}
       <Link
-        href={urls.map(deck.slug, cardId)}
+        href={urls.tree(deck.slug, cardId)}
         className="inline-flex min-h-11 items-center gap-2 self-start rounded-xl bg-accent-soft px-3 text-sm font-bold text-accent-ink hover:bg-accent hover:text-on-accent"
       >
-        <IconMap size={17} /> Explore on the map
+        <IconTree size={17} /> See it in the tree
       </Link>
     </div>
   );

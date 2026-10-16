@@ -6,7 +6,8 @@ import { nodeHref } from "@/lib/content/nav";
 import { urls } from "@/lib/urls";
 import { cx, formatDate, topicColor } from "@/lib/ui";
 import { PageHeader } from "@/components/ui/Breadcrumbs";
-import { IconLink, IconMap } from "@/components/ui/icons";
+import { IconLink } from "@/components/ui/icons";
+import { TreeTarget } from "@/components/nav/TreeTarget";
 
 export const dynamicParams = false;
 
@@ -46,7 +47,7 @@ function Branch({
           <li
             key={n.id}
             id={`node-${n.id}`}
-            className="relative scroll-mt-24 py-1.5 target:rounded-lg target:bg-accent-soft"
+            className="relative scroll-mt-24 rounded-lg py-1.5 transition-colors data-[hl]:bg-accent-soft data-[hl]:ring-2 data-[hl]:ring-accent/50"
           >
             {depth > 0 && (
               <span
@@ -63,16 +64,18 @@ function Branch({
                   style={{ borderColor: color }}
                 />
               )}
-              <Link
-                href={nodeHref(deck.slug, n)}
-                className={
-                  card
-                    ? "inline-flex min-h-10 items-center font-display text-lg font-extrabold text-ink hover:text-accent-ink"
-                    : "inline-flex min-h-10 min-w-11 items-center font-bold text-ink hover:text-accent-ink"
-                }
-              >
-                {n.label}
-              </Link>
+              {card ? (
+                <Link
+                  href={nodeHref(deck.slug, n)}
+                  className="inline-flex min-h-10 items-center font-display text-lg font-extrabold text-ink hover:text-accent-ink"
+                >
+                  {n.label}
+                </Link>
+              ) : (
+                <span className="inline-flex min-h-8 items-center font-bold text-ink">
+                  {n.label}
+                </span>
+              )}
               {(card?.meta.hook ?? n.note) && (
                 <span className="text-ink-2">{card ? card.meta.hook : n.note}</span>
               )}
@@ -93,6 +96,7 @@ export default async function TreePage({ params }: PageProps<"/[tech]/tree">) {
   const deck = getDeck(tech);
   return (
     <div className="mx-auto max-w-5xl px-4 pt-4 pb-12 sm:px-6 lg:px-10">
+      <TreeTarget />
       <PageHeader
         crumbs={[
           { label: "Home", href: urls.home() },
@@ -100,15 +104,12 @@ export default async function TreePage({ params }: PageProps<"/[tech]/tree">) {
           { label: "Tree" },
         ]}
         title={`${deck.name} as a tree`}
-        lead="Every concept, its types and their subtypes, each in one line. Concepts open their page; everything else opens on the map."
+        lead="Every concept, its types and their subtypes, each in one line. Concepts open their own page."
       >
         <p className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-3">
           <span className="inline-flex items-center gap-1.5">
             <span className="h-3 w-3 rounded-full border-[3px] border-accent" aria-hidden="true" />{" "}
             Concept with its own page
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <IconMap size={15} /> Other items open on the map
           </span>
         </p>
       </PageHeader>

@@ -30,8 +30,9 @@ Applied, and written into CLAUDE.md (CLAUDE.md is not tracked in git: the global
 5. **Concept tree** (`tree.yaml`): the full types-and-subtypes hierarchy; it also sets the reading order.
 6. **One cheat sheet for the whole tech**, built for scanning.
 7. **Code examples in Java and Python** (tabs, choice remembered).
-8. **Navigation:** the tech's pages in the top bar; Learn / Revise / Quiz and the tree in the left sidebar; the right panel shows "On this page", a recap and "Quiz me on this"; one header plus one bottom bar on phones.
+8. **Navigation:** the tech's pages sit in ONE bordered group in the top bar, with the tech name filled and each page filled only when selected. Learn / Revise / Quiz and the tree are in the left sidebar. The right panel shows "On this page", a recap and "Quiz me on this". Phones get one header and one bottom bar (Home, Topics, Cheat sheet, Quiz, Search).
 9. **"vs" concepts embed their comparison** (`<Compare id>`), so the table is written once. A new comparison, "Relational (SQL) vs NoSQL", was added for this.
+10. **Map removed (16-10-2026):** the Focus and Whole map views and the React Flow dependency are gone. Relations stay on each concept page ("How it connects"). Links to types and parts now open their place in the Tree (`/tree/#node-<id>`).
 
 ## C. Decisions still open for the owner
 

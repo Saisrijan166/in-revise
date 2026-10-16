@@ -6,7 +6,6 @@ import {
   IconArrowRight,
   IconCards,
   IconLinkArrow,
-  IconMap,
   IconSheet,
   IconTree,
 } from "@/components/ui/icons";
@@ -81,12 +80,6 @@ export default function HomePage() {
                   >
                     Open <IconArrowRight size={16} />
                   </Link>
-                  <Link
-                    href={urls.map(t.slug)}
-                    className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-line px-3 font-semibold text-ink-2 hover:border-accent hover:text-ink"
-                  >
-                    <IconMap size={17} /> Map
-                  </Link>
                 </div>
               </div>
             </li>
@@ -116,8 +109,8 @@ export default function HomePage() {
               icon: IconCards,
             },
             {
-              t: "Map and Tree",
-              d: "See every type and subtype, and how each idea needs, uses or solves another.",
+              t: "Tree",
+              d: "Every type and subtype of the tech in one tree, and in each concept: how it needs, uses or solves another.",
               icon: IconTree,
             },
           ].map((m) => (
