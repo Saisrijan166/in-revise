@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { getDeck, getDecks } from "@/lib/content";
 import type { Deck, TreeNode } from "@/lib/content/load";
-import { nodeHref } from "@/lib/content/nav";
+import { conceptsBelow, nodeHref } from "@/lib/content/nav";
 import { renderInline } from "@/lib/inline";
 import { urls } from "@/lib/urls";
 import { topicColor } from "@/lib/ui";
@@ -30,6 +30,7 @@ export async function generateMetadata({
 
 function Row({ deck, tech, n }: { deck: Deck; tech: string; n: TreeNode }) {
   const card = n.cardId ? deck.cardById.get(n.cardId) : undefined;
+  const nested = conceptsBelow(n);
   return (
     <li className="print-card py-4 first:pt-1">
       <div className="grid gap-x-6 gap-y-2 md:grid-cols-[minmax(0,15rem)_minmax(0,1fr)]">
@@ -82,14 +83,12 @@ function Row({ deck, tech, n }: { deck: Deck; tech: string; n: TreeNode }) {
           )}
         </div>
       </div>
-      {/* Concepts nested deeper (e.g. a strategy inside a group) get their own row too. */}
-      {!card && n.children.some((c) => c.cardId) && (
+      {/* Concepts nested at any depth (a strategy in a group, a concept inside a concept) get their own row too. */}
+      {nested.length > 0 && (
         <ul className="mt-3 border-l-2 border-line pl-4">
-          {n.children
-            .filter((c) => c.cardId)
-            .map((c) => (
-              <Row key={c.id} deck={deck} tech={tech} n={c} />
-            ))}
+          {nested.map((c) => (
+            <Row key={c.id} deck={deck} tech={tech} n={c} />
+          ))}
         </ul>
       )}
     </li>

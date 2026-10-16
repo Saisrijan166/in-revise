@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { getDeck, getDecks, techSummary } from "@/lib/content";
-import { nodeHref } from "@/lib/content/nav";
+import { conceptsBelow, nodeHref } from "@/lib/content/nav";
 import { urls } from "@/lib/urls";
 import { plural, topicColor } from "@/lib/ui";
 import { CompareGist } from "@/components/compare/CompareView";
@@ -98,6 +98,11 @@ export default async function OverviewPage({ params }: PageProps<"/[tech]">) {
               <ul className="divide-y divide-line rounded-2xl border border-line bg-surface">
                 {nodes.map((n) => {
                   const card = n.cardId ? deck.cardById.get(n.cardId) : undefined;
+                  // Direct children, plus concepts nested deeper (they would be hidden otherwise).
+                  const chips = [
+                    ...n.children,
+                    ...conceptsBelow(n).filter((c) => !n.children.includes(c)),
+                  ];
                   return (
                     <li key={n.id} className="px-4 py-3.5">
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -117,12 +122,12 @@ export default async function OverviewPage({ params }: PageProps<"/[tech]">) {
                       {(card?.meta.hook ?? n.note) && (
                         <p className="mt-0.5 text-ink-2">{card?.meta.hook ?? n.note}</p>
                       )}
-                      {n.children.length > 0 && (
+                      {chips.length > 0 && (
                         <ul
                           className="mt-2 flex flex-wrap gap-1.5"
                           aria-label={`Inside ${n.label}`}
                         >
-                          {n.children.map((c) => (
+                          {chips.map((c) => (
                             <li key={c.id}>
                               <Link
                                 href={nodeHref(tech, c)}

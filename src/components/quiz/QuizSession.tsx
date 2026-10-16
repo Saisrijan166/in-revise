@@ -77,7 +77,7 @@ export function QuizSession({ items }: { items: QuizItem[] }) {
         </span>
         <Link
           href={item.cardHref}
-          className="inline-flex min-h-11 min-w-0 items-center truncate font-semibold text-accent-ink hover:underline"
+          className="inline-flex min-h-11 min-w-11 items-center justify-end truncate font-semibold text-accent-ink hover:underline"
         >
           {item.cardTitle}
         </Link>
