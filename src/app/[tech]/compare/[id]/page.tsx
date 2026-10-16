@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { getDeck, getDecks } from "@/lib/content";
 import { urls } from "@/lib/urls";
 import { CompareView } from "@/components/compare/CompareView";
-import { Breadcrumbs } from "@/components/ui/Breadcrumbs";
+import { PageHeader } from "@/components/ui/Breadcrumbs";
 
 export const dynamicParams = false;
 
@@ -25,17 +25,16 @@ export default async function ComparePage({ params }: PageProps<"/[tech]/compare
   const c = deck.comparisonById.get(id);
   if (!c) notFound();
   return (
-    <div className="mx-auto max-w-5xl px-4 pt-5 pb-12 sm:px-6 lg:px-10">
-      <Breadcrumbs
-        items={[
-          { label: "Home", href: urls.home() },
-          { label: deck.name, href: urls.deck(tech) },
+    <div className="mx-auto max-w-4xl px-4 pt-4 pb-12 sm:px-6 lg:px-10">
+      <PageHeader
+        crumbs={[
+          { label: deck.name, href: urls.overview(tech) },
           { label: "Compare", href: urls.compareIndex(tech) },
           { label: c.title },
         ]}
+        eyebrow="Often confused"
+        title={c.title}
       />
-      <p className="text-xs font-bold tracking-widest text-accent-ink uppercase">Often confused</p>
-      <h1 className="mt-1 mb-5 text-3xl font-extrabold sm:text-4xl">{c.title}</h1>
       <CompareView deck={deck} c={c} />
     </div>
   );

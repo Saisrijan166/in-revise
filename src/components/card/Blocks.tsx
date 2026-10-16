@@ -1,9 +1,20 @@
 import type { ComponentType, ReactNode } from "react";
-import type { RenderedCard } from "@/lib/content/render";
+import { renderInline } from "@/lib/inline";
+import type { Point } from "@/lib/content/schema";
 import { cx } from "@/lib/ui";
-import { IconAlert, IconCheck, IconClose, IconQuote } from "@/components/ui/icons";
+import {
+  IconAlert,
+  IconCheck,
+  IconClose,
+  IconPlus,
+  IconQuote,
+  IconSliders,
+} from "@/components/ui/icons";
 
-/** Card building blocks shared by the concept page, cheat sheets and the review list. */
+/**
+ * Concept building blocks, shared by the concept page and the cheat sheet. One visual
+ * language everywhere: same spacing, same headings, boxes only where they help.
+ */
 
 export function Section({
   id,
@@ -21,9 +32,9 @@ export function Section({
   className?: string;
 }) {
   return (
-    <section data-show={show} aria-labelledby={id} className={cx("mt-9 scroll-mt-32", className)}>
-      <h2 id={id} className="mb-3 flex items-center gap-2 text-[1.35rem] font-extrabold text-ink">
-        {Icon && <Icon size={20} className="text-accent" />}
+    <section data-show={show} aria-labelledby={id} className={cx("mt-10 scroll-mt-24", className)}>
+      <h2 id={id} className="mb-3 flex items-center gap-2 text-xl font-extrabold text-ink">
+        {Icon && <Icon size={19} className="text-accent" />}
         {title}
       </h2>
       {children}
@@ -31,106 +42,92 @@ export function Section({
   );
 }
 
-export function CanCannot({
-  can,
-  cannot,
+const KIND: Record<
+  Point["kind"],
+  { label: string; icon: ComponentType<{ size?: number }>; cls: string }
+> = {
+  key: { label: "Key idea", icon: IconCheck, cls: "bg-accent-soft text-accent-ink" },
+  plus: { label: "Strength", icon: IconPlus, cls: "bg-good-soft text-good" },
+  minus: { label: "Watch out", icon: IconAlert, cls: "bg-warn-soft text-warn" },
+  default: { label: "Default", icon: IconSliders, cls: "bg-surface-2 text-ink-2" },
+};
+
+/** Key points: "keyword → meaning", readable at a glance. */
+export function KeyPoints({ points, compact }: { points: Point[]; compact?: boolean }) {
+  return (
+    <ul
+      className={cx(
+        "flex flex-col",
+        compact ? "gap-1.5" : "divide-y divide-line rounded-2xl border border-line bg-surface",
+      )}
+    >
+      {points.map((p) => {
+        const k = KIND[p.kind];
+        const Icon = k.icon;
+        return (
+          <li key={p.k} className={cx("flex items-start gap-3", compact ? "" : "px-4 py-3")}>
+            <span
+              className={cx("mt-0.5 grid h-6 w-6 flex-none place-items-center rounded-full", k.cls)}
+              title={k.label}
+            >
+              <Icon size={14} />
+              <span className="sr-only">{k.label}: </span>
+            </span>
+            <span className="min-w-0 leading-snug sm:flex sm:gap-2">
+              <strong className="block font-bold text-ink sm:inline sm:flex-none">
+                {renderInline(p.k)}
+              </strong>
+              <span className="hidden text-ink-3 sm:inline" aria-hidden="true">
+                →
+              </span>
+              <span className="text-ink-2">{renderInline(p.v)}</span>
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** The common wrong answer, and the right one, side by side. */
+export function Trap({
+  wrong,
+  right,
   compact,
 }: {
-  can?: ReactNode;
-  cannot?: ReactNode;
+  wrong: string;
+  right: string;
   compact?: boolean;
 }) {
-  if (!can && !cannot) return null;
   return (
-    <div className={cx("grid gap-3", !compact && "sm:grid-cols-2")}>
-      {can && (
-        <div className="rounded-2xl border border-line bg-surface p-4">
-          <p className="mb-2 flex items-center gap-2 font-display font-bold text-good">
-            <span className="grid h-6 w-6 place-items-center rounded-full bg-good-soft">
-              <IconCheck size={15} />
-            </span>
-            Can
-          </p>
-          <div className="prose-card text-[1rem] [&_ul>li::before]:border-good">{can}</div>
-        </div>
-      )}
-      {cannot && (
-        <div className="rounded-2xl border border-line bg-surface p-4">
-          <p className="mb-2 flex items-center gap-2 font-display font-bold text-bad">
-            <span className="grid h-6 w-6 place-items-center rounded-full bg-bad-soft">
-              <IconClose size={15} />
-            </span>
-            Cannot
-          </p>
-          <div className="prose-card text-[1rem] [&_ul>li::before]:border-bad">{cannot}</div>
-        </div>
-      )}
+    <div className={cx("grid gap-2", !compact && "sm:grid-cols-2")}>
+      <p className="flex gap-2.5 rounded-2xl border border-[color-mix(in_oklab,var(--bad)_35%,var(--line))] bg-bad-soft px-4 py-3 text-ink">
+        <span className="mt-0.5 grid h-6 w-6 flex-none place-items-center rounded-full bg-bad text-on-accent">
+          <IconClose size={14} />
+        </span>
+        <span>
+          <span className="block text-xs font-bold tracking-wider text-bad uppercase">Wrong</span>
+          {renderInline(wrong)}
+        </span>
+      </p>
+      <p className="flex gap-2.5 rounded-2xl border border-[color-mix(in_oklab,var(--good)_35%,var(--line))] bg-good-soft px-4 py-3 text-ink">
+        <span className="mt-0.5 grid h-6 w-6 flex-none place-items-center rounded-full bg-good text-on-accent">
+          <IconCheck size={14} />
+        </span>
+        <span>
+          <span className="block text-xs font-bold tracking-wider text-good uppercase">Right</span>
+          {renderInline(right)}
+        </span>
+      </p>
     </div>
   );
 }
 
-/** The label doubles as the section heading when `headingId` is given (no repeated titles). */
-function BoxLabel({
-  id,
-  className,
-  children,
-}: {
-  id?: string;
-  className: string;
-  children: ReactNode;
-}) {
-  return id ? (
-    <h2 id={id} className={cx(className, "scroll-mt-32 font-sans")}>
-      {children}
-    </h2>
-  ) : (
-    <p className={className}>{children}</p>
-  );
-}
-
-export function MistakeBox({ children, headingId }: { children: ReactNode; headingId?: string }) {
+export function SayIt({ text }: { text: string }) {
   return (
-    <div className="rounded-2xl border border-[color-mix(in_oklab,var(--warn)_45%,var(--line))] bg-warn-soft p-4">
-      <BoxLabel
-        id={headingId}
-        className="mb-1.5 flex items-center gap-2 text-sm font-bold tracking-wide text-warn uppercase"
-      >
-        <IconAlert size={17} /> Mistake alert: the common wrong answer
-      </BoxLabel>
-      <div className="prose-card">{children}</div>
-    </div>
-  );
-}
-
-export function SayItBox({ children, headingId }: { children: ReactNode; headingId?: string }) {
-  return (
-    <div className="relative rounded-2xl bg-accent-soft p-4 pl-12">
+    <blockquote className="relative rounded-2xl bg-accent-soft py-4 pr-4 pl-12 font-medium text-ink">
       <IconQuote size={22} className="absolute top-4 left-4 text-accent" />
-      <BoxLabel
-        id={headingId}
-        className="mb-1 text-sm font-bold tracking-wide text-accent-ink uppercase"
-      >
-        Say it like this
-      </BoxLabel>
-      <blockquote className="prose-card font-medium text-ink [&_p]:m-0">{children}</blockquote>
-    </div>
-  );
-}
-
-/** The Revise view of a card: rules, can/cannot, mistake, say-it. Hook is shown by the caller. */
-export function ReviseBody({ r, headingLevel = 3 }: { r: RenderedCard; headingLevel?: 2 | 3 }) {
-  const H = headingLevel === 2 ? "h2" : "h3";
-  return (
-    <div className="flex flex-col gap-4">
-      {r.rules && (
-        <div>
-          <H className="mb-2 text-base font-extrabold text-ink-2">Rules & defaults</H>
-          <div className="prose-card">{r.rules}</div>
-        </div>
-      )}
-      <CanCannot can={r.can} cannot={r.cannot} />
-      {r.mistake && <MistakeBox>{r.mistake}</MistakeBox>}
-      {r.sayIt && <SayItBox>{r.sayIt}</SayItBox>}
-    </div>
+      {text}
+    </blockquote>
   );
 }

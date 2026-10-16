@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import { getDeck, getDecks } from "@/lib/content";
 import { buildGraph } from "@/lib/content/graph";
 import { urls } from "@/lib/urls";
-import { ConceptMap } from "@/components/map/ConceptMap";
-import { Breadcrumbs } from "@/components/ui/Breadcrumbs";
+import { MapView } from "@/components/map/MapView";
+import { PageHeader } from "@/components/ui/Breadcrumbs";
 
 export const dynamicParams = false;
 
@@ -14,31 +14,27 @@ export function generateStaticParams() {
 export async function generateMetadata({ params }: PageProps<"/[tech]/map">): Promise<Metadata> {
   const { tech } = await params;
   const deck = getDeck(tech);
-  return { title: `Map (${deck.name})`, description: `How the ${deck.name} concepts connect.` };
+  return {
+    title: `Map (${deck.name})`,
+    description: `How the ${deck.name} concepts connect, and why.`,
+  };
 }
 
 export default async function MapPage({ params }: PageProps<"/[tech]/map">) {
   const { tech } = await params;
   const deck = getDeck(tech);
   return (
-    <div className="px-4 pt-5 pb-6 sm:px-6 lg:px-8">
-      <Breadcrumbs
-        items={[
+    <div className="px-4 pt-4 pb-8 sm:px-6 lg:px-10">
+      <PageHeader
+        crumbs={[
           { label: "Home", href: urls.home() },
-          { label: deck.name, href: urls.deck(tech) },
+          { label: deck.name, href: urls.overview(tech) },
           { label: "Map" },
         ]}
+        title="How it all connects"
+        lead="Pick a concept: see what leads to it, where it leads, and why. Tap any neighbour to walk the map."
       />
-      <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
-        <div>
-          <h1 className="text-3xl font-extrabold">Concept map</h1>
-          <p className="text-ink-2">
-            Prerequisites sit before what needs them. Tap a station to preview it; drag to pan,
-            pinch or use the buttons to zoom.
-          </p>
-        </div>
-      </div>
-      <ConceptMap tech={tech} data={buildGraph(deck)} />
+      <MapView data={buildGraph(deck)} />
     </div>
   );
 }

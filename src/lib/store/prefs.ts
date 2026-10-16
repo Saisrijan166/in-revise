@@ -8,13 +8,13 @@ import { useSyncExternalStore } from "react";
  * so server HTML never flashes the wrong mode or theme. These hooks read and update them.
  */
 
-export type Mode = "learn" | "revise" | "drill";
+export type Mode = "learn" | "revise" | "quiz";
 export type ThemePref = "light" | "dark" | "system";
 
 export const MODES: { value: Mode; label: string; hint: string }[] = [
-  { value: "learn", label: "Learn", hint: "Full card: why, how, example" },
-  { value: "revise", label: "Revise", hint: "Fast pass: rules, mistakes, one-liners" },
-  { value: "drill", label: "Drill", hint: "Self-test with flashcards" },
+  { value: "learn", label: "Learn", hint: "Everything: why, how, example, connections" },
+  { value: "revise", label: "Revise", hint: "Only the key points, the trap and the one-liner" },
+  { value: "quiz", label: "Quiz", hint: "Question first, tap to see the answer" },
 ];
 
 const MODE_KEY = "cm-mode";
@@ -37,7 +37,7 @@ function safeSet(key: string, value: string) {
 
 export function getMode(): Mode {
   const m = document.documentElement.dataset.mode;
-  return m === "revise" || m === "drill" ? m : "learn";
+  return m === "revise" || m === "quiz" ? m : "learn";
 }
 
 export function setMode(mode: Mode) {
@@ -98,4 +98,38 @@ export function watchSystemTheme(): () => void {
   };
   mq.addEventListener("change", onChange);
   return () => mq.removeEventListener("change", onChange);
+}
+
+/* ---------- Code language for Java / Python tabs ---------- */
+
+const LANG_KEY = "cm-code-lang";
+const langListeners = new Set<() => void>();
+let langCache: string | null = null;
+
+function readLang(): string {
+  if (langCache) return langCache;
+  try {
+    langCache = localStorage.getItem(LANG_KEY) || "java";
+  } catch {
+    langCache = "java";
+  }
+  return langCache;
+}
+
+export function setCodeLang(lang: string) {
+  langCache = lang;
+  safeSet(LANG_KEY, lang);
+  langListeners.forEach((l) => l());
+}
+
+/** The reader's preferred code language; every tab group follows it. Server HTML shows Java. */
+export function useCodeLang(): string {
+  return useSyncExternalStore(
+    (l) => {
+      langListeners.add(l);
+      return () => langListeners.delete(l);
+    },
+    readLang,
+    () => "java",
+  );
 }

@@ -26,10 +26,10 @@ const display = Bricolage_Grotesque({
 const code = JetBrains_Mono({ subsets: ["latin"], variable: "--font-code", display: "swap" });
 
 export const metadata: Metadata = {
-  title: { default: "Concept Map: understand, remember, answer", template: "%s · Concept Map" },
+  title: { default: "inrevise: interview revision that sticks", template: "%s · inrevise" },
   description:
-    "Short, connected concept cards for interview revision and first-time study. Learn, revise, and drill each technology as a map of ideas.",
-  applicationName: "Concept Map",
+    "Interview + revise. Every concept in one line, its types, its traps and how it connects. Learn once, revise in minutes.",
+  applicationName: "inrevise",
 };
 
 export const viewport: Viewport = {

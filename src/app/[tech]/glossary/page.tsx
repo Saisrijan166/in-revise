@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { getDeck, getDecks } from "@/lib/content";
 import { urls } from "@/lib/urls";
 import { GlossaryList, type GlossaryEntry } from "@/components/deck/GlossaryList";
-import { Breadcrumbs } from "@/components/ui/Breadcrumbs";
+import { PageHeader } from "@/components/ui/Breadcrumbs";
 
 export const dynamicParams = false;
 
@@ -30,25 +30,23 @@ export default async function GlossaryPage({ params }: PageProps<"/[tech]/glossa
       term: t.term,
       aka: t.aka,
       definition: t.definition,
-      seeHref: see ? urls.card(tech, see.meta.id) : undefined,
-      seeTitle: see ? `Card: ${see.meta.title}` : undefined,
+      seeHref: see ? urls.concept(tech, see.meta.id) : undefined,
+      seeTitle: see ? see.meta.title : undefined,
       sourceTitle: t.source.title,
       sourceUrl: t.source.url,
     };
   });
   return (
-    <div className="mx-auto max-w-4xl px-4 pt-5 pb-12 sm:px-6 lg:px-10">
-      <Breadcrumbs
-        items={[
+    <div className="mx-auto max-w-4xl px-4 pt-4 pb-12 sm:px-6 lg:px-10">
+      <PageHeader
+        crumbs={[
           { label: "Home", href: urls.home() },
-          { label: deck.name, href: urls.deck(tech) },
+          { label: deck.name, href: urls.overview(tech) },
           { label: "Glossary" },
         ]}
+        title="Glossary"
+        lead="Words an interviewer may use, in one line each. Terms inside concepts link here automatically."
       />
-      <h1 className="text-3xl font-extrabold sm:text-4xl">Glossary</h1>
-      <p className="mt-1 mb-4 text-ink-2">
-        Words an interviewer may use, in one line each. Terms inside cards link here automatically.
-      </p>
       <GlossaryList entries={entries} />
     </div>
   );

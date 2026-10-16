@@ -1,6 +1,6 @@
 /** Search index shape, shared by the build-time route and the client palette. */
 
-export type SearchKind = "card" | "compare" | "term";
+export type SearchKind = "card" | "node" | "compare" | "term";
 
 export interface SearchDoc {
   key: string;

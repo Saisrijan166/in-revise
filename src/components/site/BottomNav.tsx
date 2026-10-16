@@ -3,17 +3,19 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ComponentType } from "react";
-import { useUi } from "@/lib/store/ui";
+import { navStore, paletteStore } from "@/lib/store/ui";
 import { urls } from "@/lib/urls";
 import { cx } from "@/lib/ui";
-import { IconCards, IconHome, IconMap, IconSearch } from "@/components/ui/icons";
-import { useContextTech, type TechLite } from "./useCurrentTech";
+import { IconCards, IconHome, IconMap, IconSearch, IconTree } from "@/components/ui/icons";
+import { useContextTech, useCurrentTech, type TechLite } from "./useCurrentTech";
 
-/** Mobile tab bar (CLAUDE.md 5.4): Home, Map, Drill, Search. Hidden from md up. */
+/** Phone tab bar: Home, Topics (the tree), Map, Quiz, Search. Hidden from md up. */
 export function BottomNav({ techs }: { techs: TechLite[] }) {
   const pathname = usePathname() ?? "/";
+  const inTech = Boolean(useCurrentTech(techs));
   const tech = useContextTech(techs);
-  const paletteOpen = useUi((s) => s.paletteOpen);
+  const paletteOpen = paletteStore.use();
+  const navOpen = navStore.use();
 
   const tabs: {
     label: string;
@@ -23,6 +25,14 @@ export function BottomNav({ techs }: { techs: TechLite[] }) {
     onClick?: () => void;
   }[] = [
     { label: "Home", href: urls.home(), icon: IconHome, active: pathname === "/" },
+    inTech
+      ? { label: "Topics", icon: IconTree, active: navOpen, onClick: () => navStore.set(true) }
+      : {
+          label: "Topics",
+          href: tech ? urls.overview(tech.slug) : undefined,
+          icon: IconTree,
+          active: false,
+        },
     {
       label: "Map",
       href: tech ? urls.map(tech.slug) : undefined,
@@ -30,36 +40,36 @@ export function BottomNav({ techs }: { techs: TechLite[] }) {
       active: /\/map\/?$/.test(pathname),
     },
     {
-      label: "Drill",
-      href: tech ? urls.drill(tech.slug) : undefined,
+      label: "Quiz",
+      href: tech ? urls.quiz(tech.slug) : undefined,
       icon: IconCards,
-      active: /\/drill\/?$/.test(pathname),
+      active: /\/quiz\/?$/.test(pathname),
     },
     {
       label: "Search",
       icon: IconSearch,
       active: paletteOpen,
-      onClick: () => useUi.getState().setPaletteOpen(true),
+      onClick: () => paletteStore.set(true),
     },
   ];
 
   return (
     <nav
-      aria-label="Main"
+      aria-label="Bottom"
       className="no-print fixed inset-x-0 bottom-0 z-40 border-t border-line bg-[color-mix(in_oklab,var(--surface)_94%,transparent)] pb-[env(safe-area-inset-bottom)] backdrop-blur-md md:hidden"
     >
-      <ul className="mx-auto grid max-w-md grid-cols-4">
+      <ul className="mx-auto grid max-w-md grid-cols-5">
         {tabs.map((t) => {
           const Icon = t.icon;
           const inner = (
             <>
               <span
                 className={cx(
-                  "grid h-8 w-14 place-items-center rounded-full transition-colors",
-                  t.active ? "bg-accent-soft text-accent-ink" : "text-ink-3",
+                  "grid h-8 w-12 place-items-center rounded-full transition-colors",
+                  t.active ? "bg-accent text-on-accent" : "text-ink-3",
                 )}
               >
-                <Icon size={21} />
+                <Icon size={20} />
               </span>
               <span
                 className={cx("text-[0.72rem] font-semibold", t.active ? "text-ink" : "text-ink-3")}
@@ -76,7 +86,7 @@ export function BottomNav({ techs }: { techs: TechLite[] }) {
                   {inner}
                 </Link>
               ) : (
-                <button type="button" className={cls} onClick={t.onClick} aria-label="Search">
+                <button type="button" className={cls} onClick={t.onClick} aria-label={t.label}>
                   {inner}
                 </button>
               )}

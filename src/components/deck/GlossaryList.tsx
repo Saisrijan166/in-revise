@@ -33,7 +33,7 @@ export function GlossaryList({ entries }: { entries: GlossaryEntry[] }) {
 
   return (
     <div>
-      <div className="sticky top-[6.6rem] z-20 -mx-1 bg-bg px-1 pt-1 pb-3 lg:top-14">
+      <div className="sticky top-14 z-20 -mx-1 bg-bg px-1 pt-1 pb-3">
         <label className="flex min-h-12 items-center gap-2 rounded-2xl border-2 border-line bg-surface px-3 focus-within:border-accent">
           <IconSearch size={19} className="text-ink-3" />
           <span className="sr-only">Filter terms</span>
@@ -51,7 +51,7 @@ export function GlossaryList({ entries }: { entries: GlossaryEntry[] }) {
               <a
                 key={l}
                 href={`#letter-${l}`}
-                className="grid h-11 min-w-11 place-items-center rounded-lg border border-line bg-surface px-2 text-sm font-bold text-ink-2 hover:text-ink"
+                className="grid h-11 min-w-11 place-items-center rounded-lg border border-line bg-surface px-2 text-sm font-bold text-ink-2 hover:border-accent hover:text-ink"
               >
                 {l}
               </a>
@@ -69,28 +69,28 @@ export function GlossaryList({ entries }: { entries: GlossaryEntry[] }) {
         </p>
       )}
 
-      <div className="flex flex-col gap-8">
+      <div className="flex flex-col gap-6">
         {letters.map((l) => (
           <section
             key={l}
             id={`letter-${l}`}
             aria-labelledby={`letter-h-${l}`}
-            className="scroll-mt-48"
+            className="scroll-mt-44"
           >
             <h2
               id={`letter-h-${l}`}
-              className="mb-2 font-display text-2xl font-extrabold text-accent"
+              className="mb-1 font-display text-xl font-extrabold text-accent"
             >
               {l}
             </h2>
-            <dl className="flex flex-col gap-2">
+            <dl className="divide-y divide-line rounded-2xl border border-line bg-surface">
               {groups.get(l)!.map((e) => (
                 <div
                   key={e.id}
                   id={`term-${e.id}`}
-                  className="scroll-mt-48 rounded-2xl border border-line bg-surface p-4 target:border-accent target:ring-2 target:ring-accent/40"
+                  className="scroll-mt-44 px-4 py-3 target:bg-accent-soft"
                 >
-                  <dt className="font-display text-lg font-bold text-ink">
+                  <dt className="font-bold text-ink">
                     {e.term}
                     {e.aka.length > 0 && (
                       <span className="ml-2 text-sm font-semibold text-ink-3">
@@ -98,8 +98,8 @@ export function GlossaryList({ entries }: { entries: GlossaryEntry[] }) {
                       </span>
                     )}
                   </dt>
-                  <dd className="mt-1 text-ink-2">{e.definition}</dd>
-                  <dd className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                  <dd className="mt-0.5 text-ink-2">{e.definition}</dd>
+                  <dd className="mt-1 flex flex-wrap items-center gap-x-4 text-sm">
                     {e.seeHref && (
                       <Link
                         href={e.seeHref}
@@ -114,7 +114,7 @@ export function GlossaryList({ entries }: { entries: GlossaryEntry[] }) {
                       rel="noopener noreferrer"
                       className="inline-flex min-h-11 items-center text-ink-3 underline underline-offset-2 hover:text-ink"
                     >
-                      Source: {e.sourceTitle}
+                      Source
                     </a>
                   </dd>
                 </div>

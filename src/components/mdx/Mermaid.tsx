@@ -7,7 +7,7 @@ import { useResolvedTheme } from "@/lib/store/prefs";
  * Mermaid diagram, loaded lazily on the client only when it scrolls near the viewport.
  * Re-renders when the theme changes. The text alternative is always in the DOM.
  */
-export function Mermaid({ chart, alt }: { chart: string; alt: string }) {
+export function Mermaid({ chart, alt, bare }: { chart: string; alt: string; bare?: boolean }) {
   const box = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const [svg, setSvg] = useState<string | null>(null);
@@ -74,22 +74,31 @@ export function Mermaid({ chart, alt }: { chart: string; alt: string }) {
     };
   }, [visible, chart, theme, reactId]);
 
+  const drawing = (
+    <div
+      ref={box}
+      role="img"
+      aria-label={alt}
+      className={
+        bare
+          ? "flex min-h-[120px] items-center justify-center overflow-x-auto p-3 [&_svg]:h-auto [&_svg]:max-w-full"
+          : "flex min-h-[180px] items-center justify-center overflow-x-auto [&_svg]:h-auto [&_svg]:max-w-full"
+      }
+    >
+      {svg ? (
+        <div className="w-full [&>svg]:mx-auto" dangerouslySetInnerHTML={{ __html: svg }} />
+      ) : (
+        <p className="px-4 text-center text-sm text-ink-3">
+          {failed ? "Diagram could not load. The text version is below." : "Drawing diagram…"}
+        </p>
+      )}
+    </div>
+  );
+  if (bare) return drawing;
+
   return (
     <figure className="my-5 rounded-2xl border border-line bg-surface p-3 sm:p-4">
-      <div
-        ref={box}
-        role="img"
-        aria-label={alt}
-        className="flex min-h-[180px] items-center justify-center overflow-x-auto [&_svg]:h-auto [&_svg]:max-w-full"
-      >
-        {svg ? (
-          <div className="w-full [&>svg]:mx-auto" dangerouslySetInnerHTML={{ __html: svg }} />
-        ) : (
-          <p className="px-4 text-center text-sm text-ink-3">
-            {failed ? "Diagram could not load. The text version is below." : "Drawing diagram…"}
-          </p>
-        )}
-      </div>
+      {drawing}
       <figcaption className="mt-2 border-t border-line pt-2 text-sm text-ink-2">
         <details>
           <summary className="touch-target flex cursor-pointer items-center font-semibold text-ink-3 hover:text-ink">

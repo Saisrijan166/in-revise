@@ -22,6 +22,8 @@ export type Preview =
       glossaryHref: string;
       seeHref?: string;
       seeTitle?: string;
+      /** Label for the second link (defaults to "Glossary"). */
+      glossaryLabel?: string;
     };
 
 const canHover = () =>
@@ -125,7 +127,7 @@ export function PreviewLink({ preview, children }: { preview: Preview; children:
                 className="touch-target inline-flex items-center gap-1.5 rounded-xl bg-accent px-3 font-semibold text-on-accent"
                 onClick={() => setOpen(false)}
               >
-                Open card <IconArrowRight size={16} />
+                Open <IconArrowRight size={16} />
               </Link>
             </div>
           ) : (
@@ -141,7 +143,7 @@ export function PreviewLink({ preview, children }: { preview: Preview; children:
                     className="touch-target inline-flex items-center gap-1.5 rounded-xl bg-accent px-3 font-semibold text-on-accent"
                     onClick={() => setOpen(false)}
                   >
-                    {preview.seeTitle ?? "Open card"} <IconArrowRight size={16} />
+                    {preview.seeTitle ?? "Open"} <IconArrowRight size={16} />
                   </Link>
                 )}
                 <Link
@@ -149,7 +151,7 @@ export function PreviewLink({ preview, children }: { preview: Preview; children:
                   className="touch-target inline-flex items-center rounded-xl border border-line px-3 font-semibold text-ink-2 hover:text-ink"
                   onClick={() => setOpen(false)}
                 >
-                  Glossary
+                  {preview.glossaryLabel ?? "Glossary"}
                 </Link>
               </div>
             </div>

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Dialog } from "radix-ui";
 import { useEffect, useId, useMemo, useRef, useState, type ComponentType } from "react";
 import { SEARCH_INDEX_URL, SEARCH_KEYS, type SearchDoc, type SearchKind } from "@/lib/search";
-import { useUi } from "@/lib/store/ui";
+import { paletteStore } from "@/lib/store/ui";
 import { urls } from "@/lib/urls";
 import { cx } from "@/lib/ui";
 import {
@@ -15,6 +15,7 @@ import {
   IconMap,
   IconSearch,
   IconSheet,
+  IconTree,
 } from "@/components/ui/icons";
 import { useContextTech, type TechLite } from "./useCurrentTech";
 
@@ -43,12 +44,14 @@ function loadIndex() {
 }
 
 const KIND_LABEL: Record<SearchKind, string> = {
-  card: "Cards",
+  card: "Concepts",
+  node: "Types and parts",
   compare: "Comparisons",
   term: "Glossary",
 };
 const KIND_ICON: Record<SearchKind, ComponentType<{ size?: number; className?: string }>> = {
   card: IconCards,
+  node: IconTree,
   compare: IconColumns,
   term: IconBook,
 };
@@ -63,8 +66,8 @@ interface Item {
 }
 
 export function CommandPalette({ techs }: { techs: TechLite[] }) {
-  const open = useUi((s) => s.paletteOpen);
-  const setOpen = useUi((s) => s.setPaletteOpen);
+  const open = paletteStore.use();
+  const setOpen = paletteStore.set;
   const router = useRouter();
   const tech = useContextTech(techs);
   const [query, setQuery] = useState("");
@@ -91,32 +94,40 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
         ? [
             {
               key: "q-map",
-              title: "Concept map",
-              sub: tech.name,
+              title: "Map",
+              sub: `${tech.name}: how ideas connect`,
               href: urls.map(tech.slug),
               group: "Go to",
               icon: IconMap,
             },
             {
-              key: "q-drill",
-              title: "Drill flashcards",
-              sub: tech.name,
-              href: urls.drill(tech.slug),
+              key: "q-tree",
+              title: "Tree",
+              sub: `${tech.name}: all types and subtypes`,
+              href: urls.tree(tech.slug),
               group: "Go to",
-              icon: IconCards,
+              icon: IconTree,
             },
             {
               key: "q-sheet",
-              title: "Cheat sheets",
-              sub: tech.name,
-              href: urls.cheatsheetIndex(tech.slug),
+              title: "Cheat sheet",
+              sub: `${tech.name} on one page`,
+              href: urls.cheatsheet(tech.slug),
               group: "Go to",
               icon: IconSheet,
             },
             {
+              key: "q-quiz",
+              title: "Quiz",
+              sub: `${tech.name}: test yourself`,
+              href: urls.quiz(tech.slug),
+              group: "Go to",
+              icon: IconCards,
+            },
+            {
               key: "q-gloss",
               title: "Glossary",
-              sub: tech.name,
+              sub: `${tech.name}: terms in one line`,
               href: urls.glossary(tech.slug),
               group: "Go to",
               icon: IconBook,
@@ -131,14 +142,14 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
           title: d.title,
           sub: d.text,
           href: d.href,
-          group: "Cards",
+          group: "Concepts",
           icon: IconCards,
         }));
       return [...quick, ...cards];
     }
     if (!data) return [];
     const hits = data.fuse.search(q, { limit: 24 }).map((r) => r.item);
-    const order: SearchKind[] = ["card", "compare", "term"];
+    const order: SearchKind[] = ["card", "node", "compare", "term"];
     return order.flatMap((kind) =>
       hits
         .filter((d) => d.kind === kind)
@@ -199,7 +210,7 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
                 setActive(0);
               }}
               onKeyDown={onKeyDown}
-              placeholder="Search cards, comparisons, terms…"
+              placeholder="Search concepts, types, terms…"
               className="min-h-14 w-full bg-transparent text-base text-ink outline-none placeholder:text-ink-3"
               role="combobox"
               aria-expanded={items.length > 0}
@@ -242,7 +253,7 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
                     onClick={() => go(item)}
                     className={cx(
                       "flex min-h-12 cursor-pointer items-start gap-3 rounded-xl px-3 py-2.5",
-                      i === active ? "bg-accent-soft" : "hover:bg-surface-2",
+                      i === active ? "bg-accent-soft ring-1 ring-accent/60" : "hover:bg-surface-2",
                     )}
                   >
                     <Icon

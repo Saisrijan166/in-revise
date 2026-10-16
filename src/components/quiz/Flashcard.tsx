@@ -39,7 +39,7 @@ export function Flashcard({
           <span className="my-auto block py-4 font-display text-xl leading-snug font-bold text-ink sm:text-2xl">
             {front}
           </span>
-          <span className="text-sm font-semibold text-accent-ink">Tap to reveal the answer</span>
+          <span className="text-sm font-semibold text-accent-ink">Tap to see the answer</span>
         </button>
         <div
           aria-hidden={!flipped}

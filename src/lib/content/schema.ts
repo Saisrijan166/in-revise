@@ -1,8 +1,8 @@
 import { z } from "zod";
 
 /**
- * Content schema. Mirrors CLAUDE.md Section 3. Shared by the site loader and
- * scripts/validate-content.ts, so the build and the validator can never disagree.
+ * Content schema (template v2, Phase 2). Mirrors CLAUDE.md Section 3. Shared by the site loader
+ * and scripts/validate-content.ts, so the build and the validator can never disagree.
  */
 
 export const LEVELS = ["beginner", "intermediate", "interview"] as const;
@@ -10,32 +10,48 @@ export const VISUALS = ["flow", "table", "analogy", "code", "none"] as const;
 /** Accent names with tuned light/dark values in src/app/globals.css. */
 export const ACCENTS = ["blue", "orange", "green", "violet", "rose", "teal", "amber"] as const;
 
+/** Kinds of key point. Each gets its own marker so a page can be scanned, not read. */
+export const POINT_KINDS = ["key", "plus", "minus", "default"] as const;
+
+/**
+ * Relation types: how two concepts relate in practice (CLAUDE.md 3.4).
+ * Read as a sentence: "<from> <label> <to>", for example "Scale out needs Load balancer".
+ */
+export const RELATION_TYPES = {
+  needs: { label: "needs" },
+  uses: { label: "uses" },
+  solves: { label: "solves" },
+  causes: { label: "can cause" },
+  limits: { label: "limits" },
+  vs: { label: "vs" },
+  pairs: { label: "works with" },
+} as const;
+export type RelationType = keyof typeof RELATION_TYPES;
+
 export type Level = (typeof LEVELS)[number];
 export type Visual = (typeof VISUALS)[number];
 export type Accent = (typeof ACCENTS)[number];
+export type PointKind = (typeof POINT_KINDS)[number];
 
-export const LEVEL_RANK: Record<Level, number> = { beginner: 0, intermediate: 1, interview: 2 };
-
-/** Body sections a card may have, in display order. `##` heading text must match exactly. */
+/** Body sections a concept may have, in display order. `##` heading text must match exactly. */
 export const SECTION_DEFS = [
   { key: "why", heading: "Why it exists", required: true },
   { key: "how", heading: "How it works", required: true },
   { key: "analogy", heading: "Analogy", required: false },
   { key: "example", heading: "Example", required: false },
-  { key: "rules", heading: "Rules & defaults", required: false },
-  { key: "canCannot", heading: "Can / Cannot", required: false },
+  { key: "defaults", heading: "Defaults", required: false },
   { key: "questions", heading: "Interview Qs", required: true },
-  { key: "mistake", heading: "Mistake alert", required: false },
-  { key: "sayIt", heading: "Say it like this", required: false },
 ] as const;
 
 export type SectionKey = (typeof SECTION_DEFS)[number]["key"];
 
-/** MDX components authors may use inside cards. Anything else fails validation. */
-export const ALLOWED_COMPONENTS = ["Analogy", "Steps", "Step", "Mermaid", "Note"] as const;
+/** MDX components authors may use inside concepts. Anything else fails validation. */
+export const ALLOWED_COMPONENTS = ["Analogy", "Steps", "Step", "Mermaid", "Note", "Compare"] as const;
 
-/** Route segments a tech slug must not use (they are top-level routes). */
-export const RESERVED_SLUGS = ["progress", "search-index.json", "_next", "404"];
+/** Route segments a tech slug must not use (top-level routes). */
+export const RESERVED_SLUGS = ["search-index.json", "_next", "404", "icon.svg"];
+/** Route segments a concept id must not use (they are pages inside a tech). */
+export const RESERVED_CONCEPT_IDS = ["map", "tree", "compare", "cheatsheet", "quiz", "glossary"];
 
 const kebab = z
   .string()
@@ -54,7 +70,30 @@ export const sourceSchema = z
   })
   .strict();
 
-const idList = z.array(kebab).default([]);
+const oneLine = (max: number) =>
+  z
+    .string()
+    .min(2)
+    .max(max, `keep it short (max ${max} characters)`)
+    .refine((s) => !s.includes("\n"), "must be one line");
+
+export const pointSchema = z
+  .object({
+    k: oneLine(30),
+    v: oneLine(80),
+    kind: z.enum(POINT_KINDS).default("key"),
+  })
+  .strict();
+
+export const relationSchema = z
+  .object({
+    /** Defaults to the concept itself. Any concept-tree node id. */
+    from: kebab.optional(),
+    to: kebab,
+    type: z.enum(Object.keys(RELATION_TYPES) as [RelationType, ...RelationType[]]),
+    why: oneLine(100),
+  })
+  .strict();
 
 export const cardMetaSchema = z
   .object({
@@ -64,14 +103,15 @@ export const cardMetaSchema = z
     topic: kebab,
     level: z.enum(LEVELS),
     heat: z.int().min(1).max(3),
-    hook: z.string().min(10).max(170),
-    needs: idList,
-    leadsTo: idList,
-    related: idList,
-    confusedWith: idList,
+    hook: oneLine(170),
+    points: z.array(pointSchema).min(3, "give 3–6 key points").max(6, "give 3–6 key points"),
+    trap: z.object({ wrong: oneLine(120), right: oneLine(160) }).strict().optional(),
+    sayIt: oneLine(280).optional(),
+    relations: z.array(relationSchema).min(1, "add at least one relation (How it connects)"),
+    confusedWith: z.array(kebab).default([]),
     tags: z.array(z.string().min(1)).default([]),
     visual: z.enum(VISUALS),
-    sources: z.array(sourceSchema).min(1, "every card needs at least one source"),
+    sources: z.array(sourceSchema).min(1, "every concept needs at least one source"),
   })
   .strict();
 
@@ -90,9 +130,15 @@ export const comparisonSchema = z
     id: kebab,
     tech: kebab,
     title: z.string().min(3).max(70),
+    /** Concept-tree node ids (a concept or a type inside one). */
     compares: z.array(kebab).min(2).max(4),
+    /** One short line per side, shown before you open the comparison. */
+    gist: z.array(oneLine(70)),
+    /** Optional mini diagram per side (Mermaid), with one text alternative for all of them. */
+    diagrams: z.array(z.string().min(10)).optional(),
+    diagramAlt: z.string().min(10).optional(),
     rows: z.array(compareRow).min(3, "use 3–7 rows").max(7, "use 3–7 rows"),
-    verdict: z.string().min(10).max(220),
+    verdict: oneLine(220),
     sources: z.array(sourceSchema).min(1),
   })
   .strict();
@@ -102,7 +148,7 @@ const spineStep = z.union([
   z
     .object({
       step: z.string().min(5),
-      cards: idList,
+      cards: z.array(kebab).default([]),
     })
     .strict(),
 ]);
@@ -129,6 +175,35 @@ export const techSchema = z
   })
   .strict();
 
+/** A node of the concept tree: a concept (card), a type of one, or a grouping label. */
+export interface TreeNodeInput {
+  id: string;
+  label?: string;
+  note?: string;
+  term?: string;
+  children?: TreeNodeInput[];
+}
+
+export const treeNodeSchema: z.ZodType<TreeNodeInput> = z.lazy(() =>
+  z
+    .object({
+      id: kebab,
+      label: z.string().min(1).max(60).optional(),
+      note: oneLine(80).optional(),
+      term: kebab.optional(),
+      children: z.array(treeNodeSchema).optional(),
+    })
+    .strict(),
+);
+
+export const treeSchema = z
+  .object({
+    sources: z.array(sourceSchema).min(1),
+    /** Topic id → nodes, for every topic in _tech.yaml. */
+    topics: z.record(kebab, z.array(treeNodeSchema).min(1)),
+  })
+  .strict();
+
 export const glossarySchema = z
   .object({
     terms: z.array(
@@ -137,11 +212,7 @@ export const glossarySchema = z
           id: kebab,
           term: z.string().min(1),
           aka: z.array(z.string().min(1)).default([]),
-          definition: z
-            .string()
-            .min(5)
-            .max(200, "keep definitions to one line (max 200 chars)")
-            .refine((s) => !s.includes("\n"), "definition must be one line"),
+          definition: oneLine(200),
           see: kebab.optional(),
           source: sourceSchema,
         })
@@ -152,6 +223,8 @@ export const glossarySchema = z
 
 export type Source = z.infer<typeof sourceSchema>;
 export type CardMeta = z.infer<typeof cardMetaSchema>;
+export type Point = z.infer<typeof pointSchema>;
+export type Relation = z.infer<typeof relationSchema>;
 export type ComparisonData = z.infer<typeof comparisonSchema>;
 export type TechData = z.infer<typeof techSchema>;
 export type GlossaryTerm = z.infer<typeof glossarySchema>["terms"][number];

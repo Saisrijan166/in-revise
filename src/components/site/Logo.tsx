@@ -1,4 +1,4 @@
-/** Concept Map mark: two lines meeting at an interchange station. */
+/** inrevise mark: two lines meeting at an interchange, the way concepts connect. */
 export function LogoMark({ size = 30 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
@@ -24,12 +24,19 @@ export function LogoMark({ size = 30 }: { size?: number }) {
   );
 }
 
-export function Wordmark() {
+/** "inrevise" = interview + revise. `compact` hides the word on small screens (mark only). */
+export function Wordmark({ compact }: { compact?: boolean }) {
   return (
     <span className="flex items-center gap-2">
       <LogoMark />
-      <span className="font-display text-[1.15rem] leading-none font-extrabold tracking-tight text-ink">
-        concept<span className="text-accent">·</span>map
+      <span
+        className={
+          compact
+            ? "hidden font-display text-[1.2rem] leading-none font-extrabold tracking-tight text-ink sm:inline"
+            : "font-display text-[1.2rem] leading-none font-extrabold tracking-tight text-ink"
+        }
+      >
+        <span className="text-accent">in</span>revise
       </span>
     </span>
   );
