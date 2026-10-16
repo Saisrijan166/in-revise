@@ -62,7 +62,8 @@ export function remarkTerms(options: { matchers: TermMatcher[]; seen: Set<string
     for (const m of matchers) {
       if (seen.has(m.id)) continue;
       const hit = m.regex.exec(value);
-      if (hit && (!best || hit.index < best.index))
+      // Earliest match wins; at the same place the longer one does ("idempotency key" over "idempotency").
+      if (hit && (!best || hit.index < best.index || (hit.index === best.index && hit[0].length > best.length)))
         best = { index: hit.index, length: hit[0].length, id: m.id };
     }
     if (!best) return null;

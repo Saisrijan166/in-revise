@@ -65,7 +65,7 @@ export default async function OverviewPage({ params }: PageProps<"/[tech]">) {
 
       <section aria-labelledby="story" className="mt-10">
         <h2 id="story" className="text-2xl font-extrabold">
-          The story in 10 stops
+          The story in {deck.spine.length} stops
         </h2>
         <p className="mt-1 mb-4 text-ink-2">
           Each stop is a problem and the idea that fixes it. Read it once and the whole tech hangs

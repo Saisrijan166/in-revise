@@ -545,7 +545,14 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
   const comparisonById = new Map(comparisons.map((c) => [c.id, c]));
   const pairKey = (a: string, b: string) => [a, b].sort().join("|");
   const comparisonByPair = new Map<string, string>();
-  for (const c of comparisons) if (c.compares.length === 2) comparisonByPair.set(pairKey(c.compares[0], c.compares[1]), c.id);
+  // Every pair inside a comparison links to it; a 2-item comparison wins over a wider one.
+  for (const c of [...comparisons].sort((a, b) => a.compares.length - b.compares.length)) {
+    c.compares.forEach((a, i) =>
+      c.compares.slice(i + 1).forEach((b) => {
+        if (!comparisonByPair.has(pairKey(a, b))) comparisonByPair.set(pairKey(a, b), c.id);
+      }),
+    );
+  }
 
   // Relations, from each concept's frontmatter.
   const relations: ResolvedRelation[] = [];

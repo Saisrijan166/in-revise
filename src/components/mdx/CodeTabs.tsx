@@ -14,6 +14,7 @@ const LABEL: Record<string, string> = {
   bash: "Shell",
   yaml: "YAML",
   nginx: "nginx",
+  proto: "Protobuf",
   text: "Text",
 };
 
