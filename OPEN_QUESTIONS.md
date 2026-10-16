@@ -70,12 +70,13 @@ Applied, and written into CLAUDE.md (CLAUDE.md is not tracked in git: the global
 | D2.11 | Retry amplification | Uses the Google SRE example (3 retries over 3 layers = 64×), not the ambiguous Builders' Library wording |
 | D2.12 | Prometheus defaults | Labelled 3.15 (the docs version linked from the page) |
 | D2.13 | "Auto-increment reveals how many rows exist" | Backed by ByteByteGo and OWASP ("enumerable identifiers"), not by a vendor doc |
+| D2.14 | Write-around as a named strategy | No vendor doc names it; it rests on Wikipedia ("no-write allocate", also called write around) and ByteByteGo. Added 16-10-2026 at the owner's request; the six strategy names (Cache-Aside (Lazy Loading), Read-Through, Refresh-Ahead, Write-Through, Write-Behind (Write-Back), Write-Around) follow Oracle Coherence, AWS and Wikipedia |
 
 ### D3. Dropped (could not be confirmed from a primary source)
 
 - Modern SSD latency numbers and single-server QPS figures (only Jeff Dean's 2009 list is used).
 - A fixed gRPC default deadline (it is language-specific); Consul's DNS port as a default.
-- Amazon ElastiCache's default eviction policy (sources conflict); "write-around" as a named strategy; the "two hard things" quote.
+- Amazon ElastiCache's default eviction policy (sources conflict); the "two hard things" quote.
 - Default consistency levels of cqlsh and Cosmos DB; Spanner using 2PC over Paxos groups; ULID.
 - The 3-2-1 backup rule; Aurora failover numbers; AWS SDK retry numbers (they need an opt-in flag until they become the default).
 - The JVM's positive DNS cache default; pull CDNs as "most common".
