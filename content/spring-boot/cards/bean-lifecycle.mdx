@@ -1,0 +1,120 @@
+---
+id: bean-lifecycle
+tech: spring-boot
+title: Bean Lifecycle
+topic: beans-di
+level: intermediate
+heat: 3
+hook: "Spring creates the bean, injects it, runs its init callbacks, hands it out, and runs its destroy callbacks on shutdown. BeanPostProcessors hook in around init."
+points:
+  - { k: "Order", v: "construct, inject, Aware, init, ready, destroy" }
+  - { k: "Init order", v: "@PostConstruct, then afterPropertiesSet(), then initMethod" }
+  - { k: "Destroy order", v: "@PreDestroy, then destroy(), then destroyMethod" }
+  - { k: "BeanPostProcessor", v: "runs before and after each bean's init; AOP proxies come here" }
+  - { k: "Prototype beans", v: "Spring never calls their destroy callbacks", kind: minus }
+  - { k: "Changed in Spring Boot 4.0", v: "javax.annotation.PostConstruct is ignored; use jakarta.annotation" }
+trap:
+  wrong: "Field-injected dependencies can be used inside the constructor."
+  right: "Fields are injected after the constructor returns, so they are still null there. Use constructor injection, or do the setup in @PostConstruct."
+sayIt: "Spring instantiates the bean, injects it, calls Aware methods, then runs BeanPostProcessors around the init callbacks: @PostConstruct, afterPropertiesSet, init method. AOP proxies are made after init. On shutdown it runs @PreDestroy, destroy and the destroy method."
+relations:
+  - { from: aop-proxies, to: bean-post-processor, type: uses, why: "An auto-proxy creator, itself a BeanPostProcessor, wraps advised beans after init." }
+  - { from: autowired-annotation, to: bean-post-processor, type: needs, why: "AutowiredAnnotationBeanPostProcessor is what performs @Autowired injection." }
+  - { from: post-construct, to: dependency-injection, type: needs, why: "It runs right after all dependencies are injected, so they are safe to use." }
+  - { from: aware-interfaces, to: inversion-of-control, type: limits, why: "Asking the container for things couples code to Spring and breaks the IoC style." }
+  - { from: bean-factory-post-processor, to: externalized-configuration, type: uses, why: "PropertySourcesPlaceholderConfigurer fills ${...} placeholders from the Environment." }
+confusedWith: [beanpostprocessor-vs-beanfactorypostprocessor]
+tags: [lifecycle, postconstruct, predestroy, beanpostprocessor]
+visual: flow
+sources:
+  - title: "Customizing the Nature of a Bean: lifecycle callbacks and their order (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/beans/factory-nature.html"
+    verifiedOn: "2026-10-17"
+  - title: "BeanFactory: standard order of initialization and shutdown methods (Spring Framework 7.0.9 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/beans/factory/BeanFactory.html"
+    verifiedOn: "2026-10-17"
+  - title: "Container Extension Points: BeanPostProcessor, BeanFactoryPostProcessor (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/beans/factory-extension.html"
+    verifiedOn: "2026-10-17"
+  - title: "AbstractAutoProxyCreator.postProcessAfterInitialization (Spring Framework 7.0.9 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/aop/framework/autoproxy/AbstractAutoProxyCreator.html"
+    verifiedOn: "2026-10-17"
+  - title: "Autowired: fields are injected right after construction (Spring Framework 7.0.9 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/beans/factory/annotation/Autowired.html"
+    verifiedOn: "2026-10-17"
+  - title: "Bean Scopes: prototype destruction callbacks are not called (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Framework 7.0 Release Notes: javax.annotation no longer supported (GitHub wiki)"
+    url: "https://github.com/spring-projects/spring-framework/wiki/Spring-Framework-7.0-Release-Notes"
+    verifiedOn: "2026-10-17"
+  - title: "SpringApplication: application exit and the JVM shutdown hook (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/features/spring-application.html"
+    verifiedOn: "2026-10-17"
+  - title: "Common Application Properties: spring.main.register-shutdown-hook (Spring Boot 4.1)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-17"
+  - title: "82 Spring Interview Questions: bean lifecycle, BeanPostProcessor vs BeanFactoryPostProcessor (TechPrep)"
+    url: "https://www.techprep.app/blog/spring-interview-questions"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+Some beans need setup after their dependencies arrive, such as opening a pool, and cleanup before the app stops. Lifecycle callbacks give fixed places for both, and let Spring add proxies.
+
+## How it works
+
+<Mermaid
+  alt="Bean lifecycle, top to bottom. 1: instantiate, the constructor runs. 2: inject setters and fields. 3: Aware callbacks such as setBeanName and setApplicationContext. 4: BeanPostProcessors run before init. 5: init callbacks, in order @PostConstruct, afterPropertiesSet, then the custom init method. 6: BeanPostProcessors run after init; AOP proxies are made here. 7: the bean is in use. 8: when the context closes, destroy callbacks run in order @PreDestroy, destroy, then the custom destroy method."
+  chart={`flowchart TD
+  A["1. Instantiate: constructor runs"] --> B["2. Inject setters and fields"]
+  B --> C["3. Aware: setBeanName, setApplicationContext"]
+  C --> D["4. BeanPostProcessor: before init"]
+  D --> E["5. Init: @PostConstruct, afterPropertiesSet(), initMethod"]
+  E --> F["6. BeanPostProcessor: after init (AOP proxy)"]
+  F --> G(["7. Bean in use"])
+  G -- "context closes" --> H["8. Destroy: @PreDestroy, destroy(), destroyMethod"]`}
+/>
+
+- Prefer `@PostConstruct` and `@PreDestroy`; the Spring interfaces tie your class to Spring.
+- Keep init callbacks small. For heavy start-up work, listen for `ContextRefreshedEvent` or use `SmartInitializingSingleton`.
+- A `BeanFactoryPostProcessor` runs earlier still: it edits bean definitions before any regular bean exists.
+
+## Example
+
+```java
+import jakarta.annotation.PostConstruct;      // jakarta, not javax
+import jakarta.annotation.PreDestroy;
+
+@Component
+public class FileArchiver {
+    private final ArchiveProperties props;
+    private ExecutorService pool;
+
+    FileArchiver(ArchiveProperties props) { this.props = props; }
+
+    @PostConstruct                            // dependencies are ready here
+    void start() { pool = Executors.newFixedThreadPool(props.threads()); }
+    @PreDestroy                               // runs when the context closes
+    void stop() { pool.shutdown(); }
+}
+```
+
+## Interview Qs
+
+### Explain the Spring bean lifecycle.
+
+Instantiate, inject dependencies, call Aware methods, run BeanPostProcessors before init, run the init callbacks, run BeanPostProcessors after init, where AOP proxies are made, use the bean, then run the destroy callbacks when the context closes.
+
+### BeanPostProcessor vs BeanFactoryPostProcessor?
+
+A BeanFactoryPostProcessor changes bean definitions before any regular bean is created, for example filling `${...}` placeholders. A BeanPostProcessor works on each bean instance around its init callbacks, for example to inject @Autowired fields or wrap the bean in a proxy.
+
+### Why is @PreDestroy not called on my bean?
+
+Either the bean is a prototype, whose destroy callbacks Spring never calls, or the context was not closed. Spring Boot registers a JVM shutdown hook by default, so a normal shutdown closes the context.
+
+### Which init callback should you use?
+
+@PostConstruct, with @PreDestroy for cleanup; the Spring docs call them best practice. InitializingBean and DisposableBean work but tie the class to Spring. initMethod and destroyMethod on @Bean suit library classes you cannot annotate.

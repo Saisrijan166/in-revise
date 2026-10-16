@@ -1,0 +1,124 @@
+---
+id: openfeign
+tech: spring-boot
+title: Declarative HTTP Clients with OpenFeign
+topic: spring-cloud
+level: intermediate
+heat: 3
+hook: "Write an interface with @FeignClient and Spring MVC annotations; Spring Cloud generates the HTTP client. It is feature-complete; new code can use HTTP Service Clients."
+points:
+  - { k: "@FeignClient(\"orders\")", v: "the name is the service id used for load balancing" }
+  - { k: "@EnableFeignClients", v: "scans packages for the client interfaces" }
+  - { k: "Timeouts", v: "Feign's own: 10 s connect, 60 s read", kind: default }
+  - { k: "Retries", v: "off: Spring Cloud sets Retryer.NEVER_RETRY", kind: default }
+  - { k: "Fallbacks", v: "need spring.cloud.openfeign.circuitbreaker.enabled=true" }
+  - { k: "Status", v: "feature-complete: no new features planned", kind: minus }
+trap:
+  wrong: "A Feign client retries failed calls and uses its fallback out of the box."
+  right: "Spring Cloud sets Retryer.NEVER_RETRY, and a fallback runs only with Spring Cloud CircuitBreaker on the classpath and the circuitbreaker property on."
+sayIt: "OpenFeign turns an annotated interface into an HTTP client, load-balanced by service name. Because the project is feature-complete, for new code I use Spring's HTTP Service Clients with @HttpExchange, which Spring Cloud can load-balance too."
+relations:
+  - { to: spring-cloud-loadbalancer, type: uses, why: "Without a url, the client name is resolved to an instance by LoadBalancer." }
+  - { from: feign-fallback, to: resilience4j, type: needs, why: "A fallback runs only when Spring Cloud CircuitBreaker wraps the calls." }
+  - { from: feign-client-annotation, to: request-mapping, type: uses, why: "Its methods reuse Spring MVC annotations like @GetMapping and @PathVariable." }
+  - { from: cloud-http-service-clients, to: http-clients, type: uses, why: "The interfaces run on RestClient or WebClient from Spring Framework." }
+  - { from: cloud-http-service-clients, to: spring-cloud-loadbalancer, type: uses, why: "A group with no base URL calls its group name as a service id." }
+confusedWith: [openfeign-vs-http-service-clients]
+tags: [spring-cloud, http-client, feign, microservices]
+visual: flow
+sources:
+  - title: "Spring Cloud OpenFeign 5.0.3 reference"
+    url: "https://docs.spring.io/spring-cloud-openfeign/reference/spring-cloud-openfeign.html"
+    verifiedOn: "2026-10-17"
+  - title: "Request.java: Options defaults (OpenFeign source, GitHub)"
+    url: "https://github.com/OpenFeign/feign/blob/master/core/src/main/java/feign/Request.java"
+    verifiedOn: "2026-10-17"
+  - title: "FeignClientFactoryBean.java: options fall back to Feign defaults (Spring Cloud OpenFeign source, GitHub)"
+    url: "https://github.com/spring-cloud/spring-cloud-openfeign/blob/main/spring-cloud-openfeign-core/src/main/java/org/springframework/cloud/openfeign/FeignClientFactoryBean.java"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Cloud LoadBalancer: HTTP Service Clients integration (Spring Cloud Commons 5.0.3)"
+    url: "https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/loadbalancer.html"
+    verifiedOn: "2026-10-17"
+  - title: "REST Clients: HTTP Service Clients (Spring Framework 7.0.9 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/integration/rest-clients.html"
+    verifiedOn: "2026-10-17"
+  - title: "Calling REST Services: HTTP Service Interface Clients (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/io/rest-client.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Cloud Interview Questions: Feign client (interviewprep.org)"
+    url: "https://interviewprep.org/spring-cloud-interview-questions/"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+Calling another service with a hand-built HTTP request repeats URLs, encoding and error handling in every call. Feign lets you declare the remote API once, as a Java interface.
+
+## How it works
+
+<Mermaid
+  alt="OpenFeign flow. OrderService calls client.getOrder(42) on the OrdersClient interface. A generated Feign proxy turns it into an HTTP request. Spring Cloud LoadBalancer resolves the service id orders to an instance, which receives GET /orders/42."
+  chart={`flowchart LR
+  S[OrderService] -- "client.getOrder(42)" --> P[Feign proxy for OrdersClient]
+  P -- "service id: orders" --> LB[Spring Cloud LoadBalancer]
+  LB -- "GET /orders/42" --> I[orders instance]`}
+/>
+
+- Settings per client live under `spring.cloud.openfeign.client.config.<name>`; use `default` for all clients.
+- Fallbacks: `fallback` (a bean implementing the interface) or `fallbackFactory` (to see the cause), once circuit breaking is on.
+- The OpenFeign docs call the project feature-complete and suggest Spring HTTP Service Clients ([compare](compare:openfeign-vs-http-service-clients)).
+
+## Example
+
+Add `spring-cloud-starter-openfeign` and put `@EnableFeignClients` on the main class:
+
+```java
+@FeignClient(name = "orders", fallback = OrdersFallback.class)
+public interface OrdersClient {
+    @GetMapping("/orders/{id}")
+    Order getOrder(@PathVariable Long id);
+}
+
+@Component
+class OrdersFallback implements OrdersClient {
+    @Override
+    public Order getOrder(Long id) {
+        return Order.unknown(id);   // the call failed or the circuit is open
+    }
+}
+```
+
+Tune one client and switch on circuit breaking:
+
+```properties
+spring.cloud.openfeign.client.config.orders.connect-timeout=2000
+spring.cloud.openfeign.client.config.orders.read-timeout=5000
+spring.cloud.openfeign.circuitbreaker.enabled=true
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Connect / read timeout | 10 s / 60 s (Feign `Request.Options`) | When nothing is configured |
+| Retries | None (`Retryer.NEVER_RETRY`) | Spring Cloud OpenFeign 5.0 |
+| Logger level | `NONE` | Spring Cloud OpenFeign 5.0 |
+| Circuit breaker | Off | Spring Cloud OpenFeign 5.0 |
+
+## Interview Qs
+
+### What is Feign, and how is it different from RestClient?
+
+Feign is declarative: you write an interface and Spring Cloud generates the client. With RestClient you build each request in code. Spring's HTTP Service Clients bring the same interface style to RestClient itself.
+
+### How does a Feign client find the service?
+
+The @FeignClient name is a service id. When no url is set, Spring Cloud LoadBalancer resolves it to an instance from discovery, such as Eureka, round robin by default.
+
+### How do you add a fallback to a Feign client?
+
+Set spring.cloud.openfeign.circuitbreaker.enabled=true with a Spring Cloud CircuitBreaker implementation such as Resilience4j. Then point fallback to a bean that implements the interface, or fallbackFactory to also get the exception.
+
+### Should a new project use OpenFeign?
+
+Its docs call it feature-complete and suggest Spring HTTP Service Clients (@HttpExchange), which support blocking and reactive stacks and, since Spring Cloud 2025.1, load balancing. Keeping Feign where it already works is fine.

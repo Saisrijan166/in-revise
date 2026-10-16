@@ -1,0 +1,125 @@
+---
+id: authentication-flow
+tech: spring-boot
+title: Authentication in Spring Security
+topic: security
+level: intermediate
+heat: 3
+hook: "A login filter turns credentials into an Authentication, the AuthenticationManager checks it, and the result goes into the SecurityContextHolder."
+points:
+  - { k: "ProviderManager", v: "the usual AuthenticationManager; asks each provider in turn" }
+  - { k: "AuthenticationProvider", v: "checks one credential type, e.g. DaoAuthenticationProvider" }
+  - { k: "UserDetailsService", v: "loads a user by username; write one for your own users" }
+  - { k: "SecurityContextHolder", v: "holds the current Authentication, per thread" }
+  - { k: "Between requests", v: "kept in the HTTP session, unless the chain is stateless" }
+  - { k: "New thread", v: "starts with no user unless you propagate the context", kind: minus }
+trap:
+  wrong: "In my UserDetailsService I compare the typed password with the stored one."
+  right: "Only load the user and its password hash. DaoAuthenticationProvider checks the password with the PasswordEncoder."
+sayIt: "A filter builds an unauthenticated token and calls the AuthenticationManager, a ProviderManager. DaoAuthenticationProvider loads the user through UserDetailsService and checks the password; the result is stored in the SecurityContextHolder and the session."
+relations:
+  - { from: dao-authentication-provider, to: user-details-service, type: uses, why: "It loads the user and the stored password hash by username." }
+  - { from: dao-authentication-provider, to: password-encoding, type: uses, why: "It compares the typed password with the stored hash via PasswordEncoder." }
+  - { from: jwt-authentication-provider, to: jwt-resource-server, type: pairs, why: "Bearer-token logins use it to decode and validate the JWT." }
+  - { from: security-context-holder, to: async-scheduling, type: limits, why: "The context is per thread, so @Async code has no user unless it is copied." }
+  - { from: session-authentication, to: csrf-protection, type: needs, why: "The browser sends the session cookie by itself, so forms need a CSRF token." }
+confusedWith: [authentication-vs-authorization]
+tags: [security, spring-security, authentication]
+visual: flow
+sources:
+  - title: "Servlet Authentication Architecture (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/authentication/architecture.html"
+    verifiedOn: "2026-10-17"
+  - title: "DaoAuthenticationProvider (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/dao-authentication-provider.html"
+    verifiedOn: "2026-10-17"
+  - title: "UserDetailsService (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/user-details-service.html"
+    verifiedOn: "2026-10-17"
+  - title: "UserDetailsService (Spring Security 7.1 API)"
+    url: "https://docs.spring.io/spring-security/reference/api/java/org/springframework/security/core/userdetails/UserDetailsService.html"
+    verifiedOn: "2026-10-17"
+  - title: "User.UserBuilder#roles (Spring Security 7.1 API)"
+    url: "https://docs.spring.io/spring-security/reference/api/java/org/springframework/security/core/userdetails/User.UserBuilder.html"
+    verifiedOn: "2026-10-17"
+  - title: "Authentication Persistence and Session Management (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html"
+    verifiedOn: "2026-10-17"
+  - title: "Concurrency Support (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/features/integrations/concurrency.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring MVC Integration: @AuthenticationPrincipal (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/integrations/mvc.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Security (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/web/spring-security.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Security interview questions (HowToDoInJava)"
+    url: "https://howtodoinjava.com/interview-questions/spring-security-interview-questions/"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+Form login, HTTP Basic and JWTs read credentials in different ways, but the check and the result should be the same. Spring Security splits the work: read the credentials, check them, then store who the user is.
+
+## How it works
+
+<Steps label="Username and password login">
+<Step title="Filter">
+UsernamePasswordAuthenticationFilter builds an unauthenticated UsernamePasswordAuthenticationToken from the request.
+</Step>
+<Step title="Manager">
+The AuthenticationManager, a ProviderManager, asks each AuthenticationProvider until one supports the token.
+</Step>
+<Step title="Provider">
+DaoAuthenticationProvider loads the UserDetails through the UserDetailsService and checks the password with the PasswordEncoder.
+</Step>
+<Step title="Store">
+The authenticated token goes into the SecurityContextHolder and is saved in the HTTP session for later requests.
+</Step>
+</Steps>
+
+- **On failure** the SecurityContextHolder is cleared and a failure handler runs. A request with no login at all goes to the AuthenticationEntryPoint: a redirect to the login page, or a 401.
+- Read the current user with `@AuthenticationPrincipal` in a controller, or `SecurityContextHolder.getContext().getAuthentication()`.
+
+## Example
+
+```java
+@Bean
+UserDetailsService userDetailsService(UserRepository users) {
+    return username -> users.findByEmail(username)
+        .map(u -> User.withUsername(u.email())
+            .password(u.passwordHash())   // e.g. {bcrypt}$2a$10$...
+            .roles(u.role())              // stored as ROLE_<role>
+            .build())
+        .orElseThrow(() -> new UsernameNotFoundException(username));
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| SecurityContextHolder strategy | `MODE_THREADLOCAL` | Spring Security 7.1 |
+| Where the login is kept | HTTP session (`HttpSessionSecurityContextRepository`) | Spring Security 7.1 |
+| Credentials after a successful login | Erased by ProviderManager | Spring Security 7.1 |
+| Session fixation protection | `changeSessionId`: new session id on login | Spring Security 7.1, Servlet 3.1+ |
+
+## Interview Qs
+
+### How do AuthenticationManager, ProviderManager and AuthenticationProvider fit together?
+
+AuthenticationManager is the interface the login filters call. ProviderManager is its usual implementation and holds a list of AuthenticationProviders. Each provider handles one credential type, such as DaoAuthenticationProvider for passwords; if none can, a ProviderNotFoundException is thrown.
+
+### What is the SecurityContextHolder?
+
+It holds the SecurityContext, which holds the current user's Authentication: principal, credentials and authorities. By default it is a ThreadLocal, and FilterChainProxy clears it after each request.
+
+### How do you log users in from your own database?
+
+Expose a `UserDetailsService` bean whose `loadUserByUsername` returns UserDetails with the password hash and authorities, or throws UsernameNotFoundException. Boot then drops its default user, and DaoAuthenticationProvider does the password check.
+
+### What is a principal in Spring Security?
+
+The identity of the logged-in user, held inside the Authentication next to the credentials and authorities. With a password login it is usually the UserDetails object; in a controller you can inject it with `@AuthenticationPrincipal`.

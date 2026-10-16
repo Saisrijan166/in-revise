@@ -1,0 +1,127 @@
+---
+id: jpa-entities
+tech: spring-boot
+title: JPA Entities and Relationships
+topic: data
+level: intermediate
+heat: 3
+hook: "An entity is a class mapped to a table. The owning side of a relationship writes the foreign key; the persistence context saves your changes."
+points:
+  - { k: "Entity rules", v: "@Entity, an @Id, a no-arg constructor; not final, not a record" }
+  - { k: "Owning side", v: "the @ManyToOne side holds the foreign key; the other says mappedBy" }
+  - { k: "Cascade", v: "none by default; PERSIST and REMOVE pass the call on to children" }
+  - { k: "Dirty checking", v: "change a managed entity and it is saved at flush; no save() call", kind: plus }
+  - { k: "IDENTITY ids", v: "Hibernate cannot batch these inserts", kind: minus }
+  - { k: "save() (Spring Data)", v: "persist() if new (null @Version, else null id); otherwise merge()" }
+trap:
+  wrong: "Adding a child to parent.getChildren() is enough to save the link."
+  right: "Only the owning side is written: also call child.setParent(parent), best in a helper that sets both sides."
+sayIt: "An entity is a class mapped to a table with @Entity and @Id. In a one-to-many, the @ManyToOne side owns the foreign key; the other side uses mappedBy. Changes to managed entities are saved at flush."
+relations:
+  - { from: mapped-by, to: owning-side, type: needs, why: "mappedBy names the owner's field; only the owner's changes reach the foreign key." }
+  - { from: dirty-checking, to: transactional, type: needs, why: "Changes are flushed inside a transaction; with none active, nothing is flushed." }
+  - { from: entity-state-detached, to: lazy-initialization-exception, type: causes, why: "Touching an unloaded association after its context closed throws it." }
+  - { from: orphan-removal, to: cascade-remove, type: vs, why: "orphanRemoval also deletes a child that is only removed from the collection." }
+  - { from: generation-identity, to: generation-sequence, type: vs, why: "IDENTITY needs the insert to learn the id; a sequence gives it before the insert." }
+confusedWith: [lazy-vs-eager-fetch]
+tags: [jpa, hibernate, entity, mapping]
+visual: flow
+sources:
+  - title: "Jakarta Persistence 3.2 specification: 2.1 entity class, 2.11 relationships, 3.3 entity life cycle, 3.4 persistence context scope"
+    url: "https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2.html"
+    verifiedOn: "2026-10-17"
+  - title: "OneToMany: mappedBy, cascade, orphanRemoval defaults (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/OneToMany.html"
+    verifiedOn: "2026-10-17"
+  - title: "CascadeType (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/CascadeType.html"
+    verifiedOn: "2026-10-17"
+  - title: "GenerationType and GeneratedValue (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/GenerationType.html"
+    verifiedOn: "2026-10-17"
+  - title: "FlushModeType: no flush without a transaction (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/FlushModeType.html"
+    verifiedOn: "2026-10-17"
+  - title: "Hibernate ORM 7.4 User Guide: Interpreting AUTO, Using IDENTITY columns"
+    url: "https://docs.hibernate.org/orm/7.4/userguide/html_single/"
+    verifiedOn: "2026-10-17"
+  - title: "A Short Guide to Hibernate 7 (7.4): persistence context and dirty checking"
+    url: "https://docs.hibernate.org/orm/7.4/introduction/html_single/"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Data JPA 4.1: Persisting entities (persist or merge)"
+    url: "https://docs.spring.io/spring-data/jpa/reference/jpa/entity-persistence.html"
+    verifiedOn: "2026-10-17"
+  - title: "Hibernate interview questions: entity states, final entity class (InterviewBit)"
+    url: "https://www.interviewbit.com/hibernate-interview-questions/"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+Java code works with objects; a relational database stores rows linked by foreign keys. JPA maps classes to tables and object links to foreign keys, so you load and save objects instead of writing SQL by hand.
+
+## How it works
+
+<Mermaid
+  alt="Entity states. New: persist() makes it Managed. Managed: remove() makes it Removed, and its row is deleted at flush or commit. When the transaction ends, or on detach() or clear(), a Managed entity becomes Detached. merge() copies a Detached entity back onto a Managed one."
+  chart={`flowchart LR
+  N([New]) -- "persist()" --> M([Managed])
+  M -- "remove()" --> R([Removed])
+  R -- "flush or commit" --> X[(Row deleted)]
+  M -- "transaction ends, detach(), clear()" --> D([Detached])
+  D -- "merge()" --> M`}
+/>
+
+- The [persistence context](card:persistence-context) holds one managed instance per id. [Dirty checking](card:dirty-checking) finds changed fields and writes them at flush.
+- In a one-to-many pair, the `@ManyToOne` side is the [owning side](card:owning-side); the `@OneToMany` side sets `mappedBy`.
+- With `GenerationType.AUTO`, the default, Hibernate uses a sequence if the database has them, else a table.
+
+## Example
+
+```java
+@Entity
+public class Author {
+    @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+    private Long id;
+
+    @OneToMany(mappedBy = "author", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List<Book> books = new ArrayList<>();
+
+    public void addBook(Book book) {      // keep both sides in sync
+        books.add(book);
+        book.setAuthor(this);             // the owning side writes author_id
+    }
+}
+```
+
+The child holds the foreign key:
+
+```java
+@Entity
+public class Book {
+    @Id @GeneratedValue(strategy = GenerationType.SEQUENCE)
+    private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY)    // owning side; EAGER if left out
+    @JoinColumn(name = "author_id")
+    private Author author;
+}
+```
+
+## Interview Qs
+
+### What are the states of an entity?
+
+New (transient): not saved yet. Managed: in a persistence context; changes are saved at flush. Detached: has an id but is no longer tracked, for example after the transaction ends. Removed: marked for deletion at flush or commit. merge() copies a detached entity onto a managed one.
+
+### What is the owning side, and what does mappedBy do?
+
+The owning side's field decides what is written to the foreign key. In a one-to-many pair it is the @ManyToOne side. The @OneToMany side sets mappedBy to the owner's field name; changes made only on that side are not written.
+
+### Can an entity be final, or a record?
+
+No. Jakarta Persistence requires a non-final class with non-final methods and persistent fields, and a public or protected no-arg constructor. Enums, records and interfaces cannot be entities. Records work well as DTO projections instead.
+
+### What do CascadeType.ALL and orphanRemoval do?
+
+Persisting, merging or deleting the parent does the same to its children, and a child removed from the collection is deleted at flush. Use them for parts owned by one parent, such as order lines; the spec says REMOVE belongs only on one-to-one or one-to-many.

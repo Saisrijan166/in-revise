@@ -1,0 +1,125 @@
+---
+id: http-clients
+tech: spring-boot
+title: "HTTP Clients: RestClient, WebClient, RestTemplate"
+topic: web
+level: intermediate
+heat: 3
+hook: "Call other services with RestClient (blocking, fluent) or WebClient (reactive), or declare an @HttpExchange interface on top of them. RestTemplate is on its way out."
+points:
+  - { k: "RestClient", v: "synchronous fluent API (Framework 6.1+); the default choice" }
+  - { k: "WebClient", v: "non-blocking and reactive; for WebFlux apps and streaming" }
+  - { k: "@HttpExchange interface", v: "declare the methods; Spring generates the client" }
+  - { k: "RestTemplate", v: "deprecated in the 7.0 docs; @Deprecated in 7.1; removal planned for 8.0", kind: minus }
+  - { k: "Boot 4.1 default", v: "inject the prototype RestClient.Builder; no RestTemplate bean", kind: default }
+trap:
+  wrong: "RestTemplate is deprecated, so move every call to WebClient."
+  right: "For blocking code the replacement is RestClient, which shares RestTemplate's infrastructure. WebClient is for reactive or streaming use."
+sayIt: "In Boot 4 I use RestClient for blocking calls, built from the auto-configured RestClient.Builder, and WebClient in reactive apps. For many endpoints I declare an @HttpExchange interface. RestTemplate still works, but Spring Framework 7 deprecates it in favour of RestClient."
+relations:
+  - { from: web-client, to: webflux-reactive-stack, type: pairs, why: "Both are reactive: WebClient returns Mono and Flux, like WebFlux handlers." }
+  - { from: http-interface-client, to: openfeign, type: vs, why: "Both turn an annotated interface into a client; @HttpExchange is built into Spring." }
+  - { from: rest-client, to: http-message-converter, type: uses, why: "The same converters map JSON bodies to Java objects on the client side." }
+  - { from: rest-client, to: virtual-threads, type: pairs, why: "Blocking calls are cheap on virtual threads, so RestClient scales without going reactive." }
+  - { to: resilience4j, type: pairs, why: "Remote calls fail; wrap them with timeouts, retries and a circuit breaker." }
+confusedWith: []
+tags: [web, http-client, rest-client, web-client]
+visual: table
+sources:
+  - title: "REST Clients (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/integration/rest-clients.html"
+    verifiedOn: "2026-10-17"
+  - title: "RestClient (Spring Framework 7.0.9 API)"
+    url: "https://docs.spring.io/spring-framework/docs/7.0.9/javadoc-api/org/springframework/web/client/RestClient.html"
+    verifiedOn: "2026-10-17"
+  - title: "RestTemplate (Spring Framework 7.0.9 API)"
+    url: "https://docs.spring.io/spring-framework/docs/7.0.9/javadoc-api/org/springframework/web/client/RestTemplate.html"
+    verifiedOn: "2026-10-17"
+  - title: "RestTemplate.java: @Deprecated(since = \"7.1\", forRemoval = true) (Spring Framework v7.1.0-M2 source)"
+    url: "https://github.com/spring-projects/spring-framework/blob/v7.1.0-M2/spring-web/src/main/java/org/springframework/web/client/RestTemplate.java"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Framework 7.0 Release Notes: Deprecations (spring-projects wiki)"
+    url: "https://github.com/spring-projects/spring-framework/wiki/Spring-Framework-7.0-Release-Notes"
+    verifiedOn: "2026-10-17"
+  - title: "The state of HTTP clients in Spring (Brian Clozel, spring.io blog, 30-09-2025)"
+    url: "https://spring.io/blog/2025/09/30/the-state-of-http-clients-in-spring"
+    verifiedOn: "2026-10-17"
+  - title: "Calling REST Services (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/io/rest-client.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Boot 4.0 Release Notes: HTTP Service Clients (spring-projects wiki)"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Release-Notes"
+    verifiedOn: "2026-10-17"
+  - title: "Build Systems: starters restclient and webclient (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/using/build-systems.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring WebClient vs. RestTemplate (Baeldung)"
+    url: "https://www.baeldung.com/spring-webclient-resttemplate"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+Services call other services over HTTP. A client turns Java objects into requests and responses back into objects, and handles connections, errors and timeouts. Spring offers one blocking and one reactive client, plus a declarative layer on top.
+
+## How it works
+
+<Compare id="restclient-vs-webclient-vs-resttemplate" />
+
+- An HTTP interface client is a Java interface with `@GetExchange`-style methods. `@ImportHttpServices` registers it as a bean, and Boot 4 reads its base URL from `spring.http.serviceclient.<group>.base-url`.
+- A 4xx or 5xx response throws a `RestClientException` subclass; `onStatus(...)` lets you handle it your way.
+- Migrate step by step: `RestClient.create(restTemplate)` reuses an existing template's setup.
+
+## Example
+
+```java
+@Service
+class PriceClient {
+    private final RestClient http;
+
+    PriceClient(RestClient.Builder builder) {               // auto-configured by Boot
+        this.http = builder.baseUrl("https://prices.example.com").build();
+    }
+
+    Price price(String sku) {
+        return http.get().uri("/prices/{sku}", sku)
+                .retrieve()                                  // 4xx/5xx throw RestClientException
+                .body(Price.class);
+    }
+}
+```
+
+The same call as an HTTP interface client:
+
+```java
+@HttpExchange("/prices")
+interface PriceApi {
+    @GetExchange("/{sku}")
+    Price price(@PathVariable String sku);
+}
+// On a @Configuration class: @ImportHttpServices(group = "prices", types = PriceApi.class)
+// In application.properties: spring.http.serviceclient.prices.base-url=https://prices.example.com
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Builders you can inject | Prototype `RestClient.Builder`, `WebClient.Builder`; `RestTemplateBuilder` | Spring Boot 4.1 |
+| HTTP library for RestClient | Apache HttpClient, else Jetty, Reactor Netty, JDK `HttpClient` | Spring Boot 4.1 (auto-detected) |
+| HTTP Service group with no name | `default` | Spring Boot 4.1 |
+| Starters | `spring-boot-starter-restclient`, `spring-boot-starter-webclient` | Spring Boot 4.0+ |
+
+## Interview Qs
+
+### RestTemplate vs RestClient vs WebClient?
+
+RestTemplate: the classic blocking client with template methods, now deprecated. RestClient: also blocking, with a fluent API and new features such as API versioning. WebClient: non-blocking and reactive, for WebFlux apps or streaming. New blocking code should use RestClient.
+
+### Is RestTemplate deprecated?
+
+Spring Framework 7.0 deprecates it in the reference docs; the class gets @Deprecated(forRemoval = true) in 7.1, and the team plans to remove it in 8.0. It still works in Boot 4.1, which provides a RestTemplateBuilder but no RestTemplate bean.
+
+### What is an HTTP interface client?
+
+A Java interface whose methods carry @HttpExchange or @GetExchange. Spring generates a proxy that makes the calls through RestClient or WebClient. In Boot 4, @ImportHttpServices registers the proxies as beans, and properties set each group's base URL.

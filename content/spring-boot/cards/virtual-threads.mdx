@@ -1,0 +1,125 @@
+---
+id: virtual-threads
+tech: spring-boot
+title: Virtual Threads in Spring Boot
+topic: web
+level: interview
+heat: 2
+hook: "Set spring.threads.virtual.enabled=true on Java 21+ and Boot runs each request, @Async task and scheduled job on a cheap JDK virtual thread, so blocking code scales."
+points:
+  - { k: "Turn on", v: "spring.threads.virtual.enabled=true; Java 21+, Java 24+ advised" }
+  - { k: "What switches", v: "Tomcat and Jetty requests, @Async, @Scheduled, JDK HTTP clients" }
+  - { k: "Not faster", v: "more requests in flight; each one is not quicker (JEP 444)" }
+  - { k: "Pinning", v: "blocking inside synchronized held the carrier; fixed in JDK 24", kind: minus }
+  - { k: "Pool settings", v: "thread-pool properties such as server.tomcat.threads.max do nothing", kind: minus }
+  - { k: "Daemon threads", v: "set spring.main.keep-alive=true so the JVM does not exit" }
+trap:
+  wrong: "With virtual threads, the database can take unlimited parallel queries."
+  right: "Threads stop being the limit; the connection pool is next (HikariCP default: 10). Size it, or cap concurrency with a semaphore."
+sayIt: "On Java 21+, spring.threads.virtual.enabled=true puts Tomcat requests, @Async and scheduling on virtual threads. A blocking call parks a cheap virtual thread, not a platform thread, so plain MVC code handles many concurrent waits. More throughput, not speed."
+relations:
+  - { from: mvc-on-virtual-threads, to: webflux-reactive-stack, type: vs, why: "Both serve many waiting requests; virtual threads keep plain blocking code." }
+  - { to: async-scheduling, type: pairs, why: "@Async and @Scheduled tasks run on virtual threads when the property is on." }
+  - { from: connection-pool, to: virtual-threads, type: limits, why: "Only maximumPoolSize connections exist; extra virtual threads wait in getConnection()." }
+  - { from: jep-491, to: virtual-thread-pinning, type: solves, why: "Since JDK 24, a virtual thread blocked in synchronized releases its carrier." }
+  - { from: mvc-on-virtual-threads, to: embedded-server, type: uses, why: "Embedded Tomcat and Jetty run each request on a virtual thread when enabled." }
+confusedWith: [mvc-vs-virtual-threads-vs-webflux]
+tags: [web, virtual-threads, concurrency, java-21]
+visual: flow
+sources:
+  - title: "SpringApplication: Virtual threads (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/features/spring-application.html"
+    verifiedOn: "2026-10-17"
+  - title: "Task Execution and Scheduling (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/features/task-execution-and-scheduling.html"
+    verifiedOn: "2026-10-17"
+  - title: "Common Application Properties: spring.threads.virtual.enabled, server.tomcat.threads.*, spring.main.keep-alive (Spring Boot 4.1.1 appendix)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Boot 3.2 Release Notes: Support for Virtual Threads (spring-projects wiki)"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-3.2-Release-Notes"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Boot 4.0 Release Notes: JDK HttpClient on virtual threads (spring-projects wiki)"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Release-Notes"
+    verifiedOn: "2026-10-17"
+  - title: "JEP 444: Virtual Threads (OpenJDK)"
+    url: "https://openjdk.org/jeps/444"
+    verifiedOn: "2026-10-17"
+  - title: "JEP 491: Synchronize Virtual Threads without Pinning (OpenJDK)"
+    url: "https://openjdk.org/jeps/491"
+    verifiedOn: "2026-10-17"
+  - title: "Thread: isVirtual, virtual threads are daemon threads (Java SE 21 API)"
+    url: "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Thread.html"
+    verifiedOn: "2026-10-17"
+  - title: "HikariCP README: maximumPoolSize default 10 (GitHub)"
+    url: "https://github.com/brettwooldridge/HikariCP"
+    verifiedOn: "2026-10-17"
+  - title: "Working with Virtual Threads in Spring (Baeldung)"
+    url: "https://www.baeldung.com/spring-6-virtual-threads"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+A platform thread maps to an OS thread, so a server can afford only a few hundred, and each one sits idle while it waits for I/O. Virtual threads are cheap enough to give every request its own, without rewriting the code to be reactive.
+
+## How it works
+
+<Steps label="One request on a virtual thread">
+<Step title="Start">
+Tomcat starts a new virtual thread for the request; virtual threads are never pooled.
+</Step>
+<Step title="Mount">
+The JVM mounts it on a carrier, a platform thread, and your controller code runs.
+</Step>
+<Step title="Block">
+A blocking call such as JDBC or RestClient unmounts it; the carrier runs other virtual threads meanwhile.
+</Step>
+<Step title="Resume">
+When the data is ready, it is mounted again, possibly on another carrier, and continues.
+</Step>
+</Steps>
+
+- To limit concurrent work, use a `Semaphore`, not a small thread pool.
+- Up to JDK 23, blocking inside `synchronized` pinned the carrier; JEP 491 fixed this in JDK 24. Class initialisers and native callbacks can still pin.
+- JDK Flight Recorder reports pinning as the `jdk.VirtualThreadPinned` event.
+
+## Example
+
+```properties
+spring.threads.virtual.enabled=true
+# virtual threads are daemon threads: keep the JVM up, e.g. in a @Scheduled-only app
+spring.main.keep-alive=true
+```
+
+Check which kind of thread serves a request:
+
+```java
+@GetMapping("/thread")
+String thread() {
+    return Thread.currentThread().isVirtual() ? "virtual" : "platform";
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| `spring.threads.virtual.enabled` | `false` | Spring Boot 4.1 |
+| Java needed | 21 or later; 24 or later strongly recommended | Spring Boot 4.1 |
+| `spring.main.keep-alive` | `false` | Spring Boot 4.1 |
+| Tomcat worker threads when off | max 200, min 10 | Spring Boot 4.1 (`server.tomcat.threads.max`, `min-spare`) |
+
+## Interview Qs
+
+### How do you enable virtual threads in Spring Boot, and what changes?
+
+Set spring.threads.virtual.enabled=true on Java 21 or later. Tomcat and Jetty then handle each request on a virtual thread, and the auto-configured executor and scheduler behind @Async and @Scheduled use virtual threads too. Thread-pool properties stop having an effect.
+
+### Virtual threads vs WebFlux?
+
+Both let a few OS threads serve many waiting requests. Virtual threads keep plain blocking code and libraries like JDBC. WebFlux needs non-blocking code end to end, but adds back pressure and streaming.
+
+### What is pinning?
+
+A pinned virtual thread cannot unmount while it blocks, so it holds its carrier platform thread. Up to JDK 23 this happened inside synchronized blocks; JEP 491 fixed that in JDK 24. Blocking in a class initialiser, or native code calling back into Java, can still pin.

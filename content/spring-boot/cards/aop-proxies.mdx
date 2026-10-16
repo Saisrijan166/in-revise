@@ -1,0 +1,134 @@
+---
+id: aop-proxies
+tech: spring-boot
+title: AOP and Spring Proxies
+topic: beans-di
+level: interview
+heat: 3
+hook: "Spring adds cross-cutting behaviour, like transactions, by wrapping a bean in a proxy. Advice runs only on calls that enter through the proxy, not on this.method()."
+points:
+  - { k: "Proxy", v: "callers get a wrapper that runs advice, then calls the bean" }
+  - { k: "Pointcut + advice", v: "which methods to intercept + what code runs there" }
+  - { k: "Spring Boot 4.1 default", v: "CGLIB subclass proxies (spring.aop.proxy-target-class=true)", kind: default }
+  - { k: "Self-invocation", v: "this.other() skips the proxy: no @Transactional, @Async, @Cacheable", kind: minus }
+  - { k: "CGLIB limits", v: "final classes and final or private methods cannot be advised", kind: minus }
+  - { k: "Changed in Spring Boot 4.0", v: "spring-boot-starter-aop is now spring-boot-starter-aspectj" }
+trap:
+  wrong: "Calling a @Transactional method from another method of the same bean starts a transaction."
+  right: "It goes through this, not the proxy, so no advice runs. Move the method to another bean."
+sayIt: "Spring AOP wraps an advised bean in a proxy, CGLIB by default in Spring Boot. The proxy runs the advice, like starting a transaction, then calls the bean. Internal this-calls skip the proxy and get no advice."
+relations:
+  - { from: jdk-dynamic-proxy, to: cglib-proxy, type: vs, why: "Implement the bean's interfaces, or generate a subclass of its class." }
+  - { from: self-invocation, to: transactional, type: limits, why: "this.save() skips the proxy, so no transaction starts." }
+  - { from: aspectj-weaving, to: self-invocation, type: solves, why: "Advice is in the bytecode, so calls inside the class are advised too." }
+confusedWith: [jdk-proxy-vs-cglib]
+tags: [aop, proxy, cglib, self-invocation]
+visual: flow
+sources:
+  - title: "AOP Concepts (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/aop/introduction-defn.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring AOP Capabilities and Goals (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/aop/introduction-spring-defn.html"
+    verifiedOn: "2026-10-17"
+  - title: "Proxying Mechanisms: JDK vs CGLIB, understanding AOP proxies (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/aop/proxying.html"
+    verifiedOn: "2026-10-17"
+  - title: "Declaring an Aspect (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/at-aspectj.html"
+    verifiedOn: "2026-10-17"
+  - title: "Declaring Advice: @Around and ProceedingJoinPoint (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/advice.html"
+    verifiedOn: "2026-10-17"
+  - title: "Aspect Oriented Programming (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/features/aop.html"
+    verifiedOn: "2026-10-17"
+  - title: "Common Application Properties: spring.aop.proxy-target-class (Spring Boot 4.1)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Boot 4.0 Migration Guide: AOP starter renamed (GitHub wiki)"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
+    verifiedOn: "2026-10-17"
+  - title: "Using @Transactional: proxy mode and self-invocation (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html"
+    verifiedOn: "2026-10-17"
+  - title: "EnableAsync: proxy mode ignores local calls (Spring Framework 7.0.9 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/scheduling/annotation/EnableAsync.html"
+    verifiedOn: "2026-10-17"
+  - title: "Declarative Annotation-based Caching: self-invocation (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/integration/cache/annotations.html"
+    verifiedOn: "2026-10-17"
+  - title: "82 Spring Interview Questions: AOP proxies, @Transactional self-invocation (TechPrep)"
+    url: "https://www.techprep.app/blog/spring-interview-questions"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+Logging, security checks, transactions and caching are needed in many classes. AOP writes such cross-cutting code once and applies it to the methods you choose, without editing those classes.
+
+## How it works
+
+<Mermaid
+  alt="A caller calls placeOrder on what it thinks is OrderService, but it holds a proxy. The proxy runs the advice, for example starts a transaction, then calls the real OrderService. Inside the real object, a call to this.audit goes straight to the same object and skips the proxy, so no advice runs for it."
+  chart={`flowchart LR
+  C[Caller] -- "placeOrder()" --> P["Proxy: advice runs here"]
+  P -- "then calls" --> T[Real OrderService]
+  T -- "this.audit(): skips the proxy" --> T`}
+/>
+
+- Spring AOP advises only method executions on beans; to advise fields, constructors or self-calls, use AspectJ weaving.
+- A JDK proxy implements the bean's interfaces; a CGLIB proxy is a generated subclass. See [JDK vs CGLIB](compare:jdk-proxy-vs-cglib).
+- `@Transactional`, `@Async` and `@Cacheable` all work through these proxies, so they share the self-invocation gap.
+
+## Analogy
+
+<Analogy title="The receptionist" limit="A proxy sees only calls made on it, and only for methods it can override or implement.">
+Visitors to the manager (the bean) pass the receptionist (the proxy), who signs them in (the advice). When the manager walks to the next desk to talk to a colleague (a self-call), no one signs anything.
+</Analogy>
+
+## Example
+
+```java
+@Aspect
+@Component                                    // @Aspect alone is not found by scanning
+public class TimingAspect {
+    private static final Logger log = LoggerFactory.getLogger(TimingAspect.class);
+
+    @Around("execution(* com.shop.service..*.*(..))")   // pointcut: every service method
+    public Object time(ProceedingJoinPoint pjp) throws Throwable {
+        long start = System.nanoTime();
+        try {
+            return pjp.proceed();             // call the real method
+        } finally {
+            log.info("{} took {} ms", pjp.getSignature(), (System.nanoTime() - start) / 1_000_000);
+        }
+    }
+}
+```
+
+```xml
+<!-- Needed for @Aspect classes; the Spring Boot 4.x starter name -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-aspectj</artifactId>
+</dependency>
+```
+
+## Interview Qs
+
+### What are aspect, advice, pointcut and join point?
+
+An aspect is a class holding cross-cutting logic, like timing. A join point is a point in execution; in Spring AOP always a method execution. A pointcut is an expression that selects join points. Advice is the code that runs there.
+
+### JDK dynamic proxy vs CGLIB?
+
+A JDK proxy implements the bean's interfaces, so only interface methods are advised and it cannot be injected as the concrete class. CGLIB generates a subclass, so it needs no interface but cannot advise final methods. Spring Boot uses CGLIB by default.
+
+### Why does @Transactional not work when I call the method from the same class?
+
+Spring applies it through a proxy, and an internal call uses `this`, the real object, so the proxy never sees it. Move the method into another bean, or use AspectJ weaving, which changes the bytecode instead of using a proxy.
+
+### What types of advice are there?
+
+@Before, @AfterReturning (after a normal return), @AfterThrowing (after an exception), @After (always, like finally) and @Around, which wraps the call and decides whether to call `proceed()`. Use the least powerful one that does the job.

@@ -1,0 +1,130 @@
+---
+id: observability
+tech: spring-boot
+title: "Metrics and Tracing with Micrometer"
+topic: testing-production
+level: intermediate
+heat: 2
+hook: "Micrometer is SLF4J for metrics and traces: instrument the code once, and Spring Boot sends the data to Prometheus, OTLP or Zipkin."
+points:
+  - { k: "Metrics", v: "counters, gauges and timers in a MeterRegistry, one per backend found" }
+  - { k: "Prometheus", v: "add micrometer-registry-prometheus; expose /actuator/prometheus" }
+  - { k: "Tracing", v: "one trace per request across services, with a span for each step" }
+  - { k: "Sampling", v: "10% of traces by default (management.tracing.sampling.probability)", kind: default }
+  - { k: "Logs", v: "traceId and spanId are added to log lines", kind: plus }
+  - { k: "Changed in 4.0", v: "new spring-boot-starter-opentelemetry for OTLP export" }
+trap:
+  wrong: "Tag a metric with the user ID to see each user's latency."
+  right: "Every tag value makes a new time series. Keep metric tags low-cardinality; put user IDs on traces as high-cardinality values."
+sayIt: "Spring Boot instruments HTTP requests and more with Micrometer Observations. Metrics go to Prometheus through /actuator/prometheus; traces go over OTLP or to Zipkin, and trace IDs land in the logs, so I can go from an alert to the slow span to its log lines."
+relations:
+  - { from: micrometer-metrics, to: micrometer-tracing, type: vs, why: "Numbers over time for alerts, or one request's path across services." }
+  - { from: prometheus-scraping, to: actuator, type: needs, why: "Prometheus pulls from /actuator/prometheus, which you must expose." }
+  - { from: trace-propagation, to: http-clients, type: needs, why: "Only clients built from the auto-configured builders send trace headers." }
+  - { from: log-correlation, to: logging, type: pairs, why: "Each log line carries the traceId and spanId of its request." }
+  - { from: observed-annotation, to: aop-proxies, type: uses, why: "@Observed works through an aspect, so it needs the AspectJ weaver." }
+confusedWith: [metrics-vs-traces]
+tags: [observability, micrometer, prometheus, tracing, opentelemetry]
+visual: flow
+sources:
+  - title: "Observability (Spring Boot 4.1.1 Actuator reference)"
+    url: "https://docs.spring.io/spring-boot/reference/actuator/observability.html"
+    verifiedOn: "2026-10-17"
+  - title: "Metrics (Spring Boot 4.1.1 Actuator reference)"
+    url: "https://docs.spring.io/spring-boot/reference/actuator/metrics.html"
+    verifiedOn: "2026-10-17"
+  - title: "Tracing (Spring Boot 4.1.1 Actuator reference)"
+    url: "https://docs.spring.io/spring-boot/reference/actuator/tracing.html"
+    verifiedOn: "2026-10-17"
+  - title: "Common Application Properties: management.tracing.* (Spring Boot 4.1.1 appendix)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-17"
+  - title: "Micrometer documentation: overview (Micrometer 1.17)"
+    url: "https://docs.micrometer.io/micrometer/reference/"
+    verifiedOn: "2026-10-17"
+  - title: "Meters (Micrometer 1.17 docs)"
+    url: "https://docs.micrometer.io/micrometer/reference/concepts/meters.html"
+    verifiedOn: "2026-10-17"
+  - title: "Micrometer Observation (Micrometer 1.17 docs)"
+    url: "https://docs.micrometer.io/micrometer/reference/observation.html"
+    verifiedOn: "2026-10-17"
+  - title: "Glossary: span and trace (Micrometer Tracing docs)"
+    url: "https://docs.micrometer.io/tracing/reference/glossary.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Boot 4.0 Release Notes: spring-boot-starter-opentelemetry"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Release-Notes"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+In production you cannot attach a debugger. Metrics show that something is slow or failing, traces show where across services, and trace IDs in the logs lead to the details.
+
+## How it works
+
+<Mermaid
+  alt="One observation, such as an HTTP request, goes to two handlers. The meter handler records a timer in the MeterRegistry, which Prometheus scrapes from /actuator/prometheus. The tracing handler records a span with a trace ID, which is exported over OTLP or to Zipkin. The trace ID and span ID are also added to log lines."
+  chart={`flowchart LR
+  O["Observation: HTTP request"] --> MH[Meter handler]
+  O --> TH[Tracing handler]
+  MH --> REG[(MeterRegistry)]
+  REG -- "scraped at /actuator/prometheus" --> PR[Prometheus]
+  TH --> SP[Span with traceId]
+  SP -- "OTLP or Zipkin" --> TB[Trace backend]
+  SP -. "traceId, spanId" .-> LOG[Log lines]`}
+/>
+
+- Low-cardinality key values go to metrics and traces; high-cardinality ones, such as a user ID, go to traces only.
+- Trace headers go out only on clients built from the auto-configured `RestClient.Builder`, `WebClient.Builder` or `RestTemplateBuilder`.
+- `@Observed`, `@Timed` and `@Counted` need `management.observations.annotations.enabled=true` and `spring-boot-starter-aspectj`.
+
+## Example
+
+```java
+@Service
+class CheckoutService {
+    private final ObservationRegistry registry;
+
+    CheckoutService(ObservationRegistry registry) {
+        this.registry = registry;
+    }
+
+    void checkout(Cart cart) {
+        Observation.createNotStarted("checkout", registry)
+            .lowCardinalityKeyValue("payment", cart.paymentType()) // metrics + traces
+            .highCardinalityKeyValue("cartId", cart.id())          // traces only
+            .observe(() -> process(cart));
+    }
+}
+```
+
+```properties
+management.endpoints.web.exposure.include=health,prometheus
+# keep every trace while developing (default 0.1)
+management.tracing.sampling.probability=1.0
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Metrics backend when none is added | In-memory simple registry | Spring Boot 4.1, Micrometer 1.17 |
+| `/actuator/prometheus` | Not exposed until you include it | Spring Boot 4.1 |
+| HTTP server metric name | `http.server.requests` | Spring Boot 4.1 |
+| Trace sampling | 10% (`0.1`) | Spring Boot 4.1 |
+| Trace IDs in logs | On when Micrometer Tracing is present | Spring Boot 4.1 |
+| `@Observed`, `@Timed`, `@Counted` | Off | Spring Boot 4.1 |
+
+## Interview Qs
+
+### What is Micrometer?
+
+A vendor-neutral facade for metrics and observations: SLF4J for observability. You record counters, gauges and timers once; the registry you add, such as `micrometer-registry-prometheus`, decides where they go.
+
+### Metrics vs traces vs logs?
+
+Metrics are cheap numbers over time, for dashboards and alerts. A trace follows one request across services as a tree of timed spans. Logs are detailed events; with a trace ID in each line, you find the logs of one slow request.
+
+### How do you trace a request across microservices?
+
+Add Micrometer Tracing with OpenTelemetry (`spring-boot-starter-opentelemetry`) or Brave with Zipkin. Calls made with the auto-configured `RestClient` or `WebClient` builders pass the trace headers on, so every service shares one trace ID.

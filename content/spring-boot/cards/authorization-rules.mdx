@@ -1,0 +1,121 @@
+---
+id: authorization-rules
+tech: spring-boot
+title: "Authorization: URL Rules and @PreAuthorize"
+topic: security
+level: intermediate
+heat: 3
+hook: "Authorization decides what a logged-in user may do: URL rules in the filter chain, plus @PreAuthorize checks on service methods."
+points:
+  - { k: "Rule order", v: "checked top to bottom; only the first match applies" }
+  - { k: "anyRequest()", v: "the last rule: authenticated(), or denyAll() for an allow-list" }
+  - { k: "hasRole(\"ADMIN\")", v: "adds the prefix: checks the authority ROLE_ADMIN" }
+  - { k: "hasAuthority(\"X\")", v: "checks X exactly, with no prefix" }
+  - { k: "Boot 4.1 default", v: "method security off until you add @EnableMethodSecurity", kind: default }
+  - { k: "Changed in 7.0", v: "authorizeRequests removed; use authorizeHttpRequests", kind: minus }
+trap:
+  wrong: "Rule order does not matter; Spring picks the most specific matcher."
+  right: "The first matching rule wins. If /api/** comes before /api/admin/**, the admin rule never runs: list specific paths first."
+sayIt: "I secure URLs in authorizeHttpRequests, specific matchers first and anyRequest last, and add @EnableMethodSecurity for @PreAuthorize on service methods. hasRole adds the ROLE_ prefix; hasAuthority matches exactly, which suits JWT scopes."
+relations:
+  - { to: authentication-flow, type: needs, why: "Rules check the authorities that authentication put in the SecurityContext." }
+  - { from: has-role, to: has-authority, type: vs, why: "hasRole adds ROLE_; hasAuthority checks the exact string." }
+  - { from: secured-annotation, to: pre-authorize, type: vs, why: "@Secured lists roles only; @PreAuthorize takes SpEL expressions." }
+  - { from: method-security, to: aop-proxies, type: uses, why: "Checks run in a proxy, so a call from inside the same class skips them." }
+  - { from: role-hierarchy, to: has-role, type: pairs, why: "With ADMIN above USER, hasRole(\"USER\") lets admins in too." }
+  - { from: method-security, to: url-authorization, type: pairs, why: "Unannotated methods are not secured, so keep a catch-all URL rule." }
+confusedWith: [authentication-vs-authorization, hasrole-vs-hasauthority]
+tags: [security, authorization, method-security, spel]
+visual: table
+sources:
+  - title: "Authorize HttpServletRequests (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/authorization/authorize-http-requests.html"
+    verifiedOn: "2026-10-17"
+  - title: "Method Security (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html"
+    verifiedOn: "2026-10-17"
+  - title: "Authorization Architecture: ROLE_ prefix, role hierarchy (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/authorization/architecture.html"
+    verifiedOn: "2026-10-17"
+  - title: "AuthorityAuthorizationManager#hasRole (Spring Security 7.1 API)"
+    url: "https://docs.spring.io/spring-security/reference/api/java/org/springframework/security/authorization/AuthorityAuthorizationManager.html"
+    verifiedOn: "2026-10-17"
+  - title: "What's New in Spring Security 7.0: authorizeRequests removed"
+    url: "https://docs.spring.io/spring-security/reference/7.0/whats-new.html"
+    verifiedOn: "2026-10-17"
+  - title: "Proxying mechanisms: self-invocation (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/aop/proxying.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Security interview questions (InterviewBit)"
+    url: "https://www.interviewbit.com/spring-security-interview-questions/"
+    verifiedOn: "2026-10-17"
+  - title: "Granted Authority vs Role in Spring Security (Baeldung)"
+    url: "https://www.baeldung.com/spring-security-granted-authority-vs-role"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+Being logged in is not enough: an ordinary user must not reach admin pages or another user's data. Rules decide that per URL and, for finer checks, per method call.
+
+## How it works
+
+| | URL rules | Method rules |
+| --- | --- | --- |
+| Where | `authorizeHttpRequests` in the SecurityFilterChain | `@PreAuthorize` and friends on bean methods |
+| Can check | Path, HTTP method, the user's authorities | Arguments, return value, any SpEL expression |
+| Switched on | Whenever you write rules | `@EnableMethodSecurity` |
+| On denial | Anonymous: asked to log in; logged in: 403 | AccessDeniedException, a 403 in a web request |
+
+- `@EnableMethodSecurity` turns on `@PreAuthorize`, `@PostAuthorize`, `@PreFilter` and `@PostFilter`; `@Secured` and `@RolesAllowed` need extra flags.
+- Method checks run in a [proxy](card:aop-proxies): a call from another method of the same class skips them.
+
+## Example
+
+```java
+http.authorizeHttpRequests(auth -> auth
+    .requestMatchers("/admin/**").hasRole("ADMIN")              // needs ROLE_ADMIN
+    .requestMatchers(HttpMethod.GET, "/products/**").permitAll()
+    .anyRequest().authenticated());                             // catch-all, last
+```
+
+```java
+@Configuration
+@EnableMethodSecurity
+class MethodSecurityConfig {}
+
+@Service
+public class AccountService {
+    @PreAuthorize("hasAuthority('SCOPE_accounts.write')")
+    public void close(long id) { /* ... */ }
+
+    @PostAuthorize("returnObject.owner == authentication.name")
+    public Account find(long id) { return accounts.findById(id).orElseThrow(); }
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Method security | Off until `@EnableMethodSecurity` | Spring Boot 4.1 |
+| `@EnableMethodSecurity` turns on | Pre/post annotations; `@Secured` and JSR-250 stay off | Spring Security 7.1 |
+| Role prefix | `ROLE_` (change it with a `GrantedAuthorityDefaults` bean) | Spring Security 7.1 |
+
+## Interview Qs
+
+### hasRole vs hasAuthority?
+
+Both check the user's GrantedAuthorities. `hasRole("ADMIN")` adds the ROLE_ prefix and looks for ROLE_ADMIN; `hasAuthority("ADMIN")` looks for exactly ADMIN. Use hasAuthority for fine permissions and JWT scopes such as SCOPE_read.
+
+### @PreAuthorize vs @Secured?
+
+@Secured only lists role names and needs `securedEnabled = true`; Spring calls it legacy. @PreAuthorize is on with @EnableMethodSecurity and takes SpEL, so it can check arguments, the current user and custom beans.
+
+### Does the order of requestMatchers matter?
+
+Yes. AuthorizationFilter applies only the first rule that matches, so put specific paths before broad ones and end with `anyRequest()`, usually `authenticated()` or, for an allow-list, `denyAll()`.
+
+### URL security or method security?
+
+Both. URL rules are a coarse first gate in the filter chain. Method rules guard the service layer, whichever controller calls it, and can check data, such as whether the returned object belongs to the current user.

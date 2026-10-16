@@ -1,0 +1,132 @@
+---
+id: lazy-loading-n-plus-one
+tech: spring-boot
+title: Lazy Loading and the N+1 Problem
+topic: data
+level: interview
+heat: 3
+hook: "Lazy associations load on first touch. Touch one for each row in a list and 1 query becomes N+1; fetch what the use case needs up front instead."
+points:
+  - { k: "Defaults (JPA 3.2)", v: "...ToOne: EAGER; ...ToMany: LAZY", kind: default }
+  - { k: "N+1", v: "1 query for N parents, then 1 more per parent when touched" }
+  - { k: "Fix", v: "JOIN FETCH or @EntityGraph: parents and children in one query", kind: plus }
+  - { k: "@BatchSize", v: "one IN query per batch of parents: fewer queries, not one" }
+  - { k: "LazyInitializationException", v: "lazy data touched after the persistence context closed", kind: minus }
+  - { k: "open-in-view (Boot 4.1)", v: "on by default for web apps, with a startup warning", kind: default }
+trap:
+  wrong: "Make the association EAGER to fix N+1."
+  right: "EAGER loads it on every use of the entity. Keep it LAZY and fetch per query with JOIN FETCH or @EntityGraph."
+sayIt: "N+1 is one query for the parents plus one per parent when a lazy association is touched in a loop. I keep associations LAZY, including @ManyToOne, and fetch what each use case needs with JOIN FETCH or @EntityGraph. I also turn off open-in-view."
+relations:
+  - { from: lazy-fetch, to: n-plus-one-problem, type: causes, why: "Touching a lazy association in a loop runs one query per parent." }
+  - { from: join-fetch, to: n-plus-one-problem, type: solves, why: "Parents and children come back in one query." }
+  - { from: entity-graph, to: n-plus-one-problem, type: solves, why: "The named associations load in the same query as the parents." }
+  - { from: batch-fetching, to: n-plus-one-problem, type: limits, why: "N extra queries shrink to about N divided by the batch size." }
+  - { from: open-session-in-view, to: lazy-initialization-exception, type: solves, why: "Lazy loads still work in the web layer, but queries then run during rendering." }
+  - { from: entity-graph, to: spring-data-repositories, type: pairs, why: "Put @EntityGraph on a repository method to load its associations." }
+confusedWith: [lazy-vs-eager-fetch]
+tags: [jpa, hibernate, performance, fetching]
+visual: flow
+sources:
+  - title: "FetchType: EAGER is a requirement, LAZY a hint (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/FetchType.html"
+    verifiedOn: "2026-10-17"
+  - title: "ManyToOne: fetch defaults to EAGER (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/ManyToOne.html"
+    verifiedOn: "2026-10-17"
+  - title: "OneToMany: fetch defaults to LAZY (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/OneToMany.html"
+    verifiedOn: "2026-10-17"
+  - title: "OneToOne: fetch defaults to EAGER (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/OneToOne.html"
+    verifiedOn: "2026-10-17"
+  - title: "ManyToMany: fetch defaults to LAZY (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/ManyToMany.html"
+    verifiedOn: "2026-10-17"
+  - title: "A Short Guide to Hibernate 7 (7.4): lazy fetching, N+1, batch and join fetching"
+    url: "https://docs.hibernate.org/orm/7.4/introduction/html_single/"
+    verifiedOn: "2026-10-17"
+  - title: "LazyInitializationException (Hibernate ORM 7.4 API)"
+    url: "https://docs.hibernate.org/orm/7.4/javadocs/org/hibernate/LazyInitializationException.html"
+    verifiedOn: "2026-10-17"
+  - title: "BatchSize (Hibernate ORM 7.4 API)"
+    url: "https://docs.hibernate.org/orm/7.4/javadocs/org/hibernate/annotations/BatchSize.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Data JPA 4.1: Configuring fetch and load graphs (@EntityGraph)"
+    url: "https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html"
+    verifiedOn: "2026-10-17"
+  - title: "SQL Databases: Open EntityManager in View (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/data/sql.html"
+    verifiedOn: "2026-10-17"
+  - title: "JpaBaseConfiguration: open-in-view default and warning (Spring Boot v4.1.1 source, GitHub)"
+    url: "https://github.com/spring-projects/spring-boot/blob/v4.1.1/module/spring-boot-jpa/src/main/java/org/springframework/boot/jpa/autoconfigure/JpaBaseConfiguration.java"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Boot how-to: Data Access (spring.jpa.properties.*)"
+    url: "https://docs.spring.io/spring-boot/how-to/data-access.html"
+    verifiedOn: "2026-10-17"
+  - title: "Hibernate interview questions: lazy loading, N+1 SELECT problem (InterviewBit)"
+    url: "https://www.interviewbit.com/hibernate-interview-questions/"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Boot interview questions: LazyInitializationException (InterviewBit)"
+    url: "https://www.interviewbit.com/spring-boot-interview-questions/"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+Loading every association up front wastes memory and time, so collections load lazily. But touching a lazy association once for each item in a list quietly runs one extra query per item.
+
+## How it works
+
+<Mermaid
+  alt="Two ways to show 3 authors with their books. N+1: one query selects the 3 authors, then reading each author's books runs one more query per author, 4 queries in total. JOIN FETCH: one query selects the authors joined with their books."
+  chart={`flowchart TD
+  subgraph NP ["N+1: 1 + N queries"]
+    A["select authors (3 rows)"] --> L{"for each author: getBooks()"}
+    L --> B1["select books of author 1"]
+    L --> B2["select books of author 2"]
+    L --> B3["select books of author 3"]
+  end
+  subgraph JF ["JOIN FETCH: 1 query"]
+    J["select authors join fetch books"]
+  end`}
+/>
+
+- A [LazyInitializationException](card:lazy-initialization-exception) means lazy data was touched after the persistence context closed, often in a controller. Load the data in the service instead.
+- Boot turns [Open Session in View](card:open-session-in-view) on for web apps and warns about it at startup. With it off, such access fails fast.
+
+## Example
+
+```java
+public interface AuthorRepository extends JpaRepository<Author, Long> {
+
+    @Query("select a from Author a left join fetch a.books")
+    List<Author> findAllWithBooks();                 // 1 query
+
+    @EntityGraph(attributePaths = "books")
+    List<Author> findByCountry(String country);      // 1 query
+}
+```
+
+```properties
+spring.jpa.open-in-view=false
+spring.jpa.properties.hibernate.default_batch_fetch_size=16
+```
+
+## Interview Qs
+
+### What is the N+1 problem, and how do you fix it?
+
+One query loads N parents; then touching a lazy association runs one more query per parent. Fetch per use case: JOIN FETCH in JPQL, or @EntityGraph on the repository method. Batch fetching cuts the number of queries but does not remove the problem.
+
+### Why do you get LazyInitializationException?
+
+A lazy association or proxy is touched after its persistence context closed, often when a controller or the JSON serialiser reads an entity returned by a transactional service. Load what is needed inside the transaction, or return a DTO.
+
+### LAZY or EAGER?
+
+LAZY almost everywhere, including @ManyToOne and @OneToOne, which JPA makes EAGER by default. EAGER is a rule the provider must follow, so the data loads even where nobody uses it; LAZY is only a hint.
+
+### What is spring.jpa.open-in-view?
+
+In web apps, Boot keeps the EntityManager open for the whole request, so lazy loads also work in controllers and views. It is on by default and logs a warning at startup. Setting it to false keeps database access inside service transactions.

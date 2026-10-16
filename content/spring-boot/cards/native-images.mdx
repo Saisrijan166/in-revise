@@ -1,0 +1,121 @@
+---
+id: native-images
+tech: spring-boot
+title: "GraalVM Native Images and AOT"
+topic: testing-production
+level: interview
+heat: 2
+hook: "A native image is a standalone executable that GraalVM compiles ahead of time. It starts in milliseconds with little memory, but all code must be known at build time."
+points:
+  - { k: "Spring AOT", v: "at build time, bean setup becomes Java code, proxies and hint files" }
+  - { k: "Closed world", v: "only reachable code is kept; classpath and beans fixed at build" }
+  - { k: "Hints", v: "reflection, resources, proxies: add a RuntimeHintsRegistrar" }
+  - { k: "Fast and small", v: "much faster startup and a smaller memory footprint", kind: plus }
+  - { k: "Costs", v: "slow, heavy builds; fewer optimisations after warm-up", kind: minus }
+  - { k: "GraalVM 25+", v: "required since Spring Boot 4.0", kind: default }
+trap:
+  wrong: "@Profile and @ConditionalOnProperty switch beans in a native image just as on the JVM."
+  right: "Beans are fixed at build time. A property that decides whether a bean exists cannot change that later, and profiles have limits."
+sayIt: "Spring AOT turns the bean setup into generated code and hints at build time; GraalVM compiles only the reachable code into one executable. Millisecond startup and low memory, paid for with slow builds and beans fixed at build time."
+relations:
+  - { to: executable-jar, type: vs, why: "A native executable with no JVM, or a jar run by the JVM." }
+  - { from: aot-proxies, to: aop-proxies, type: uses, why: "The CGLIB proxy classes Spring needs are generated during the build." }
+  - { from: native-bean-limits, to: profiles, type: limits, why: "Profiles are limited, because beans are fixed when the image is built." }
+  - { from: native-bean-limits, to: auto-configuration, type: limits, why: "@ConditionalOnProperty cannot add or drop beans at run time." }
+  - { from: native-buildpacks, to: buildpacks-image, type: uses, why: "The same build-image goal, with -Pnative, builds a native container image." }
+confusedWith: [jar-vs-native-image]
+tags: [native-image, graalvm, aot, performance]
+visual: flow
+sources:
+  - title: "Introducing GraalVM Native Images (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/packaging/native-image/introducing-graalvm-native-images.html"
+    verifiedOn: "2026-10-17"
+  - title: "Advanced Native Images Topics (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/packaging/native-image/advanced-topics.html"
+    verifiedOn: "2026-10-17"
+  - title: "Developing Your First GraalVM Native Application (Spring Boot 4.1.1 how-to)"
+    url: "https://docs.spring.io/spring-boot/how-to/native-image/developing-your-first-application.html"
+    verifiedOn: "2026-10-17"
+  - title: "Ahead-of-Time Processing With the JVM (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/packaging/aot.html"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Boot 4.0 Migration Guide: GraalVM 25 required"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
+    verifiedOn: "2026-10-17"
+  - title: "Native Image (GraalVM docs)"
+    url: "https://www.graalvm.org/latest/reference-manual/native-image/"
+    verifiedOn: "2026-10-17"
+  - title: "Native Image Basics (GraalVM docs)"
+    url: "https://www.graalvm.org/latest/reference-manual/native-image/basics/"
+    verifiedOn: "2026-10-17"
+  - title: "Spring Native 0.12 reference (archived): trade-offs of native images"
+    url: "https://docs.spring.io/spring-native/docs/0.12.0/reference/htmlsingle/"
+    verifiedOn: "2026-10-17"
+---
+
+## Why it exists
+
+A JVM app loads classes, scans and wires beans, and warms up at every start. For functions and containers that start often, startup time and memory per instance matter most.
+
+## How it works
+
+<Mermaid
+  alt="Native image build. Your code and Spring go through Spring AOT processing, which writes generated bean code and hint files. GraalVM then runs a static analysis from the main method. Reachable code goes into the native executable; unreachable code is dropped."
+  chart={`flowchart LR
+  S[Your code + Spring] --> A[Spring AOT: generated bean code and hints]
+  A --> G[GraalVM: static analysis from main]
+  G --> X([Native executable: reachable code only])
+  G -. "unreachable code" .-> D[Dropped]`}
+/>
+
+- Spring writes most hints itself; third-party libraries get theirs from the GraalVM Reachability Metadata repository.
+- Build with `mvn -Pnative spring-boot:build-image` (a container image) or `mvn -Pnative native:compile` (a local executable).
+- Test the AOT code on a normal JVM with `-Dspring.aot.enabled=true`, or record missing hints with the tracing agent.
+
+## Example
+
+```java
+@Configuration
+@ImportRuntimeHints(ReportHints.class)
+class NativeConfig {
+}
+
+class ReportHints implements RuntimeHintsRegistrar {
+    @Override
+    public void registerHints(RuntimeHints hints, ClassLoader classLoader) {
+        hints.resources().registerPattern("templates/report.txt"); // read at run time
+        hints.proxies().registerJdkProxy(PriceClient.class);        // a JDK proxy
+    }
+}
+```
+
+```bash
+./mvnw -Pnative native:compile   # needs GraalVM 25+ installed
+./target/myapp                   # starts without a JVM
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| GraalVM version | 25 or later | Spring Boot 4.0+ |
+| `native` Maven profile | Declared by `spring-boot-starter-parent` | Spring Boot 4.1 |
+| Native buildpacks builder | `paketobuildpacks/builder-noble-java-tiny:latest` | Spring Boot 4.1 |
+
+## Interview Qs
+
+### What is a GraalVM native image, and why use one with Spring Boot?
+
+A platform-specific executable compiled ahead of time, so no JVM is needed to run it. It starts much faster and uses less memory, which suits containers, scale-to-zero and functions as a service.
+
+### What does Spring AOT processing do?
+
+At build time it evaluates the configuration, writes the bean definitions as Java source, generates the proxy classes and writes hint files for reflection, resources and proxies, so GraalVM can see everything the app needs.
+
+### What are the limitations of native images?
+
+A closed world: the classpath and beans are fixed at build time, so `@Profile` and `@ConditionalOnProperty` cannot switch beans later. Reflection, resources and proxies need hints. Builds are slow and heavy, with fewer optimisations than a warmed-up JVM.
+
+### Native image or JVM with an AOT cache?
+
+Both cut startup time. An AOT cache keeps the normal JVM and full Java behaviour; it needs Java 25+ and a training run. A native image drops the JVM for much faster startup and less memory, but brings closed-world limits and long builds.
