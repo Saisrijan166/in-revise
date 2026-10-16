@@ -36,7 +36,7 @@ Applied, and written into CLAUDE.md (CLAUDE.md is not tracked in git: the global
 
 ## C. Decisions still open for the owner
 
-1. **Tree depth:** System Design's tree has about 75 nodes for 6 concepts. In Phase 3 each topic will grow. Is about 3 levels the right maximum?
+1. **Tree depth:** see D4.5 (the full tree now has about 500 nodes).
 2. **Relation types:** 7 verbs today. Add more (for example "replaces", "is a kind of") or keep the set small?
 3. **Heat rubric:** should `heat` follow a written rule (for example, 3 = appears in most prep guides)?
 4. **Deck order on Home:** alphabetical by slug. Add an `order` field to `_tech.yaml`?
@@ -85,8 +85,8 @@ Applied, and written into CLAUDE.md (CLAUDE.md is not tracked in git: the global
 
 ### D4. Decisions for the owner
 
-1. **Size:** 50 concepts, 26 comparisons, 339 glossary terms, about 500 tree nodes, 20 story steps, 8 topics. Is that the right breadth, or should some tree types become full concepts (for example read-through, refresh-ahead, leader election)?
+1. **Size:** 51 concepts, 26 comparisons, 340 glossary terms, about 500 tree nodes, 20 story steps, 8 topics. Is that the right breadth, or should some tree types become full concepts (for example read-through, refresh-ahead, leader election)?
 2. **Concept ids that are also glossary ids** (`availability`, `capacity-estimation`, `circuit-breaker`, `load-shedding`, `dns`, `cdn`, `consistent-hashing`): kept on purpose so their tree nodes show a one-line definition. Keep?
 3. **Wikipedia for geohash** (D2.1): accept, or drop the geohash details?
 4. **Redis 8.6 `allkeys-lrm` / `volatile-lrm`** (least recently modified) exist but were left out of the eviction concept to keep it short. Add a tree node?
-5. **Tree depth (C1):** the tree now has about 500 nodes. One concept (Consistent Hashing) sits 3 levels deep inside Sharding vs Replication; the Overview and Cheat sheet now show such nested concepts too.
+5. **Tree depth (C1):** the tree now has about 500 nodes. Every topic now lists concepts at its top level (Caching strategies became a concept on 16-10-2026, with write-around added). Concepts may also sit inside another concept (Cache-Aside and Write-Through inside Caching Strategies; Consistent Hashing inside Sharding vs Replication); the Overview, Cheat sheet and sidebar show them either way.
