@@ -12,14 +12,17 @@ import { urls } from "../urls";
 let cache: Deck[] | null = null;
 
 export function getDecks(): Deck[] {
-  if (cache) return cache;
+  // Content files are edited independently of this module. In `next dev`, keeping the
+  // process-wide cache would hide a newly added deck until the server restarts. Static
+  // production builds still cache the parsed result for their process.
+  if (cache && process.env.NODE_ENV === "production") return cache;
   const { decks, issues } = loadDecks();
   const errors = issues.filter((i) => i.severity === "error");
   if (errors.length) {
     const list = errors.map((e) => `  ${e.file}: ${e.message}`).join("\n");
     throw new Error(`Content has ${errors.length} error(s). Run "npm run validate:content".\n${list}`);
   }
-  cache = decks;
+  if (process.env.NODE_ENV === "production") cache = decks;
   return decks;
 }
 
