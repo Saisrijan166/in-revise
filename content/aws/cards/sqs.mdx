@@ -1,0 +1,92 @@
+---
+id: sqs
+tech: aws
+title: "Amazon SQS: Queues"
+topic: integration
+level: beginner
+heat: 3
+hook: "A queue holds jobs until a worker pulls one, finishes it and deletes it; an undeleted job comes back for another try."
+points:
+  - { k: "Pull model", v: "workers poll the queue; SQS never pushes to them" }
+  - { k: "Delete to finish", v: "receiving only hides a message; delete it after success" }
+  - { k: "Long polling", v: "WaitTimeSeconds up to 20 s: fewer empty responses, lower cost", kind: plus }
+  - { k: "Dead-letter queue", v: "after maxReceiveCount receives, the message moves aside" }
+  - { k: "Duplicates", v: "standard queues deliver at least once: make workers idempotent", kind: minus }
+trap:
+  wrong: "SQS removes a message as soon as a consumer receives it."
+  right: "It only hides it for the visibility timeout. Not deleted in time, it reappears and may run twice."
+sayIt: "SQS decouples the payment API from slow work. Workers long-poll, process and delete. A message not deleted in time reappears, and after maxReceiveCount tries it goes to a DLQ."
+confusedWith: [sqs-vs-sns-vs-eventbridge-vs-kinesis]
+tags: [sqs, messaging, decoupling]
+visual: flow
+sources:
+  - title: "Amazon SQS message quotas (SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/quotas-messages.html"
+    verifiedOn: "2026-10-20"
+  - title: "Amazon SQS visibility timeout (SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html"
+    verifiedOn: "2026-10-20"
+  - title: "Using dead-letter queues in Amazon SQS (SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html"
+    verifiedOn: "2026-10-20"
+  - title: "Amazon SQS short and long polling (SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-short-and-long-polling.html"
+    verifiedOn: "2026-10-20"
+  - title: "Amazon SQS increases maximum message payload size to 1 MiB (What's New, 04-08-2025)"
+    url: "https://aws.amazon.com/about-aws/whats-new/2025/08/amazon-sqs-max-payload-size-1mib"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Making a receipt PDF takes seconds. If the payment API did it inline, every ₹500 payment would wait, and a worker crash would lose the job.
+
+## How it works
+
+<Steps label="Life of one SQS message">
+  <Step title="Send">The payment API sends a job with the payment ID.</Step>
+  <Step title="Receive">A worker gets it; other workers no longer see it.</Step>
+  <Step title="Delete">Done in time: the worker deletes it.</Step>
+  <Step title="Reappear">Not deleted within the visibility timeout: visible again.</Step>
+  <Step title="Dead-letter">Received maxReceiveCount times: moved to the DLQ.</Step>
+</Steps>
+
+<Compare id="sqs-standard-vs-fifo" />
+
+## Example
+
+```java
+var request = ReceiveMessageRequest.builder()
+        .queueUrl(receiptsQueueUrl)
+        .waitTimeSeconds(20)                      // long polling
+        .maxNumberOfMessages(10).build();
+for (Message m : sqs.receiveMessage(request).messages()) {
+    String paymentId = m.body();
+    if (!receipts.exists(paymentId)) {            // a duplicate is skipped
+        receipts.writePdfToS3(paymentId);
+    }
+    sqs.deleteMessage(d -> d.queueUrl(receiptsQueueUrl).receiptHandle(m.receiptHandle()));
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Visibility timeout | 30 s (0 s to 12 h) | SQS quotas, 20-10-2026 |
+| Message retention | 4 days (1 min to 14 days) | SQS quotas, 20-10-2026 |
+| Max message size | 1 MiB (256 KiB before 04-08-2025) | SQS quotas, 20-10-2026 |
+
+## Interview Qs
+
+### A worker crashes while making a receipt. Is the job lost?
+
+No. It was never deleted, so it reappears after the visibility timeout and another worker retries. Set the timeout above the normal processing time.
+
+### How do you handle duplicate messages?
+
+Make the consumer idempotent: record the payment ID with a unique constraint and skip IDs already done.
+
+### The payload is bigger than 1 MiB. What now?
+
+Store it in S3 and send its key; the SQS Extended Client Library for Java does this, up to 2 GB.

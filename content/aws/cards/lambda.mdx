@@ -1,0 +1,90 @@
+---
+id: lambda
+tech: aws
+title: "AWS Lambda: Functions on Events"
+topic: compute
+level: intermediate
+heat: 3
+hook: "Lambda runs your handler when an event arrives; AWS starts, scales and stops the environments, so you never manage a server."
+points:
+  - { k: "Cold start", v: "a new environment loads code, starts the JVM and runs init code", kind: minus }
+  - { k: "Warm reuse", v: "environments are reused: create SDK clients once, outside the handler", kind: plus }
+  - { k: "SnapStart", v: "Java 11+: resume from a snapshot taken at publish; no extra cost on Java", kind: plus }
+  - { k: "Provisioned concurrency", v: "keeps N environments initialised; extra charge; not with SnapStart" }
+trap:
+  wrong: "Every Lambda request pays a cold start."
+  right: "Only requests that need a new execution environment do; warm ones are reused. SnapStart or provisioned concurrency cut the rest."
+sayIt: "Lambda runs a handler per event and scales by adding execution environments. For Java I cut cold starts with SnapStart, or provisioned concurrency for strict latency, and keep each run under 15 minutes."
+confusedWith: [ec2-vs-lambda-vs-fargate]
+tags: [lambda, serverless, cold-start]
+visual: flow
+sources:
+  - title: "Lambda quotas"
+    url: "https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html"
+    verifiedOn: "2026-10-20"
+  - title: "Understanding the Lambda execution environment lifecycle"
+    url: "https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtime-environment.html"
+    verifiedOn: "2026-10-20"
+  - title: "Improving startup performance with Lambda SnapStart"
+    url: "https://docs.aws.amazon.com/lambda/latest/dg/snapstart.html"
+    verifiedOn: "2026-10-20"
+  - title: "Configuring provisioned concurrency for a function"
+    url: "https://docs.aws.amazon.com/lambda/latest/dg/provisioned-concurrency.html"
+    verifiedOn: "2026-10-20"
+  - title: "Understanding Lambda Event Function invocation methods"
+    url: "https://docs.aws.amazon.com/lambda/latest/dg/lambda-invocation.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A payment webhook or receipt worker does not justify a server running all day. Lambda runs code only when an event arrives.
+
+## How it works
+
+<Mermaid
+  alt="API Gateway invokes Lambda synchronously and waits. S3 or EventBridge invoke it asynchronously; the event is queued. For SQS or Kinesis, an event source mapping polls and invokes in batches."
+  chart={`flowchart LR
+  API[API Gateway] -- "sync: waits" --> F[Lambda function]
+  EB[S3 / EventBridge] -- "async: queued" --> F
+  Q[(SQS / Kinesis)] -- "polled in batches" --> ESM[Event source mapping]
+  ESM --> F`}
+/>
+
+- Permissions come from the function's execution role: [temporary credentials](card:sts-and-temporary-credentials).
+
+## Example
+
+```java
+// libraries: aws-lambda-java-core, aws-lambda-java-events
+public class ReceiptHandler implements RequestHandler<SQSEvent, Void> {
+    private static final S3Client S3 = S3Client.create(); // init once, reused
+
+    @Override
+    public Void handleRequest(SQSEvent event, Context context) {
+        for (SQSEvent.SQSMessage msg : event.getRecords()) {
+            S3.putObject(b -> b.bucket("payment-receipts").key(msg.getMessageId() + ".txt"),
+                    RequestBody.fromString(msg.getBody()));
+        }
+        return null;
+    }
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Concurrent executions | 1,000 per Region, shared by all functions; can be raised | Lambda quotas, 20-10-2026 |
+| Timeout | Up to 900 s (15 minutes) per invocation | Lambda quotas, 20-10-2026 |
+| Payload | 6 MB request or response (sync), 1 MB (async) | Lambda quotas, 20-10-2026 |
+
+## Interview Qs
+
+### What is a cold start, and how do you reduce it for Java?
+
+Lambda must create an environment, load code, start the JVM and run static init before the handler. Use SnapStart, keep init light, or provisioned concurrency for strict latency.
+
+### Reserved or provisioned concurrency: what is the difference?
+
+Reserved sets aside, and caps, one function's share of the Region's concurrency, free. Provisioned keeps environments initialised, removing cold starts, at extra cost.
