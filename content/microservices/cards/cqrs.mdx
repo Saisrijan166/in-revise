@@ -1,0 +1,79 @@
+---
+id: cqrs
+tech: microservices
+title: "CQRS: Separate Reads from Writes"
+topic: data
+level: interview
+heat: 2
+hook: "One model changes the data; other models, shaped for reading, answer queries. Events keep the read side up to date."
+points:
+  - { k: "Command side", v: "validates and changes data; holds the business rules" }
+  - { k: "Query side", v: "denormalised views built for screens; no business logic" }
+  - { k: "Cross-service queries", v: "one view can join data from many services' events", kind: plus }
+  - { k: "Stale reads", v: "the read side lags the write side: eventual consistency", kind: minus }
+  - { k: "Overkill for CRUD", v: "simple domains pay the cost and get nothing back", kind: minus }
+trap:
+  wrong: "CQRS means you must also use event sourcing."
+  right: "CQRS only splits the read and write models; both can sit on ordinary databases. Event sourcing is optional."
+sayIt: "CQRS splits the write model from read models. The write side publishes events and consumers update denormalised views. It suits cross-service queries and uneven read and write loads, but reads lag a little."
+confusedWith: [cqrs-vs-event-sourcing]
+tags: [cqrs, read-model, materialized-view]
+visual: flow
+sources:
+  - title: "CQRS (Martin Fowler, bliki)"
+    url: "https://martinfowler.com/bliki/CQRS.html"
+    verifiedOn: "2026-10-20"
+  - title: "CQRS pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs"
+    verifiedOn: "2026-10-20"
+  - title: "Pattern: Command Query Responsibility Segregation (microservices.io, Chris Richardson)"
+    url: "https://microservices.io/patterns/data/cqrs.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+One screen may need data from several services, and their databases cannot be joined. A read model built for that screen answers in one query.
+
+## How it works
+
+<Mermaid
+  alt="The client sends the PlaceOrder command to the Order service, which writes the Orders database and publishes OrderCreated to Kafka. A projector consumes the event and updates the order summary view. The client's query GET /my-orders goes to a query service that reads only that view."
+  chart={`flowchart LR
+  U([Client]) -- "PlaceOrder (command)" --> W[Order Service]
+  W --> WDB[(Orders DB)]
+  W -- OrderCreated --> K[[Kafka]]
+  K --> P[Projector]
+  P --> V[(Order summary view)]
+  U -- "GET /my-orders (query)" --> R[Query service]
+  R --> V`}
+/>
+
+- The write side stays the truth; nobody updates the view directly.
+- The view is disposable: rebuild it from the events or the source data.
+- Just after a write, the view may not show it yet; design the UI for that.
+
+## Example
+
+```java
+@Component
+class OrderSummaryProjector {
+    private final OrderSummaryRepository views;
+    OrderSummaryProjector(OrderSummaryRepository views) { this.views = views; }
+
+    @KafkaListener(topics = "order-events", groupId = "order-summary")
+    void on(OrderCreated e) {   // save by orderId: a replayed event overwrites, no duplicate
+        views.save(new OrderSummary(e.orderId(), e.customerName(), e.totalInr(), "CREATED"));
+    }
+}
+```
+
+## Interview Qs
+
+### When would you use CQRS?
+
+When reads and writes differ a lot in shape or load, or a query needs data from several services. For simple CRUD it adds moving parts and stale reads for no gain.
+
+### How is the read model kept in sync?
+
+The write side publishes an event after each change, safely through an [outbox](card:outbox-and-inbox). A consumer updates the view. Make it idempotent, because events can arrive twice.

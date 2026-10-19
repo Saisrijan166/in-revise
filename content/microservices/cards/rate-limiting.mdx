@@ -1,0 +1,77 @@
+---
+id: rate-limiting
+tech: microservices
+title: "Rate Limiting and Load Shedding"
+topic: resilience
+level: intermediate
+heat: 2
+hook: "Cap each client's requests per time window and answer 429 past it; when the server itself is overloaded, drop low-priority work."
+points:
+  - { k: "Rate limit", v: "N requests per client per time window" }
+  - { k: "Key", v: "who is counted: a user, an API key or an IP" }
+  - { k: "Load shedding", v: "by the server's own load: drop low-priority work first" }
+  - { k: "Algorithms", v: "token bucket, leaky bucket, fixed or sliding window" }
+  - { k: "Callers", v: "honour Retry-After and back off", kind: plus }
+trap:
+  wrong: "Return 503 when a client goes over its limit."
+  right: "Send 429 Too Many Requests, ideally with Retry-After. Keep 503 for a server that is itself overloaded and shedding work."
+sayIt: "I rate limit each client at the API gateway with a token bucket kept in Redis, and return 429 with Retry-After. Inside services I shed low-priority work with 503 when they are overloaded."
+confusedWith: []
+tags: [rate-limiting, throttling, load-shedding]
+visual: flow
+sources:
+  - title: "RFC 6585 Additional HTTP Status Codes: 429 Too Many Requests"
+    url: "https://www.rfc-editor.org/rfc/rfc6585.html"
+    verifiedOn: "2026-10-20"
+  - title: "Scaling your API with rate limiters (Stripe engineering blog)"
+    url: "https://stripe.com/blog/rate-limiters"
+    verifiedOn: "2026-10-20"
+  - title: "RequestRateLimiter GatewayFilter Factory (Spring Cloud Gateway 5.0)"
+    url: "https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories/requestratelimiter-factory.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+One noisy client or a sudden spike can use all the capacity. Limits keep a fair share per client and protect services before they fall over.
+
+## How it works
+
+<Mermaid
+  alt="A client calls the API gateway, which checks the client's limit. Over the limit, the gateway answers 429 with Retry-After. Under the limit, the request goes to the Order service. If the Order service is overloaded, it sheds low-priority requests with 503; otherwise it calls its database."
+  chart={`flowchart LR
+  C[Client] --> G{"Gateway: under the client's limit?"}
+  G -- no --> R1["429 + Retry-After"]
+  G -- yes --> S{"Order service overloaded?"}
+  S -- "yes, low priority" --> R2["503: shed"]
+  S -- no --> DB[(Database)]`}
+/>
+
+- Enforce per-client limits at the [API gateway](card:api-gateway), before work reaches the services.
+- Shedding keeps the server alive by doing less, for example rejecting work above a cap on requests in flight.
+
+## Example
+
+```text
+GET /orders?page=1 HTTP/1.1
+X-API-Key: shop-mobile-app
+
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Limiter | Redis token bucket, keyed by the user's principal; answers 429 | Spring Cloud Gateway 5.0 `RequestRateLimiter` |
+
+## Interview Qs
+
+### Rate limiting vs load shedding?
+
+A rate limit looks at one client: has it sent too much? Load shedding looks at the server: is it overloaded? Then it drops the least important work first, whoever sent it.
+
+### How do you rate limit across ten gateway instances?
+
+Keep the counters in a shared fast store such as Redis, so every instance sees the same count per client.

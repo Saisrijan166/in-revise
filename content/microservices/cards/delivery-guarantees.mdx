@@ -1,0 +1,75 @@
+---
+id: delivery-guarantees
+tech: microservices
+title: Delivery Guarantees and Idempotent Consumers
+topic: messaging
+level: intermediate
+heat: 3
+hook: "Plan for at-least-once delivery; an idempotent consumer turns repeats into exactly-once effects."
+points:
+  - { k: "Commit before work", v: "at-most-once: a crash loses the message" }
+  - { k: "Commit after work", v: "at-least-once: a crash repeats the message" }
+  - { k: "Kafka exactly-once", v: "transactions cover Kafka-to-Kafka work only", kind: minus }
+  - { k: "Idempotent producer", v: "on by default (Kafka 4.3): send retries add no duplicates", kind: default }
+  - { k: "Idempotent consumer", v: "save the eventId with the change; a repeat is skipped", kind: plus }
+trap:
+  wrong: "Kafka has exactly-once, so the payment API is called only once."
+  right: "Kafka's exactly-once covers reads and writes inside Kafka. A payment API or another database needs an idempotent consumer."
+sayIt: "I assume at-least-once delivery, so duplicates come. The consumer saves each eventId with its change in one transaction, under a unique key, and skips ids it has seen. Kafka's exactly-once covers Kafka-to-Kafka only."
+confusedWith: [idempotency-vs-deduplication]
+tags: [delivery, exactly-once, idempotent-consumer, kafka]
+visual: table
+sources:
+  - title: "Design: message delivery semantics (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-20"
+  - title: "Producer configs: enable.idempotence (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/configuration/producer-configs/"
+    verifiedOn: "2026-10-20"
+  - title: "Idempotent consumer (microservices.io)"
+    url: "https://microservices.io/patterns/communication-style/idempotent-consumer.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Networks and consumers fail mid-way, so a broker must choose between losing a message and sending it again. Your code must cope with the choice.
+
+## How it works
+
+<Compare id="at-most-vs-at-least-vs-exactly-once" />
+
+- Kafka's default is at-least-once; at-most-once means no producer retries and committing first.
+- Storing the consumer's position with its output gives exactly-once without 2PC.
+- Keys for HTTP retries are a different tool: [idempotency keys](card:idempotency).
+
+## Example
+
+```java
+@KafkaListener(topics = "payments", groupId = "order-service")
+@Transactional
+public void on(PaymentFailed event) {
+    if (processed.existsById(event.eventId())) {
+        return;                                  // duplicate: already applied
+    }
+    processed.save(new ProcessedEvent(event.eventId()));  // primary key = eventId
+    orders.markPaymentFailed(event.orderId());   // same DB transaction
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| `enable.idempotence` | `true` | Kafka 4.3 producer |
+| `isolation.level` | `read_uncommitted` | Kafka 4.3 consumer |
+
+## Interview Qs
+
+### Is exactly-once delivery possible?
+
+Inside Kafka, yes: a transaction writes the output and the consumer offsets together, and readers use read_committed. Across a database or an external API you get exactly-once effects only by making the consumer idempotent.
+
+### How do you make a consumer idempotent?
+
+Give every event a unique eventId. In one local transaction, insert the id into a processed table with a unique key and apply the change. A redelivered event hits the key and is skipped.

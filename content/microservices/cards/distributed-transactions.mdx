@@ -1,0 +1,76 @@
+---
+id: distributed-transactions
+tech: microservices
+title: Distributed Transactions and Two-Phase Commit
+topic: messaging
+level: intermediate
+heat: 3
+hook: "ACID ends at one database; 2PC can stretch it across several, at the cost of blocking."
+points:
+  - { k: "Local transaction", v: "ACID inside one service's own database", kind: plus }
+  - { k: "2PC", v: "coordinator: all prepare and vote, then all commit or all roll back" }
+  - { k: "Blocking", v: "prepared participants hold locks until the coordinator decides", kind: minus }
+  - { k: "Support", v: "many brokers and databases do not support 2PC", kind: minus }
+  - { k: "@Transactional", v: "local only: it cannot undo another service's HTTP call" }
+trap:
+  wrong: "Put @Transactional on checkout; if anything fails, the payment is rolled back too."
+  right: "@Transactional covers your own database only. The remote charge stays; undo it with a refund (a saga step)."
+sayIt: "One ACID transaction cannot span services that own their databases. 2PC can, but participants hold locks until the coordinator decides, and many brokers and databases do not support it. So microservices use sagas."
+confusedWith: [saga-vs-two-phase-commit]
+tags: [transactions, 2pc, xa, acid]
+visual: flow
+sources:
+  - title: "PREPARE TRANSACTION (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/18/sql-prepare-transaction.html"
+    verifiedOn: "2026-10-20"
+  - title: "Transaction management: local vs global transactions (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/motivation.html"
+    verifiedOn: "2026-10-20"
+  - title: "Transactional outbox: why not 2PC (microservices.io)"
+    url: "https://microservices.io/patterns/data/transactional-outbox.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Placing an order touches the Order, Inventory and Payment databases. Each commits on its own, so nothing makes all three succeed or fail together.
+
+## How it works
+
+<Mermaid
+  alt="Two-phase commit. Phase 1: the coordinator asks the Order database and the Payment database to prepare; both save their work and vote yes. Phase 2: because all voted yes, the coordinator tells both to commit. If any had voted no, it would tell all to roll back."
+  chart={`sequenceDiagram
+  participant C as Coordinator
+  participant O as Order DB
+  participant P as Payment DB
+  C->>O: prepare
+  C->>P: prepare
+  O-->>C: yes
+  P-->>C: yes
+  C->>O: commit
+  C->>P: commit`}
+/>
+
+- A prepared participant waits for the coordinator's decision and keeps its locks meanwhile.
+- The usual microservices answer: [saga](card:saga), with an [outbox](card:outbox-and-inbox) for each step's event.
+
+## Example
+
+```java
+@Transactional
+public void checkout(Order order) {
+    orders.save(order);                                  // local: rolled back on error
+    paymentClient.charge(order.id(), order.totalInr());  // remote: ₹ already taken
+    inventoryClient.reserve(order.items());              // throws: out of stock
+}   // the order row rolls back, the charge does not
+```
+
+## Interview Qs
+
+### Why do microservices avoid two-phase commit?
+
+Participants hold locks while waiting for the coordinator, so one slow or failed coordinator stalls every service in the transaction. Many message brokers and databases do not support it, and it couples each service tightly to the others.
+
+### Does @Transactional work across two microservices?
+
+No. It manages the resources of your own transaction manager, usually one database. A call to another service commits on its own side, so you need a compensating action such as a refund.

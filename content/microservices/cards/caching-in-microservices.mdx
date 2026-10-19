@@ -1,0 +1,74 @@
+---
+id: caching-in-microservices
+tech: microservices
+title: Caching in Microservices
+topic: data
+level: intermediate
+heat: 2
+hook: "A cache makes repeated reads fast, but the database stays the truth: every cached copy needs a TTL and an invalidation plan."
+points:
+  - { k: "Local vs shared", v: "in-process is fastest; Redis is one copy for all instances" }
+  - { k: "Write rule", v: "update the database, then delete the cached key" }
+  - { k: "TTL on every key", v: "catches missed invalidations; add jitter to spread expiry" }
+  - { k: "Not the truth", v: "never keep the only copy of important data in a cache", kind: minus }
+trap:
+  wrong: "Delete the cached key first, then update the database."
+  right: "Update the database first, then delete the key. Otherwise a reader can cache the old value again."
+sayIt: "I use cache-aside with Redis: read the cache; on a miss load from the database and store it with a TTL. On writes I update the database, then delete the key. Hot keys get TTL jitter and one loader at a time."
+confusedWith: []
+tags: [cache-aside, redis, ttl, cache-stampede]
+visual: flow
+sources:
+  - title: "Caching guidance (Azure Architecture Center, best practices)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/best-practices/caching"
+    verifiedOn: "2026-10-20"
+  - title: "Caching best practices (AWS)"
+    url: "https://aws.amazon.com/caching/best-practices/"
+    verifiedOn: "2026-10-20"
+  - title: "How to do distributed locking (Martin Kleppmann)"
+    url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Many requests read the same product or price again and again. Serving those from memory cuts latency and protects the database, as long as slightly old data is acceptable.
+
+## How it works
+
+<Steps label="Cache-aside (lazy loading)">
+  <Step title="Read">Look up the key in the cache. Hit: return it.</Step>
+  <Step title="Miss">Load from the database, store it with a TTL, return it.</Step>
+  <Step title="Write">Update the database first, then delete the key.</Step>
+</Steps>
+
+- [Stampede](card:cache-stampede): let one request reload the key while the others wait or get the old value.
+- [Penetration](card:cache-penetration): check a Bloom filter first; it can say "definitely absent" without asking the database.
+- [Avalanche](card:cache-avalanche): add random jitter to TTLs so keys do not expire together.
+
+## Example
+
+```java
+String productName(long id) {
+    String key = "product:" + id, name = redis.opsForValue().get(key);
+    if (name == null) {                                        // miss
+        name = repo.findById(id).orElseThrow().getName();
+        long ttl = ThreadLocalRandom.current().nextLong(600, 660);  // 10 min + jitter
+        redis.opsForValue().set(key, name, Duration.ofSeconds(ttl));
+    }
+    return name;
+}
+void rename(long id, String name) {                     // 1. database, 2. then the cache
+    repo.updateName(id, name); redis.delete("product:" + id);
+}
+```
+
+## Interview Qs
+
+### Local cache or Redis?
+
+A local cache is fastest, but each instance has its own copy, so instances can disagree after a write. Redis is shared by all instances, at the cost of a network hop. Many systems use both, local in front.
+
+### Can a Redis lock make sure only one instance charges a payment?
+
+Not on its own. A lock with an expiry can run out during a long pause, so two holders are possible. For correctness, add a fencing token the database checks, or rely on a unique constraint and [idempotency](card:idempotency).

@@ -1,0 +1,85 @@
+---
+id: timeouts-and-retries
+tech: microservices
+title: "Timeouts, Retries, Backoff and Jitter"
+topic: resilience
+level: intermediate
+heat: 3
+hook: "Give every remote call a timeout; retry only brief errors, a few times, with growing random waits."
+points:
+  - { k: "Timeout", v: "stop waiting; frees the thread and the connection" }
+  - { k: "Retry only", v: "timeouts, connection resets, 429, 500, 502, 503, 504" }
+  - { k: "Exponential backoff", v: "the wait doubles each attempt, up to a cap" }
+  - { k: "Jitter", v: "a random wait, so clients do not retry in waves", kind: plus }
+  - { k: "Layers multiply", v: "3 attempts at each of 3 layers = 27 calls downstream", kind: minus }
+trap:
+  wrong: "Retry every failure, at every layer, straight away."
+  right: "Retry only transient errors, at one layer, with capped backoff and jitter. A non-idempotent call needs an idempotency key first."
+sayIt: "Every remote call gets a timeout. I retry only transient errors, at most three attempts, with backoff and jitter, at one layer, and only if the call is idempotent or carries an idempotency key."
+confusedWith: [retry-vs-circuit-breaker]
+tags: [timeout, retry, backoff, jitter]
+visual: table
+sources:
+  - title: "Timeouts, retries, and backoff with jitter (Amazon Builders' Library)"
+    url: "https://builder.aws.com/content/3EumjoZascWd1oZiEgL8ORlv3qE/timeouts-retries-and-backoff-with-jitter"
+    verifiedOn: "2026-10-20"
+  - title: "Retry behavior (AWS SDKs and Tools reference)"
+    url: "https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html"
+    verifiedOn: "2026-10-20"
+  - title: "Retry (Resilience4j docs)"
+    url: "https://resilience4j.readme.io/docs/retry"
+    verifiedOn: "2026-10-20"
+  - title: "HttpRequest.Builder.timeout (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.net.http/java/net/http/HttpRequest.Builder.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Remote calls hang or fail for a moment. Without a timeout, threads can wait forever; a careful retry turns a blip into a success.
+
+## How it works
+
+| Failure | Retry? |
+| --- | --- |
+| Timeout, connection reset | Yes |
+| 429, 503 | Yes, after `Retry-After` or a backoff |
+| 500, 502, 504 | Yes, a few times |
+| 400, 401, 403, 404, 422 | No: the same request fails again |
+
+- A timeout ends one attempt; a retry starts a new one. You need both.
+- Set the timeout from the callee's latency, for example its p99.9.
+- Repeat only [idempotent](card:idempotency) calls: the first attempt may have worked.
+
+## Example
+
+```yaml
+resilience4j:
+  retry:
+    instances:
+      inventory:                      # GET stock
+        maxAttempts: 3                # first call + 2 retries
+        waitDuration: 200ms
+        enableExponentialBackoff: true
+        exponentialBackoffMultiplier: 2
+        enableRandomizedWait: true    # jitter
+        retryExceptions: [java.io.IOException]
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Attempts | 3 in total, 500 ms apart | Resilience4j 2.x Retry |
+| Errors retried | every exception, unless you list `retryExceptions` | Resilience4j 2.x Retry |
+| Request timeout | none: `send()` blocks forever | JDK `HttpClient`, Java 25 |
+
+## Interview Qs
+
+### Timeout vs retry?
+
+A timeout stops waiting for one attempt; a retry makes a new attempt. Each attempt has its own timeout, and attempts are capped.
+
+### Why add jitter to exponential backoff?
+
+Clients that failed together would retry together, in waves that hit the recovering service again. Random waits spread them out.

@@ -1,0 +1,85 @@
+---
+id: circuit-breaker
+tech: microservices
+title: "Circuit Breaker"
+topic: resilience
+level: intermediate
+heat: 3
+hook: "After too many failures, stop calling the sick service and fail fast; later, let a few test calls through."
+points:
+  - { k: "CLOSED", v: "normal: calls pass, results are counted" }
+  - { k: "OPEN", v: "calls fail at once, nothing is sent; waits a set time" }
+  - { k: "HALF_OPEN", v: "a few trial calls: success closes it, failure reopens it" }
+  - { k: "Slow calls", v: "can open it too, not only errors" }
+  - { k: "One per dependency", v: "a breaker for Payment, another for Inventory" }
+trap:
+  wrong: "OPEN means calls flow, like an open door."
+  right: "It is named after an electric breaker: OPEN means the circuit is broken and no calls pass. CLOSED is the normal state."
+sayIt: "A circuit breaker counts failures over a sliding window. Past the threshold it opens and fails fast, so callers stop waiting on a dead service. After a wait it lets a few trial calls through to decide."
+confusedWith: [retry-vs-circuit-breaker, circuit-breaker-vs-bulkhead]
+tags: [circuit-breaker, resilience4j, fail-fast]
+visual: flow
+sources:
+  - title: "Circuit Breaker pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker"
+    verifiedOn: "2026-10-20"
+  - title: "CircuitBreaker (Resilience4j docs)"
+    url: "https://resilience4j.readme.io/docs/circuitbreaker"
+    verifiedOn: "2026-10-20"
+  - title: "Getting started with Spring Boot (Resilience4j docs)"
+    url: "https://resilience4j.readme.io/docs/getting-started-3"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+When a service is down, its callers keep waiting, hold threads, and fail too. A breaker stops those calls, so one failure does not cascade.
+
+## How it works
+
+<Mermaid
+  alt="Circuit breaker states. CLOSED moves to OPEN when the failure rate passes the threshold. OPEN moves to HALF_OPEN when the wait ends. HALF_OPEN goes back to CLOSED if trial calls succeed, or to OPEN if they fail."
+  chart={`stateDiagram-v2
+  [*] --> CLOSED
+  CLOSED --> OPEN: failure rate over threshold
+  OPEN --> HALF_OPEN: wait time ends
+  HALF_OPEN --> CLOSED: trial calls succeed
+  HALF_OPEN --> OPEN: trial calls fail`}
+/>
+
+- It opens on a failure rate over many calls, not on one error.
+- While OPEN, answer with a [fallback](card:fallback-and-degradation) or a clear error at once.
+- The breaker needs a short [timeout](card:timeouts-and-retries) on each call, or it learns about failures too late.
+
+## Example
+
+```java
+@CircuitBreaker(name = "inventory", fallbackMethod = "stockUnknown")
+public Stock stock(String sku) {
+    return inventoryClient.get().uri("/stock/{sku}", sku)
+            .retrieve().body(Stock.class);
+}
+
+// on failure, or at once while OPEN
+private Stock stockUnknown(String sku, Exception e) {
+    return Stock.unknown(sku);
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Opens at | 50% failed calls, over the last 100 calls (at least 100 recorded) | Resilience4j 2.x |
+| Stays OPEN | 60 s, then 10 trial calls in HALF_OPEN | Resilience4j 2.x |
+| While OPEN | throws `CallNotPermittedException` | Resilience4j 2.x |
+
+## Interview Qs
+
+### How do you prevent cascading failures?
+
+A timeout on every call, a few retries with backoff, a breaker per dependency, [bulkheads](card:bulkhead) so one slow service cannot take every thread, and [rate limits](card:rate-limiting) on incoming work. Monitor each dependency's errors and latency.
+
+### Why HALF_OPEN, and not straight back to CLOSED?
+
+A service that is just recovering may fall over again under full traffic. A few trial calls test it gently first.

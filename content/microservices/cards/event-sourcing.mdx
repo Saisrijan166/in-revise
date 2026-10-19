@@ -1,0 +1,79 @@
+---
+id: event-sourcing
+tech: microservices
+title: Event Sourcing
+topic: data
+level: interview
+heat: 2
+hook: "Store every change as an event in an append-only log; the current state is what you get by replaying those events."
+points:
+  - { k: "Source of truth", v: "the event store, append-only; state is derived from it" }
+  - { k: "Audit and time travel", v: "full history; rebuild the state at any past point", kind: plus }
+  - { k: "Fix by appending", v: "never edit an event; append a compensating event" }
+  - { k: "Hard to query", v: "queries need projections, so it nearly always comes with CQRS", kind: minus }
+  - { k: "Schema change", v: "old event versions stay forever; version or upcast them", kind: minus }
+trap:
+  wrong: "Event sourcing just means services publish events to Kafka."
+  right: "Publishing events is event-driven messaging. Event sourcing means the stored events are the record of truth."
+sayIt: "With event sourcing I store each change, like OrderCreated or OrderPaid, as an immutable event and rebuild state by replaying them, with snapshots for long streams. It gives a full audit trail but needs projections for queries."
+confusedWith: [cqrs-vs-event-sourcing]
+tags: [event-sourcing, event-store, snapshot, replay]
+visual: table
+sources:
+  - title: "Event Sourcing pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing"
+    verifiedOn: "2026-10-20"
+  - title: "Event Sourcing (Martin Fowler)"
+    url: "https://martinfowler.com/eaaDev/EventSourcing.html"
+    verifiedOn: "2026-10-20"
+  - title: "Pattern: Event sourcing (microservices.io, Chris Richardson)"
+    url: "https://microservices.io/patterns/data/event-sourcing.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A normal table keeps only the latest state, so history is lost. Some domains, like payments and orders, need every change kept and the state rebuildable at any time.
+
+## How it works
+
+| # | Event appended to order 42 | State after replay |
+|---|---|---|
+| 1 | OrderCreated (₹1,200) | CREATED, ₹1,200 |
+| 2 | ItemAdded (₹300) | CREATED, ₹1,500 |
+| 3 | OrderPaid | PAID, ₹1,500 |
+
+- Loading: read the latest snapshot, then replay only the later events.
+- Two writers at once: the append fails if the stream changed since it was read.
+- Its events are low level; other services usually get separate integration events.
+
+## Example
+
+```java
+sealed interface OrderEvent {}
+record OrderCreated(long totalInr) implements OrderEvent {}
+record ItemAdded(long priceInr) implements OrderEvent {}
+record OrderPaid() implements OrderEvent {}
+record Order(String status, long totalInr) {
+    Order apply(OrderEvent e) { return switch (e) {
+        case OrderCreated c -> new Order("CREATED", c.totalInr());
+        case ItemAdded i    -> new Order(status, totalInr + i.priceInr());
+        case OrderPaid p    -> new Order("PAID", totalInr);
+    }; }
+}
+// replay: for (OrderEvent e : events) order = order.apply(e);
+```
+
+## Interview Qs
+
+### Is replaying slow for long streams?
+
+It can be. Save a snapshot every N events and replay only the events after it. A snapshot is an optimisation; the events stay the truth.
+
+### How do you fix a wrong event or delete personal data?
+
+Never edit events: append a compensating event. Keep personal data outside the event store and reference it by id, or encrypt it per person and delete the key (crypto-shredding).
+
+### When should you not use event sourcing?
+
+For simple CRUD, lookup data, prototypes, or views that must be up to date instantly. It changes how you test, query and evolve data, and is costly to undo.

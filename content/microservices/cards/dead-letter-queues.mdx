@@ -1,0 +1,77 @@
+---
+id: dead-letter-queues
+tech: microservices
+title: Dead-Letter Queues and Poison Messages
+topic: messaging
+level: intermediate
+heat: 2
+hook: "Retry a failing message a few times, then park it in a dead-letter queue so the rest keep flowing."
+points:
+  - { k: "Poison message", v: "fails every time; retried forever it blocks the partition", kind: minus }
+  - { k: "Bounded retries", v: "a few attempts with backoff; skip retries for bad data" }
+  - { k: "Retry topics", v: "do not block the partition, but Kafka ordering is lost", kind: minus }
+  - { k: "Spring Kafka", v: "DefaultErrorHandler: 10 attempts, then log (4.1)", kind: default }
+  - { k: "RabbitMQ", v: "quorum queue delivery limit 20 (4.0+), then drop or dead-letter", kind: default }
+trap:
+  wrong: "A dead-letter queue means the failure is handled."
+  right: "It only parks the message. Alert on it, fix the cause, then replay the messages."
+sayIt: "I retry a failed message a few times with backoff, then send it to a dead-letter topic with the error, commit and move on. We alert on the DLQ, fix the cause and replay."
+confusedWith: []
+tags: [dlq, poison-message, retry, kafka, rabbitmq]
+visual: flow
+sources:
+  - title: "Container error handlers (Spring for Apache Kafka 4.1)"
+    url: "https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html"
+    verifiedOn: "2026-10-20"
+  - title: "Non-blocking retries: how the pattern works (Spring for Apache Kafka 4.1)"
+    url: "https://docs.spring.io/spring-kafka/reference/retrytopic/how-the-pattern-works.html"
+    verifiedOn: "2026-10-20"
+  - title: "Quorum queues: poison message handling (RabbitMQ 4.3 docs)"
+    url: "https://www.rabbitmq.com/docs/quorum-queues"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A malformed OrderCreated fails on every try. Retried forever, it stops every message behind it in that partition; dropped silently, the order is lost.
+
+## How it works
+
+<Steps label="Handling a message that keeps failing">
+  <Step title="Retry a few times">With backoff, for errors that may pass, such as a timeout.</Step>
+  <Step title="Skip retries for bad data">A message that cannot be read fails the same way every time.</Step>
+  <Step title="Park it">Publish it to a dead-letter topic with the error details, then commit and move on.</Step>
+  <Step title="Alert and replay">Watch the DLQ size, fix the bug or data, then republish the messages.</Step>
+</Steps>
+
+- Spring Kafka names the dead-letter topic `<topic>-dlt` and keeps the same partition.
+- Which errors to retry, and how to back off: [Timeouts and Retries](card:timeouts-and-retries).
+
+## Example
+
+```java
+@Bean
+DefaultErrorHandler errorHandler(KafkaTemplate<Object, Object> template) {
+    var toDlt = new DeadLetterPublishingRecoverer(template);   // orders -> orders-dlt
+    var handler = new DefaultErrorHandler(toDlt, new FixedBackOff(1000L, 2L));
+    handler.addNotRetryableExceptions(IllegalArgumentException.class);
+    return handler;                                // 3 attempts, 1 s apart
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Retries | `FixedBackOff(0, 9)`: 10 attempts, then log and skip | Spring for Apache Kafka 4.1 `DefaultErrorHandler` |
+| Delivery limit | 20, then drop or dead-letter | RabbitMQ 4.0+ quorum queues |
+
+## Interview Qs
+
+### What is a poison message and how do you handle it?
+
+A message that fails every time, often bad data. Detect it by counting attempts, stop retrying, and move it to a dead-letter queue with the error so the consumer continues. Then fix and replay.
+
+### Why not retry a failed Kafka message until it works?
+
+A Kafka partition is read in order, so one stuck record holds back every record behind it and lag grows. Bound the retries, or use retry topics if you can give up ordering.
