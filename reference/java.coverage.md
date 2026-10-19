@@ -263,7 +263,7 @@ corrections: Java 25 (LTS). Sources for corrections are primary pages (Java SE 2
 | put on an existing key returns the old value | concept map-hashmap (point) | Clarifies "same key" behaviour |
 | Consistent with equals; BigDecimal 4.0 vs 4.00 | concept comparable-comparator (point, bullet, Interview Q); tree consistent-with-equals | Explains why TreeSet "loses" items |
 | Comparator builders comparing / thenComparing / reversed | concept comparable-comparator (points, Example, Interview Q) | Modern way to write comparators (Java 8) |
-| Mutable elements in a HashSet | concept set-hashset-treeset (Interview Q) | Spec warning; common follow-up |
+| Mutable elements in a HashSet | concept set-hashset-treeset (Interview Q, links to object-class-equals-hashcode) | Spec warning; common follow-up |
 | PriorityQueue iteration is not sorted; max-heap via reverseOrder | concept queue-deque (trap, bullet) | Common mistake |
 | PriorityQueue vs TreeSet | concept queue-deque (Interview Q) | Asked in interview lists |
 | Generics are invariant: List<Integer> is not a List<Number> | concept generics (trap) | the most common generics mistake |
