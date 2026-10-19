@@ -12,7 +12,7 @@ export type Mode = "learn" | "revise" | "quiz";
 export type ThemePref = "light" | "dark" | "system";
 
 export const MODES: { value: Mode; label: string; hint: string }[] = [
-  { value: "learn", label: "Learn", hint: "Everything: why, how, example, connections" },
+  { value: "learn", label: "Learn", hint: "Everything: why, how, example, interview questions" },
   { value: "revise", label: "Revise", hint: "Only the key points, the trap and the one-liner" },
   { value: "quiz", label: "Quiz", hint: "Question first, tap to see the answer" },
 ];

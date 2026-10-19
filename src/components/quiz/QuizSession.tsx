@@ -10,7 +10,7 @@ export interface QuizItem {
   cardId: string;
   cardTitle: string;
   cardHref: string;
-  /** "One-liner", "Interview question", "Trap", "Connection". */
+  /** "One-liner", "Interview question", "Trap". */
   eyebrow: string;
   q: ReactNode;
   a: ReactNode;

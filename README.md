@@ -9,7 +9,7 @@ Rules for content and UI live in `CLAUDE.md`.
 ```bash
 npm install
 npm run dev               # http://localhost:3000
-npm run validate:content  # schema, links, tree, relations, sources (also runs before every build)
+npm run validate:content  # schema, links, tree, sources (also runs before every build)
 npm run lint
 npm run typecheck
 npm run build             # static export to ./out (deploys to Vercel with no extra config)

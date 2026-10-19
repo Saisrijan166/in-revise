@@ -16,7 +16,6 @@ import {
   type CardMeta,
   type ComparisonData,
   type GlossaryTerm,
-  type Relation,
   type SectionKey,
   type Source,
   type TreeNodeInput,
@@ -85,14 +84,6 @@ export interface TreeNode {
   children: TreeNode[];
 }
 
-export interface ResolvedRelation extends Required<Pick<Relation, "to" | "type" | "why">> {
-  from: string;
-  /** The concept file that declares this relation. */
-  card: string;
-  /** Comparison covering exactly these two nodes, if any. */
-  comparison?: string;
-}
-
 export interface Deck {
   name: string;
   slug: string;
@@ -108,7 +99,6 @@ export interface Deck {
   glossary: GlossaryTerm[];
   tree: { topic: Topic; nodes: TreeNode[] }[];
   treeSources: Source[];
-  relations: ResolvedRelation[];
   cardById: Map<string, Card>;
   comparisonById: Map<string, ComparisonData>;
   termById: Map<string, GlossaryTerm>;
@@ -553,36 +543,6 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
   });
 
   const comparisonById = new Map(comparisons.map((c) => [c.id, c]));
-  const pairKey = (a: string, b: string) => [a, b].sort().join("|");
-  const comparisonByPair = new Map<string, string>();
-  // Every pair inside a comparison links to it; a 2-item comparison wins over a wider one.
-  for (const c of [...comparisons].sort((a, b) => a.compares.length - b.compares.length)) {
-    c.compares.forEach((a, i) =>
-      c.compares.slice(i + 1).forEach((b) => {
-        if (!comparisonByPair.has(pairKey(a, b))) comparisonByPair.set(pairKey(a, b), c.id);
-      }),
-    );
-  }
-
-  // Relations, from each concept's frontmatter.
-  const relations: ResolvedRelation[] = [];
-  for (const c of ordered) {
-    const e = (message: string) => issues.push({ file: c.file, message, severity: "error" });
-    c.meta.relations.forEach((r, i) => {
-      const from = r.from ?? c.meta.id;
-      for (const [label, id] of [["from", from], ["to", r.to]] as const) {
-        // A concept missing from the tree is reported once ("not in tree.yaml"), not per relation.
-        if (!nodeById.has(id) && id !== c.meta.id) e(`relations.${i}.${label}: "${id}" is not a node in tree.yaml`);
-      }
-      if (from === r.to) e(`relations.${i}: a concept cannot relate to itself`);
-      // A relation must be about this concept: one end is the concept or a type inside it.
-      const inside = (id: string) => id === c.meta.id || nodeById.get(id)?.ownerCardId === c.meta.id;
-      if (nodeById.size && !inside(from) && !inside(r.to)) {
-        e(`relations.${i}: one end must be "${c.meta.id}" or a node under it in tree.yaml`);
-      }
-      relations.push({ from, to: r.to, type: r.type, why: r.why, card: c.meta.id, comparison: comparisonByPair.get(pairKey(from, r.to)) });
-    });
-  }
 
   const deck: Deck = {
     name: tech.name,
@@ -597,7 +557,6 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
     glossary,
     tree,
     treeSources,
-    relations,
     cardById: new Map(ordered.map((c) => [c.meta.id, c])),
     comparisonById,
     termById,

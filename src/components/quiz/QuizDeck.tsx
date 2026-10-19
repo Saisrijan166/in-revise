@@ -10,7 +10,7 @@ const CHIP_ROW =
 
 export interface QuizDeckItem extends QuizItem {
   topic: string;
-  kind: "one-liner" | "trap" | "question" | "connection";
+  kind: "one-liner" | "trap" | "question";
 }
 
 const KINDS: { value: "all" | QuizDeckItem["kind"]; label: string }[] = [
@@ -18,7 +18,6 @@ const KINDS: { value: "all" | QuizDeckItem["kind"]; label: string }[] = [
   { value: "one-liner", label: "One-liners" },
   { value: "question", label: "Interview Qs" },
   { value: "trap", label: "Traps" },
-  { value: "connection", label: "Connections" },
 ];
 
 /** Whole-tech quiz: pick a topic and a kind of question, shuffle if you like. */

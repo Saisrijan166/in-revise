@@ -13,21 +13,6 @@ export const ACCENTS = ["blue", "orange", "green", "violet", "rose", "teal", "am
 /** Kinds of key point. Each gets its own marker so a page can be scanned, not read. */
 export const POINT_KINDS = ["key", "plus", "minus", "default"] as const;
 
-/**
- * Relation types: how two concepts relate in practice (CLAUDE.md 3.4).
- * Read as a sentence: "<from> <label> <to>", for example "Scale out needs Load balancer".
- */
-export const RELATION_TYPES = {
-  needs: { label: "needs" },
-  uses: { label: "uses" },
-  solves: { label: "solves" },
-  causes: { label: "can cause" },
-  limits: { label: "limits" },
-  vs: { label: "vs" },
-  pairs: { label: "works with" },
-} as const;
-export type RelationType = keyof typeof RELATION_TYPES;
-
 export type Level = (typeof LEVELS)[number];
 export type Visual = (typeof VISUALS)[number];
 export type Accent = (typeof ACCENTS)[number];
@@ -85,16 +70,6 @@ export const pointSchema = z
   })
   .strict();
 
-export const relationSchema = z
-  .object({
-    /** Defaults to the concept itself. Any concept-tree node id. */
-    from: kebab.optional(),
-    to: kebab,
-    type: z.enum(Object.keys(RELATION_TYPES) as [RelationType, ...RelationType[]]),
-    why: oneLine(100),
-  })
-  .strict();
-
 export const cardMetaSchema = z
   .object({
     id: kebab,
@@ -107,7 +82,6 @@ export const cardMetaSchema = z
     points: z.array(pointSchema).min(3, "give 3–6 key points").max(6, "give 3–6 key points"),
     trap: z.object({ wrong: oneLine(120), right: oneLine(160) }).strict().optional(),
     sayIt: oneLine(280).optional(),
-    relations: z.array(relationSchema).min(1, "add at least one relation"),
     confusedWith: z.array(kebab).default([]),
     tags: z.array(z.string().min(1)).default([]),
     visual: z.enum(VISUALS),
@@ -229,7 +203,6 @@ export const glossarySchema = z
 export type Source = z.infer<typeof sourceSchema>;
 export type CardMeta = z.infer<typeof cardMetaSchema>;
 export type Point = z.infer<typeof pointSchema>;
-export type Relation = z.infer<typeof relationSchema>;
 export type ComparisonData = z.infer<typeof comparisonSchema>;
 export type TechData = z.infer<typeof techSchema>;
 export type GlossaryTerm = z.infer<typeof glossarySchema>["terms"][number];
