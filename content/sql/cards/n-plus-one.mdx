@@ -1,0 +1,78 @@
+---
+id: n-plus-one
+tech: sql
+title: The N+1 Query Problem
+topic: backend
+level: intermediate
+heat: 3
+hook: "One query loads N rows, then a lazy field fires one more query per row: N+1 trips. Fetch what you need up front."
+points:
+  - { k: "Cause", v: "reading a LAZY association inside a loop" }
+  - { k: "Detect", v: "count SQL per request: spring.jpa.show-sql or Hibernate statistics" }
+  - { k: "Fix one use case", v: "JOIN FETCH or @EntityGraph: one query" }
+  - { k: "Safety net", v: "batch fetching loads lazy rows in groups with IN (...)" }
+  - { k: "Read-only lists", v: "a DTO projection selects only the needed columns", kind: plus }
+trap:
+  wrong: "Switch the association to EAGER to fix N+1."
+  right: "EAGER loads it in every query, needed or not. Fetch it per use case with JOIN FETCH or an entity graph."
+sayIt: "N+1 is one query for the list plus one per row for a lazy association. I find it by counting SQL in the logs, then fix it with JOIN FETCH or an entity graph, batch fetching as a safety net, or a DTO projection."
+confusedWith: []
+tags: [n-plus-one, jpa, hibernate, performance]
+visual: table
+sources:
+  - title: "Hibernate ORM 7.4 Introduction: association, batch and join fetching"
+    url: "https://docs.hibernate.org/orm/7.4/introduction/html_single/"
+    verifiedOn: "2026-10-20"
+  - title: "JPA Query Methods: @EntityGraph (Spring Data JPA reference)"
+    url: "https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html"
+    verifiedOn: "2026-10-20"
+  - title: "Common Application Properties: spring.jpa.show-sql (Spring Boot reference)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-20"
+  - title: "Hibernate Interview Questions (GeeksforGeeks)"
+    url: "https://www.geeksforgeeks.org/java/hibernate-interview-questions/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Lazy loading looks free in code: `order.getUser()` is only a getter. In a loop over 100 orders it quietly becomes 101 round trips to the database.
+
+## How it works
+
+| Fix | Queries for 100 orders | Use when |
+|---|---|---|
+| None (lazy in a loop) | 1 + 100 | never on a list page |
+| JOIN FETCH or `@EntityGraph` | 1 | this use case needs the users |
+| Batch fetching, size 25 | 1 + 4 | a safety net for all lazy loads |
+| DTO projection | 1 | read-only lists and APIs |
+
+- Hibernate turns batch fetching on with `@BatchSize` or `hibernate.default_batch_fetch_size`; it is off by default.
+- The same bug exists without an ORM: any loop that runs one query per row.
+
+## Example
+
+```java
+// N+1: 1 query for orders, then 1 per order for its user
+for (CustomerOrder o : orderRepo.findByStatus("PAID")) {
+    log.info(o.getUser().getName());
+}
+
+// Fixed: one query with a join
+@Query("SELECT o FROM CustomerOrder o JOIN FETCH o.user WHERE o.status = :s")
+List<CustomerOrder> findPaidWithUser(@Param("s") String s);
+
+// Or let Spring Data add the fetch
+@EntityGraph(attributePaths = "user")
+List<CustomerOrder> findByStatus(String status);
+```
+
+## Interview Qs
+
+### How do you detect N+1 in a Spring Boot app?
+
+Log the SQL (`spring.jpa.show-sql` or Hibernate's SQL logging) or enable Hibernate statistics in a test, and count statements per request. A list page that runs one SELECT per row is the sign.
+
+### JOIN FETCH or batch fetching?
+
+JOIN FETCH loads parents and children in one query for that use case. Batch fetching stays lazy but groups the keys into IN lists, so N extra queries become about N divided by the batch size.

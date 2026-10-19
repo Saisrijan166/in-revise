@@ -1,0 +1,81 @@
+---
+id: deadlocks
+tech: sql
+title: Deadlocks
+topic: transactions
+level: intermediate
+heat: 2
+hook: "Two transactions each hold a lock the other needs; the database spots the cycle, kills one, and your code retries it."
+points:
+  - { k: "Cycle", v: "T1 holds row 1, wants row 2; T2 holds row 2, wants row 1" }
+  - { k: "PostgreSQL", v: "aborts one; which one is unpredictable; SQLSTATE 40P01" }
+  - { k: "MySQL InnoDB", v: "rolls back the smaller transaction; error 1213, SQLSTATE 40001" }
+  - { k: "Retry", v: "the victim's whole transaction is undone: run it again", kind: plus }
+  - { k: "Prevent", v: "lock rows in the same order everywhere, e.g. lower id first" }
+trap:
+  wrong: "Deadlocks need explicit LOCK statements; plain UPDATEs cannot deadlock."
+  right: "Two plain UPDATEs touching the same two rows in opposite order can deadlock. Row locks from ordinary writes are enough."
+sayIt: "A deadlock is a cycle of lock waits. The database detects it and rolls back one transaction, so the app retries. I avoid them by locking in a fixed order and keeping transactions short."
+confusedWith: []
+tags: [deadlock, locking, retry]
+visual: flow
+sources:
+  - title: "Explicit Locking: Deadlocks (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/explicit-locking.html"
+    verifiedOn: "2026-10-20"
+  - title: "Serialization Failure Handling (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/mvcc-serialization-failure-handling.html"
+    verifiedOn: "2026-10-20"
+  - title: "Deadlock Detection (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-deadlock-detection.html"
+    verifiedOn: "2026-10-20"
+  - title: "How to Minimize and Handle Deadlocks (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-deadlocks-handling.html"
+    verifiedOn: "2026-10-20"
+  - title: "An InnoDB Deadlock Example (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-deadlock-example.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Once transactions lock more than one row, two of them can wait for each other forever. Without detection, both would hang.
+
+## How it works
+
+<Mermaid
+  alt="T1 holds account 1 and waits for account 2; T2 holds account 2 and waits for account 1. The database finds this cycle and rolls back one of them."
+  chart={`flowchart LR
+  T1([T1]) -- holds --> A1[(account 1)]
+  T1 -. waits for .-> A2[(account 2)]
+  T2([T2]) -- holds --> A2
+  T2 -. waits for .-> A1
+  D{{cycle found}} --> V[roll back one: the victim]`}
+/>
+
+## Example
+
+```java
+void transferWithRetry(long from, long to, BigDecimal amount) throws SQLException {
+    for (int attempt = 1; ; attempt++) {
+        try {
+            transfer(from, to, amount);   // the whole transaction, BEGIN to COMMIT
+            return;
+        } catch (SQLException e) {
+            String state = e.getSQLState();
+            boolean retry = "40P01".equals(state) || "40001".equals(state);
+            if (!retry || attempt == 3) throw e;   // 40001: MySQL deadlock or serialization failure
+        }
+    }
+}
+```
+
+## Interview Qs
+
+### How do you prevent deadlocks?
+
+Take locks in one fixed order (for example, by ascending id), keep transactions short, add indexes so fewer rows are locked, and avoid locking reads you do not need. Still write retry code: prevention is never perfect.
+
+### Deadlock vs lock wait timeout?
+
+A deadlock is a cycle: no one can ever proceed, so the database detects it and rolls back a whole transaction. A [lock wait timeout](card:lock-wait-timeout) has no cycle: one transaction simply waited longer than the limit.

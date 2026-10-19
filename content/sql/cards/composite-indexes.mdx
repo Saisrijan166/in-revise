@@ -1,0 +1,76 @@
+---
+id: composite-indexes
+tech: sql
+title: Composite and Covering Indexes
+topic: indexes
+level: intermediate
+heat: 3
+hook: "A composite index is sorted by its first column, then the next, like a phone book: it serves filters on a leftmost prefix."
+points:
+  - { k: "Leftmost prefix", v: "(a, b, c) serves a; a and b; a, b and c" }
+  - { k: "Column order", v: "equality columns first, the range column last" }
+  - { k: "Skip scan", v: "can skip a missing first column with few values (MySQL 8.0.13+, PostgreSQL 18)", kind: plus }
+  - { k: "Covering", v: "holds every column the query needs: no table visit", kind: plus }
+  - { k: "INCLUDE", v: "PostgreSQL 11+: extra stored columns that are not search keys", kind: default }
+trap:
+  wrong: "An index on (user_id, status) also serves WHERE status = 'PAID'."
+  right: "Not as a normal seek: status is not the leftmost column. Add an index on status; skip scan helps only when user_id has few values."
+sayIt: "A composite index is sorted by its columns in order, so it serves filters on a leftmost prefix. I put equality columns first and the range column last. If it also holds every selected column it is covering, and the table is never read."
+confusedWith: []
+tags: [indexes, composite-index, covering-index]
+visual: table
+sources:
+  - title: "Multiple-Column Indexes (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/multiple-column-indexes.html"
+    verifiedOn: "2026-10-20"
+  - title: "Multicolumn Indexes (PostgreSQL 18 docs, 11.3)"
+    url: "https://www.postgresql.org/docs/18/indexes-multicolumn.html"
+    verifiedOn: "2026-10-20"
+  - title: "Index-Only Scans and Covering Indexes (PostgreSQL 18 docs, 11.9)"
+    url: "https://www.postgresql.org/docs/18/indexes-index-only-scans.html"
+    verifiedOn: "2026-10-20"
+  - title: "Combining Multiple Indexes (PostgreSQL 18 docs, 11.5)"
+    url: "https://www.postgresql.org/docs/18/indexes-bitmap-scans.html"
+    verifiedOn: "2026-10-20"
+  - title: "Skip Scan, as of 8.0.13 (MySQL 8.0 manual)"
+    url: "https://dev.mysql.com/doc/refman/8.0/en/range-optimization.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Real queries filter on two or three columns together. One index sorted by all of them finds the rows in one seek, and can even answer the query by itself.
+
+## How it works
+
+| `WHERE` (index on `user_id, status, created_at`) | Seek uses |
+|---|---|
+| `user_id = 7` | `user_id` |
+| `user_id = 7 AND status = 'PAID'` | `user_id, status` |
+| `user_id = 7 AND status = 'PAID' AND created_at > '2026-01-01'` | all three |
+| `user_id = 7 AND created_at > '2026-01-01'` | `user_id`; `created_at` is checked inside the index |
+| `status = 'PAID'` | no seek (skip scan at best) |
+
+- PostgreSQL: an index-only scan still checks the visibility map; recently changed pages need a table visit.
+
+## Example
+
+```sql
+CREATE INDEX idx_orders_user_status ON orders (user_id, status);
+
+-- PostgreSQL 11+: amount is stored in the index, not searchable
+CREATE INDEX idx_orders_user_cover ON orders (user_id) INCLUDE (amount);
+
+EXPLAIN SELECT amount FROM orders WHERE user_id = 7;
+-- PostgreSQL: Index Only Scan using idx_orders_user_cover
+```
+
+## Interview Qs
+
+### What is a covering index?
+
+An index holding every column a query reads, so the answer comes from the index alone. In PostgreSQL 11+ add non-key columns with `INCLUDE`.
+
+### Two single-column indexes or one composite index?
+
+For queries that filter on both, one composite index is usually faster. PostgreSQL can combine two indexes with a bitmap, at extra cost; separate indexes also serve each column alone.

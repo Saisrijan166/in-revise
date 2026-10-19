@@ -1,0 +1,79 @@
+---
+id: group-aggregation-patterns
+tech: sql
+title: Pivots, Zero Counts and Above-Average Rows
+topic: patterns
+level: intermediate
+heat: 2
+hook: "CASE inside an aggregate pivots; LEFT JOIN plus COUNT(child.id) keeps zeros; compare with AVG to find above-average rows."
+points:
+  - { k: "Pivot", v: "one SUM(CASE WHEN status = 'PAID' THEN 1 ELSE 0 END) per column" }
+  - { k: "FILTER", v: "PostgreSQL: COUNT(*) FILTER (WHERE …); MySQL has no FILTER", kind: plus }
+  - { k: "Zero counts", v: "LEFT JOIN from the parent, then COUNT(child.id), not COUNT(*)" }
+  - { k: "Empty SUM", v: "SUM over no rows is NULL: wrap it in COALESCE(…, 0)", kind: minus }
+  - { k: "Above average", v: "overall: scalar subquery; own group: AVG() OVER (PARTITION BY …)" }
+trap:
+  wrong: "After a LEFT JOIN, COUNT(*) shows 0 for a department with no employees."
+  right: "It shows 1: the empty department still has one joined row. COUNT(e.id) skips that row's NULL and shows 0."
+sayIt: "To pivot I aggregate a CASE per category. To keep empty groups I LEFT JOIN from the parent and count the child key. For above-average rows I compare with AVG in a subquery, or AVG OVER PARTITION BY per group."
+confusedWith: [where-vs-having, group-by-vs-partition-by]
+tags: [patterns, aggregation, pivot]
+visual: table
+sources:
+  - title: "Aggregate Expressions: FILTER (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/sql-expressions.html"
+    verifiedOn: "2026-10-20"
+  - title: "Aggregate Function Descriptions (MySQL 9.7)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/aggregate-functions.html"
+    verifiedOn: "2026-10-20"
+  - title: "Table Expressions: joins (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/queries-table-expressions.html"
+    verifiedOn: "2026-10-20"
+  - title: "SQL Interview Questions (GeeksforGeeks)"
+    url: "https://www.geeksforgeeks.org/sql/sql-interview-questions/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Reports need counts per category side by side, groups with no rows, and rows compared with an average. Plain GROUP BY does none of these.
+
+## How it works
+
+| Need | Pattern | Watch out |
+|---|---|---|
+| Categories as columns | `SUM(CASE WHEN … THEN 1 ELSE 0 END)` | No ELSE 0: an empty category gives NULL |
+| Groups with zero rows | Parent `LEFT JOIN` child, `COUNT(child.id)` | A child condition in WHERE drops empty groups |
+| Above the overall average | `WHERE x > (SELECT AVG(x) FROM …)` | The subquery must return one value |
+| Above the group's own average | `AVG(x) OVER (PARTITION BY g)` in a subquery | Or a correlated subquery |
+
+- Why: [COUNT(column) skips NULLs](card:aggregates-group-by); [child conditions belong in ON](card:joins).
+
+## Example
+
+```sql
+SELECT d.name,
+       COUNT(e.id)                                     AS staff,
+       COALESCE(SUM(e.salary), 0)                      AS payroll,
+       SUM(CASE WHEN e.salary >= 90 THEN 1 ELSE 0 END) AS senior
+FROM departments d
+LEFT JOIN employees e ON e.dept_id = d.id
+GROUP BY d.id, d.name;
+```
+
+```text
+name  | staff | payroll | senior
+Eng   | 5     | 440     | 3
+Sales | 2     | 130     | 0
+HR    | 0     | 0       | 0      <- COUNT(*) would show 1
+```
+
+## Interview Qs
+
+### Employees who earn more than their department's average?
+
+Compute `AVG(salary) OVER (PARTITION BY dept_id) AS dept_avg` in a subquery and keep `salary > dept_avg` outside. A correlated subquery on the same dept_id gives the same rows.
+
+### How do you turn rows into columns?
+
+Write one aggregate over a CASE per output column. PostgreSQL also accepts `COUNT(*) FILTER (WHERE status = 'PAID')`; MySQL needs the CASE form. The column list is fixed in the query text.

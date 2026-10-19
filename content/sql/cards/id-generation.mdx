@@ -1,0 +1,80 @@
+---
+id: id-generation
+tech: sql
+title: "Generated IDs: Identity, Sequence, UUID"
+topic: design
+level: intermediate
+heat: 2
+hook: "Let the database number rows with IDENTITY or AUTO_INCREMENT and expect gaps; use a UUID when ids are made outside one database."
+points:
+  - { k: "IDENTITY", v: "PostgreSQL's SQL-standard choice; SERIAL is the older shortcut" }
+  - { k: "Gaps", v: "rollbacks and failed inserts use up numbers; they are never reused" }
+  - { k: "INT limit", v: "2,147,483,647 in both; then inserts fail. Use BIGINT", kind: default }
+  - { k: "UUIDv4 vs v7", v: "v4 is random; v7 starts with a timestamp, so it sorts by time" }
+  - { k: "Random keys", v: "v4 inserts scatter across the index; InnoDB pages end 1/2 to 15/16 full", kind: minus }
+trap:
+  wrong: "A gap in the ids means someone deleted rows."
+  right: "Gaps are normal: a rolled-back or failed insert still uses up its number, and numbers are never handed out again."
+sayIt: "I default to a BIGINT identity column and never rely on ids being gap-free. When ids must be created by clients or across services, I use UUIDv7: unique everywhere, yet new keys still arrive roughly in index order."
+confusedWith: [auto-increment-vs-uuid]
+tags: [identity, sequence, uuid]
+visual: table
+sources:
+  - title: "PostgreSQL 18: Identity Columns"
+    url: "https://www.postgresql.org/docs/18/ddl-identity-columns.html"
+    verifiedOn: "2026-10-20"
+  - title: "MySQL 9.7: AUTO_INCREMENT Handling in InnoDB"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-auto-increment-handling.html"
+    verifiedOn: "2026-10-20"
+  - title: "RFC 9562: Universally Unique IDentifiers (UUIDs)"
+    url: "https://www.rfc-editor.org/rfc/rfc9562"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Every row needs a unique key, and making one in the app breaks under concurrency. The database hands out ids safely to many sessions at once.
+
+## How it works
+
+| Generator | Product | Remember |
+|---|---|---|
+| `GENERATED ALWAYS AS IDENTITY` | PostgreSQL 10+, SQL standard | Rejects a manual id unless `OVERRIDING SYSTEM VALUE` |
+| `SERIAL` / `BIGSERIAL` | PostgreSQL | A sequence plus a column default |
+| Sequence | PostgreSQL | `nextval()` is never rolled back |
+| `AUTO_INCREMENT` | MySQL | One counter per table |
+| UUIDv4 / UUIDv7 | Both: 128 bits | PostgreSQL 18 has `uuidv7()`; MySQL `UUID()` is v1 |
+
+- Identity does not make a column unique: add `PRIMARY KEY` or `UNIQUE`.
+- MySQL: store UUIDs with `UUID_TO_BIN()` in 16 bytes, not as a 36-character string.
+
+## Example
+
+```sql
+CREATE TABLE orders (
+  id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id bigint NOT NULL,
+  amount  numeric(10,2)
+);
+-- MySQL: id BIGINT AUTO_INCREMENT PRIMARY KEY
+
+-- PostgreSQL 18: a time-ordered UUID key
+CREATE TABLE events (id uuid DEFAULT uuidv7() PRIMARY KEY, name text);
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| First value, step | 1, 1 | PostgreSQL 18 sequences and identity |
+| Sequence `CACHE` | 1 (no preallocated numbers) | PostgreSQL 18 |
+
+## Interview Qs
+
+### Why does my id column have gaps?
+
+A number is used up when handed out, even if the insert fails or rolls back, and it is never reused. Gaps are normal; never rely on gap-free ids.
+
+### Auto-increment or UUID as the primary key?
+
+Auto-increment: small, ordered, fast to insert. UUID: made anywhere without a central counter. If you need a UUID, prefer UUIDv7 to random v4. See [the comparison](compare:auto-increment-vs-uuid).

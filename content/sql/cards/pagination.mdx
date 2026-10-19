@@ -1,0 +1,75 @@
+---
+id: pagination
+tech: sql
+title: "Pagination: OFFSET vs Keyset"
+topic: indexes
+level: intermediate
+heat: 3
+hook: "OFFSET reads and throws away every skipped row; keyset remembers the last row seen and asks for the rows after it."
+points:
+  - { k: "OFFSET cost", v: "page 5,000 (20 a page) first reads about 100,000 rows", kind: minus }
+  - { k: "Drift", v: "a row inserted between pages makes OFFSET repeat a row", kind: minus }
+  - { k: "Keyset", v: "WHERE (created_at, id) < last seen, same ORDER BY, LIMIT" }
+  - { k: "Tie-breaker", v: "end ORDER BY with a unique column such as id" }
+  - { k: "Keyset limit", v: "no jump to page N; fine for 'next' and infinite scroll", kind: minus }
+trap:
+  wrong: "Keyset on created_at alone: WHERE created_at < last_created_at."
+  right: "Rows sharing that created_at are skipped. Add a unique tie-breaker: (created_at, id) in ORDER BY, WHERE and the index."
+sayIt: "OFFSET is simple and can jump to any page, but the database reads every skipped row and pages drift on inserts. Keyset filters after the last row seen, with a unique tie-breaker and a matching index, so every page costs the same."
+confusedWith: []
+tags: [pagination, performance, keyset]
+visual: table
+sources:
+  - title: "LIMIT and OFFSET (PostgreSQL 18 docs, 7.6)"
+    url: "https://www.postgresql.org/docs/18/queries-limit.html"
+    verifiedOn: "2026-10-20"
+  - title: "Row Constructor Expression Optimization (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/row-constructor-optimization.html"
+    verifiedOn: "2026-10-20"
+  - title: "We need tool support for keyset pagination (Markus Winand, use-the-index-luke.com)"
+    url: "https://use-the-index-luke.com/no-offset"
+    verifiedOn: "2026-10-20"
+  - title: "Paging Through Results: the seek method (Markus Winand, use-the-index-luke.com)"
+    url: "https://use-the-index-luke.com/sql/partial-results/fetch-next-page"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+An API must not return a million rows at once. Pages fix that, but the obvious `OFFSET` gets slower with every page.
+
+## How it works
+
+<Compare id="offset-vs-keyset-pagination" />
+
+- The client sends back the last row's `(created_at, id)`: that pair is the cursor.
+- MySQL: the row comparison gives correct rows but may not get an index range scan. Spell it out: `created_at < ? OR (created_at = ? AND id < ?)`.
+
+## Example
+
+```sql
+CREATE INDEX idx_orders_created ON orders (created_at, id);
+
+-- first page
+SELECT id, amount, created_at FROM orders
+ORDER BY created_at DESC, id DESC LIMIT 20;
+
+-- next page: values from the last row of the previous page
+SELECT id, amount, created_at FROM orders
+WHERE (created_at, id) < ('2026-10-01 10:00', 981)
+ORDER BY created_at DESC, id DESC LIMIT 20;
+```
+
+## Interview Qs
+
+### Why is OFFSET slow on deep pages?
+
+The database must still find, sort and discard every skipped row: `OFFSET 100000` reads 100,020 rows to return 20. The cost grows with the page number.
+
+### How does keyset (cursor) pagination work?
+
+Sort by a unique order such as `(created_at, id)`, index it, and ask for rows after the last row the client saw. The database seeks straight there, so page 1 and page 5,000 cost the same.
+
+### When is OFFSET still fine?
+
+When users need page numbers and the offsets stay small, such as an admin screen. Always pair it with an ORDER BY on a unique order, or pages are unpredictable.

@@ -1,0 +1,78 @@
+---
+id: mvcc
+tech: sql
+title: "MVCC: Readers Don't Block Writers"
+topic: transactions
+level: intermediate
+heat: 2
+hook: "A write adds a new row version instead of overwriting; each reader sees its own snapshot, so plain reads do not wait for row writes."
+points:
+  - { k: "Reads vs writes", v: "plain SELECTs and row writes do not block each other", kind: plus }
+  - { k: "Two writers, one row", v: "the second still waits for the first to finish", kind: minus }
+  - { k: "PostgreSQL", v: "old versions stay in the table as dead tuples until VACUUM" }
+  - { k: "MySQL InnoDB", v: "old versions are rebuilt from undo logs, then purged" }
+  - { k: "Long transactions", v: "keep old versions alive: bloat, growing undo", kind: minus }
+trap:
+  wrong: "With MVCC the database takes no locks."
+  right: "Plain reads take no row locks, but UPDATE and DELETE still lock the row, so two writers on one row still queue."
+sayIt: "MVCC keeps several versions of a row. Each transaction reads from a snapshot, so readers and writers do not block each other. Old versions are cleaned up later: VACUUM in PostgreSQL, purge in InnoDB."
+confusedWith: []
+tags: [mvcc, snapshot, vacuum, undo-log]
+visual: flow
+sources:
+  - title: "Concurrency Control: Introduction (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/mvcc-intro.html"
+    verifiedOn: "2026-10-20"
+  - title: "Explicit Locking: row-level locks (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/explicit-locking.html"
+    verifiedOn: "2026-10-20"
+  - title: "Routine Vacuuming (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/routine-vacuuming.html"
+    verifiedOn: "2026-10-20"
+  - title: "InnoDB Multi-Versioning (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-multi-versioning.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+With only locks, a long report blocks every update, and every update blocks readers. Keeping old versions lets both run at once.
+
+## How it works
+
+<Mermaid
+  alt="T2 updates a row, creating version 2 with balance 500. T1, with an older snapshot, still reads version 1 with balance 1000. Once no snapshot needs version 1, VACUUM (PostgreSQL) or purge (InnoDB) removes it."
+  chart={`flowchart LR
+  T2([T2: UPDATE]) --> V2[v2: balance 500]
+  V2 -. "older version" .-> V1[v1: balance 1000]
+  T1([T1: older snapshot]) --> V1
+  V1 --> GC[cleanup when unused: VACUUM or purge]`}
+/>
+
+- When the snapshot is taken depends on the level: see [READ COMMITTED vs REPEATABLE READ](compare:read-committed-vs-repeatable-read).
+
+## Example
+
+```sql
+-- Session A
+BEGIN;
+UPDATE accounts SET balance = 500 WHERE id = 1;   -- new version, not committed
+-- Session B: not blocked, sees the old version
+SELECT balance FROM accounts WHERE id = 1;        -- 1000
+-- Session B: a second writer on the same row waits for A
+UPDATE accounts SET balance = 900 WHERE id = 1;
+```
+
+## Interview Qs
+
+### What is MVCC?
+
+Multi-version concurrency control: a write creates a new version of the row, and each transaction reads the versions visible in its snapshot. Readers and writers do not block each other.
+
+### Why does PostgreSQL need VACUUM?
+
+An UPDATE or DELETE leaves the old version in the table. VACUUM removes dead versions so the space is reused, and freezes old rows to prevent transaction ID wraparound.
+
+### Why is a long-running transaction harmful under MVCC?
+
+Its snapshot keeps old versions alive, so VACUUM or purge cannot remove them: tables bloat in PostgreSQL and the undo history grows in InnoDB.

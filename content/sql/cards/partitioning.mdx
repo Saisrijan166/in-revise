@@ -1,0 +1,73 @@
+---
+id: partitioning
+tech: sql
+title: Partitioning
+topic: scaling
+level: intermediate
+heat: 2
+hook: "One big table, split into smaller pieces on the same server, but still queried as one table."
+points:
+  - { k: "Types", v: "range, list, hash; MySQL also KEY" }
+  - { k: "Pruning", v: "a WHERE on the partition key skips other partitions", kind: plus }
+  - { k: "Old data", v: "drop a partition instead of a slow bulk DELETE", kind: plus }
+  - { k: "Unique keys", v: "every PK and unique key must include the partition key", kind: minus }
+  - { k: "MySQL InnoDB", v: "partitioned tables cannot have foreign keys", kind: minus }
+trap:
+  wrong: "Partitioning makes every query faster."
+  right: "Only queries that filter on the partition key skip partitions. Others scan every partition."
+sayIt: "Partitioning splits a large table, often by date range, inside one server. Queries on the key touch only the matching partitions, and old data goes by dropping a partition."
+confusedWith: [partitioning-vs-sharding]
+tags: [partitioning, partition-pruning, range-partitioning]
+visual: code
+sources:
+  - title: "Table Partitioning (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/ddl-partitioning.html"
+    verifiedOn: "2026-10-20"
+  - title: "Partitioning Types (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/partitioning-types.html"
+    verifiedOn: "2026-10-20"
+  - title: "Restrictions and Limitations on Partitioning (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/partitioning-limitations.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Huge tables slow down scans, index upkeep and bulk deletes. Splitting by a key lets the database touch only the pieces a query or cleanup needs.
+
+## How it works
+
+| Type | Rows go by | Typical key |
+|---|---|---|
+| [Range](card:range-partitioning) | value ranges (lower bound in, upper out) | `created_at` by month |
+| [List](card:list-partitioning) | listed values | `region`, `country` |
+| [Hash](card:hash-partitioning) | hash of the key | `user_id`, for even spread |
+
+- PostgreSQL: declarative partitioning since 10 (range, list); hash since 11.
+- Worth it mainly when a table is very large; PostgreSQL's rule of thumb is bigger than the server's RAM.
+
+## Example
+
+```sql
+CREATE TABLE orders (
+  id bigint, user_id bigint, amount numeric(12,2), created_at date,
+  PRIMARY KEY (id, created_at)              -- must include the partition key
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE orders_2026_10 PARTITION OF orders
+  FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+
+SELECT sum(amount) FROM orders
+WHERE created_at >= '2026-10-01';           -- older partitions are pruned
+DROP TABLE orders_2025_10;                  -- an old month, gone at once
+```
+
+## Interview Qs
+
+### Why drop a partition instead of DELETE?
+
+Dropping or detaching a partition is far faster. A bulk DELETE must find and remove every row and, in PostgreSQL, leaves dead rows for VACUUM to clean.
+
+### Why must the primary key include the partition key?
+
+Each partition has its own index, which checks uniqueness only inside that partition. Including the key makes duplicates in different partitions impossible. PostgreSQL and MySQL both require it.

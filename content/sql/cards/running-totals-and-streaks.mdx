@@ -1,0 +1,77 @@
+---
+id: running-totals-and-streaks
+tech: sql
+title: Running Totals, Previous Row and Streaks
+topic: patterns
+level: interview
+heat: 2
+hook: "Order the rows and let a window look back: SUM for running totals, LAG for change, date minus ROW_NUMBER for streaks."
+points:
+  - { k: "Running total", v: "SUM(x) OVER (ORDER BY t, id ROWS UNBOUNDED PRECEDING)" }
+  - { k: "Moving average", v: "AVG(x) OVER (… ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)" }
+  - { k: "Change", v: "x - LAG(x) OVER (ORDER BY …); NULL on the first row" }
+  - { k: "Streaks", v: "day minus ROW_NUMBER() is constant within one run of days" }
+  - { k: "Repeated days", v: "remove duplicate days with DISTINCT first, or runs split", kind: minus }
+trap:
+  wrong: "SUM(amount) OVER (ORDER BY created_at) adds one row at a time."
+  right: "The default RANGE frame includes ties: rows with the same created_at share one total. Add id to ORDER BY, or use ROWS."
+sayIt: "I use windows over ordered rows: SUM OVER with a ROWS frame for running totals, LAG for change from the previous row, and for streaks date minus ROW_NUMBER gives each run one key to group by."
+confusedWith: [group-by-vs-partition-by]
+tags: [patterns, window-functions, gaps-and-islands]
+visual: table
+sources:
+  - title: "4.2.8 Window Function Calls: frames, ROWS and RANGE (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/sql-expressions.html"
+    verifiedOn: "2026-10-20"
+  - title: "9.22 Window Functions: lag, row_number (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/functions-window.html"
+    verifiedOn: "2026-10-20"
+  - title: "9.9 Date/Time Functions and Operators: date - integer (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/functions-datetime.html"
+    verifiedOn: "2026-10-20"
+  - title: "SQL Interview Questions: running total (GeeksforGeeks)"
+    url: "https://www.geeksforgeeks.org/sql/sql-interview-questions/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Running totals, change from the previous period and streaks all depend on row order. [Window functions](card:window-functions) read neighbouring rows directly, with no self-join.
+
+## How it works
+
+| day | ROW_NUMBER() | day − rn | Run |
+|---|---|---|---|
+| 01-01 | 1 | 12-31 | A |
+| 01-02 | 2 | 12-31 | A |
+| 01-04 | 3 | 01-01 | B |
+
+- Consecutive days rise by one, like rn, so day − rn stays fixed; a gap changes it. Group by it.
+- ROWS counts rows. For "the last 7 days" order by a date and use `RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW`.
+
+## Example
+
+```sql
+WITH days AS (
+  SELECT DISTINCT user_id, created_at::date AS d FROM orders
+), marked AS (
+  SELECT user_id, d,
+         d - ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY d)::int AS grp
+  FROM days
+)
+SELECT user_id, MIN(d) AS first_day, MAX(d) AS last_day, COUNT(*) AS days
+FROM marked
+GROUP BY user_id, grp;
+```
+
+MySQL: `DATE(created_at)` and `DATE_SUB(d, INTERVAL ROW_NUMBER() OVER (…) DAY)`.
+
+## Interview Qs
+
+### Show a running total of spending per user.
+
+`SUM(amount) OVER (PARTITION BY user_id ORDER BY created_at, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. Every order row stays; GROUP BY would collapse them into one total.
+
+### Find users who ordered on 3 or more consecutive days.
+
+Build the runs as above, then add `HAVING COUNT(*) >= 3`. For "the same value in 3 rows in a row", compare the value with `LAG(x, 1)` and `LAG(x, 2)`.

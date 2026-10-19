@@ -1,0 +1,71 @@
+---
+id: locking
+tech: sql
+title: "Locks: Shared, Exclusive, Row and Table"
+topic: transactions
+level: intermediate
+heat: 2
+hook: "Many transactions can share a lock to read a row; only one can hold it exclusively to change it. Locks last until COMMIT or ROLLBACK."
+points:
+  - { k: "Row lock", v: "blocks only writers and lockers of that row, not plain reads" }
+  - { k: "FOR UPDATE", v: "exclusive row lock on what you read, before you change it" }
+  - { k: "NOWAIT", v: "fail at once instead of waiting for a locked row" }
+  - { k: "SKIP LOCKED", v: "skip locked rows: many workers, one job queue", kind: plus }
+  - { k: "InnoDB gap locks", v: "REPEATABLE READ also locks gaps to block inserts", kind: minus }
+trap:
+  wrong: "Every read takes a shared lock."
+  right: "In PostgreSQL and InnoDB a plain SELECT reads a snapshot and takes no row lock. Only FOR SHARE or FOR UPDATE lock what they read."
+sayIt: "Writes take exclusive row locks; FOR SHARE and FOR UPDATE lock rows you read. Locks last until the transaction ends. NOWAIT fails fast, SKIP LOCKED lets workers share a queue."
+confusedWith: [shared-vs-exclusive-lock]
+tags: [locking, for-update, skip-locked, gap-lock]
+visual: table
+sources:
+  - title: "Explicit Locking (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/explicit-locking.html"
+    verifiedOn: "2026-10-20"
+  - title: "Locking Reads (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-locking-reads.html"
+    verifiedOn: "2026-10-20"
+  - title: "InnoDB Locking (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-locking.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+[MVCC](card:mvcc) keeps readers apart from writers, but two writers on one row, or a read you will act on, still need someone to wait.
+
+## How it works
+
+| Statement | Lock it takes |
+| --- | --- |
+| Plain `SELECT` | No row lock (reads a snapshot) |
+| `SELECT … FOR SHARE` | Shared row lock: others may read-lock, not change |
+| `UPDATE`, `DELETE`, `SELECT … FOR UPDATE` | Exclusive row lock |
+| Most `ALTER TABLE`, `DROP TABLE`, `TRUNCATE` | PostgreSQL: a table lock that blocks even plain reads |
+
+- In autocommit mode the transaction is one statement, so a lone `FOR UPDATE` protects nothing afterwards.
+- Long open transactions hold locks for longer: never wait for user input inside one.
+
+## Example
+
+```sql
+BEGIN;
+SELECT id FROM orders
+WHERE status = 'NEW'
+ORDER BY id
+LIMIT 1
+FOR UPDATE SKIP LOCKED;          -- each worker gets a different order
+UPDATE orders SET status = 'PROCESSING' WHERE id = 42;  -- the id returned above
+COMMIT;
+```
+
+## Interview Qs
+
+### What does SELECT … FOR UPDATE do?
+
+It locks the rows it returns as if you were updating them, so other transactions cannot change or lock them until you commit. Use it inside a transaction when you read a value and then write based on it.
+
+### How do several workers pull jobs from one table safely?
+
+`SELECT … FOR UPDATE SKIP LOCKED` with `LIMIT`: each worker locks a different row and skips rows others hold, so no job is taken twice and nobody waits.

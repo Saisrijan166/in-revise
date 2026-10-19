@@ -1,0 +1,70 @@
+---
+id: distributed-transactions
+tech: sql
+title: "Distributed Transactions: 2PC and Saga"
+topic: scaling
+level: interview
+heat: 2
+hook: "Across databases, 2PC commits all-or-nothing but blocks; a saga runs local steps and undoes them with compensations."
+points:
+  - { k: "2PC", v: "a coordinator asks all to prepare, then tells all to commit" }
+  - { k: "Blocking", v: "prepared work keeps its locks until the coordinator decides", kind: minus }
+  - { k: "Saga", v: "local transactions in order; on failure, compensating steps undo" }
+  - { k: "Saga cost", v: "no automatic rollback, no isolation between sagas", kind: minus }
+  - { k: "Outbox", v: "write the event in the same local transaction; a relay sends it" }
+trap:
+  wrong: "One @Transactional around calls to two services makes them atomic."
+  right: "A local transaction covers one database. Across services use a saga with compensations, and an outbox for events."
+sayIt: "Inside one database I use a normal transaction. Across services I use a saga: each step commits locally and a failure triggers compensating steps. Events go out through an outbox table."
+confusedWith: []
+tags: [two-phase-commit, saga, outbox, microservices]
+visual: table
+sources:
+  - title: "PREPARE TRANSACTION (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/sql-prepare-transaction.html"
+    verifiedOn: "2026-10-20"
+  - title: "Pattern: Saga (microservices.io, Chris Richardson)"
+    url: "https://microservices.io/patterns/data/saga.html"
+    verifiedOn: "2026-10-20"
+  - title: "Pattern: Transactional outbox (microservices.io, Chris Richardson)"
+    url: "https://microservices.io/patterns/data/transactional-outbox.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+An order may touch an orders database, a payments database and a message broker. No local transaction spans them, so a crash halfway leaves them disagreeing.
+
+## How it works
+
+<Compare id="two-phase-commit-vs-saga" />
+
+- Saga styles: [choreography](card:choreography-saga) (services react to events) or [orchestration](card:orchestration-saga) (one coordinator gives orders).
+- The [outbox](card:transactional-outbox) relay may send an event twice, so consumers must be idempotent.
+
+## Example
+
+```sql
+BEGIN;
+INSERT INTO orders (id, user_id, amount, status)
+VALUES (42, 7, 999.00, 'PENDING');
+INSERT INTO outbox (aggregate_id, event_type, payload)
+VALUES (42, 'OrderCreated', '{"orderId": 42}');
+COMMIT;   -- both rows or neither; a relay publishes the outbox row later
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| `max_prepared_transactions` | 0: 2PC prepare is turned off | PostgreSQL 18 |
+
+## Interview Qs
+
+### In 2PC, what if the coordinator crashes after everyone prepared?
+
+Participants stay prepared and keep their locks. They cannot commit or roll back alone; they wait until the coordinator, or an operator, finishes each one with COMMIT PREPARED or ROLLBACK PREPARED.
+
+### Why do microservices use sagas instead of 2PC?
+
+Each service owns its database, and many brokers and NoSQL stores do not support 2PC. 2PC also adds latency and blocking. A saga needs only local transactions plus messages.

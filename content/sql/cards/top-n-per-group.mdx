@@ -1,0 +1,82 @@
+---
+id: top-n-per-group
+tech: sql
+title: Nth Highest and Top N per Group
+topic: patterns
+level: interview
+heat: 3
+hook: "Rank in a subquery, filter outside: DENSE_RANK keeps ties, ROW_NUMBER gives exactly N rows per group."
+points:
+  - { k: "Second highest", v: "MAX(x) WHERE x < (SELECT MAX(x) …); NULL if none" }
+  - { k: "Nth distinct value", v: "DENSE_RANK() = N, or DISTINCT … LIMIT 1 OFFSET N-1" }
+  - { k: "Top 3 per group", v: "DENSE_RANK() ≤ 3 keeps ties, so it can return more than 3 rows", kind: minus }
+  - { k: "One row per group", v: "ROW_NUMBER() = 1 with a unique tie-breaker such as id" }
+  - { k: "DISTINCT ON", v: "PostgreSQL shortcut for one row per group; not in MySQL", kind: plus }
+trap:
+  wrong: "Top earner per department: SELECT dept_id, name, MAX(salary) … GROUP BY dept_id."
+  right: "GROUP BY gives the top value, not its row, and name is not grouped. Rank the rows; keep rank 1."
+sayIt: "I rank with DENSE_RANK() OVER (PARTITION BY dept_id ORDER BY salary DESC) in a subquery and keep rank ≤ N outside. DENSE_RANK keeps ties; ROW_NUMBER gives exactly N."
+confusedWith: [row-number-vs-rank-vs-dense-rank, group-by-vs-partition-by]
+tags: [patterns, window-functions]
+visual: table
+sources:
+  - title: "SELECT: DISTINCT ON, LIMIT (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/sql-select.html"
+    verifiedOn: "2026-10-20"
+  - title: "4.2 Value Expressions (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/sql-expressions.html"
+    verifiedOn: "2026-10-20"
+  - title: "Derived Tables (MySQL 9.7)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/derived-tables.html"
+    verifiedOn: "2026-10-20"
+  - title: "Department Top Three Salaries (LeetCode)"
+    url: "https://leetcode.com/problems/department-top-three-salaries/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+GROUP BY returns one value per group, not the rows holding it, so "Nth highest" and "top N per group" need a rank.
+
+## How it works
+
+| Question | Use | Ties |
+|---|---|---|
+| Second highest value | `MAX(x) WHERE x < (SELECT MAX(x) …)` | Ignored: distinct values |
+| Nth highest value | `DENSE_RANK() = N` | One value |
+| Top N per group | `DENSE_RANK() <= N` | All tied rows kept |
+| Exactly N per group | `ROW_NUMBER() <= N` | Broken by the tie-breaker |
+| Latest per user | `ROW_NUMBER() = 1`, ORDER BY time DESC, id DESC | Broken by id |
+
+- WHERE cannot use a window result: rank in a subquery or CTE, filter outside. MySQL needs the subquery alias (`ranked`).
+
+## Example
+
+```sql
+-- Top 3 salary levels per department
+SELECT dept_id, name, salary, rnk
+FROM (
+  SELECT e.*,
+         DENSE_RANK() OVER (PARTITION BY dept_id ORDER BY salary DESC) AS rnk
+  FROM employees e
+) ranked
+WHERE rnk <= 3;
+```
+
+```text
+dept_id | name | salary | rnk
+1       | A    | 100    | 1
+1       | B    | 100    | 1     <- tie: 4 rows
+1       | C    | 90     | 2
+1       | D    | 80     | 3
+```
+
+## Interview Qs
+
+### Nth highest salary: what if there are fewer than N salaries?
+
+`SELECT (SELECT DISTINCT salary FROM employees ORDER BY salary DESC LIMIT 1 OFFSET 2);` gives the 3rd, or NULL: a scalar subquery with no rows is NULL.
+
+### Latest order per user in PostgreSQL, the short way?
+
+`SELECT DISTINCT ON (user_id) * FROM orders ORDER BY user_id, created_at DESC, id DESC;` keeps each user's first row. MySQL lacks it: use `ROW_NUMBER() = 1`.

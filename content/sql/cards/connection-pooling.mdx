@@ -1,0 +1,87 @@
+---
+id: connection-pooling
+tech: sql
+title: Connection Pooling
+topic: backend
+level: intermediate
+heat: 3
+hook: "Opening a connection is slow, so keep a few open and reuse them. A small pool usually beats a big one."
+points:
+  - { k: "Cost of connecting", v: "network trip and login; PostgreSQL also starts a server process" }
+  - { k: "Borrow and return", v: "close() on a pooled connection hands it back to the pool" }
+  - { k: "Spring Boot", v: "picks HikariCP whenever it is on the classpath (Boot 4.1)", kind: default }
+  - { k: "Pool exhausted", v: "callers wait; after connectionTimeout they get an SQLException", kind: minus }
+  - { k: "Leak", v: "a connection never closed never returns; use try-with-resources", kind: minus }
+trap:
+  wrong: "A bigger pool means more throughput, so set it to 100 or more."
+  right: "Past a few connections per CPU core the database only switches between them. Start near (cores × 2) + disks, then load-test."
+sayIt: "A pool such as HikariCP keeps a few connections open, lends one per unit of work and caps the total. That skips the costly connect and login and protects the database. I keep it small and always close connections."
+confusedWith: []
+tags: [connection-pool, hikaricp, pgbouncer, performance]
+visual: flow
+sources:
+  - title: "HikariCP README"
+    url: "https://github.com/brettwooldridge/HikariCP"
+    verifiedOn: "2026-10-20"
+  - title: "About Pool Sizing (HikariCP wiki)"
+    url: "https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing"
+    verifiedOn: "2026-10-20"
+  - title: "How Connections Are Established (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/connect-estab.html"
+    verifiedOn: "2026-10-20"
+  - title: "Connection Settings (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/runtime-config-connection.html"
+    verifiedOn: "2026-10-20"
+  - title: "SQL Databases (Spring Boot reference)"
+    url: "https://docs.spring.io/spring-boot/reference/data/sql.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A new connection per request is slow, and every database caps how many connections it accepts.
+
+## How it works
+
+<Mermaid
+  alt="Request threads borrow connections from a HikariCP pool that holds 10 open connections to PostgreSQL. Threads 1 and 2 get a connection. Thread 11 waits in the pool until one is returned."
+  chart={`flowchart LR
+  T1[Request thread 1] --> P
+  T2[Request thread 2] --> P
+  T11[Request thread 11] -. waits .-> P
+  P[["Pool: 10 open connections"]] --> DB[(PostgreSQL)]`}
+/>
+
+- Extra requests queue in the pool instead of overloading the database.
+- App instances × pool size must stay below the server's `max_connections`.
+
+## Example
+
+```java
+try (Connection con = dataSource.getConnection();      // borrow
+     PreparedStatement ps = con.prepareStatement(
+         "SELECT name FROM users WHERE id = ?")) {
+    ps.setLong(1, id);
+    try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString("name") : null;
+    }
+}                                                       // closed = returned
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Max connections in the pool | 10 | HikariCP 7.1 `maximumPoolSize` |
+| Wait for a free connection | 30 seconds | HikariCP 7.1 `connectionTimeout` |
+| Server connection limit | 100 / 151 | `max_connections`, PostgreSQL 18 / MySQL 9.7 |
+
+## Interview Qs
+
+### Why use a connection pool?
+
+To skip the slow connect and login on every request, and to cap how many sessions reach the database at once.
+
+### How big should the pool be?
+
+Small. HikariCP's guide suggests starting near (CPU cores × 2) + disks and load-testing. Too many connections make the database switch between them, so latency rises.

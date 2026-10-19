@@ -1,0 +1,82 @@
+---
+id: caching-redis
+tech: sql
+title: Database vs Cache (Redis)
+topic: backend
+level: intermediate
+heat: 3
+hook: "The database holds the truth; Redis holds fast copies. Read the cache first; on writes update the DB, then delete the key."
+points:
+  - { k: "Hit and miss", v: "hit: answer from memory; miss: read the DB, then store the copy" }
+  - { k: "TTL", v: "EXPIRE deletes a key after N seconds, which caps staleness" }
+  - { k: "Good fit", v: "data read often and changed rarely", kind: plus }
+  - { k: "Stale window", v: "between the DB write and the delete, readers may get old data", kind: minus }
+trap:
+  wrong: "Delete the cached key first, then update the database."
+  right: "Update the database first, then delete the key. Deleting first lets a reader put the old row back into the cache."
+sayIt: "The database is the source of truth; Redis keeps hot data in memory. With cache-aside I read Redis first, load from the database on a miss and set a TTL; on writes I update the database, then delete the key."
+confusedWith: [database-vs-cache]
+tags: [cache, redis, cache-aside, ttl]
+visual: flow
+sources:
+  - title: "Cache-Aside pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
+    verifiedOn: "2026-10-20"
+  - title: "Redis persistence (Redis docs)"
+    url: "https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/"
+    verifiedOn: "2026-10-20"
+  - title: "EXPIRE (Redis command reference)"
+    url: "https://redis.io/docs/latest/commands/expire/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Most apps read the same rows again and again. A cache serves those repeated reads from memory and takes that load off the database.
+
+## How it works
+
+<Steps label="Cache-aside with Redis">
+  <Step title="Read">Look up `user:42` in Redis. On a hit, return it.</Step>
+  <Step title="Miss">Read the row from the database, store it with a TTL, return it.</Step>
+  <Step title="Write">Update the database, then delete `user:42`.</Step>
+  <Step title="Next read">It misses and loads the fresh row.</Step>
+</Steps>
+
+- A TTL heals any delete that was missed, so set one on every cached key.
+- [Redis](card:redis) also serves sessions, counters, rate limits, locks and pub/sub.
+
+## Example
+
+```java
+User find(long id) {
+    String key = "user:" + id;
+    User u = cache.get(key);
+    if (u != null) return u;                      // hit
+    u = userRepo.findById(id).orElseThrow();      // miss: read the DB
+    cache.set(key, u, Duration.ofMinutes(5));     // store with a TTL
+    return u;
+}
+void rename(long id, String name) {
+    userRepo.updateName(id, name);                // 1. database
+    cache.delete("user:" + id);                   // 2. drop the copy
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Key lifetime | none: keys live until deleted | Redis 8.x, without EXPIRE |
+| Disk persistence | RDB snapshots to `dump.rdb`; AOF off | Redis 8.x |
+| AOF fsync policy | `everysec` (lose up to about 1 s) | Redis 8.x, when AOF is on |
+
+## Interview Qs
+
+### Why not keep everything in Redis instead of the database?
+
+Redis keeps data in memory, so size costs RAM, and a crash can lose recent writes: about a second with AOF everysec, minutes with RDB alone. The database gives durable storage, constraints, joins and transactions.
+
+### How do you keep the cache and the database consistent?
+
+Not perfectly, without extra cost. Update the database, then delete the key, and set a TTL so a missed delete heals itself. Do not cache data that must never be stale.
