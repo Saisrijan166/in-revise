@@ -92,39 +92,39 @@ Applied, and written into CLAUDE.md (CLAUDE.md is not tracked in git: the global
 4. **Redis 8.6 `allkeys-lrm` / `volatile-lrm`** (least recently modified) exist but were left out of the eviction concept to keep it short. Add a tree node?
 5. **Tree depth (C1):** the tree now has about 500 nodes. Every topic now lists concepts at its top level (Caching strategies became a concept on 16-10-2026, with write-around added). Concepts may also sit inside another concept (Cache-Aside and Write-Through inside Caching Strategies; Consistent Hashing inside Sharding vs Replication); the Overview, Cheat sheet and sidebar show them either way.
 
-## E. Spring Boot (Phase 4, 17-10-2026)
+## E. Spring Boot (rebuilt from the owner's reference, 19-10-2026)
 
-Owner's choices: Spring Boot 4.1 as the baseline (4.1.1, with Spring Framework 7.0.9 and Spring Security 7.1.1), plus a short "changed in 4.0" point only where 3.x differs and interviewers ask; Java-only code (`codeLanguages: [java]`); 8 topics including Spring Cloud (2025.1 "Oakwood" is the train for Boot 4.1).
+The first version (17-10-2026) was rebuilt from `reference/spring-boot.md` (CLAUDE.md 3.8.7). Baseline unchanged: Spring Boot 4.1 (4.1.1, confirmed current on spring.io 19-10-2026), Spring Framework 7.0.9, Spring Security 7.1.1, Spring Data 4.1.1, Hibernate 7.4.5; Java-only code; 8 topics including Spring Cloud (2025.1 "Oakwood"). Where every reference item landed, what was corrected and what was added: `reference/spring-boot.coverage.md`.
 
 ### E1. Verification status
 
-- **First pass (done):** each topic was drafted by a separate agent that checked every key point, default, number, version, trap and tree note against a page it opened, and re-checked them in a second pass. Each agent kept a claim log (claim, URL, evidence).
-- **Re-checked by hand on 17-10-2026, all confirmed:** Boot 4.1.1 manages Spring Framework 7.0.9, Spring Security 7.1.1, Spring Data 4.1.1, Spring Kafka 4.1.1, Hibernate 7.4.5, Tomcat 11.0.24, HikariCP 7.0.2, Testcontainers 2.0.5; Undertow is not supported in Boot 4 (Servlet 6.1); HikariCP defaults (pool 10, connection timeout 30 s, max lifetime 30 min); only `/health` is exposed over HTTP by default, and DOWN / OUT_OF_SERVICE map to 503; `@MockBean` and `@SpyBean` were removed in 4.0 for `@MockitoBean` / `@MockitoSpyBean`; liveness and readiness probes are on by default in 4.0; RestTemplate is deprecated in the Framework 7.0 docs, gets `@Deprecated(forRemoval = true)` in 7.1 and is planned for removal in 8.0; the order of property sources.
-- **Independent pass over every claim: not done yet** (as for System Design).
+- **Writing pass (done):** each of 10 units was drafted by a separate agent that checked every point, default, number, version, trap and tree note against a page it opened on 19-10-2026, and kept a claim log.
+- **Independent pass (4.8, done 19-10-2026):** different agents re-checked every concept, comparison, tree note and glossary term against primary sources: about 2,200 items, 0 dropped, 33 fixed. The fixes were overstated or imprecise wording, not wrong headline facts. Examples: the Resilience4j example put the fallback where retries never happen; the bean-selection diagram sent "two @Primary beans" to the name check (Spring fails at once); `@TransactionalEventListener` is skipped with no transaction unless `fallbackExecution`; `@Secured` takes authority names; `iss` is checked only when an issuer is configured; RestTemplate is deprecated in the 7.0 docs, gets `@Deprecated` in 7.1 and is removed in 8.0; the persistence context lasts the whole request while open-in-view is on (Boot's default).
+- **Reference corrections:** 11, listed in the coverage file (Undertow removed in 4.0; `@MockBean` removed in 4.0; the Spring Data 3+ repository hierarchy; the web starter rename and no validation in it; the `@ComponentScan` fix that drops the main package; the `@ConfigurationProperties` sample that cannot bind; the exact rollback rule; INFO as the default level everywhere; idempotency per RFC 9110).
 
 ### E2. Worded carefully
 
 | # | Item | What the content does |
 |---|---|---|
-| E2.1 | RestTemplate's annotation lands in Framework 7.1, still a milestone today | Says "deprecated in the 7.0 docs; @Deprecated in 7.1". Re-check when 7.1 / Boot 4.2 go GA. |
-| E2.2 | "A caught exception commits", "`ddl-auto=update` adds a column for a renamed field", "an object made with `new` gets no proxy" | Inferences from the Spring and Hibernate docs, not sentences in them |
-| E2.3 | CORS bean picked up automatically by Spring Security | Stated for "Spring Security 7" with no "since" version (checked in the 7.0.0 and 7.1.1 source) |
-| E2.4 | Eureka health-check propagation default | Two Spring pages conflict; no default stated |
+| E2.1 | RestTemplate's `@Deprecated` annotation lands in Framework 7.1 | Says "deprecated in the 7.0 docs; @Deprecated in 7.1, removed in 8.0". Re-check when 7.1 / Boot 4.2 go GA (Boot 4.2 is due 30-11-2026). |
+| E2.2 | `Idempotency-Key` header | Called an expired IETF draft (revision 07) used by Stripe and Adyen, not a standard. |
+| E2.3 | "The cache is not the source of truth" (spring-cache trap) | A design principle; backed by Boot's note that the simple cache has no expiry, not stated in those words by one page. |
+| E2.4 | Default isolation level | "PostgreSQL 18: READ COMMITTED". PostgreSQL 19 RC1 is out (15-10-2026); update the version when 19 is final. |
+| E2.5 | Eureka removal after 90 s | The lease expires at 90 s; the server removes it on its next eviction run. |
+| E2.6 | Session vs JWT with many instances | Says "needs a shared session store"; sticky sessions are the other, weaker option. |
+| E2.7 | spring.io/projects/spring-boot still lists Undertow | The 4.0 migration guide and 4.1.1 system requirements are treated as the authority. |
 
 ### E3. Dropped (could not be confirmed from a primary source)
 
-- Boot: the `server.servlet.context-path` default; the LiveReload port; the Initializr default build tool.
-- Beans and DI: self-injection as a fix for self-invocation; "single constructor needs no @Autowired since 4.3"; scoped proxies for prototypes; where `@Priority` sits in bean choice.
-- Configuration: the default encoding of `application.properties`; the exception type when `@Validated` properties fail.
-- Web: Boot 4.2 deprecating `RestTemplateBuilder`; the version that added `@FilterRegistration`; `block()` on an event loop.
-- Data: subselect fetching; "DTO projections fix N+1"; the sequence allocation-size default.
-- Security: BCrypt's 72-byte limit in Spring; default security header values; re-hashing passwords at login.
-- Testing and production: `@Async` context propagation in 4.1; "`@Async` methods must be public"; native build and start-up numbers.
-- Spring Cloud: Config client retry defaults (they depend on Spring Retry, which Boot 4 no longer manages); when `@EnableEurekaClient` was removed; whether `@ConcurrencyLimit` blocks or rejects.
+- "BeanFactory creates singletons lazily on first request" (blogs only).
+- "Hibernate cannot batch inserts with IDENTITY ids" (not re-verified; also too advanced).
+- Still dropped from the first version: the `server.servlet.context-path` default; the LiveReload port; self-injection as a fix for self-invocation; the default encoding of `application.properties`; subselect fetching; BCrypt's 72-byte limit; native build and start-up numbers; Config client retry defaults.
 
 ### E4. Decisions for the owner
 
-1. **Size:** 56 concepts, 40 comparisons, 316 glossary terms, 724 tree nodes (668 types), 24 story steps. Three topics have 7 comparisons each (Beans and DI, Testing and Production; Web has 6). Trim candidates: `singleton-vs-prototype`, `beanpostprocessor-vs-beanfactorypostprocessor`, `metrics-vs-traces`, `testcontainers-vs-embedded-db`.
-2. **Heat** is editorial; `virtual-threads` is 2, raise it if Java 21 questions are common in your interviews.
-3. **Spring Cloud Stream** is only a type under the Spring Cloud overview. Make it a concept?
-4. **Retry vs circuit breaker** is also covered in System Design (circuit breaker); kept here for the Spring annotations.
+1. **Size:** 62 concepts (was 56), 35 comparisons (was 40), 295 glossary terms (was 316), 567 tree nodes (was 724), 27 story steps. Concepts run 454–650 words (was 700–1,060). Trim candidates if you want it shorter still: `connection-pool`, `schema-migrations` and `testcontainers` (heat 1, not in the reference).
+2. **Heat** was re-graded from the reference's "10 most likely asked" list: 29 concepts at heat 3, 30 at 2, 3 at 1. Raise or lower any that differ from your interviews.
+3. **Spring Cloud** (6 concepts) is not in the reference; it stays because you chose it on 17-10-2026. Say if you want it removed now that the reference sets the scope.
+4. **Interview-prep sources:** a few concepts still cite Baeldung or InterviewBit as evidence that a question is really asked (every fact also has a primary source). Keep them, or remove them?
+5. **Reference file location:** it arrived as `content/reference.md`; it is now `reference/spring-boot.md` (CLAUDE.md 3.8.2: never inside `/content`). Please put future reference files in `reference/<slug>.md`.
+6. **Removed glossary term "Spring Boot":** it would auto-link the first "Spring Boot" in every concept.
