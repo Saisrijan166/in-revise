@@ -250,3 +250,23 @@ LTS still common; 26.7 is an Innovation release under the new calendar versionin
 4. **Overlap with other techs:** replication, sharding, CAP and caching also exist in System Design; JPA, N+1 and HikariCP in
    Spring Boot. Each tech stays self-contained (no cross-tech links); the SQL versions focus on the database side.
 5. Some concepts cite 4–6 primary pages (one per PostgreSQL/MySQL fact) instead of 1–3.
+
+## I. Owner additions (20-10-2026): Java streams, Java coding methods, SQL query building
+
+The owner's new `reference/reference.md` held three parts. Each was appended to its tech's reference (`reference/java.md`,
+`reference/dsa.md`, `reference/sql.md`, after an "Owner addition" marker line) and recorded at the end of that tech's coverage
+file. Nothing in it concerned System Design or Spring Boot.
+
+- **Java:** topic "Generics and Functional Java" became **"Lambdas and Streams"** (generics moved to Collections and Generics,
+  date-time to Java Basics). New concepts: primitive-streams, collectors, stream-coding-patterns, employee-stream-questions; new
+  comparisons: groupingby-vs-partitioningby, stream-tolist-vs-collectors-tolist, findfirst-vs-findany.
+- **DSA:** new concept java-coding-toolkit ("Java Methods for Coding Rounds"); missing calls added to hashmap-hashset, strings, arrays.
+- **SQL:** new concepts string-date-functions and english-to-sql; sql-problem-approach trimmed to pattern level so the two do not overlap.
+- Independent check: about 300 items, 13 fixed, 1 dropped (a repeated point). Every Java block was compiled and run (JDK 21);
+  every SQL block ran on PostgreSQL 17 and MySQL 8.0.
+
+Decisions for the owner:
+1. Newer stream APIs were left out to keep Java short: takeWhile/dropWhile (Java 9), Collectors.teeing (12), mapMulti (16),
+   Gatherers (24). Add them?
+2. `java/cards/generics.mdx` is 567 words (over the 550 target since the first Java version).
+3. "Nth highest → OFFSET" in the reference needs DISTINCT; the site says so.

@@ -324,3 +324,75 @@ Hibernate, Redis docs, original papers).
 | B24. MySQL-specific (parts: clustered primary key; secondary indexes contain the PK) | also: concept `clustered-indexes` (points, example, Interview Q "why short PK") |
 | B24. MySQL-specific (part: EXPLAIN shows the planned execution) | also: concept `explain-query-plans` (bullet: MySQL `type` ALL … const) |
 | B24. MySQL-specific concepts (part: ON DUPLICATE KEY UPDATE) | also: concept upsert; tree node on-duplicate-key-update; glossary on-duplicate-key-update |
+
+
+## Owner addition (20-10-2026): SQL query building
+
+Appended to `reference/sql.md` after the marker line "Owner addition: SQL query building". Keys: the addition's own section numbers or
+headings. Every item of the addition appears in exactly one of Mapped, Corrected or Dropped below.
+
+### Mapped
+| Reference item | Landed in | Note |
+|---|---|---|
+| Q1. Master order (written and run order) | `english-to-sql` hook + node `written-clause-order` (written order); `query-order` (run order) | Site's run order also lists DISTINCT |
+| Q2. SELECT, DISTINCT, alias | `select-and-filtering` (DISTINCT Q); `query-order` (alias); glossary `select-distinct` (new) | |
+| Q3. WHERE operators, LIKE patterns, IS NULL, never = NULL | `select-and-filtering` table; `null-handling` | already covered |
+| Q4. AND / OR / NOT, brackets | `select-and-filtering` point "AND before OR" | already covered |
+| Q5. Aggregate functions | `aggregates-group-by` | already covered |
+| Q6. GROUP BY (incl. multiple columns) | `aggregates-group-by`; `english-to-sql` translator | already covered |
+| Q7. HAVING; WHERE vs HAVING | `aggregates-group-by`, comparison `where-vs-having`; `english-to-sql` point + Interview Q | |
+| Q8. ORDER BY ASC/DESC, multiple keys, by alias | `select-and-filtering`; `query-order` (alias in ORDER BY) | already covered |
+| Q9. LIMIT, top 5, LIMIT/OFFSET pagination | `select-and-filtering`; `pagination`; `english-to-sql` shape "filter, sort, limit" | |
+| Q10. INNER / LEFT / RIGHT / FULL OUTER JOIN | `joins` | already covered (incl. MySQL has no FULL JOIN) |
+| Q11. JOIN + SELECT | `joins` example | already covered |
+| Q12. JOIN + WHERE | `joins` trap (ON vs WHERE); `english-to-sql` example | |
+| Q14. JOIN + GROUP BY + HAVING | `english-to-sql` example (join → where → group → having → sort → limit) | groups by d.id, d.name (see Q13) |
+| Q15. CASE (in SELECT, in ORDER BY) | `select-and-filtering` example + node `case-expression`; `english-to-sql` translator ("custom sort → ORDER BY CASE") | ORDER BY CASE added |
+| Q16. COALESCE | `null-handling`; `english-to-sql` translator ("0 if missing") | already covered |
+| Q17. String functions | new concept `string-date-functions`; glossary `char-length`, `concat-function` | added LENGTH vs CHAR_LENGTH, CONCAT/|| NULL rules, MySQL `||` = OR |
+| Q19. Subquery (above average, max) | `subqueries` (scalar row); `group-aggregation-patterns` (above average) | already covered |
+| Q20. IN subquery | `subqueries` | already covered |
+| Q21. EXISTS / NOT EXISTS | `subqueries`; `anti-join-pattern`; `english-to-sql` translator ("has none") | |
+| Q22. CTE, multiple CTEs | `ctes`; `running-totals-and-streaks` example shows two CTEs | already covered |
+| Q23. UNION / UNION ALL | `set-operations`; comparison `union-vs-union-all` | already covered |
+| Q24. INSERT (multi-row) | `sql-commands` example now multi-row | |
+| Q25. UPDATE (incl. salary * 1.10) | `sql-commands` | already covered |
+| Q26. DELETE, no WHERE deletes all | `sql-commands` point "No WHERE" | already covered |
+| Q27. Nth highest with LIMIT 1 OFFSET N-1 | `top-n-per-group` (node `limit-offset-nth`) | already covered, incl. DISTINCT and NULL-if-missing |
+| Q28. Second highest with MAX below MAX | `top-n-per-group` (node `max-below-max`) | already covered |
+| Q29. Duplicates (one and several columns) | `duplicates`; `english-to-sql` translator ("more than once") | already covered |
+| Q30. DISTINCT to remove duplicates from a result | `select-and-filtering` | already covered |
+| Q31. COUNT DISTINCT (incl. per group) | `aggregates-group-by` | already covered |
+| Q32. Conditional count | `group-aggregation-patterns` (`COUNT(CASE WHEN … THEN 1 END)` added) | |
+| Q33. Conditional sum | `group-aggregation-patterns` | already covered |
+| Q34. Window functions (ROW_NUMBER, RANK, DENSE_RANK, PARTITION) | `window-functions` | already covered |
+| Q35. Top employee per department, top 3 | `top-n-per-group` | already covered (site adds tie-breaker and DENSE_RANK) |
+| Q36. ROW_NUMBER vs RANK vs DENSE_RANK | comparison `row-number-vs-rank-vs-dense-rank`; `window-functions` | already covered |
+| Q37. LAG / LEAD | `window-functions`; `running-totals-and-streaks` | already covered |
+| Q39. Window + PARTITION (AVG per department) | `group-aggregation-patterns` (node `partition-avg-compare`); comparison `group-by-vs-partition-by` | already covered |
+| Q40. Important query combinations | `english-to-sql` shapes table + tree nodes `shape-*`; Interview Q "rows or values" (distinct → sort → top N) | |
+| Q-TRANSLATOR. English → SQL translator | `english-to-sql` "Words → SQL" table; pattern-level words point to `sql-problem-approach` | clause level only; no overlap with the pattern picker |
+| Q-CORE. The core to memorise | Covered by `english-to-sql` (clauses, shapes) and existing concepts; the Cheat sheet page already lists them | no new content needed |
+
+### Corrected
+| Reference item | What was wrong | Fixed to | Source URL |
+|---|---|---|---|
+| Q13. JOIN + GROUP BY | Groups by `d.department_name` only: two departments with the same name merge into one row | Group by the key: `GROUP BY d.id, d.name` (example and node `shape-join-group-count`); zero counts via `COUNT(e.id)` already in `group-aggregation-patterns` | https://www.postgresql.org/docs/18/queries-table-expressions.html |
+| Q18. Date functions | Listed YEAR(), MONTH(), DAY(), DATEDIFF, DATE_ADD, DATE_SUB as "common"; they are MySQL (and SQL Server) forms; PostgreSQL has no YEAR() or DATEDIFF, and its DATE_ADD (16+) takes a PostgreSQL interval, not `INTERVAL 7 DAY` | PostgreSQL vs MySQL table in `string-date-functions`: EXTRACT, date − date, `INTERVAL '7 days'` vs `INTERVAL 7 DAY`, DATE_TRUNC vs DATE_FORMAT; trap added | https://www.postgresql.org/docs/18/functions-datetime.html ; https://dev.mysql.com/doc/refman/9.7/en/date-and-time-functions.html |
+| Q38. Running total `SUM(amount) OVER (ORDER BY date)` | Default RANGE frame groups rows tied on the date, so it is not row by row | Already the trap of `running-totals-and-streaks` and `window-functions` (ROWS frame or unique sort) | https://www.postgresql.org/docs/18/sql-expressions.html |
+| Q-TRANSLATOR "NTH HIGHEST → ORDER BY DESC + OFFSET" | Without DISTINCT, ties make OFFSET count rows, not values | Points to the pattern picker → `top-n-per-group` (DISTINCT … OFFSET or DENSE_RANK) | https://www.postgresql.org/docs/18/sql-select.html |
+
+### Added beyond the reference
+| New item | Landed in | Why |
+|---|---|---|
+| LENGTH (bytes) vs CHAR_LENGTH in MySQL; OCTET_LENGTH in PostgreSQL | `string-date-functions` point, Interview Q, node `char-length`, glossary | Common wrong answer with non-ASCII names |
+| CONCAT with NULL (MySQL NULL, PostgreSQL skips), `||` NULL, CONCAT_WS | `string-date-functions` point, Interview Q, glossary `concat-function` | Frequent bug and interview question |
+| MySQL `||` is logical OR (deprecated) unless PIPES_AS_CONCAT | `string-date-functions` point | Portability trap |
+| NOW() fixed at transaction start (PostgreSQL) / statement start (MySQL) | `string-date-functions` point | Asked in "NOW vs CURRENT_DATE" questions |
+| DATE_TRUNC vs DATE_FORMAT month bucket; filter dates as a range | `string-date-functions` table, example, link to `index-not-used` | Most common date task in reports |
+| "Rows or values?" for top N | `english-to-sql` Interview Q | Classic ambiguity with ties |
+
+### Dropped
+| Reference item | Reason |
+|---|---|
+| (none) | Every item is mapped or corrected |

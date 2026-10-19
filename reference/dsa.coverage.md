@@ -1,5 +1,5 @@
 # Coverage: DSA with Java
-Reference: reference/dsa.md  ·  Last updated: 19-10-2026
+Reference: reference/dsa.md  ·  Last updated: 20-10-2026
 
 Every numbered section (1–47) and every sub-item that carries its own claim (the 11 "cannot" rules of section 34, the 8 traps of
 section 35, the 9 "why" answers of section 44, the 9 pattern blocks of section 40, the 6 terms of section 42 and the 20 questions of
@@ -228,3 +228,62 @@ algorithm sources named in each row.
 |---|---|
 | Java basics concepts: java-basics, control-flow, methods, java-oop, input-output | Teaching Java syntax is out of scope for interview revision; what matters in a coding round moved to `java-collections`, `strings` and `java-pitfalls` (owner can overrule, OPEN_QUESTIONS F) |
 | two-dimensional-arrays, arrays-and-strings, sorting-and-binary-search, java-dsa-toolkit, complexity (concept ids) | Merged into `arrays`, `strings`, `binary-search`, `java-collections` and `big-o` |
+
+
+## Owner addition (20-10-2026): Java methods for coding rounds
+
+Appended to `reference/dsa.md` after the marker line "Owner addition: Java methods for coding rounds". Keys: the addition's own section numbers or
+headings. Every item of the addition appears in exactly one of Mapped, Corrected or Dropped below.
+
+### Mapped
+| Reference item | Landed in | Note |
+|---|---|---|
+| J-STRING | `strings` (new point `substring(a, b)`, new bullets: everyday calls, regex `split` / `replaceAll` vs literal `replace`); conversions `String.valueOf`, `toCharArray`, `new String(chars)` in `java-coding-toolkit` table | `length`, `charAt`, `equals`, `toUpperCase` already covered by `strings`; `lastIndexOf`, `endsWith`, `toLowerCase` left implied by their pairs |
+| J-STRINGBUILDER | `strings` + comparison `string-vs-stringbuilder` (added `deleteCharAt`) | `append`, `insert`, `reverse`, `setCharAt`, `toString` already there; `delete(start, end)`, `length`, `charAt` not added (obvious from String) |
+| J-ARRAY | `java-coding-toolkit` table + tree `arrays-helpers`; 2D rows / columns in `arrays` | `Arrays.copyOf` not listed separately (`copyOfRange` covers the slice case); `Arrays.binarySearch` stays in `binary-search` |
+| J-LIST | Already covered by `dynamic-array` (add, get, `remove(index)` vs `remove(Integer.valueOf(x))`) and `java-pitfalls`; sorting rows and `List<Integer>` → `int[]` in `java-coding-toolkit` | `set`, `contains`, `indexOf`, `size`, `isEmpty`, `clear` are self-explanatory; not restated |
+| J-COLLECTIONS | `java-coding-toolkit` table + tree `collections-helpers` | `binarySearch` with "needs a sorted list" in the tree note |
+| J-HASHSET | `hashmap-hashset` (new bullet: `addAll` union, `retainAll` intersection, `removeAll` difference, copy first) | add / remove / contains already covered; `containsAll` dropped as rare |
+| J-HASHMAP | Already covered by `hashmap-hashset` (`getOrDefault`, `merge`, `computeIfAbsent`, put/get) | `containsValue` not added |
+| J-FREQUENCY | Already covered by `frequency-counting` + `hashmap-hashset`; new comment in the `hashmap-hashset` example: `get(w) + 1` throws NPE on a new key | `putIfAbsent`, `replace`, `replaceAll`, `computeIfPresent` not added: `merge` and `computeIfAbsent` cover the coding-round uses |
+| J-MAP-LOOPING | `hashmap-hashset` example: `entrySet` loop ("key and value, one lookup"); `keySet` / `values` / `entrySet` views already in `java-collections` | `forEach` not added |
+| J-QUEUE | Already covered by `queue-and-deque` (offer / poll / peek, remove vs poll trap) | Reference declares `new LinkedList<>()`; the site already recommends `ArrayDeque` with the Java docs' reason |
+| J-DEQUE | Already covered by `queue-and-deque` (`offerFirst`, `pollLast`, both-end table) | add* vs offer* only differ for capacity-limited deques; not added |
+| J-STACK | Already covered by `stack` (trap: use `Deque` / `ArrayDeque`, not `Stack`) | |
+| J-PRIORITY-QUEUE | Already covered by `heap-priority-queue` (min-heap default, max-heap with `Collections.reverseOrder()`, comparator heap) | `Comparator.reverseOrder()` and `Collections.reverseOrder()` behave the same for this |
+| J-CHARACTER | `java-coding-toolkit` table + tree `character-helpers` | `isUpperCase` / `isLowerCase` / `toUpperCase` implied; `toUpperCase` already in `strings` example |
+| J-MATH | `java-coding-toolkit` (point: `pow` / `sqrt` return double; `floorMod` Q; MAX/MIN start line); tree `number-helpers` | `abs(MIN_VALUE)` stays in `java-pitfalls`; `ceil`, `floor`, `round`, `random` and Long limits not added |
+| J-CONVERSION | `java-coding-toolkit` (point `c - '0'` and `(char) ('0' + d)`, table rows, trap on `Arrays.asList(int[])`); tree `type-conversions` | `Long.parseLong`, `Integer.toString` not listed (same as parseInt / valueOf) |
+| J-SORTING | `sorting-basics` (library sorts, `comparingInt(...).reversed()`) + `java-coding-toolkit` rows (descending list, `comparing(...).thenComparing(...)`, descending `int[]` Interview Q) | |
+| J-LOOPS | Already covered: every concept's code uses index, for-each and reverse loops | Plain syntax, not restated |
+| J-SWAP | Already covered: `quick-sort` swap helper; `Collections.swap` in the toolkit table | |
+| J-ARRAY-PATTERNS | Already covered: `edge-cases` (start at MIN_VALUE), `prefix-sum` (running sum), `frequency-counting`; one line in the toolkit | |
+| J-SUBSTRING | Already covered by `two-pointers` (opposite ends, code) | |
+| J-BINARY-SEARCH | Already covered by `binary-search` (manual loop, safe mid, `Arrays.binarySearch` return value) | |
+| J-METHOD-TREE | Split across the toolkit table and tree, plus the owning concepts listed above | The flat method tree is not copied |
+| J-MEMORIZE-FIRST | Toolkit hook, points and table plus the owning concepts | Every listed call is on the site |
+
+### Corrected
+| Reference item | What was wrong | Fixed to | Source URL |
+|---|---|---|---|
+
+
+No key needed a correction: every method in the new part exists and behaves as listed. Two notes: the title says "Java 8", but the site's baseline stays Java 25, and the one newer call the toolkit uses (`Stream.toList()`) is marked Java 16+; and the reference's "Update: `map.put(key, map.get(key) + 1)`" is unsafe for a missing key, which the site now says (NPE comment in `hashmap-hashset`).
+
+### Added beyond the reference
+| New item | Landed in | Why |
+|---|---|---|
+| `Arrays.asList(int[])` gives `List<int[]>` (trap) and `Arrays.stream(a).boxed().toList()` | `java-coding-toolkit` trap | Very common wrong conversion in coding rounds |
+| `split` / `replaceAll` read a regex; `"a.b".split(".")` is empty | `strings` bullet; glossary `regex` | Common silent bug with `split` |
+| `Arrays.sort(int[])` has no Comparator overload | `java-coding-toolkit` Interview Q | Common question and compile error |
+| `Math.floorMod` vs `%` for negative indexes | `java-coding-toolkit` Interview Q; glossary `floor-modulus` | Circular-array index bug |
+| `Integer.parseInt` throws NumberFormatException | `java-coding-toolkit` point | Input-parsing failure mode |
+| `Math.pow` / `sqrt` return double | `java-coding-toolkit` point | Casting bug |
+| `Collections.binarySearch` needs a sorted list | tree `collections-helpers` | Precondition |
+
+### Dropped
+| Reference item | Reason |
+|---|---|
+| J-OPTIONAL | Belongs to the Java tech (concept optional). The one DSA use, `Arrays.stream(a).max().getAsInt()`, is a row in `java-coding-toolkit` |
+
+Also cut inside mapped keys (recorded in their Note cells): `Collections.shuffle`, `Collections.fill`, `Math.random`, `ceil` / `floor` / `round`, `containsAll`, `containsValue`, `putIfAbsent`, `replace`, `replaceAll`, `computeIfPresent`, `map.forEach`, `Arrays.copyOf`, `Long` limits: rare in coding rounds or obvious from a listed sibling.

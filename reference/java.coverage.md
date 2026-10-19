@@ -1,5 +1,5 @@
 # Coverage: Java
-Reference: reference/java.md  ·  Last updated: 19-10-2026
+Reference: reference/java.md  ·  Last updated: 20-10-2026
 
 Every numbered section (1–156) and every "why do we need X if Y already exists?" question (why-Q1 to why-Q30) appears in exactly
 one of Mapped, Corrected or Dropped. Items of section 155 ("20 things to remember") are folded into the row for 155. Baseline for
@@ -364,3 +364,82 @@ corrections: Java 25 (LTS). Sources for corrections are primary pages (Java SE 2
 | 155.19 Stream: process, not store | also: concept streams ("No storage" point) |
 | 155.20 JVM memory (stack per thread, heap shared) | also: concept `jvm-memory` (hook, points) |
 | 155 (as the list of priorities) | also: heat: `jvm-memory` 3, `garbage-collection` 3, `class-loading-jit` 2, `modern-java` 2 |
+
+
+## Owner addition (20-10-2026): Java 8 Streams coding
+
+Appended to `reference/java.md` after the marker line "Owner addition: Java 8 Streams coding". Keys: the addition's own section numbers or
+headings. Every item of the addition appears in exactly one of Mapped, Corrected or Dropped below.
+
+### Mapped
+| Reference item | Landed in | Note |
+|---|---|---|
+| S1. The master pattern (filter → transform → sort → collect) | `stream-coding-patterns` (hook, Example 1); `streams` (Mermaid pipeline) | Order clarified, see the "Sort before map" point; not a correction of a false fact, the hook says "keep only the steps you need" |
+| S2. First decision: what does the question want (word → operation table) | `stream-coding-patterns` (How it works translator table) | Merged with S29 and S32 into one table |
+| S3. FILTER (basic, common conditions) | `streams` (operation list); `stream-coding-patterns` (row "which, only, where") | The list of example conditions (even, odd, startsWith...) dropped as trivial |
+| S4. MAP (values, String::toUpperCase, object → field) | `streams`; comparison `map-vs-flatmap`; `lambdas` (method references) | Already covered |
+| S5. FILTER + MAP (names of employees with salary > 50,000) | `employee-stream-questions` (table row "Names earning over 50,000") | |
+| S6. SORTING (asc, desc, by field, reversed, multiple fields) | `comparable-comparator` (comparing, thenComparing, reversed: already covered); new tree node `comparator-natural-reverse` (reverseOrder); `stream-coding-patterns` table row; `employee-stream-questions` (sort by salary desc then name) | |
+| S7. DISTINCT | `streams` (operation list); `stream-coding-patterns` (row "unique") | Already covered |
+| S8. COUNT | `streams` (terminal list); `stream-coding-patterns` (row "how many") | Already covered |
+| S9. FIND FIRST (+ orElse(null)) | tree node `find-first`; comparison `findfirst-vs-findany`; `optional` (orElse) | |
+| S10. ANY / ALL / NONE | `streams` (terminal list + point "Empty stream"); tree node `match-operations`; `stream-coding-patterns` row | Empty-stream results added |
+| S11. MAX / MIN (Integer::compareTo, objects, mapToInt shortcut) | `streams` (terminal list); `stream-coding-patterns` row; `employee-stream-questions` (top earner); `primitive-streams` (max().orElse) | |
+| S12. SUM / AVERAGE (mapToInt) | `primitive-streams` (table, Example, point "sum()") | |
+| S13. REDUCE (sum, product, max; "many → one") | `streams` tree node `reduce-operation` + children `reduce-with-identity`, `reduce-without-identity`; `stream-coding-patterns` row "combine into one value" | |
+| S15. GROUPING BY (Map<Key, List<Value>>) | `collectors` (table, point); tree node `grouping-by` | |
+| S16. GROUP + COUNT | `collectors` (table, Example); tree node `counting-collector` | |
+| S17. GROUP + SUM | `collectors` (table row "Total or average per group"); tree node `summing-averaging-collectors` | |
+| S18. GROUP + AVERAGE | `collectors` (same row); `employee-stream-questions` row | |
+| S19. PARTITIONING BY | `collectors` (table, Example, point); comparison `groupingby-vs-partitioningby`; glossary `partitioning-by` | |
+| S20. STRING JOINING | `collectors` (table row, Example); tree node `joining-collector`; glossary `joining-collector` | |
+| S21. FLATMAP (List<List<Integer>> → List<Integer>) | comparison `map-vs-flatmap` (already covered); `stream-coding-patterns` row "nested lists: flatMap(List::stream)" | |
+| S22. FREQUENCY (groupingBy + counting, Function.identity()) | `stream-coding-patterns` (point, Example, tree node `frequency-pattern`); glossary `function-identity` | |
+| S23. DUPLICATE ELEMENTS | `stream-coding-patterns` (Example, Interview Q, tree node `duplicates-pattern`) | |
+| S24. SECOND HIGHEST NUMBER (and third, Nth) | `stream-coding-patterns` (point, trap, Example, tree node `nth-highest-pattern`) | Example ends with orElseThrow() instead of orElse(0), so "no second value" is not hidden |
+| S25. TOP N / bottom N (skip vs limit) | `stream-coding-patterns` (row, Example, tree node `top-n-pattern`) | |
+| S26. EMPLOYEE QUESTIONS (highest, lowest, salary > 50K, names, sort, group, count, highest per department) | `employee-stream-questions` (table, Example, Interview Qs, tree) | Lowest = same row with min |
+| S27. STRING STREAM QUESTIONS (uppercase, startsWith, longest, sort by length, count length > 5, join) | `stream-coding-patterns` (bullet "Words / Characters / Rebuild text", tree node `string-stream-pattern`); `primitive-streams` (chars, vowel count); `collectors` (joining) | Longest = max(Comparator.comparing(String::length)) covered by the max row; the 6 one-liners are not repeated |
+| S28. NUMBER STREAM QUESTIONS (even, odd, square, sum, average, distinct, first 5, skip 5) | `stream-coding-patterns` (translator rows); `primitive-streams` (sum of squares with rangeClosed) | |
+| S30. METHOD REFERENCE SHORTCUTS (Employee::getName, String::toUpperCase, "Java"::equals, Function.identity()) | `lambdas` (method references: already covered); tree note `bound-method-reference` now shows "Java"::equals; glossary `function-identity` | |
+| S31. The 10 patterns you actually need | `stream-coding-patterns` (translator table + Example) | Duplicate of S3–S25; merged |
+| S32. Mental algorithm during interview (SELECT → filter, ... TRUE/FALSE → partitioningBy) | `stream-coding-patterns` (translator table) | Merged with S2 and S29 |
+| S33. One golden rule (English sentence → stream, IT employees > 60K sorted desc) | `stream-coding-patterns` (hook, Example 1 with word → step comments) | Uses `"IT"`-style record accessors `e.dept()` |
+| S-METHODS: COLLECT (toList, toSet, toCollection(LinkedHashSet::new)); GROUPING BY (plain, toList, counting, summingInt, averagingInt, mapping, maxBy, minBy); PARTITIONING BY (plain, toList, counting); JOINING (joining(), ", ", with prefix/suffix); COUNTING (+ groupingBy(identity, counting)); SUMMING (Int/Long/Double); AVERAGING (Int/Long/Double); MAPPING (mapping + toList, + joining); MAX/MIN (maxBy/minBy, with grouping); REDUCE ((a,b)->a+b, identity forms, Integer::max/min); MAPTOINT (intValue, field; sum/average/max/min/count); TOP/NTH (limit, skip(1), skip(n-1)); MOST IMPORTANT COMBINATIONS | COLLECT, GROUPING BY, PARTITIONING BY, JOINING, COUNTING, SUMMING, AVERAGING, MAPPING, MAX/MIN → `collectors` (table, tree nodes `collect-to-collection`, `grouping-by` + 4 children, `partitioning-by`, `joining-collector`); REDUCE → `streams` tree nodes; MAPTOINT → `primitive-streams`; TOP/NTH → `stream-coding-patterns`; MOST IMPORTANT COMBINATIONS → `stream-coding-patterns` translator table (each combination is one row there or one row in `collectors`) | Long/Double variants of summing/averaging kept as one tree note; minBy kept as tree label with maxBy |
+| S-FINAL. Final memory list (method list, one-word meanings, COLLECT tree) | One-word meanings → `stream-coding-patterns` translator table; COLLECT tree → `tree.yaml` children of `collectors` | The closing line after it ("the same way I want to remember the normal Java functions") is answered by the DSA addition (`reference/dsa.md` "Java methods for coding rounds"), not by Java |
+| S-PRIORITY. 1-hour priority list (stars) | Hint for heat: `collectors`, `stream-coding-patterns`, `employee-stream-questions` heat 3; `primitive-streams` heat 2 | Stars not copied |
+
+### Corrected
+| Reference item | What was wrong | Fixed to | Source URL |
+|---|---|---|---|
+| S14. COLLECT TO LIST / SET ("Collectors.toList() and toSet() are enough") | Outdated for the Java 25 baseline and incomplete: Collectors.toList promises nothing about type or mutability; Java 16 added stream.toList(), which is unmodifiable | `collectors` table + comparison `stream-tolist-vs-collectors-tolist` (Stream.toList Java 16 unmodifiable, Collectors.toList no promise, toUnmodifiableList Java 10 throws on null); all new examples use `.toList()` | https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/Stream.html |
+| S29. THE INTERVIEW "TRANSLATOR" ("For each..." → map()) | Misleading: "for each" usually means an action per element, which is the terminal forEach (returns nothing); map converts | Translator rows: "convert" → map; "print each" → forEach, "no result" | https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/Stream.html |
+
+### Added beyond the reference
+| New item | Landed in | Why |
+|---|---|---|
+| toMap with merge function and map factory; duplicate key throws IllegalStateException | `collectors` (point, trap, Interview Q); tree node `to-map`; glossary `to-map`, `merge-function` | The most common Collectors mistake; owner's prompt listed it |
+| groupingBy with a map factory (TreeMap::new) | `collectors` (Example, Interview Q, point "Map type") | groupingBy promises no map type or order |
+| Downstream collector as a named idea | `collectors`; glossary `downstream-collector` | Interviewer word |
+| partitioningBy always has both keys; groupingBy has no empty groups | comparison `groupingby-vs-partitioningby` | Real difference interviewers probe |
+| findAny, and findFirst vs findAny | comparison `findfirst-vs-findany`; tree nodes `find-first`, `find-any` | Common "difference" question |
+| Empty-stream results of allMatch / noneMatch / anyMatch | `streams` point | Classic trick question |
+| reduce(identity, op) returns T; reduce(op) returns Optional | `streams` tree nodes | Explains why the reference's forms return different types |
+| IntStream.range / rangeClosed, boxed / mapToObj, chars(), summaryStatistics, OptionalInt | `primitive-streams`; glossary `int-stream`, `optional-int`, `int-summary-statistics` | Owner's prompt listed them |
+| IntStream.sum() overflows silently | `primitive-streams` point | Correctness trap for salary totals |
+| IntStream has only sorted(); descending needs boxed() | `primitive-streams` bullet | Frequent compile error |
+| Comparator.comparing(e -> e.salary()).reversed() does not compile | `employee-stream-questions` trap | Real error when writing sort code by hand |
+| reversed() before thenComparing | `employee-stream-questions` Interview Q | Common wrong output |
+| Highest paid per department without Optional (toMap + BinaryOperator.maxBy, collectingAndThen) | `employee-stream-questions` (Example, Interview Q) | groupingBy + maxBy gives Optional values |
+| Nth highest salary, department with most employees (Map.Entry.comparingByValue) | `employee-stream-questions` | Owner's prompt listed them |
+| First non-repeated character (LinkedHashMap counting) | `stream-coding-patterns` (Interview Q, tree node) | Owner's prompt listed it; very common |
+| Sort before map when sorting by a dropped field | `stream-coding-patterns` point | The reference's own S33 code needs it |
+| Stateful lambda warning (Set.add trick for duplicates) | `stream-coding-patterns` Interview Q | Stream docs warn against it |
+| Laziness and short-circuit demo with peek | `streams` Example | Replaces the old example that duplicated the new concepts |
+| Encounter order | glossary `encounter-order` | Used by the findFirst comparison |
+
+### Dropped
+| Reference item | Reason |
+|---|---|
+
+(Nothing was dropped as a whole item. Sub-details dropped inside mapped rows: the list of example filter conditions in S3, the six string one-liners in S27 as separate code, and every emoji, star and ASCII arrow.)
