@@ -1,0 +1,81 @@
+---
+id: persistence-context
+tech: spring-boot
+title: Persistence Context and Entity States
+topic: data
+level: intermediate
+heat: 3
+hook: "The persistence context tracks loaded entities: change a managed one and the UPDATE is written at flush, without calling save()."
+points:
+  - { k: "One instance per id", v: "loading the same id twice returns the same object (first-level cache)" }
+  - { k: "Dirty checking", v: "changed managed entities are written at flush", kind: plus }
+  - { k: "Flush (JPA 3.2)", v: "AUTO mode: before affected queries and at commit", kind: default }
+  - { k: "save() (Spring Data JPA)", v: "persist() if new (null id or version), else merge()" }
+  - { k: "Second-level cache", v: "shared across contexts; off in Hibernate until configured", kind: default }
+trap:
+  wrong: "save() always runs an INSERT, and flush commits the transaction."
+  right: "save() merges an entity that is not new. Flush only sends SQL; the transaction can still roll back."
+sayIt: "The persistence context holds one managed instance per id. Hibernate dirty-checks them and writes changes at flush, before queries or at commit. Flush is not commit: the transaction can still roll back."
+relations:
+  - { from: dirty-checking, to: transactional, type: needs, why: "JPA does not flush when no transaction is active." }
+  - { from: entity-state-detached, to: lazy-initialization-exception, type: causes, why: "A detached entity cannot load its lazy data." }
+  - { from: save-and-flush, to: jpa-flush, type: uses, why: "It saves, then flushes at once, so SQL errors show up now." }
+  - { from: first-level-cache, to: second-level-cache, type: vs, why: "Per context and always on, or shared and opt-in." }
+tags: [jpa, persistence-context, flush]
+visual: flow
+sources:
+  - title: "Jakarta Persistence 3.2 specification: 3.1 persistence context, 3.3 entity lifecycle"
+    url: "https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2.html"
+    verifiedOn: "2026-10-19"
+  - title: "FlushModeType: AUTO default, no flush without a transaction (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/FlushModeType.html"
+    verifiedOn: "2026-10-19"
+  - title: "Spring Data JPA 4.1: Persisting entities (persist or merge)"
+    url: "https://docs.spring.io/spring-data/jpa/reference/jpa/entity-persistence.html"
+    verifiedOn: "2026-10-19"
+  - title: "A Short Guide to Hibernate 7 (7.4): flushing, second-level cache"
+    url: "https://docs.hibernate.org/orm/7.4/introduction/html_single/"
+    verifiedOn: "2026-10-19"
+---
+
+## Why it exists
+
+Without tracking, you would write an UPDATE for every field you change. The persistence context remembers what was loaded and works out the SQL for you.
+
+## How it works
+
+<Mermaid
+  alt="Entity states. Transient: persist() makes it Managed. Managed: remove() makes it Removed; the row is deleted at flush. When the context closes, or on detach(), a Managed entity becomes Detached. merge() copies a Detached entity back onto a Managed one."
+  chart={`flowchart LR
+  T([Transient]) -- "persist()" --> M([Managed])
+  M -- "remove()" --> R([Removed])
+  M -- "context closes, detach()" --> D([Detached])
+  D -- "merge()" --> M`}
+/>
+
+- By default the context lives for one transaction; then its entities become detached.
+- `saveAndFlush()` flushes at once, so constraint errors appear at that line, not at commit.
+
+## Example
+
+```java
+@Transactional
+public void markPaid(Long id) {
+    Payment p = payments.findById(id).orElseThrow();  // managed
+    p.setStatus("PAID");                              // no save() needed
+}   // commit: flush runs UPDATE payment set status = 'PAID' ...
+```
+
+## Interview Qs
+
+### What are the entity states?
+
+Transient: new, not tracked. Managed: in a persistence context; changes are saved at flush. Detached: has an id but is no longer tracked. Removed: marked for deletion at flush.
+
+### Does save() always insert?
+
+No. Spring Data JPA checks whether the entity is new: a null version, or else a null id. New entities are persisted; others are merged, which updates the row.
+
+### save() vs saveAndFlush()?
+
+save() may leave the SQL pending until the next flush. saveAndFlush() flushes immediately, which helps when you need the SQL to run now. Neither commits: the transaction can still roll back.
