@@ -170,3 +170,42 @@ release (GA 15-09-2026). Code uses only APIs in Java 17+.
 4. **Heat:** 25 concepts at heat 3, 24 at heat 2, 1 at heat 1. The reference's 20 questions were the hint for heat 3.
 5. **Glossary ids** `binary-search-tree-term` and `trie-term` avoid clashing with the concept ids; rename if you prefer.
 6. The reference file was moved from the repo root `reference.md` to `reference/dsa.md` (the convention in CLAUDE.md 3.8).
+
+## G. Java (new tech from the owner's reference, 19-10-2026)
+
+Reference: `reference/java.md`; where every item landed: `reference/java.coverage.md`. Baseline: Java 25 (LTS); JDK 27 is the
+latest release (GA 15-09-2026). Every feature newer than Java 8 states the release in which it became final.
+
+### G1. Verification status
+
+- Independent pass (4.8) by agents that did not write the content: about 1,760 items checked, 51 fixed, 0 dropped. Every Java
+  example was compiled and run with javac 21 (the Java 25 instance-main example was checked against JEP 512 instead).
+- 28 reference items corrected (see the coverage file), for example: no separate Oracle JRE since JDK 11; `main` may be an
+  instance method since Java 25; this()/super() need not be the first statement since Java 25 (JEP 513); `compareTo` with
+  subtraction can overflow; G1 is not only for large heaps; records, switch expressions and text blocks are not Java 17
+  features; `synchronized` no longer pins virtual threads since Java 24; Error is unchecked too.
+
+### G2. Worded carefully (kept, with the caveat shown)
+
+1. The `Integer(int)` constructors are "deprecated since Java 9"; the Java SE 25 API no longer marks them for removal.
+2. The Integer cache: only -128 to 127 is guaranteed; HotSpot can raise the top (`-XX:AutoBoxCacheMax`).
+3. An inner object "can keep" its outer object alive: since JDK 18 javac drops the hidden reference when it is unused.
+4. Shared aggregation is described as "the whole does not control the parts' lifetime" (UML leaves its meaning open).
+5. PECS comes from Effective Java; the Oracle tutorial backs the rule, not the acronym.
+6. Glossary terms abstraction, getter and setter cite GeeksforGeeks only (no Oracle page defines these words).
+7. Tree examples HikariCP (a connection pool) and `Arrays.asList` (an adapter) have no primary source.
+
+### G3. Dropped (could not be confirmed from a primary source)
+
+- "Unremoved listeners and callbacks" as a memory-leak example (no primary source found).
+- The Repository pattern (a data-access pattern, out of scope for core Java; can come back as a tree node).
+
+### G4. Decisions for the owner
+
+1. **Heat:** 22 concepts at heat 3, 29 at heat 2, 1 at heat 1 (date-time).
+2. **Virtual threads** is heat 2. Raise it to 3?
+3. **Synchronisers** (CountDownLatch, CyclicBarrier, Semaphore) are tree nodes under concurrency. Make them a concept?
+4. **Repository pattern:** add it back under design patterns?
+5. Two concurrency sources are not Java docs: the OSTEP textbook (deadlock conditions) and Doug Lea's 2006 mail on nulls in
+   ConcurrentHashMap (web.archive.org).
+6. The reference file arrived as `reference/reference.md`; it was renamed `reference/java.md` (the CLAUDE.md 3.8 convention).
