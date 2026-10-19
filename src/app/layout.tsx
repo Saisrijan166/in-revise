@@ -28,7 +28,7 @@ const code = JetBrains_Mono({ subsets: ["latin"], variable: "--font-code", displ
 export const metadata: Metadata = {
   title: { default: "inrevise: interview revision that sticks", template: "%s · inrevise" },
   description:
-    "Interview + revise. Every concept in one line, its types, its traps and how it connects. Learn once, revise in minutes.",
+    "Interview + revise. Every concept in one line, its types and its traps. Learn once, revise in minutes.",
   applicationName: "inrevise",
 };
 

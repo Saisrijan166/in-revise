@@ -107,7 +107,7 @@ export const cardMetaSchema = z
     points: z.array(pointSchema).min(3, "give 3–6 key points").max(6, "give 3–6 key points"),
     trap: z.object({ wrong: oneLine(120), right: oneLine(160) }).strict().optional(),
     sayIt: oneLine(280).optional(),
-    relations: z.array(relationSchema).min(1, "add at least one relation (How it connects)"),
+    relations: z.array(relationSchema).min(1, "add at least one relation"),
     confusedWith: z.array(kebab).default([]),
     tags: z.array(z.string().min(1)).default([]),
     visual: z.enum(VISUALS),

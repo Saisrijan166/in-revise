@@ -27,8 +27,8 @@ export default function HomePage() {
             <span className="text-accent">More that sticks.</span>
           </h1>
           <p className="mt-4 max-w-xl text-lg text-ink-2">
-            Every concept in one line, its types, the trap people fall into, and how it connects to
-            the rest. Learn it once, revise it in minutes.
+            Every concept in one line, its types and the trap people fall into. Learn it once,
+            revise it in minutes.
           </p>
           {techs[0]?.firstHref && (
             <div className="mt-6 flex flex-wrap gap-2">
@@ -110,7 +110,7 @@ export default function HomePage() {
             },
             {
               t: "Tree",
-              d: "Every type and subtype of the tech in one tree, and in each concept: how it needs, uses or solves another.",
+              d: "Every type and subtype of the tech in one tree, each with a one-line note.",
               icon: IconTree,
             },
           ].map((m) => (

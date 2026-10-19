@@ -17,7 +17,6 @@ import { urls } from "@/lib/urls";
 import { formatDate } from "@/lib/ui";
 import { KeyPoints, SayIt, Section, Trap } from "@/components/card/Blocks";
 import { PageAside, type TocItem } from "@/components/card/PageAside";
-import { HowItConnects } from "@/components/card/Relations";
 import { SwipeNav } from "@/components/card/SwipeNav";
 import { CompareGist } from "@/components/compare/CompareView";
 import { PreviewLink } from "@/components/mdx/PreviewLink";
@@ -35,7 +34,6 @@ import {
   IconColumns,
   IconHelp,
   IconLink,
-  IconLinkArrow,
   IconSheet,
   IconSliders,
 } from "@/components/ui/icons";
@@ -84,7 +82,6 @@ export default async function ConceptPage({ params }: PageProps<"/[tech]/[concep
     { id: "points", label: "Key points", show: "learn revise" },
     r.defaults && { id: "defaults", label: "Defaults", show: "learn" },
     m.trap && { id: "trap", label: "Common trap", show: "learn revise" },
-    { id: "connects", label: "How it connects", show: "learn" },
     comparisons.length > 0 && { id: "confused", label: "Often confused", show: "learn" },
     r.questions.length > 0 && { id: "questions", label: "Interview questions", show: "learn" },
     m.sayIt && { id: "say-it", label: "Say it like this", show: "learn revise" },
@@ -168,10 +165,6 @@ export default async function ConceptPage({ params }: PageProps<"/[tech]/[concep
               <Trap wrong={m.trap.wrong} right={m.trap.right} />
             </Section>
           )}
-
-          <Section id="connects" title="How it connects" show="learn" icon={IconLinkArrow}>
-            <HowItConnects deck={deck} cardId={id} />
-          </Section>
 
           {comparisons.length > 0 && (
             <Section id="confused" title="Often confused" show="learn" icon={IconColumns}>
