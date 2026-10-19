@@ -1,55 +1,50 @@
-# Plan: SQL & Databases (new tech, 20-10-2026)
+# Plan: Microservices (new tech, 20-10-2026)
 
-Phase 4 (new tech), following Phase 3 with the reference (CLAUDE.md 3.8). Reference: `reference/sql.md` (owner input, not a source;
-Part A has 47 numbered sections, a one-shot guide; Part B has 24 numbered sections, a cheat sheet, with 12 lettered query
-patterns in B21). Owner request: SQL, PostgreSQL, MySQL and everything database-related a backend developer needs (including the
-database side of system design), plus tricks and patterns that make databases easy to remember. No repeated content, not lengthy.
+Phase 4 (new tech), following Phase 3 with the reference (CLAUDE.md 3.8). Reference: `reference/microservices.md` (owner input,
+not a source; 25 numbered sections, 20 interview questions in section 22, a 20-row differences table in section 23). Arrived as
+`reference/reference.md` and was renamed by the CLAUDE.md 3.8 convention. Owner note: no repeated content, not lengthy.
 
-Slug `sql`, name "SQL & Databases", accent teal (unused by other techs). Baseline: **PostgreSQL 18** (18.6 latest; 19 only at
-RC 1 on 15-10-2026) and **MySQL 9.7 LTS** (April 2026; 8.4 LTS still common; 26.7 is an Innovation release). Standard SQL first,
-with a one-line PostgreSQL / MySQL note where they differ. App code: Java only.
+Slug `microservices`, accent amber (unused by other techs). Baseline (checked 20-10-2026): Java 25, Spring Boot 4.1 with Spring
+Cloud 2025.1 (Oakwood), Apache Kafka 4.3, Kubernetes 1.37, Resilience4j 2.x, OpenTelemetry. Vendor-neutral idea first; products
+as examples. App code: Java only.
 
 ## Shape
 
-- 58 concepts in 8 topics; whole concept file ≤ 550 words; 1–3 primary sources (PostgreSQL 18 docs, MySQL 9.7 manual,
-  OWASP, HikariCP, Hibernate/Jakarta Persistence, Redis docs, original papers).
-- Tree: 2–6 children per concept, about 250 nodes. Comparisons: 33. Glossary: about 250 terms. Story spine: about 14 steps.
+- 44 concepts in 8 topics; whole concept file ≤ 550 words; primary sources (RFCs, product docs, microservices.io,
+  martinfowler.com, Azure and AWS architecture guidance, the Google SRE book, OWASP, NIST).
+- Comparisons: 31. Glossary: about 280 terms. Story spine: about 14 steps.
 
 ## Topics (8) and concepts
 
-| #   | Topic                        | Concepts                                                                                                                                       |
-| --- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Database Basics              | relational-databases, sql-and-nosql, keys, relationships, data-types, constraints, postgresql-and-mysql                                        |
-| 2   | Writing SQL                  | sql-commands, select-and-filtering, query-order, null-handling, aggregates-group-by, joins, subqueries, set-operations, window-functions, ctes |
-| 3   | Schema Design                | normalization, denormalization, id-generation, views, stored-procedures-triggers, oltp-and-olap                                                |
-| 4   | Indexes and Performance      | indexes, index-types, clustered-indexes, composite-indexes, index-not-used, explain-query-plans, query-optimization, pagination                |
-| 5   | Transactions and Concurrency | transactions, acid, isolation-levels, mvcc, locking, optimistic-pessimistic-locking, deadlocks, wal                                            |
-| 6   | Databases in Backend Apps    | connection-pooling, sql-injection, orm-jpa, n-plus-one, caching-redis, upsert                                                                  |
-| 7   | Scaling and Reliability      | replication, partitioning, sharding, cap-theorem, distributed-transactions, backup-recovery, scaling-ladder                                    |
-| 8   | SQL Patterns and Tricks      | sql-problem-approach, top-n-per-group, duplicates, anti-join-pattern, running-totals-and-streaks, group-aggregation-patterns                   |
+| #   | Topic                         | Concepts                                                                                                                                                  |
+| --- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Microservices Basics          | monolith-and-microservices, service-boundaries, distributed-systems-fallacies, scaling-services                                                           |
+| 2   | Communication and APIs        | sync-and-async-communication, rest-apis, grpc, idempotency, api-gateway, service-discovery, load-balancing, service-mesh                                  |
+| 3   | Resilience                    | timeouts-and-retries, circuit-breaker, bulkhead, rate-limiting, fallback-and-degradation                                                                  |
+| 4   | Data and Consistency          | database-per-service, cap-and-consistency, caching-in-microservices, cqrs, event-sourcing                                                                 |
+| 5   | Events, Messaging and Sagas   | event-driven-architecture, message-brokers, kafka-fundamentals, delivery-guarantees, outbox-and-inbox, dead-letter-queues, distributed-transactions, saga |
+| 6   | Security and Observability    | microservices-security, jwt-and-oauth, observability, distributed-tracing, metrics-and-slos                                                               |
+| 7   | Deployment and Testing        | containers-and-kubernetes, health-probes, deployment-strategies, configuration-management, testing-microservices                                          |
+| 8   | Spring, Patterns and Playbook | spring-cloud-stack, microservice-patterns-map, strangler-fig-migration, design-walkthrough                                                                |
 
-Comparisons: sql-vs-nosql, primary-key-vs-unique-key, decimal-vs-float, postgresql-vs-mysql, delete-vs-truncate-vs-drop, where-vs-having, inner-vs-left-join, in-vs-exists, union-vs-union-all, row-number-vs-rank-vs-dense-rank, group-by-vs-partition-by, cte-vs-subquery, normalization-vs-denormalization, auto-increment-vs-uuid, view-vs-materialized-view, stored-procedure-vs-function, oltp-vs-olap, btree-vs-hash-index, clustered-vs-nonclustered-index, offset-vs-keyset-pagination, dirty-vs-nonrepeatable-vs-phantom-read, read-committed-vs-repeatable-read, shared-vs-exclusive-lock, optimistic-vs-pessimistic-locking, statement-vs-preparedstatement, jdbc-vs-jpa-vs-hibernate, database-vs-cache, sync-vs-async-replication, partitioning-vs-sharding, replication-vs-sharding, strong-vs-eventual-consistency, two-phase-commit-vs-saga, logical-vs-physical-backup.
+Comparisons: monolith-vs-microservices, vertical-vs-horizontal-scaling, rest-vs-messaging, put-vs-post-vs-patch, rest-vs-grpc, idempotency-vs-deduplication, api-gateway-vs-load-balancer, service-discovery-vs-api-gateway, client-side-vs-server-side-discovery, retry-vs-circuit-breaker, circuit-breaker-vs-bulkhead, strong-vs-eventual-consistency, cqrs-vs-event-sourcing, command-vs-event, queue-vs-topic, kafka-vs-rabbitmq, at-most-vs-at-least-vs-exactly-once, outbox-vs-inbox, orchestration-vs-choreography, saga-vs-two-phase-commit, authentication-vs-authorization, oauth2-vs-oidc, api-key-vs-jwt, logs-vs-metrics-vs-traces, sli-vs-slo-vs-sla, docker-vs-kubernetes, liveness-vs-readiness-probe, rolling-vs-blue-green-vs-canary, contract-vs-integration-vs-e2e-test, spring-boot-vs-spring-cloud, restclient-vs-webclient-vs-feign.
+
+## Added beyond the reference
+
+Fallacies of distributed computing, gRPC, service mesh, rate-limiting algorithms and load shedding, event sourcing details,
+dead-letter handling, Kubernetes probe defaults, the patterns map and a design-answer walkthrough (the "tricks" concept).
 
 ## Ownership (each fact once)
 
-- NOT IN + NULL trap: `null-handling`; subqueries and anti-join-pattern link to it.
-- PostgreSQL vs MySQL: each difference lives in its own concept (isolation defaults in `isolation-levels`, ids in `id-generation`,
-  upsert in `upsert`, table storage in `clustered-indexes`, VACUUM in `mvcc`, DDL commits in `transactions`); `postgresql-and-mysql`
-  holds only the summary comparison and "which to pick".
-- Window function definitions: `window-functions`; the patterns topic only shows how to use them on problems.
-- Selectivity and cardinality: `index-not-used`. WAL: `wal`; replication and backup-recovery link to it.
-- The "how to scale / make it fast" interview answer: `scaling-ladder`, which links to the concept of every step.
-
-## Tricks and patterns (owner request)
-
-Topic 8 "SQL Patterns and Tricks": a step-by-step approach for any SQL question with a pattern picker, then the patterns that
-solve most interview queries (Nth highest and top N per group, duplicates, rows with no match, running totals and streaks, pivots
-and zero counts). Memory aids elsewhere: logical query order, join and isolation tables, "copy vs split" for replication vs
-sharding, the scaling ladder.
+- Idempotency keys (HTTP): `idempotency`; idempotent consumers (messaging): `delivery-guarantees`; inbox table: `outbox-and-inbox`.
+- 2PC and the @Transactional trap: `distributed-transactions`; sagas and both saga comparisons: `saga`.
+- Gateway vs load balancer: `api-gateway`; algorithms: `load-balancing`; discovery vs gateway: `service-discovery`.
+- mTLS meaning: `microservices-security`; the mesh that provides it: `service-mesh`. Secrets storage: `configuration-management`.
+- Every pattern is explained once in its own concept; `microservice-patterns-map` and `design-walkthrough` only link.
 
 ## Process
 
 1. Eight drafting units in parallel, one per topic. Each passes the real validator in isolation and logs coverage rows and a claim log.
 2. Merge, validate, commit.
 3. Independent verification pass by different agents (4.8). Fix, validate, commit.
-4. Close `reference/sql.coverage.md`, update `OPEN_QUESTIONS.md`, run all quality gates, final report.
+4. Close `reference/microservices.coverage.md`, update `OPEN_QUESTIONS.md`, run all quality gates, final report.
