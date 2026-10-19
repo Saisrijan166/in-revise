@@ -128,3 +128,45 @@ The first version (17-10-2026) was rebuilt from `reference/spring-boot.md` (CLAU
 4. **Interview-prep sources:** a few concepts still cite Baeldung or InterviewBit as evidence that a question is really asked (every fact also has a primary source). Keep them, or remove them?
 5. **Reference file location:** it arrived as `content/reference.md`; it is now `reference/spring-boot.md` (CLAUDE.md 3.8.2: never inside `/content`). Please put future reference files in `reference/<slug>.md`.
 6. **Removed glossary term "Spring Boot":** it would auto-link the first "Spring Boot" in every concept.
+
+## F. DSA with Java (rebuilt from the owner's reference, 19-10-2026)
+
+Reference: `reference/dsa.md`; where every item landed: `reference/dsa.coverage.md`. Baseline: Java 25 (LTS); JDK 27 is the latest
+release (GA 15-09-2026). Code uses only APIs in Java 17+.
+
+### F1. Verification status
+
+- Independent pass (4.8) by agents that did not write the content: about 1,560 items checked, 52 fixed, 3 dropped (2 duplicates, 1 unsourced number).
+  The checkers were faster than the Spring Boot ones (3 to 6 minutes per unit), so treat this as a solid but lighter pass.
+- 15 corrections to the reference (see the coverage file), for example: singly linked list delete needs the predecessor; Java's
+  `Queue` is not always FIFO; TreeMap throws on a null key; a balanced binary tree is not O(log n) to search unless it is a BST;
+  union-find detects cycles only in undirected graphs; selection and quick sort are not stable ("usually no" was hedged).
+
+### F2. Worded carefully (kept, with the caveat shown)
+
+1. Tail recursion: no Java SE spec page says Java has no tail-call optimisation; the glossary says "do not rely on that in Java".
+2. Quadratic probing is named in the hashing tree and in `chaining-vs-open-addressing`; algs4, MIT 6.006 and Open Data Structures
+   cover only linear probing and double hashing, so only interview-prep pages describe it.
+3. Heap sort's best case is shown as O(n log n), the standard answer; algs4 notes it can be O(n) when all keys are equal.
+4. "Search in a rotated sorted array" says one half is sorted only with distinct values (as in the usual problem).
+5. Three problem facts rest on interview-prep pages and match CSES: Happy Number reaches 1 or loops; Product of Array Except Self
+   uses prefix and suffix products; in Largest Rectangle the nearest smaller bars bound each width.
+6. "Space complexity" is said to "usually" count the input: sources differ on the convention.
+
+### F3. Dropped (could not be confirmed from a primary source)
+
+- "A red-black tree needs at most 3 rotations per delete" (the bound is in CLRS, no open primary source found).
+- "Spell checking" as a trie use, "undo/redo" and "backtracking" as stack uses (no primary source; other uses are given).
+- Bucket sort O(n) for Top K Frequent (tie-breaking variants not verified).
+
+### F4. Decisions for the owner
+
+1. **Java basics removed.** The old draft's Java-basics concepts (values, control flow, methods, OOP, input) are gone; what matters
+   in a coding round lives in `java-collections`, `strings` and `java-pitfalls`. Bring them back as a topic?
+2. **Your extra parts** are two topics: Problem Patterns (14 concepts, each "clue → move → template → classic problems", with a
+   clue table in `spotting-the-pattern`) and Problem-Solving Tricks (6 concepts). Is that the shape you wanted?
+3. **Minimum spanning tree** is heat 1 (Tech Interview Handbook says Prim and Kruskal are rarely asked). Keep as a concept, or fold it
+   into `union-find` as a type?
+4. **Heat:** 25 concepts at heat 3, 24 at heat 2, 1 at heat 1. The reference's 20 questions were the hint for heat 3.
+5. **Glossary ids** `binary-search-tree-term` and `trie-term` avoid clashing with the concept ids; rename if you prefer.
+6. The reference file was moved from the repo root `reference.md` to `reference/dsa.md` (the convention in CLAUDE.md 3.8).
