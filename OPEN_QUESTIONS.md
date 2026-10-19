@@ -270,3 +270,37 @@ Decisions for the owner:
    Gatherers (24). Add them?
 2. `java/cards/generics.mdx` is 567 words (over the 550 target since the first Java version).
 3. "Nth highest → OFFSET" in the reference needs DISTINCT; the site says so.
+
+## J. Microservices (new tech from the owner's reference, 20-10-2026)
+
+Reference: `reference/microservices.md` (arrived as `reference/reference.md`, renamed by the CLAUDE.md 3.8 convention); where
+every item landed: `reference/microservices.coverage.md`. Baseline: Java 25, Spring Boot 4.1 + Spring Cloud 2025.1 (Oakwood),
+Apache Kafka 4.3, Kubernetes 1.37, Resilience4j 2.x.
+
+### J1. Verification status
+
+- Independent pass (4.8): about 1,600 items checked, about 49 fixed, 3 dropped (an unsourced modular-monolith row, an example
+  that contradicted AWS's availability definition, "can grow heavy" for orchestrators). Java examples compiled with javac 21 where
+  the libraries were available; Spring/Kafka/Resilience4j names checked against their current API docs.
+- 11 reference sections corrected (see the coverage file), for example: 3 retries are 4 attempts per layer, so retries multiply
+  faster than "3 × 3 = 9"; PATCH is neither safe nor idempotent by definition; PUT can create; Kafka 4.0 removed ZooKeeper;
+  RabbitMQ streams can replay; the Ingress API is frozen in favour of Gateway API; a flat trace list is really a span tree;
+  RestClient arrived in Spring Framework 6.1; OpenFeign is feature-complete.
+
+### J2. Worded carefully (kept, with the caveat shown)
+
+1. "Distributed monolith" has no single primary definition; the glossary cites Azure's "must deploy together" warning sign.
+2. The fallacies of distributed computing cite Wikipedia (confirmed by the AWS Builders' Library and APNIC); the co-author's
+   first name differs between sources, so the concept names neither.
+3. RestTemplate: the Spring Framework 7.0 reference calls it deprecated; the formal `@Deprecated` is planned for 7.1.
+4. Spring Cloud Contract moved to Stubborn.sh (Spring blog, 06-07-2026) and leaves future release trains; it is still in 2025.1.
+5. The Idempotency-Key HTTP header is an expired IETF draft, not an RFC; OAuth 2.1 is still a draft.
+
+### J3. Decisions for the owner
+
+1. **Config block:** CLAUDE.md's ACTIVE CONFIG values were blank when this tech started; they were left blank (the owner's edit).
+2. **Heat:** 16 concepts at heat 3, 28 at heat 2.
+3. **Overlap with other techs:** CAP, caching, rate limiting and load balancing also exist in System Design; Spring Cloud in
+   Spring Boot; saga, 2PC and outbox in SQL & Databases. Each tech stays self-contained (no cross-tech links).
+4. Some concepts cite 4–5 primary pages (one per product default) instead of 1–3; three units have 33–38 glossary terms.
+5. "Cache a not-found result" (a common fix for cache penetration) was left out: no primary source found; a Bloom filter is given.
