@@ -1,0 +1,83 @@
+---
+id: retries-and-timeouts
+tech: rest-api
+title: Retries, Backoff and Timeouts
+topic: reliability
+level: intermediate
+heat: 3
+hook: "Time-box every call; retry only temporary failures, a few times, with growing random waits."
+points:
+  - { k: "Timeout", v: "on every remote call, or a thread may wait forever" }
+  - { k: "Retry only", v: "idempotent or keyed requests: the first may have worked" }
+  - { k: "Backoff + jitter", v: "growing, capped, random waits", kind: plus }
+  - { k: "Retry-After", v: "the server's wait hint: seconds or an HTTP date (RFC 9110)" }
+  - { k: "Layers multiply", v: "3 tries at each of 5 layers = 243x load on the database", kind: minus }
+trap:
+  wrong: "Retry every error, straight away, at every layer."
+  right: "Retry only transient errors, at one layer, with capped backoff and jitter; stop while the breaker is open."
+sayIt: "Every outbound call has connect and read timeouts. I retry only transient errors like 503 or a reset, at one layer, with capped backoff, jitter and Retry-After, and only idempotent or keyed requests."
+confusedWith: [retry-vs-circuit-breaker]
+tags: [retries, timeouts]
+visual: table
+sources:
+  - title: "RFC 9110: HTTP Semantics (9.2.2, 10.2.3, 15.5.9)"
+    url: "https://www.rfc-editor.org/rfc/rfc9110.html"
+    verifiedOn: "2026-10-20"
+  - title: "Timeouts, retries, and backoff with jitter (Amazon Builders' Library)"
+    url: "https://builder.aws.com/content/3EumjoZascWd1oZiEgL8ORlv3qE/timeouts-retries-and-backoff-with-jitter"
+    verifiedOn: "2026-10-20"
+  - title: "Retry behavior (AWS SDKs and Tools reference)"
+    url: "https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html"
+    verifiedOn: "2026-10-20"
+  - title: "HttpRequest.Builder.timeout (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.net.http/java/net/http/HttpRequest.Builder.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Services and networks fail briefly. A timeout frees the waiting thread; a careful retry turns a blip into success.
+
+## How it works
+
+| Failure | Retry? |
+| --- | --- |
+| Connection reset, timeout, 408 | Yes, if idempotent or keyed |
+| 429, 503 | Yes, after `Retry-After` or a backoff |
+| 500, 502, 504 | Yes, a few times |
+| 400, 401, 403, 404, 422 | No: the same request fails again |
+
+- Set both a connect and a read timeout; Spring setup is in [HTTP clients](card:rest-clients).
+- Base the timeout on the callee's latency, say its p99.9.
+- A dependency that keeps failing needs a breaker, not more retries: [Retry vs Circuit Breaker](compare:retry-vs-circuit-breaker).
+
+## Example
+
+```java
+// Full jitter over a capped exponential; retry = 0, 1, 2 ...
+Duration backoff(int retry) {
+    long maxMs = Math.min(20_000, 100L << retry);   // base 100 ms, cap 20 s
+    return Duration.ofMillis(ThreadLocalRandom.current().nextLong(maxMs + 1));
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Request timeout | none: `send()` blocks forever | JDK `HttpClient`, Java 25 |
+| Attempts | 3 in total, 20 s wait cap | AWS SDKs, standard mode |
+
+## Interview Qs
+
+### Which failures do you retry?
+
+Connection errors, timeouts, 408, 429, 500, 502, 503 and 504, for idempotent or keyed requests only. Never 400, 401, 403, 404 or 422.
+
+### Why add jitter to exponential backoff?
+
+Clients that failed together retry together, in waves that knock the recovering service over. A random wait spreads them out; AWS SDKs use full jitter.
+
+### Connect timeout vs read timeout?
+
+Connect timeout limits opening a new connection; read timeout limits waiting for data on an open one. A slow payment gateway trips the read timeout.

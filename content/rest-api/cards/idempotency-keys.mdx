@@ -1,0 +1,87 @@
+---
+id: idempotency-keys
+tech: rest-api
+title: Idempotency Keys and Duplicate Payments
+topic: reliability
+level: intermediate
+heat: 3
+hook: "Send one key per payment; the server stores it with the result, so a retry gets the first answer, not a second charge."
+points:
+  - { k: "Key", v: "one per logical payment, reused on every retry" }
+  - { k: "Server stores", v: "key + request fingerprint + result, kept unique" }
+  - { k: "Header status", v: "IETF draft only (draft-07 expired April 2026), not an RFC", kind: minus }
+  - { k: "Goal", v: "exactly-once effect over at-least-once delivery", kind: plus }
+trap:
+  wrong: "Generate a fresh UUID for every attempt, including retries."
+  right: "One key per payment, reused on every retry. A new key looks like a new payment and charges again."
+sayIt: "Each payment carries an Idempotency-Key. I store key, body hash and result under a unique constraint; a retry gets the saved result, a running one 409, a different body 422."
+confusedWith: []
+tags: [idempotency, payments]
+visual: flow
+sources:
+  - title: "The Idempotency-Key HTTP Header Field (IETF httpapi draft-07)"
+    url: "https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/"
+    verifiedOn: "2026-10-20"
+  - title: "Idempotent requests (Stripe API reference)"
+    url: "https://docs.stripe.com/api/idempotent_requests"
+    verifiedOn: "2026-10-20"
+  - title: "Advanced error handling (Stripe docs)"
+    url: "https://docs.stripe.com/error-low-level"
+    verifiedOn: "2026-10-20"
+  - title: "Idempotent Consumer pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/idempotent-consumer"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A ₹500 POST can succeed while its reply is lost. The client retries, and unless the server spots the repeat, it charges twice.
+
+## How it works
+
+<Mermaid
+  alt="Payment POST with an Idempotency-Key. New key: save key and body hash, charge, save result, 201. Seen and finished: return the saved response. Still running: 409. Different body: 422."
+  chart={`flowchart TD
+  R([POST /api/payments + Idempotency-Key]) --> K{Key seen?}
+  K -- new --> S[Save key + body hash, charge, save result]
+  S --> A([201 Created])
+  K -- "seen, finished" --> SAVED([Return the saved response])
+  K -- "seen, still running" --> C([409 Conflict])
+  K -- "seen, other body" --> U([422 Unprocessable Content])`}
+/>
+
+- Racing duplicates both insert the key; the unique constraint lets one win.
+- Draft-07: a missing required key gets 400. Stripe replays saved errors too.
+- POST is not idempotent: [HTTP methods](card:http-methods). Webhooks dedupe by event ID: [Webhooks](card:webhooks).
+
+## Example
+
+```text
+POST /api/payments
+Idempotency-Key: order-789-payment
+{"amount": 500, "currency": "INR", "method": "UPI"}
+-> 201 Created  {"paymentId": "PAY101", "status": "PENDING"}
+
+(reply lost; same request sent again)
+-> 201 Created  {"paymentId": "PAY101", "status": "PENDING"}   (saved copy)
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Key kept for | at least 24 hours | Stripe API v1 |
+
+## Interview Qs
+
+### How do you stop a retry from charging ₹500 twice?
+
+The client sends an Idempotency-Key. The server inserts the key under a unique constraint before charging, saves the result, and returns it to any retry with the same key and body.
+
+### Where does the key come from?
+
+The client: a random UUID v4, or one derived from the order, like order-789-payment, never personal data. A reused key runs again once pruned.
+
+### Two requests with the same key arrive together. What happens?
+
+One insert wins. The other gets 409 Conflict, waits, retries with the same key and body, and receives the saved result.

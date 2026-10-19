@@ -1,0 +1,76 @@
+---
+id: webhooks
+tech: rest-api
+title: "Webhooks: Signatures, Retries and Idempotent Receivers"
+topic: reliability
+level: intermediate
+heat: 2
+hook: "The gateway calls your HTTPS endpoint when a payment settles: verify the signature, answer 2xx fast, process each event once."
+points:
+  - { k: "Signature", v: "HMAC-SHA256 of timestamp + raw body, keyed with a shared secret" }
+  - { k: "Replay guard", v: "reject old timestamps; Stripe libraries allow 5 minutes", kind: default }
+  - { k: "Respond", v: "2xx quickly; slow work goes to a queue" }
+  - { k: "Delivery", v: "at-least-once and unordered: dedupe by event ID", kind: minus }
+  - { k: "Sender retries", v: "Stripe live mode: up to 3 days, exponential backoff", kind: default }
+trap:
+  wrong: "Each event arrives once and in order, so apply it directly."
+  right: "Delivery is at-least-once and unordered. Skip event IDs already processed and check current state before acting."
+sayIt: "My webhook endpoint verifies the HMAC signature over the raw body and timestamp, returns 2xx fast, queues the event, skips event IDs it has seen, and checks current state because events can arrive out of order."
+confusedWith: []
+tags: [webhooks, security, idempotency]
+visual: flow
+sources:
+  - title: "Receive Stripe events in your webhook endpoint (Stripe docs)"
+    url: "https://docs.stripe.com/webhooks"
+    verifiedOn: "2026-10-20"
+  - title: "Standard Webhooks specification"
+    url: "https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md"
+    verifiedOn: "2026-10-20"
+  - title: "RFC 2104: HMAC, Keyed-Hashing for Message Authentication"
+    url: "https://www.rfc-editor.org/rfc/rfc2104"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+The gateway learns the final status later, for example when a bank confirms a UPI payment. A webhook pushes that news to you, so you do not poll.
+
+## How it works
+
+<Steps label="Receive one webhook">
+  <Step title="Verify">HMAC-SHA256 over timestamp + raw body with the secret; compare in constant time.</Step>
+  <Step title="Check time">Reject a timestamp older than the tolerance, to stop replays.</Step>
+  <Step title="Acknowledge">Save the event and return 2xx; heavy work goes to a queue.</Step>
+  <Step title="Dedupe">Skip an event ID already processed (unique constraint on it).</Step>
+  <Step title="Apply">Check current state; ignore an older event that arrives late.</Step>
+</Steps>
+
+- Verify the raw bytes: parsing and re-serialising JSON changes them, and the check fails.
+- [Standard Webhooks](card:standard-webhooks) fixes the header names and signing format across providers.
+- Clients polling a status URL instead: [long-running operations](card:long-running-operations).
+
+## Example
+
+```text
+POST /webhooks/payments
+webhook-id: msg_7Rq2LbX9
+webhook-timestamp: 1792467000
+webhook-signature: v1,3mJ0b2tVb2tOZXdTaWduYXR1cmVWYWx1ZTAxMg==
+{"type": "payment.succeeded", "paymentId": "PAY101"}
+
+-> 204 No Content    (saved and queued; a worker marks PAY101 SUCCESS)
+```
+
+## Interview Qs
+
+### How do you secure a webhook endpoint?
+
+HTTPS only. Verify the HMAC signature over the raw body with the shared secret, reject old timestamps against replays, and rotate the secret. Optionally accept only the provider's IP addresses.
+
+### The same webhook arrives twice. What happens?
+
+Expect it: delivery is at-least-once. Store each processed event ID under a unique constraint and skip repeats; make the update idempotent too, like setting status to SUCCESS.
+
+### Why return 2xx before processing?
+
+Slow handlers time out, and the provider then retries, sending duplicates. Save, acknowledge, and process from a queue at your own pace.

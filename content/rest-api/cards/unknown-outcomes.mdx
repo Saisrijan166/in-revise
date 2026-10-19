@@ -1,0 +1,70 @@
+---
+id: unknown-outcomes
+tech: rest-api
+title: "Timeouts Are Not Failures: Unknown Outcomes"
+topic: reliability
+level: interview
+heat: 3
+hook: "A timeout means 'I don't know', not 'it failed': mark the payment UNKNOWN, ask the gateway, never just charge again."
+points:
+  - { k: "Three outcomes", v: "success, failure, unknown (timeout, reset, a 500)" }
+  - { k: "States", v: "PENDING, SUCCESS, FAILED, UNKNOWN; the names are your design" }
+  - { k: "Resolve", v: "query the gateway by our reference, or wait for its webhook" }
+  - { k: "Safe retry", v: "same idempotency key and same body; never a new key" }
+  - { k: "Lock alone", v: "a paused worker can outlive its lock lease; not enough", kind: minus }
+trap:
+  wrong: "The gateway call timed out, so mark it FAILED and charge again."
+  right: "The charge may have gone through. Mark it UNKNOWN, check with the gateway, and retry only with the same key."
+sayIt: "A timeout is an unknown outcome. I mark the payment UNKNOWN, query the gateway or wait for its webhook, retry only with the same idempotency key, and a reconciliation job settles the rest."
+confusedWith: []
+tags: [payments, timeouts, reconciliation]
+visual: flow
+sources:
+  - title: "Advanced error handling: network errors, 500s, reconcile (Stripe docs)"
+    url: "https://docs.stripe.com/error-low-level"
+    verifiedOn: "2026-10-20"
+  - title: "Payout reconciliation report (Stripe docs)"
+    url: "https://docs.stripe.com/reports/payout-reconciliation"
+    verifiedOn: "2026-10-20"
+  - title: "Pattern: Transactional outbox (microservices.io)"
+    url: "https://microservices.io/patterns/data/transactional-outbox.html"
+    verifiedOn: "2026-10-20"
+  - title: "How to do distributed locking (Martin Kleppmann, 2016)"
+    url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"
+    verifiedOn: "2026-10-20"
+  - title: "Unique constraints (PostgreSQL 18 docs, 5.5.3)"
+    url: "https://www.postgresql.org/docs/18/ddl-constraints.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+The gateway may charge ₹500 and the reply may still be lost. Charging again bills the customer twice; marking it failed loses real money.
+
+## How it works
+
+<Steps label="Gateway charged ₹500, reply lost">
+  <Step title="Save first">Insert PAY101 as PENDING, with a unique order id, before calling the gateway.</Step>
+  <Step title="Timeout">Mark PAY101 UNKNOWN. Do not charge again with a new key.</Step>
+  <Step title="Ask">Query the gateway by our reference, or wait for its signed webhook.</Step>
+  <Step title="Retry safely">If still unclear, resend with the same idempotency key and body.</Step>
+  <Step title="Reconcile">A job matches our rows to the settlement report and fixes leftovers.</Step>
+</Steps>
+
+- Store the "payment succeeded" event in a [transactional outbox](card:transactional-outbox), so the row and event never disagree.
+- Stripe: retry with the same key within 24 hours; after that, reconcile, never resend.
+- Correctness lives in the database (transaction, unique constraint); a lock only saves duplicate work.
+
+## Interview Qs
+
+### The gateway timed out after charging ₹500. What do you do?
+
+Mark the payment UNKNOWN, not FAILED. Query the gateway by our reference or wait for its webhook. Retry only with the same idempotency key. Anything still open goes to reconciliation against the settlement report.
+
+### Is a Redis lock enough to stop double charges?
+
+No. A lock with an expiry can run out during a GC pause while the holder keeps working, so two workers act. Use a database transaction and a unique constraint on the order id.
+
+### Why a transactional outbox?
+
+Saving the payment and publishing its event are two writes. The outbox saves the event in the same database transaction; a relay publishes it, maybe twice, so consumers must dedupe.

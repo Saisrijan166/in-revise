@@ -1,0 +1,69 @@
+---
+id: long-running-operations
+tech: rest-api
+title: Long-Running Operations and 202 Accepted
+topic: design
+level: intermediate
+heat: 2
+hook: "Slow work answers 202 Accepted at once with a status URL; the client polls it until the job ends."
+points:
+  - { k: "202 Accepted", v: "taken for processing, not finished; it may still fail" }
+  - { k: "Location", v: "the status resource to poll, like /api/operations/OP55" }
+  - { k: "Retry-After", v: "seconds, or a date, to wait before the next poll" }
+  - { k: "Status resource", v: "200 with PENDING, then SUCCEEDED or FAILED" }
+  - { k: "When done", v: "303 See Other to the result, or a result link in the body" }
+trap:
+  wrong: "202 means the request succeeded."
+  right: "202 only means accepted. Success or failure shows up later on the status resource."
+sayIt: "For slow work I return 202 Accepted with a Location for a status resource and a Retry-After. The client polls it; when the job ends it gets the result link or a 303 See Other. A webhook can push the result instead."
+confusedWith: [polling-vs-long-polling-vs-sse-vs-websocket]
+tags: [async, long-running, http-202, polling]
+visual: flow
+sources:
+  - title: "RFC 9110 HTTP Semantics: 201 Created, 202 Accepted, 303 See Other, Retry-After"
+    url: "https://www.rfc-editor.org/rfc/rfc9110.html#name-202-accepted"
+    verifiedOn: "2026-10-20"
+  - title: "Asynchronous Request-Reply pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/async-request-reply"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Some work takes minutes, like a monthly statement PDF or a bank settlement run. Holding one HTTP call open that long ends in timeouts and ties up servers.
+
+## How it works
+
+<Mermaid
+  alt="Long-running operation. The client sends POST /api/statements. The API queues job OP55 for a worker and answers 202 Accepted with Location /api/operations/OP55 and Retry-After 5. The client polls GET /api/operations/OP55 and gets 200 with status PENDING. After the worker finishes, the next poll returns 303 See Other with Location /api/statements/ST9, and the client fetches the result with GET."
+  chart={`sequenceDiagram
+  participant C as Client
+  participant A as API
+  participant W as Worker
+  C->>A: POST /api/statements
+  A->>W: queue job OP55
+  A-->>C: 202 Accepted, Location /api/operations/OP55, Retry-After 5
+  C->>A: GET /api/operations/OP55
+  A-->>C: 200 status PENDING
+  W-->>A: job OP55 done
+  C->>A: GET /api/operations/OP55
+  A-->>C: 303 See Other, Location /api/statements/ST9`}
+/>
+
+- A failed job shows FAILED with an [error body](card:error-responses) on the status resource.
+- Optional cancel: `DELETE /api/operations/OP55`.
+- No polling: push the result by [webhook](card:webhooks) or [SSE](card:websockets-and-sse).
+
+## Interview Qs
+
+### How do you design an API for a job that takes minutes?
+
+Accept quickly with 202 Accepted, a Location header for a status resource and Retry-After. The client polls that URL; at the end it gets the result link or 303 See Other. Offer a webhook to avoid polling.
+
+### 201 with status PENDING, or 202?
+
+201 when the resource already exists, like payment PAY101 saved as PENDING; its own URL shows progress. 202 when you only queued the request, so you point to a separate status resource.
+
+### Does 202 guarantee the work will be done?
+
+No. RFC 9110 calls 202 noncommittal: the request may still be rejected when it is processed. The client must check the final status.

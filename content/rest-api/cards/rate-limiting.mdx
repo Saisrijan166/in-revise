@@ -1,0 +1,75 @@
+---
+id: rate-limiting
+tech: rest-api
+title: Rate Limiting and 429
+topic: security
+level: intermediate
+heat: 2
+hook: "Rate limiting caps how many requests each caller may send per time window; extra calls get 429 Too Many Requests."
+points:
+  - { k: "Why", v: "stop abuse and brute force, keep it fair, protect the database" }
+  - { k: "Key on", v: "user, API key or IP; RFC 6585 leaves the choice open" }
+  - { k: "Over the limit", v: "429 (RFC 6585), optionally with Retry-After", kind: default }
+  - { k: "Several servers", v: "one shared counter store (such as Redis) or the gateway" }
+  - { k: "Quota headers", v: "RateLimit fields are an IETF draft; X-RateLimit-* are vendor ones", kind: minus }
+trap:
+  wrong: "Return 503 or 500 when a client sends too many requests."
+  right: "Return 429 Too Many Requests, ideally with Retry-After. 503 means the server itself is unavailable."
+sayIt: "I limit each user or API key, usually with a token bucket at the gateway or a shared Redis counter. Over the limit the API returns 429 with Retry-After, and clients back off before retrying."
+confusedWith: [502-vs-503-vs-504]
+tags: [rate-limiting, throttling, "429", token-bucket, retry-after]
+visual: table
+sources:
+  - title: "RFC 6585 Additional HTTP Status Codes: 429 Too Many Requests"
+    url: "https://www.rfc-editor.org/rfc/rfc6585#section-4"
+    verifiedOn: "2026-10-20"
+  - title: "RateLimit header fields for HTTP (IETF draft-ietf-httpapi-ratelimit-headers-11)"
+    url: "https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/"
+    verifiedOn: "2026-10-20"
+  - title: "How we built rate limiting capable of scaling to millions of domains (Cloudflare blog)"
+    url: "https://blog.cloudflare.com/counting-things-a-lot-of-different-things/"
+    verifiedOn: "2026-10-20"
+  - title: "Throttle requests to your REST APIs (Amazon API Gateway docs)"
+    url: "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Without limits, one script can flood the API, guess passwords, or run up costs, and every other customer pays for it. OWASP lists this as [API4](card:owasp-api-security).
+
+## How it works
+
+| Algorithm | How it counts | Watch out |
+|---|---|---|
+| Fixed window | Counter per clock minute | Spikes around the window edge |
+| Sliding window | Blends last and current window counts | An approximation, not exact |
+| Token bucket | Tokens refill steadily; each call takes one | Allows short bursts by design |
+| Leaky bucket | Calls drain at a fixed rate | Bursts wait or are dropped |
+
+- Token bucket is the usual answer: Amazon API Gateway throttles with it.
+- What the client does after a 429 belongs to [retries and timeouts](card:retries-and-timeouts).
+
+## Example
+
+```text
+HTTP/1.1 429 Too Many Requests
+Retry-After: 30
+Content-Type: application/problem+json
+
+{"title": "Too many payment attempts", "status": 429}
+```
+
+## Interview Qs
+
+### How do you rate limit across ten app servers?
+
+Keep the counter in one shared store, such as Redis with an atomic increment and expiry, or enforce it at the API gateway. Separate counters per server let a caller get up to ten times the limit.
+
+### Throttling vs rate limiting?
+
+Mostly the same idea and often used interchangeably: Amazon API Gateway calls its limits throttling and returns 429.
+
+### Which algorithm would you pick?
+
+Token bucket: it allows a short burst, then holds a steady average rate. Cloudflare chose a sliding window because it needs only get and increment on a shared counter.
