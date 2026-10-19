@@ -1,59 +1,65 @@
-# Plan: Spring Boot rebuild from the reference (19-10-2026)
+# Plan: DSA (Java) rebuild from the reference (19-10-2026)
 
-Phase 3, rebuild mode (CLAUDE.md 3.8.7). Reference: `reference/spring-boot.md` (owner input, not a source).
-Baseline: **Spring Boot 4.1** (4.1.1, checked on spring.io 19-10-2026), Spring Framework 7.0, Spring Security 7.1. Java-only code.
+Phase 3, rebuild mode (CLAUDE.md 3.8.7). Reference: `reference/dsa.md` (owner input, not a source; 47 sections on data structures).
+The owner also asked for two extra parts: **tricks** to solve problems, and **patterns** that solve most problems, in an easy-to-remember form.
+Owner's note in CLAUDE.md: no repeated content, every fact in the one place it belongs, and not lengthy.
+
+Baseline: **Java 25** (current LTS; JDK 27 is the latest release, GA 15-09-2026, checked on openjdk.org). Code uses only APIs in Java 17+.
+Java only (`codeLanguages: [java]`). Accent: violet (unchanged).
 
 ## Why a rebuild
 
-The first version (17-10-2026) was correct but heavy: 700–1,060 words per concept, up to 8 sources each, 724 tree nodes,
-40 comparisons, and internals the reference never asks about (`@Lookup`, scoped proxies, WebSocket scope, BeanPostProcessor).
-The rebuild keeps the correct facts and sources and cuts to the reference's level:
+The existing DSA content (30 concepts, 17-10-2026, and 9 Java-basics concepts added later) is generic: many points and traps are
+template lines ("preserve the invariant") rather than facts about the structure, there are no comparisons and only 8 glossary terms.
+The rebuild keeps the topic idea and the Java focus and writes real, sourced content.
 
-- Concepts: 62, each one idea at interview depth. Core ≤ ~200 words; 1–3 primary sources plus at most one interview-prep source.
-- Tree: about 6 children per concept, mostly one level deep, about 350 nodes in total.
-- Comparisons: about 32, led by the reference's "why X if Y exists" list.
-- Glossary: about 200 terms, only words an interviewer uses.
-- Relations: 2–4 per concept, between ideas a reader knows.
+## Shape (smaller than Spring Boot, on purpose)
 
-## Topics (8) and concepts (62)
+- 50 concepts, each one idea; whole file ≤ 550 words. 1–3 primary sources plus at most one interview-prep page.
+- Tree: 2–6 children per concept, about 300 nodes. Comparisons: 25. Glossary: about 170 terms. Story spine: about 14 steps.
+- Patterns share one shape: "when you see <clue>, do <move>", the cost, the classic problems and a template in Java.
 
-| #   | Topic                  | Concepts                                                                                                                                                                                                                           |
-| --- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Boot Basics            | spring-vs-spring-boot, starters, auto-configuration, spring-boot-application, application-startup, embedded-server                                                                                                                 |
-| 2   | Beans and DI           | ioc-container, dependency-injection, component-vs-bean, component-scanning, bean-selection, bean-scopes, bean-lifecycle, circular-dependencies, spring-aop, aop-proxies, async-scheduling, application-events                      |
-| 3   | Configuration          | externalized-configuration, configuration-properties, profiles, logging                                                                                                                                                            |
-| 4   | Web and REST           | dispatcher-servlet, rest-controller, request-mapping, dto, validation, exception-handling, rest-api-design, filters-interceptors, http-clients, mvc-vs-webflux                                                                     |
-| 5   | Data and Transactions  | jpa-hibernate-spring-data, jpa-entities, spring-data-repositories, persistence-context, lazy-loading-n-plus-one, locking, transactional, transaction-propagation, acid-isolation, spring-cache, connection-pool, schema-migrations |
-| 6   | Security               | security-filter-chain, authentication-flow, authorization-rules, password-encoding, jwt-resource-server, csrf-cors                                                                                                                 |
-| 7   | Testing and Production | spring-boot-testing, mockito, testcontainers, actuator, observability, packaging-deployment                                                                                                                                        |
-| 8   | Spring Cloud           | spring-cloud-overview, config-server, service-discovery-eureka, spring-cloud-gateway, resilience4j, spring-kafka                                                                                                                   |
+## Topics (8) and concepts (50)
 
-New against the first version: component-scanning, spring-aop, application-events, dto, rest-api-design, jpa-hibernate-spring-data,
-persistence-context, locking, acid-isolation, mockito. Folded into others as types: devtools, virtual-threads (into mvc-vs-webflux),
-native-images (into packaging-deployment), openfeign (into http-clients).
+| #   | Topic                            | Concepts                                                                                                                                                                                                                                 |
+| --- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Foundations                      | data-structures, big-o, java-collections                                                                                                                                                                                                 |
+| 2   | Arrays, Strings and Hashing      | arrays, dynamic-array, strings, hashing, hashmap-hashset, ordered-maps-sets                                                                                                                                                              |
+| 3   | Linked Lists, Stacks and Queues  | linked-list, stack, queue-and-deque                                                                                                                                                                                                      |
+| 4   | Trees, Heaps and Tries           | tree-basics, tree-traversals, binary-search-tree, balanced-trees, heap-priority-queue, trie                                                                                                                                              |
+| 5   | Graphs                           | graph-basics, bfs, dfs, topological-sort, shortest-paths, union-find, minimum-spanning-tree                                                                                                                                              |
+| 6   | Recursion, Searching and Sorting | recursion, binary-search, sorting-basics, merge-sort, quick-sort                                                                                                                                                                         |
+| 7   | Problem Patterns                 | spotting-the-pattern, two-pointers, fast-slow-pointers, sliding-window, prefix-sum, frequency-counting, monotonic-stack, binary-search-on-answer, top-k-heap, merge-intervals, grid-traversal, backtracking, dynamic-programming, greedy |
+| 8   | Problem-Solving Tricks           | problem-solving-steps, constraints-to-complexity, choosing-a-data-structure, edge-cases, java-pitfalls, bit-manipulation                                                                                                                 |
 
-Not in the reference, kept as "added beyond": circular-dependencies, connection-pool, schema-migrations, testcontainers, observability
-(partly), virtual threads, native images and all of Spring Cloud (the owner chose "with Spring Cloud" on 17-10-2026).
+Comparisons (25): comparable-vs-comparator, string-vs-stringbuilder, chaining-vs-open-addressing, hashmap-vs-hashset, hashmap-vs-linkedhashmap-vs-treemap, hashset-vs-linkedhashset-vs-treeset, array-vs-arraylist, array-vs-linked-list, stack-vs-queue, depth-vs-height, full-vs-complete-vs-perfect, traversal-orders, binary-tree-vs-bst, avl-vs-red-black, heap-vs-bst, adjacency-list-vs-matrix, bfs-vs-dfs, dijkstra-vs-bellman-ford, kruskal-vs-prim, recursion-vs-iteration, linear-vs-binary-search, merge-sort-vs-quick-sort, two-pointers-vs-sliding-window, memoisation-vs-tabulation, dp-vs-greedy
 
-## Story spine (about 20 steps, problem → fix)
+Decisions taken (owner can overrule, see OPEN_QUESTIONS.md section F):
 
-Follows the reference's memory map: Spring → container and beans → Boot adds starters, auto-configuration, embedded server and
-external config → request path (filters, DispatcherServlet, controller, service, repository, database) → data and transactions →
-security in front → tests and production → many services (Spring Cloud).
+- The Java-basics concepts (values, control flow, methods, OOP, input) are folded away: what matters in a coding round moves to
+  `java-collections`, `strings` and `java-pitfalls`. Teaching Java syntax is out of scope for a revision site.
+- Added beyond the reference: strings, topological sort, shortest paths, minimum spanning tree, the pattern topic (two pointers,
+  fast/slow pointers, sliding window, prefix sum, monotonic stack, binary search on the answer, top K, intervals, grid BFS/DFS,
+  backtracking, dynamic programming, greedy) and the tricks topic.
 
-## Reference corrections already known (to verify while writing)
+## Ownership (each fact once)
 
-- Undertow is not supported by Spring Boot 4 (the reference lists it in sections 2 and 32).
-- `@MockBean` was removed in Spring Boot 4.0; `@MockitoBean` replaces it (section 77, question 36).
-- Spring Data 3+: `PagingAndSortingRepository` no longer extends `CrudRepository`; `JpaRepository` extends the `List…` variants (sections 100, Q13).
-- The web starter does not bring validation (since Boot 2.3); Boot 4 renames the web starter to `spring-boot-starter-webmvc` (section 136).
-- Boot 4 uses Jackson 3 (sections 10, 47).
+- Costs of a structure live in its own concept; patterns and the "choosing" table link to them.
+- Hash table theory: `hashing`; Java specifics: `hashmap-hashset`; counting idioms in problems: `frequency-counting`.
+- Heap structure and `PriorityQueue` API: `heap-priority-queue`; top K and k-way merge: `top-k-heap`.
+- BFS/DFS algorithms: graphs topic; grid flood fill and multi-source BFS: `grid-traversal`.
+- Binary search template: `binary-search`; searching a range of answers: `binary-search-on-answer`.
+- Clue → pattern table: `spotting-the-pattern`; need → structure table: `choosing-a-data-structure`; input size → complexity: `constraints-to-complexity`.
+
+## Story spine
+
+From "store data" (arrays, hashing) → "order of access" (lists, stacks, queues) → "hierarchy" (trees, heaps, tries) → "connections"
+(graphs) → "core algorithms" (recursion, search, sort) → "patterns" → "tricks to get it right in the room".
 
 ## Process
 
-1. Ten drafting units in parallel (beans-di and data are split in two), each from the reference items assigned to it, the
-   existing draft, and primary sources. Each unit passes the real validator in isolation and logs its coverage rows.
+1. Nine drafting units in parallel (patterns split in two), each from its reference items, primary sources and the scope notes.
+   Each unit passes the real validator in isolation and logs coverage rows and a claim log.
 2. Merge, validate, commit.
-3. Independent verification pass by different agents (4.8): every point, default, trap, relation and tree note against its source.
-   Fix, validate, commit.
-4. Close `reference/spring-boot.coverage.md`, update `OPEN_QUESTIONS.md`, run all quality gates, final report.
+3. Independent verification pass by different agents (4.8). Fix, validate, commit.
+4. Close `reference/dsa.coverage.md`, update `OPEN_QUESTIONS.md`, run all quality gates, final report.
