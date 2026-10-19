@@ -209,3 +209,44 @@ latest release (GA 15-09-2026). Every feature newer than Java 8 states the relea
 5. Two concurrency sources are not Java docs: the OSTEP textbook (deadlock conditions) and Doug Lea's 2006 mail on nulls in
    ConcurrentHashMap (web.archive.org).
 6. The reference file arrived as `reference/reference.md`; it was renamed `reference/java.md` (the CLAUDE.md 3.8 convention).
+
+## H. SQL & Databases (new tech from the owner's reference, 20-10-2026)
+
+Reference: `reference/sql.md` (arrived as `reference/reference.md`, renamed by the CLAUDE.md 3.8 convention); where every item
+landed: `reference/sql.coverage.md`. Baseline: PostgreSQL 18 (18.6; 19 was only at RC 1 on 15-10-2026) and MySQL 9.7 LTS (8.4
+LTS still common; 26.7 is an Innovation release under the new calendar versioning).
+
+### H1. Verification status
+
+- Independent pass (4.8) by agents that did not write the content: about 1,860 items checked, 51 fixed, 1 softened, 0 dropped.
+  Every SQL block was run on throwaway PostgreSQL 17 and MySQL 8.0.46 servers (data with ties, NULLs and empty groups); product
+  facts for PostgreSQL 18 and MySQL 9.7 were taken from their manuals, not from those older servers.
+- 25 reference sections corrected (see the coverage file), for example: MySQL has no RETURNING (MariaDB does); a plain SELECT
+  takes no shared row lock in PostgreSQL or InnoDB (it reads a snapshot); an inner join is not a set intersection (rows repeat);
+  InnoDB has no hash index (`USING HASH` builds a B-tree); a replica is not a backup; ever-growing id ranges make a hot shard;
+  AUTO_INCREMENT values lost in a rollback are never reused; NULLs sort last in PostgreSQL and first in MySQL (ASC).
+
+### H2. Worded carefully (kept, with the caveat shown)
+
+1. Keyset pagination in MySQL: the row-value form `(created_at, id) < (...)` "may not get an index range scan" (an 8.0.46 test
+   could not use it; the spelled-out OR form could; 9.7 not tested).
+2. GROUP BY puts all NULLs in one group: stated in the MySQL 9.7 manual; no PostgreSQL 18 sentence found (PostgreSQL behaves so).
+3. Super, candidate, alternate, composite, surrogate and natural key definitions cite GeeksforGeeks only (no vendor manual
+   defines them); they are the standard textbook definitions.
+4. "MySQL 26.7 is an Innovation release" is implied by the downloads page (9.7.2 and 8.4.11 labelled LTS, 26.7 unlabelled).
+5. Redis defaults are labelled "Redis 8.x": the Redis docs publish only a "latest" version.
+6. "Analytics on an OLTP database can block transactions" (Azure OLTP page): with MVCC the main cost is load, not blocking.
+
+### H3. Dropped (could not be confirmed from a primary source)
+
+- "Modern applications keep most business logic in the application layer" (a trend claim; the trade-off is kept as pros/cons).
+- "MySQL is widely used in web applications" (marketing line).
+
+### H4. Decisions for the owner
+
+1. **Slug and name:** `sql`, "SQL & Databases" (covers SQL, PostgreSQL, MySQL, Redis as a cache, and database scaling). Accent teal.
+2. **Heat:** 18 concepts at heat 3, 39 at heat 2, 1 at heat 1 (backup-recovery). Raise connection pooling or N+1-adjacent topics?
+3. **Scaling ladder order:** cache and read replicas come before scaling up the server. Keep?
+4. **Overlap with other techs:** replication, sharding, CAP and caching also exist in System Design; JPA, N+1 and HikariCP in
+   Spring Boot. Each tech stays self-contained (no cross-tech links); the SQL versions focus on the database side.
+5. Some concepts cite 4–6 primary pages (one per PostgreSQL/MySQL fact) instead of 1–3.
