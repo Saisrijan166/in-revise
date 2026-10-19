@@ -1,0 +1,83 @@
+---
+id: virtual-threads
+tech: java
+title: Virtual Threads
+topic: concurrency
+level: intermediate
+heat: 2
+hook: "Virtual threads (Java 21) are cheap threads the JVM schedules: start one per blocking task for scale, not for faster CPU work."
+points:
+  - { k: "Since", v: "Java 21, final in JEP 444", kind: default }
+  - { k: "Carrier", v: "the JVM mounts it on a platform thread and unmounts it when it blocks" }
+  - { k: "Good for", v: "many tasks that mostly wait on I/O", kind: plus }
+  - { k: "Never pool them", v: "one new virtual thread per task; limit access with a Semaphore" }
+  - { k: "Pinning", v: "native code still pins; synchronized stopped pinning in Java 24", kind: minus }
+trap:
+  wrong: "Virtual threads make code run faster."
+  right: "They run code at the same speed. They raise throughput by letting far more blocking tasks wait at once."
+sayIt: "Virtual threads, final in Java 21, are scheduled by the JVM onto a few carrier threads. When one blocks on I/O it unmounts, so I can run one thread per request. They help I/O-bound work, not CPU-bound work."
+confusedWith: [platform-vs-virtual-threads]
+tags: [virtual-threads, loom, carrier-thread, pinning, java-21]
+visual: flow
+sources:
+  - title: "JEP 444: Virtual Threads (Java 21)"
+    url: "https://openjdk.org/jeps/444"
+    verifiedOn: "2026-10-19"
+  - title: "JEP 491: Synchronize Virtual Threads without Pinning (Java 24)"
+    url: "https://openjdk.org/jeps/491"
+    verifiedOn: "2026-10-19"
+  - title: "Virtual Threads (Java SE 25 Core Libraries guide)"
+    url: "https://docs.oracle.com/en/java/javase/25/core/virtual-threads.html"
+    verifiedOn: "2026-10-19"
+---
+
+## Why it exists
+
+Thread-per-request code is simple, but platform threads are costly, so a server runs out of them before the CPU is busy.
+
+## How it works
+
+<Mermaid
+  alt="Many virtual threads share a few carrier threads. The JVM scheduler, a ForkJoinPool, mounts a runnable virtual thread on a carrier platform thread. When the virtual thread blocks on I/O it unmounts, and the carrier runs another virtual thread."
+  chart={`flowchart LR
+  V1[Virtual thread 1] --> S{{JVM scheduler}}
+  V2[Virtual thread 2] --> S
+  V3[Virtual thread 10,000] --> S
+  S -- mount --> C1[Carrier 1]
+  S -- mount --> C2[Carrier 2]
+  C1 --> OS[OS threads]
+  C2 --> OS`}
+/>
+
+- Most blocking JDK calls, like socket reads and `BlockingQueue.take()`, unmount the thread and free its carrier.
+- Code stays plain blocking style: loops, try/catch and readable stack traces, unlike async callback chains.
+
+## Example
+
+```java
+try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {   // Java 21+
+    for (String url : urls) {                     // say, 10,000 URLs
+        executor.submit(() -> download(url));     // blocking I/O unmounts it
+    }
+}                                                 // close() waits for all tasks
+
+Thread.ofVirtual().start(() -> System.out.println("hello"));
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Scheduler parallelism | Number of available processors | JDK 21+ (jdk.virtualThreadScheduler.parallelism) |
+| Daemon | Always true; cannot be changed | Thread, Java SE 25 |
+| Priority | Fixed at NORM_PRIORITY | Thread, Java SE 25 |
+
+## Interview Qs
+
+### When should you not use virtual threads?
+
+For CPU-bound work: more threads than cores does not help. Also watch native calls, which pin the carrier, and on Java 21–23, synchronized blocks around long I/O.
+
+### Should you pool virtual threads?
+
+No. They are cheap, so create one per task. Pools exist to share scarce threads; to cap access to a resource, such as 10 database calls, use a Semaphore.

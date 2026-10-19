@@ -1,4 +1,4 @@
-# Plan: Java (new tech, 20-10-2026)
+# Plan: Java (new tech, 19-10-2026)
 
 Phase 4 (new tech), following Phase 3 with the reference (CLAUDE.md 3.8). Reference: `reference/java.md` (owner input, not a source;
 156 numbered sections plus 30 "why X if Y already exists?" questions). Owner note in CLAUDE.md: no repeated content, every fact in
@@ -11,7 +11,7 @@ Java 8 states its version. Java-only code. Accent: orange (the one accent no oth
 
 - 52 concepts in 8 topics; whole concept file ≤ 550 words; 1–3 primary sources (Java SE 25 API, JLS/JVMS 25, JEPs, Oracle guides).
 - Tree: 2–6 children per concept, about 300 nodes. Comparisons: 28. Glossary: about 250 terms. Story spine: about 16 steps.
-- No relations (removed by the owner on 20-10-2026).
+- No relations (removed by the owner on 19-10-2026).
 
 ## Topics (8) and concepts (52)
 

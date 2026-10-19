@@ -1,5 +1,5 @@
 # Coverage: Java
-Reference: reference/java.md  ·  Last updated: 20-10-2026
+Reference: reference/java.md  ·  Last updated: 19-10-2026
 
 Status: skeleton. Every item is pending until the drafting units report where it landed.
 
