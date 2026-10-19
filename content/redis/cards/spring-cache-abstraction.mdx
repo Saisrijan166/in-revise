@@ -1,0 +1,92 @@
+---
+id: spring-cache-abstraction
+tech: redis
+title: Spring Cache with Redis
+topic: caching
+level: intermediate
+heat: 2
+hook: "With the cache starter, Redis and @EnableCaching, Spring keeps @Cacheable results in Redis; @CachePut and @CacheEvict update them."
+points:
+  - { k: "Turn on", v: "@EnableCaching on a @Configuration class, not the main class" }
+  - { k: "Default key", v: "one argument is the key; several become a SimpleKey" }
+  - { k: "Starter", v: "spring-boot-starter-cache plus spring-boot-starter-data-redis" }
+  - { k: "sync = true", v: "asks for one loader per key; Redis's default writer does not lock", kind: minus }
+trap:
+  wrong: "@Cacheable still works when another method in the same class calls it."
+  right: "That call skips Spring's proxy, so nothing is cached. Call the method through another bean."
+sayIt: "I enable caching and let Spring Boot configure a RedisCacheManager, then set a TTL, because entries never expire by default. @Cacheable on reads, @CachePut or @CacheEvict on writes, and no calls from inside the class."
+confusedWith: [cacheable-vs-cacheput]
+tags: [spring, cacheable, cacheevict, redis-cache-manager]
+visual: flow
+sources:
+  - title: "Declarative annotation-based caching (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/integration/cache/annotations.html"
+    verifiedOn: "2026-10-20"
+  - title: "Caching: Redis (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/io/caching.html"
+    verifiedOn: "2026-10-20"
+  - title: "Application properties: spring.cache.redis (Spring Boot 4.1)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-20"
+  - title: "Redis Cache (Spring Data Redis 4.1 reference)"
+    url: "https://docs.spring.io/spring-data/redis/reference/redis/redis-cache.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Hand-written [cache-aside](card:cache-aside) code repeats in every service. Spring's cache abstraction moves it into annotations; Spring Boot backs them with Redis.
+
+## How it works
+
+<Mermaid
+  alt="Another bean calls find for PAY101. Spring's cache proxy checks Redis for the key payments::PAY101. On a hit it returns the cached value without running the method. On a miss it runs find, stores the result in Redis and returns it. A call to find from inside the same class goes straight to the method and skips the proxy."
+  chart={`flowchart TD
+  C(["Other bean: find PAY101"]) --> P{"Proxy: payments::PAY101 in Redis?"}
+  P -- hit --> RET([Return cached value])
+  P -- miss --> M["Run find"]
+  M --> S[Store result in Redis] --> RET
+  SELF(["this.find inside the class"]) -.-> M`}
+/>
+
+- The value serialiser is chosen in [Spring Data Redis](card:spring-data-redis).
+- When Redis fails, [failure handling](card:redis-failure-handling) can turn cache errors into misses.
+
+## Example
+
+```java
+@Service
+class PaymentQueryService {
+    private final PaymentRepository repo;
+    PaymentQueryService(PaymentRepository repo) { this.repo = repo; }
+
+    @Cacheable(cacheNames = "payments", key = "#id")    // Redis key payments::PAY101
+    public PaymentView find(String id) { return repo.load(id); }
+
+    @CacheEvict(cacheNames = "payments", key = "#id")
+    public void refund(String id) { repo.refund(id); }
+}
+```
+
+```properties
+spring.cache.redis.time-to-live=10m
+spring.cache.redis.cache-null-values=false
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Entry TTL | never expires | `spring.cache.redis.time-to-live`, Spring Boot 4.1 |
+| Cache `null` results | yes | `spring.cache.redis.cache-null-values`, Spring Boot 4.1 |
+| Key prefix | the cache name plus `::` | `spring.cache.redis.use-key-prefix`, Spring Boot 4.1 |
+
+## Interview Qs
+
+### How do you give each cache its own TTL?
+
+Register a `RedisCacheManagerBuilderCustomizer` bean and call `withCacheConfiguration("payments", RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration.ofMinutes(5)))` for each cache name.
+
+### Does @CacheEvict run before or after the method?
+
+After it completes successfully, so a failed refund keeps the entry. `beforeInvocation = true` evicts first, even if the method throws; `allEntries = true` clears the whole cache.

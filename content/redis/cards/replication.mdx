@@ -1,0 +1,85 @@
+---
+id: replication
+tech: redis
+title: Replication and Replicas
+topic: operations
+level: intermediate
+heat: 2
+hook: "Replicas keep a live copy of the primary, sent asynchronously; they serve reads and stand by, but can lag."
+points:
+  - { k: "Async", v: "the primary replies OK before replicas get the write" }
+  - { k: "Partial resync", v: "after a short break, only the missed writes, from the backlog", kind: plus }
+  - { k: "Full sync", v: "otherwise an RDB copy of everything, then the live stream", kind: minus }
+  - { k: "Stale reads", v: "a replica may return data older than the last write", kind: minus }
+  - { k: "WAIT n ms", v: "waits for n replicas to confirm; fewer lost writes, not zero" }
+trap:
+  wrong: "We have a replica, so we do not need RDB backups."
+  right: "A replica copies every change, a FLUSHALL too. Only a saved snapshot takes you back in time."
+sayIt: "Replicas copy the primary asynchronously and serve reads, so they can lag. After a short disconnect they resync only the missed part. WAIT lowers the chance of losing a write but is not strong consistency."
+confusedWith: [sentinel-vs-cluster]
+tags: [replication, replica, high-availability]
+visual: flow
+sources:
+  - title: "Redis replication (Redis docs)"
+    url: "https://redis.io/docs/latest/operate/oss_and_stack/management/replication/"
+    verifiedOn: "2026-10-20"
+  - title: "WAIT (Redis command reference)"
+    url: "https://redis.io/docs/latest/commands/wait/"
+    verifiedOn: "2026-10-20"
+  - title: "redis.conf (Redis 8.10.2 tag)"
+    url: "https://github.com/redis/redis/blob/8.10.2/redis.conf"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+One Redis server is a single point of failure with limited read capacity. Replicas keep copies on other servers.
+
+## How it works
+
+<Mermaid
+  alt="The app writes to the primary, which streams the commands to two replicas. Reads may go to a replica, which can be behind."
+  chart={`flowchart LR
+  App -- writes --> P[(Primary)]
+  P -- "command stream" --> R1[(Replica 1)]
+  P -- "command stream" --> R2[(Replica 2)]
+  App -. "reads, may lag" .-> R1`}
+/>
+
+- A reconnecting replica sends PSYNC with its replication ID and offset; it gets only what is missing.
+- If the backlog no longer holds that part, it gets a full RDB copy.
+- Replication does not fail over by itself: [Sentinel](card:sentinel) or [Cluster](card:redis-cluster) promotes a replica.
+
+## Example
+
+```text
+-- on the new replica
+REPLICAOF 10.0.0.1 6379     -> OK
+INFO replication            -> role:slave ... master_link_status:up
+
+-- on the primary: wait for 1 replica, at most 100 ms
+SET payment:PAY101 PAID     -> OK
+WAIT 1 100                  -> (integer) 1
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| replica-read-only | yes: replicas reject writes | Redis Open Source 8.10 redis.conf |
+| repl-backlog-size | 1mb | Redis Open Source 8.10 redis.conf |
+| min-replicas-to-write | 0 (off) | Redis Open Source 8.10 redis.conf |
+
+## Interview Qs
+
+### A customer pays, then sees the old status. Why?
+
+The read hit a replica that had not applied the write yet. Read just-changed data from the primary.
+
+### What happens if a primary with persistence off restarts automatically?
+
+It comes back empty, and its replicas sync to that empty copy, wiping their data too. Keep persistence on, or disable automatic restarts.
+
+### How do you limit lost writes?
+
+min-replicas-to-write with min-replicas-max-lag: the primary refuses writes unless enough replicas are recent. It bounds the loss window, not each write.

@@ -1,0 +1,78 @@
+---
+id: transactions-multi-exec
+tech: redis
+title: "Transactions: MULTI, EXEC and WATCH"
+topic: atomicity
+level: intermediate
+heat: 2
+hook: "MULTI queues commands and EXEC runs them with no one in between; WATCH cancels EXEC if a key changed. No rollback."
+points:
+  - { k: "MULTI … EXEC", v: "commands reply QUEUED, then run in order as one isolated step" }
+  - { k: "No rollback", v: "a command that fails at run time does not undo the others", kind: minus }
+  - { k: "Queue error", v: "a bad command (wrong syntax) makes EXEC refuse the whole block" }
+  - { k: "WATCH", v: "EXEC returns nil if a watched key changed; read again and retry", kind: plus }
+  - { k: "Replies at EXEC", v: "you cannot use a value read inside MULTI to decide the next write", kind: minus }
+trap:
+  wrong: "MULTI/EXEC rolls back like a SQL transaction when one command fails."
+  right: "Redis has no rollback. A run-time error fails only that command; the rest still apply."
+sayIt: "MULTI/EXEC runs the queued commands in order with no other client in between, but it never rolls back. For check-then-write I WATCH the key and retry when EXEC returns nil, or use a Lua script."
+confusedWith: [pipelining-vs-multi-exec-vs-lua]
+tags: [atomicity, transactions, optimistic-locking]
+visual: flow
+sources:
+  - title: "Transactions (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/using-commands/transactions/"
+    verifiedOn: "2026-10-20"
+  - title: "src/multi.c at tag 8.10.2 (redis/redis on GitHub)"
+    url: "https://github.com/redis/redis/blob/8.10.2/src/multi.c"
+    verifiedOn: "2026-10-20"
+  - title: "Transactions (Spring Data Redis 4.1 reference)"
+    url: "https://docs.spring.io/spring-data/redis/reference/redis/transactions.html"
+    verifiedOn: "2026-10-20"
+  - title: "Redis interview questions (Devinterview.io)"
+    url: "https://github.com/Devinterview-io/redis-interview-questions"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Some updates touch several keys, or must check a value first. MULTI/EXEC makes the writes one isolated step; WATCH adds optimistic locking for the check.
+
+## How it works
+
+<Steps label="Optimistic update with WATCH">
+  <Step title="WATCH">Mark payment:PAY101; Redis notes any change to it.</Step>
+  <Step title="Read and decide">GET the status and check it in the app.</Step>
+  <Step title="MULTI">Start the queue; each command replies QUEUED.</Step>
+  <Step title="EXEC">Runs all, or returns nil if the key changed (a write, expiry or eviction).</Step>
+  <Step title="Retry on nil">Start again from WATCH.</Step>
+</Steps>
+
+- DISCARD drops the queue; nothing runs.
+- In [Redis Cluster](card:redis-cluster) all keys of one transaction must share a hash slot.
+- For one string key, `SET … IFEQ` (Redis 8.4+) does this check in [one command](card:single-command-atomicity).
+
+## Example
+
+```text
+WATCH payment:PAY101
+GET payment:PAY101                          -- "PENDING": the app may go on
+MULTI
+SET payment:PAY101 PAID
+INCRBY merchant:42:paise:2026-10-20 50000
+EXEC                                        -- nil if PAY101 changed since WATCH
+```
+
+## Interview Qs
+
+### How is a Redis transaction different from a SQL transaction?
+
+Both run as an isolated unit, but Redis never rolls back: if one command fails at run time, the others still apply. You cannot act on reads inside it, and WATCH detects changes instead of locking rows.
+
+### When does EXEC return nil?
+
+When a key you watched was changed by another client, or expired or was evicted, between WATCH and EXEC. Nothing ran; read again and retry.
+
+### How do you run MULTI/EXEC from Spring Data Redis?
+
+Inside a `SessionCallback`, so every command uses the same connection; plain `RedisTemplate` calls may use different ones.

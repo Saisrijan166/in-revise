@@ -1,0 +1,76 @@
+---
+id: lua-and-functions
+tech: redis
+title: Lua Scripts and Redis Functions
+topic: atomicity
+level: intermediate
+heat: 2
+hook: "A Lua script runs inside Redis as one atomic step, so it can read, decide and write with no one in between."
+points:
+  - { k: "Atomic", v: "no other command runs while the script runs", kind: plus }
+  - { k: "Read, decide, write", v: "a reply can choose the next command, unlike MULTI/EXEC", kind: plus }
+  - { k: "KEYS and ARGV", v: "pass every key name in KEYS; other values in ARGV" }
+  - { k: "Blocks everyone", v: "a slow script stalls all clients; keep it short", kind: minus }
+  - { k: "Functions", v: "Redis 7.0+: named, stored in the database, replicated" }
+trap:
+  wrong: "When a script passes the time limit, Redis stops it."
+  right: "Redis never stops it on its own; others get BUSY. SCRIPT KILL works only if it has not written yet."
+sayIt: "When a write depends on a value I read, I put the logic in a Lua script: it runs atomically on the server. I pass keys in KEYS, keep it short because it blocks Redis, and use Functions on Redis 7+."
+confusedWith: [pipelining-vs-multi-exec-vs-lua]
+tags: [lua, scripting, functions, atomicity]
+visual: table
+sources:
+  - title: "Scripting with Lua (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/programmability/eval-intro/"
+    verifiedOn: "2026-10-20"
+  - title: "Redis functions (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/programmability/functions-intro/"
+    verifiedOn: "2026-10-20"
+  - title: "redis.conf at tag 8.10.2 (redis/redis on GitHub)"
+    url: "https://github.com/redis/redis/blob/8.10.2/redis.conf"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+MULTI/EXEC cannot use a value it reads, and WATCH needs retry loops. A script moves the whole read-decide-write logic to the server and runs it at once.
+
+## How it works
+
+| | EVAL | EVALSHA | FCALL |
+|---|---|---|---|
+| You send | the script text | its SHA1 digest | the function name |
+| Code lives in | the request | script cache, volatile | the database, persisted |
+| Load with | nothing | SCRIPT LOAD | FUNCTION LOAD |
+| Since | Redis 2.6 | Redis 2.6 | Redis 7.0 |
+
+- Key names built inside a script are unsafe in Cluster; declared keys must share one slot ([Redis Cluster](card:redis-cluster)).
+- The lock release script is in [distributed locks](card:distributed-locks); the token bucket in [rate limiting](card:rate-limiting-with-redis).
+
+## Example
+
+```lua
+-- mark_paid.lua: KEYS[1] payment, KEYS[2] merchant total, ARGV[1] paise
+if redis.call('GET', KEYS[1]) ~= 'PENDING' then
+  return 0
+end
+redis.call('SET', KEYS[1], 'PAID')
+return redis.call('INCRBY', KEYS[2], ARGV[1])
+-- redis-cli --eval mark_paid.lua payment:PAY101 merchant:42:paise:2026-10-20 , 50000
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Busy-script threshold | 5000 ms (`busy-reply-threshold`, old name `lua-time-limit`) | redis.conf, Redis Open Source 8.10 |
+
+## Interview Qs
+
+### When do you choose a Lua script over MULTI/EXEC?
+
+When a later command depends on an earlier reply, such as "mark PAID only if still PENDING". MULTI/EXEC only queues commands; WATCH needs a retry loop. A script reads and writes in one atomic step.
+
+### EVALSHA returns NOSCRIPT. Why, and what do you do?
+
+The script cache is not persisted: a restart, a failover or SCRIPT FLUSH empties it. Load the script again, or fall back to EVAL; most client libraries do this for you.

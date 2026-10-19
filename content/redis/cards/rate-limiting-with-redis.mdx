@@ -1,0 +1,73 @@
+---
+id: rate-limiting-with-redis
+tech: redis
+title: Rate Limiting with Redis
+topic: coordination
+level: intermediate
+heat: 2
+hook: "Every app server counts a client's requests in one Redis key, in one atomic step, and answers 429 past the limit."
+points:
+  - { k: "Key", v: "one per client and action, such as rate:user:7:upi" }
+  - { k: "Atomic check", v: "read, decide and write in one Lua script or command" }
+  - { k: "INCREX", v: "Redis 8.8+: increment, cap and TTL in one command", kind: plus }
+  - { k: "Over the limit", v: "HTTP 429, with Retry-After saying when to retry" }
+trap:
+  wrong: "Call INCR, then call EXPIRE from the app when the count is 1."
+  right: "If the app dies in between, the key never expires and the user stays blocked. Do both in one Lua script, or use INCREX."
+sayIt: "I keep a counter per user per window in Redis. A Lua script increments it and sets the TTL on the first hit, atomically. Over the limit I return 429; for bursty clients I use a token bucket."
+confusedWith: []
+tags: [rate-limiting, lua, payments]
+visual: table
+sources:
+  - title: "Redis tutorial: Build 5 rate limiters"
+    url: "https://redis.io/tutorials/howtos/ratelimiting/"
+    verifiedOn: "2026-10-20"
+  - title: "Redis docs: INCREX"
+    url: "https://redis.io/docs/latest/commands/increx/"
+    verifiedOn: "2026-10-20"
+  - title: "RFC 6585: 429 Too Many Requests"
+    url: "https://www.rfc-editor.org/rfc/rfc6585#section-4"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+One client or bot can flood the payment API. Every app server must see the same count, so the count lives in Redis, not in each server.
+
+## How it works
+
+<Compare id="fixed-window-vs-sliding-window-vs-token-bucket" />
+
+- Fixed window: `INCR` and, on the first hit, `EXPIRE` in one script; or `INCREX key UBOUND 5 EX 60 ENX`.
+- Sliding window log: drop old times with `ZREMRANGEBYSCORE`, count with `ZCARD`, add now with `ZADD`, in one script.
+- Why a script: [MULTI/EXEC](card:transactions-multi-exec) cannot branch on the count it just read.
+
+## Example
+
+```lua
+-- token bucket: 5 UPI attempts, refilled at 5 per minute
+-- KEYS[1] = rate:user:7:upi  ARGV = capacity, tokens per second, now in seconds
+local cap, rate, now = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
+local b = redis.call("HMGET", KEYS[1], "tokens", "ts")
+local tokens, last = tonumber(b[1]) or cap, tonumber(b[2]) or now
+tokens = math.min(cap, tokens + (now - last) * rate)   -- refill since last call
+local allowed = tokens >= 1
+if allowed then tokens = tokens - 1 end
+redis.call("HSET", KEYS[1], "tokens", tostring(tokens), "ts", tostring(now))
+redis.call("EXPIRE", KEYS[1], math.ceil(cap / rate) + 1)
+return allowed and 1 or 0
+```
+
+## Interview Qs
+
+### Design a rate limiter with Redis.
+
+One key per user and action, such as rate:user:7:upi. A Lua script increments it and sets a 60-second TTL on the first hit. Above 5, return 429 with Retry-After. All app servers share the count.
+
+### Why can a fixed window let through twice the limit?
+
+The count resets at the window edge. A client can send 5 requests at 10:00:59 and 5 more at 10:01:00: 10 in two seconds. A sliding window or token bucket smooths this.
+
+### Why a Lua script and not MULTI/EXEC?
+
+MULTI/EXEC queues commands before running them, so it cannot decide based on the count it reads. A Lua script reads, decides and writes atomically in one round trip, with no retry loop.

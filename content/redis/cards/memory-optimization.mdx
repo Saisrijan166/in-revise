@@ -1,0 +1,79 @@
+---
+id: memory-optimization
+tech: redis
+title: Big Keys and Memory Use
+topic: memory
+level: intermediate
+heat: 1
+hook: "One huge key stalls every client while Redis reads or deletes it: find it, split it, remove it with UNLINK."
+points:
+  - { k: "Big key", v: "one value with very many elements or bytes" }
+  - { k: "Why it hurts", v: "commands run one at a time; a slow one makes all clients wait", kind: minus }
+  - { k: "Find it", v: "redis-cli --bigkeys or --memkeys; both use SCAN" }
+  - { k: "UNLINK", v: "frees the memory in another thread; DEL blocks", kind: plus }
+  - { k: "Small is cheap", v: "small hashes, sets and sorted sets use a compact encoding", kind: plus }
+trap:
+  wrong: "Deleting is instant, so DEL a 10-million-element list in production."
+  right: "DEL frees the whole value before the next command runs. Use UNLINK, which frees it in the background."
+sayIt: "I avoid big keys: I split large collections, find them with redis-cli --bigkeys, and delete them with UNLINK so Redis does not block. Small hashes stay in the compact listpack encoding."
+confusedWith: []
+tags: [memory, big-keys, performance]
+visual: table
+sources:
+  - title: "Diagnosing latency issues (Redis docs)"
+    url: "https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/latency/"
+    verifiedOn: "2026-10-20"
+  - title: "redis-cli: big keys and memory usage (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/tools/cli/"
+    verifiedOn: "2026-10-20"
+  - title: "Storing large composite items (Amazon ElastiCache docs)"
+    url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/BestPractices.Clients.Redis.LargeItems.html"
+    verifiedOn: "2026-10-20"
+  - title: "OBJECT ENCODING (Redis command reference)"
+    url: "https://redis.io/docs/latest/commands/object-encoding/"
+    verifiedOn: "2026-10-20"
+  - title: "redis.conf (Redis 8.10.2 tag)"
+    url: "https://github.com/redis/redis/blob/8.10.2/redis.conf"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Redis serves commands one at a time from RAM. One slow command on a huge value delays everyone, and memory is the main cost.
+
+## How it works
+
+| Problem | Find it | Fix |
+|---|---|---|
+| Huge hash, list or set | `redis-cli --bigkeys` | Split into smaller keys; read parts (HMGET), not HGETALL |
+| Key uses lots of memory | `redis-cli --memkeys` | Smaller values |
+| Delete stalls the server | Slow log | `UNLINK` instead of `DEL` |
+
+- Small collections stay in listpack (intset for integer sets) until a size limit, then convert automatically.
+- Too many reads on one key is a hot key: see [cache problems](card:cache-problems).
+
+## Example
+
+```text
+HSET merchant:42:config upi on card on wallet off
+OBJECT ENCODING merchant:42:config   -> "listpack"
+SCARD payment:history:2025           -> 12000000   -- a big key
+UNLINK payment:history:2025          -> 1   -- freed in the background
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Hash stays listpack | ≤ 512 fields, values ≤ 64 bytes | Redis Open Source 8.10 redis.conf |
+| Set stays intset | ≤ 512 integers | Redis Open Source 8.10 redis.conf |
+
+## Interview Qs
+
+### What is a big key and why is it a problem?
+
+A value with very many elements or bytes. Redis runs commands one at a time, so an O(N) read or a DEL on it blocks every other client. Find it with redis-cli --bigkeys.
+
+### DEL vs UNLINK?
+
+Both remove the key at once. DEL frees the memory in the main thread, which blocks on a big value; UNLINK frees it in another thread.

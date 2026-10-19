@@ -1,0 +1,81 @@
+---
+id: key-design
+tech: redis
+title: Key Naming and Key Scanning
+topic: basics
+level: intermediate
+heat: 2
+hook: "Name keys type:id:field, keep them short but readable, and walk the keyspace with SCAN, never KEYS."
+points:
+  - { k: "Pattern", v: "object-type:id[:field], e.g. payment:PAY101:attempts" }
+  - { k: "No namespaces", v: "one flat keyspace; a service prefix avoids clashes" }
+  - { k: "Length", v: "readable beats tiny; 1 KB keys waste memory and time", kind: minus }
+  - { k: "Max key size", v: "512 MB in Redis Open Source 8.x; real keys stay tiny", kind: default }
+  - { k: "KEYS", v: "O(N) over every key and blocks the server", kind: minus }
+trap:
+  wrong: "Use KEYS payment:* in app code to find pending payments."
+  right: "KEYS blocks Redis while it walks every key. Use SCAN with MATCH, or keep the ids in a set."
+sayIt: "I name keys object-type:id:field with a service prefix and iterate with SCAN and a cursor, because KEYS walks every key and blocks the server."
+confusedWith: []
+tags: [keys, scan, naming]
+visual: table
+sources:
+  - title: "Keys and values (redis.io)"
+    url: "https://redis.io/docs/latest/develop/using-commands/keyspace/"
+    verifiedOn: "2026-10-20"
+  - title: "SCAN (redis.io command reference)"
+    url: "https://redis.io/docs/latest/commands/scan/"
+    verifiedOn: "2026-10-20"
+  - title: "KEYS (redis.io command reference)"
+    url: "https://redis.io/docs/latest/commands/keys/"
+    verifiedOn: "2026-10-20"
+  - title: "Redis interview questions: Redis keys (Devinterview.io, GitHub)"
+    url: "https://github.com/Devinterview-io/redis-interview-questions"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Redis has no tables or namespaces, so key names are your only structure. One careless KEYS call can freeze production.
+
+## How it works
+
+| Key | Holds |
+|---|---|
+| `payment:PAY101` | payment status |
+| `payment:PAY101:attempts` | retry counter |
+| `merchant:42:config` | merchant settings |
+| `lock:payment:PAY101` | lock token |
+| `rate:user:7:upi` | request count |
+
+- SCAN returns a cursor and a few keys; call again with that cursor until it returns 0.
+- Hash tags for Cluster: [Redis Cluster](card:redis-cluster). Deleting big keys: [UNLINK](card:memory-optimization).
+
+## Example
+
+```text
+SCAN 0 MATCH payment:* COUNT 100
+-- 1) "1792"   next cursor   2) 1) "payment:PAY101"  2) "payment:PAY102"
+SCAN 1792 MATCH payment:* COUNT 100
+-- 1) "0"      cursor 0: done
+EXISTS payment:PAY101                -- (integer) 1
+TYPE merchant:42:config              -- hash
+MGET payment:PAY101 payment:PAY102   -- both values in one round trip
+DEL payment:PAY102                   -- (integer) 1
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| SCAN COUNT | 10 (a hint, not a limit) | Redis Open Source 8.x |
+
+## Interview Qs
+
+### KEYS vs SCAN?
+
+KEYS returns every match in one call, O(N), and blocks all clients. SCAN walks the keyspace in small steps with a cursor, so it is safe in production, but a key may come back twice and MATCH filters after fetching.
+
+### How do you name Redis keys?
+
+Use object-type:id:field with colons, like payment:PAY101:attempts, plus a service prefix. Keep names readable; very long keys cost memory and lookup time.

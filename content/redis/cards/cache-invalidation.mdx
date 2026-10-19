@@ -1,0 +1,62 @@
+---
+id: cache-invalidation
+tech: redis
+title: Cache Invalidation and Stale Data
+topic: caching
+level: intermediate
+heat: 2
+hook: "After the database commit succeeds, delete the cached key; a TTL catches anything you miss."
+points:
+  - { k: "Delete, not update", v: "a delete is safe to retry; racing updates can cache an old value" }
+  - { k: "After commit", v: "evict only once the DB transaction has committed" }
+  - { k: "TTL", v: "a safety net: limits how long stale data can live" }
+  - { k: "Other writers", v: "a job that edits the DB directly leaves Redis stale", kind: minus }
+  - { k: "Change data capture", v: "read the DB's commit log and delete keys in one place", kind: plus }
+trap:
+  wrong: "Evict the key inside the transaction, before it commits."
+  right: "Evict after the commit. A reader that misses before the commit loads the old row and caches it again."
+sayIt: "After a successful commit I delete the key rather than update it, so the next read loads fresh data. A TTL limits staleness if an invalidation is missed; with many writers I delete keys from a change-data-capture feed."
+confusedWith: []
+tags: [caching, invalidation, stale-data, cdc]
+visual: flow
+sources:
+  - title: "Cache-Aside pattern: order of update and invalidation (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
+    verifiedOn: "2026-10-20"
+  - title: "Scaling Memcache at Facebook: delete over update, leases, commit-log invalidation (NSDI 2013)"
+    url: "https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf"
+    verifiedOn: "2026-10-20"
+  - title: "TransactionAwareCacheDecorator (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/cache/transaction/TransactionAwareCacheDecorator.html"
+    verifiedOn: "2026-10-20"
+  - title: "Redis Data Integration: CDC from a database into Redis (Redis docs)"
+    url: "https://redis.io/docs/latest/integrate/redis-data-integration/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A cached copy goes stale the moment the database changes. Invalidation removes that copy, so readers do not see old merchant settings or an old payment status for long.
+
+## How it works
+
+<Steps label="Change merchant 42's configuration">
+  <Step title="Write the database">Update merchant 42 inside a transaction.</Step>
+  <Step title="Commit">Wait until the commit succeeds.</Step>
+  <Step title="Delete the key">`DEL merchant:42:config`.</Step>
+  <Step title="Next read reloads">The miss reads the new row and caches it with a TTL.</Step>
+</Steps>
+
+- Spring: `RedisCacheManager.builder(factory).transactionAware()` holds cache puts and evicts until the commit.
+- Facebook's memcache reads committed SQL and broadcasts deletes; Redis Data Integration (Redis Software, Cloud) syncs Redis by CDC.
+- Telling other app instances through [Pub/Sub](card:pub-sub) also works, within its delivery limits.
+
+## Interview Qs
+
+### Why delete the cached key instead of writing the new value?
+
+A delete can be retried safely, and the next read loads the truth. With updates, two writers can reach Redis in the wrong order and leave the older value cached until its TTL runs out.
+
+### Many services write the same table. How do you keep Redis fresh?
+
+Do not rely on every service to remember. Capture changes from the database log (CDC) and delete the matching keys from one place, with TTLs as the backstop.

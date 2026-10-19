@@ -1,0 +1,78 @@
+---
+id: redis-failure-handling
+tech: redis
+title: When Redis Is Slow or Down
+topic: java
+level: intermediate
+heat: 2
+hook: "Decide per use before it happens: a cache error becomes a miss, a limiter fails open or closed, a lock you cannot get is not held."
+points:
+  - { k: "Cache down", v: "treat it as a miss and read the DB, but cap the DB load" }
+  - { k: "Limiter down", v: "fail open (allow) or fail closed (deny): a business choice" }
+  - { k: "Command timeout", v: "60 s unless spring.data.redis.timeout is set (Spring Data Redis 4.1)", kind: default }
+  - { k: "@Cacheable errors", v: "rethrown by default (SimpleCacheErrorHandler)", kind: minus }
+  - { k: "Lettuce reconnects", v: "automatically, buffering commands meanwhile", kind: plus }
+trap:
+  wrong: "If Redis is down, just send every request to the database."
+  right: "Fall back with limits: short timeouts, a circuit breaker and capped database load, or the database fails next."
+sayIt: "I decide per use: cache errors become misses with the database protected, limiters fail open or closed by business choice, locks fail closed. Short timeouts and a circuit breaker keep a dead Redis from hanging requests."
+confusedWith: []
+tags: [resilience, timeout, circuit-breaker, monitoring]
+visual: table
+sources:
+  - title: "Circuit Breaker pattern (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker"
+    verifiedOn: "2026-10-20"
+  - title: "Token bucket rate limiter with Java and Lettuce: error handling (redis.io)"
+    url: "https://redis.io/docs/latest/develop/use-cases/rate-limiter/java-lettuce/"
+    verifiedOn: "2026-10-20"
+  - title: "CachingConfigurer.errorHandler() (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/cache/annotation/CachingConfigurer.html"
+    verifiedOn: "2026-10-20"
+  - title: "LettuceClientConfiguration source (Spring Data Redis)"
+    url: "https://github.com/spring-projects/spring-data-redis/blob/main/src/main/java/org/springframework/data/redis/connection/lettuce/LettuceClientConfiguration.java"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Redis can restart, fail over or stall on a slow command. Without a plan, every request waits on it, then the database drowns.
+
+## How it works
+
+| Use | When Redis fails | Detail |
+|---|---|---|
+| Cache | Miss: read the database | Cap the flood: [cache problems](card:cache-problems) |
+| Rate limit | Fail open or fail closed | Availability vs protection, per endpoint |
+| Lock | Not acquired: retry later | Never run guarded work unlocked: [locks](card:distributed-locks) |
+| Session | Lookups fail; lost data means sign in again | [Sessions](card:session-storage) |
+
+- Short client timeouts: `spring.data.redis.timeout` (read) and `spring.data.redis.connect-timeout`.
+- A circuit breaker, such as Resilience4j, skips Redis at once after repeated failures, then tests it again.
+
+## Example
+
+```java
+@Configuration
+@EnableCaching
+class CacheConfig implements CachingConfigurer {
+    @Override
+    public CacheErrorHandler errorHandler() {
+        return new LoggingCacheErrorHandler();   // log, then run the method as on a miss
+    }
+}
+```
+
+## Interview Qs
+
+### Redis goes down. What happens to your payment app?
+
+Merchant config comes from the database, with capped load. The UPI limiter follows its fail-open or fail-closed rule. Workers cannot take `lock:payment:PAY101`, so they retry later. Payment records stay safe in the database.
+
+### Should a rate limiter fail open or fail closed?
+
+It depends on the cost. Fail open keeps users served but drops protection; fail closed guards login or payment endpoints but takes them down with Redis.
+
+### How do you find what makes Redis slow?
+
+`SLOWLOG GET` lists slow commands, `LATENCY DOCTOR` explains latency spikes once the monitor is on, and `INFO` shows memory, clients and hit counts. Then look for [big keys](card:memory-optimization).

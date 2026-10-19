@@ -1,0 +1,89 @@
+---
+id: redis-cluster
+tech: redis
+title: Redis Cluster and Hash Slots
+topic: operations
+level: intermediate
+heat: 3
+hook: "Cluster splits keys into 16384 hash slots spread over primaries; each has replicas, and clients follow redirects."
+points:
+  - { k: "Slot", v: "CRC16(key) mod 16384; each primary owns a range of slots" }
+  - { k: "Hash tag", v: "only the text in {} is hashed: {merchant:42}:* keys share a slot", kind: plus }
+  - { k: "Multi-key", v: "MSET, MULTI/EXEC or Lua across slots fails with CROSSSLOT", kind: minus }
+  - { k: "MOVED / ASK", v: "slot moved for good / only this command, during resharding" }
+  - { k: "Consistency", v: "async replication, so acknowledged writes can be lost", kind: minus }
+trap:
+  wrong: "Redis Cluster uses consistent hashing on a ring."
+  right: "It uses fixed hash slots: CRC16(key) mod 16384. Adding a node moves whole slots to it."
+sayIt: "Cluster shards keys over 16384 hash slots. Each primary owns a slot range and has replicas for failover. Keys used together need a hash tag, or multi-key commands fail with CROSSSLOT."
+confusedWith: [sentinel-vs-cluster]
+tags: [cluster, sharding, hash-slot]
+visual: flow
+sources:
+  - title: "Scale with Redis Cluster (Redis docs)"
+    url: "https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/"
+    verifiedOn: "2026-10-20"
+  - title: "Redis Cluster specification (Redis docs)"
+    url: "https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/"
+    verifiedOn: "2026-10-20"
+  - title: "Multi-key operations (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/using-commands/multi-key-operations/"
+    verifiedOn: "2026-10-20"
+  - title: "config.c (Redis 8.10.2 tag)"
+    url: "https://github.com/redis/redis/blob/8.10.2/src/config.c"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+One server's RAM and CPU cap how much data and how many writes Redis takes. Cluster spreads keys over several primaries.
+
+## How it works
+
+<Mermaid
+  alt="The client hashes each key to a slot and sends it to the owner: primary A has slots 0-5500, B 5501-11000, C 11001-16383. Each has one replica."
+  chart={`flowchart LR
+  C[Client] -- "slot = CRC16(key) mod 16384" --> B
+  C --> A
+  C --> PC
+  A[(Primary A: 0-5500)] --> A1[(Replica A1)]
+  B[(Primary B: 5501-11000)] --> B1[(Replica B1)]
+  PC[(Primary C: 11001-16383)] --> C1[(Replica C1)]`}
+/>
+
+- A node that does not own the slot replies MOVED; cluster clients cache the slot map.
+- At least 3 primaries; 3 primaries plus 3 replicas is the recommended start.
+- Spring Boot: `spring.data.redis.cluster.nodes` lists seed nodes for [the client](card:spring-data-redis).
+
+## Example
+
+```text
+CLUSTER KEYSLOT payment:PAY101                   -> (integer) 4122
+MSET merchant:42:config A merchant:43:config B
+-> (error) CROSSSLOT Keys in request don't hash to the same slot
+MSET {merchant:42}:config A {merchant:42}:limits B   -> OK  (both slot 7650)
+
+-- redis-cli without -c, connected to the wrong node
+GET payment:PAY101   -> (error) MOVED 4122 10.0.0.1:6379
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| cluster-node-timeout | 15000 ms | Redis Open Source 8.10 |
+| Cluster bus port | data port + 10000 (16379) | Redis Open Source 8.10 |
+
+## Interview Qs
+
+### How do you update two keys atomically in Cluster?
+
+Give them one hash tag, like `{order:PAY101}:status` and `{order:PAY101}:events`. They share a slot, so MULTI/EXEC or Lua works.
+
+### What is the difference between MOVED and ASK?
+
+MOVED: the slot lives on another node now; update the map. ASK: the slot is migrating; send only this command there, after ASKING.
+
+### Sentinel or Cluster?
+
+Sentinel while one primary holds all the data; Cluster when it must be split. See [Sentinel vs Cluster](compare:sentinel-vs-cluster).

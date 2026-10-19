@@ -1,0 +1,67 @@
+---
+id: cache-problems
+tech: redis
+title: Stampede, Penetration, Avalanche and Hot Keys
+topic: caching
+level: interview
+heat: 3
+hook: "Stampede: one hot key expires. Penetration: keys that exist nowhere. Avalanche: many expire at once. Each floods the database."
+points:
+  - { k: "Rebuild lock", v: "SET NX with a short TTL: one caller reloads, others wait" }
+  - { k: "Bloom filter", v: "'not present' is certain; 'present' may be wrong, so check the DB" }
+  - { k: "Hot key", v: "one key takes most of the traffic and overloads its node", kind: minus }
+  - { k: "Find hot keys", v: "redis-cli --hotkeys, which needs an LFU eviction policy" }
+trap:
+  wrong: "Cache penetration is fixed with a longer TTL."
+  right: "The keys never exist, so nothing gets cached. Cache the 'not found' briefly or filter ids with a Bloom filter."
+sayIt: "I name the case first. One hot key expiring is a stampede, so one caller rebuilds it. Missing keys are penetration, so I cache the absence. Mass expiry is an avalanche, so I add TTL jitter."
+confusedWith: []
+tags: [caching, stampede, penetration, avalanche, hot-key]
+visual: table
+sources:
+  - title: "Caching best practices: thundering herd, prewarming, TTL randomness (AWS)"
+    url: "https://aws.amazon.com/caching/best-practices/"
+    verifiedOn: "2026-10-20"
+  - title: "Optimal Probabilistic Cache Stampede Prevention (Vattani et al., VLDB 2015)"
+    url: "https://www.vldb.org/pvldb/vol8/p886-vattani.pdf"
+    verifiedOn: "2026-10-20"
+  - title: "Bloom filter (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/probabilistic/bloom-filter/"
+    verifiedOn: "2026-10-20"
+  - title: "Negative Caching of DNS Queries (RFC 2308)"
+    url: "https://www.rfc-editor.org/rfc/rfc2308"
+    verifiedOn: "2026-10-20"
+  - title: "ElastiCache Well-Architected Lens, Performance Efficiency: hot keys (AWS)"
+    url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/PerformanceEfficiencyPillar.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A cache shields the database only while requests hit it. Some patterns of misses send a sudden flood to the database instead, often at peak traffic.
+
+## How it works
+
+<Compare id="stampede-vs-penetration-vs-avalanche" />
+
+- The rebuild lock uses the same `SET NX` idea as [distributed locks](card:distributed-locks).
+- Early refresh: each reader may recompute a little before expiry, at random, so one usually refreshes first.
+- Large values are a different problem: [big keys](card:memory-optimization).
+
+## Example
+
+```text
+GET payment:PAY999                        -> (nil)   miss; the DB has no PAY999
+SET payment:PAY999 "NOT_FOUND" EX 60      -- cache the absence briefly
+SET merchant:42:config "{...}" EX 3727    -- 3600 s plus random jitter
+```
+
+## Interview Qs
+
+### A flash sale makes one product key hot. What do you do?
+
+Keep a short-lived copy in each app instance, kept fresh by Redis client-side caching (Redis 6+). Or store copies of the key on several nodes and read one at random; replicas can also share the reads.
+
+### Redis restarts empty at peak traffic. What happens?
+
+Every read misses, so it acts like an avalanche on the database. Warm the cache first with a script that replays common reads, and limit database calls until hits recover: see [failure handling](card:redis-failure-handling).

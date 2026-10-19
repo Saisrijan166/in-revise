@@ -1,0 +1,79 @@
+---
+id: sentinel
+tech: redis
+title: Redis Sentinel and Failover
+topic: operations
+level: intermediate
+heat: 2
+hook: "Sentinels watch the primary; when it dies they agree, promote a replica and tell clients the new address."
+points:
+  - { k: "Quorum", v: "how many Sentinels must agree the primary is down" }
+  - { k: "Majority", v: "of all Sentinels must elect a leader to run the failover" }
+  - { k: "At least 3", v: "on machines or zones that fail independently" }
+  - { k: "Clients", v: "ask a Sentinel for the primary instead of a fixed host", kind: plus }
+  - { k: "Lost writes", v: "replication is async, so a failover can drop acknowledged writes", kind: minus }
+trap:
+  wrong: "Once the quorum agrees, the failover starts."
+  right: "Quorum only marks the primary down. A majority of all Sentinels must still elect a leader before any failover."
+sayIt: "Sentinel gives automatic failover without sharding. Three or more Sentinels watch the primary; when a quorum sees it down, a majority elects a leader that promotes a replica, and clients ask Sentinel for it."
+confusedWith: [sentinel-vs-cluster]
+tags: [sentinel, failover, high-availability]
+visual: flow
+sources:
+  - title: "High availability with Redis Sentinel (Redis docs)"
+    url: "https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/"
+    verifiedOn: "2026-10-20"
+  - title: "sentinel.conf (Redis 8.10.2 tag)"
+    url: "https://github.com/redis/redis/blob/8.10.2/sentinel.conf"
+    verifiedOn: "2026-10-20"
+  - title: "Common application properties: spring.data.redis.sentinel.* (Spring Boot 4.1)"
+    url: "https://docs.spring.io/spring-boot/4.1/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+[Replication](card:replication) keeps copies, but nobody promotes a replica when the primary dies. Sentinel does it automatically and points clients to the new primary.
+
+## How it works
+
+<Steps label="A Sentinel failover">
+  <Step title="Detect">A Sentinel gets no valid reply for down-after-milliseconds and marks the primary subjectively down (SDOWN).</Step>
+  <Step title="Agree">When quorum Sentinels agree, the primary is objectively down (ODOWN).</Step>
+  <Step title="Elect">A majority of Sentinels votes one of them leader for this failover.</Step>
+  <Step title="Promote">The leader promotes the best replica and repoints the other replicas to it.</Step>
+  <Step title="Discover">Clients ask any Sentinel for the current primary and reconnect.</Step>
+</Steps>
+
+- An old primary cut off with some clients keeps taking writes; they vanish when it rejoins as a replica.
+- [min-replicas-to-write](card:replication) makes it stop taking writes once its replicas stop answering.
+- Spring Boot: set `spring.data.redis.sentinel.master` and `spring.data.redis.sentinel.nodes`.
+
+## Example
+
+```text
+-- sentinel.conf on each of 3 machines (Sentinel port 26379)
+sentinel monitor mymaster 10.0.0.1 6379 2
+sentinel down-after-milliseconds mymaster 5000
+
+-- ask any Sentinel where the primary is
+SENTINEL GET-MASTER-ADDR-BY-NAME mymaster   -> 1) "10.0.0.1" 2) "6379"
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Sentinel port | 26379 | Redis Open Source 8.10 sentinel.conf |
+| down-after-milliseconds | 30000 (30 s) | Redis Open Source 8.10 sentinel.conf |
+| failover-timeout | 180000 (3 min) | Redis Open Source 8.10 sentinel.conf |
+
+## Interview Qs
+
+### Why at least three Sentinels?
+
+A failover needs a majority. With two, if the primary's machine dies it takes one Sentinel with it, and the survivor alone is no majority. Three on independent machines survive one failure.
+
+### Can a Sentinel failover lose data?
+
+Yes. Writes the primary acknowledged but had not yet copied are lost when a replica is promoted. Sentinel limits downtime, not data loss.

@@ -1,0 +1,78 @@
+---
+id: queues-with-redis
+tech: redis
+title: Queues and Messaging with Redis
+topic: coordination
+level: intermediate
+heat: 2
+hook: "A list is a simple job queue, a sorted set delays jobs, a stream adds acks and replay; Pub/Sub keeps nothing."
+points:
+  - { k: "Simple queue", v: "LPUSH to add a job, BRPOP to wait for and take one" }
+  - { k: "Reliable queue", v: "BLMOVE into a processing list; LREM when done", kind: plus }
+  - { k: "Delayed jobs", v: "sorted set scored by run time; take the due ones" }
+  - { k: "Streams", v: "consumer groups, acks, retries and replay" }
+  - { k: "Failover", v: "async replication: a new primary may miss recent jobs", kind: minus }
+trap:
+  wrong: "Use Pub/Sub as a job queue."
+  right: "Pub/Sub keeps nothing: a worker that is offline or crashes misses the job. Use a list or a stream."
+sayIt: "For a simple job queue I use a list: LPUSH and BRPOP, or BLMOVE into a processing list so a crash loses nothing. For acks, retries and replay I use a stream with consumer groups."
+confusedWith: []
+tags: [queue, list, stream, pubsub]
+visual: table
+sources:
+  - title: "LMOVE, pattern: reliable queue (Redis commands)"
+    url: "https://redis.io/docs/latest/commands/lmove/"
+    verifiedOn: "2026-10-20"
+  - title: "Redis Pub/Sub, delivery semantics (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/pubsub/"
+    verifiedOn: "2026-10-20"
+  - title: "Redis docs: Streams (capped streams, persistence)"
+    url: "https://redis.io/docs/latest/develop/data-types/streams/"
+    verifiedOn: "2026-10-20"
+  - title: "Delayed queue pattern (Redis patterns by antirez)"
+    url: "https://redis.antirez.com/fundamental/delayed-queue.md"
+    verifiedOn: "2026-10-20"
+  - title: "Introduction (Apache Kafka docs)"
+    url: "https://kafka.apache.org/intro"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Slow work, such as emailing a payment receipt, should not hold up the API reply. A queue lets the API answer now and a worker do the job later.
+
+## How it works
+
+<Compare id="pub-sub-vs-lists-vs-streams" />
+
+- BRPOP removes the job at once; if the worker then crashes, the job is gone. BLMOVE keeps a copy.
+- A watcher re-queues jobs left in a processing list too long.
+
+## Example
+
+```text
+-- payment PAY101 succeeded: queue its receipt
+LPUSH jobs:receipts PAY101                            -> (integer) 1
+-- worker w1 waits for a job and keeps it in its processing list
+BLMOVE jobs:receipts jobs:processing:w1 RIGHT LEFT 0  -> "PAY101"
+-- ... receipt sent ...
+LREM jobs:processing:w1 1 PAY101                      -> (integer) 1
+-- delayed: check UPI status at 10:05 IST on 20-10-2026
+ZADD jobs:delayed 1792470900 check:PAY101             -> (integer) 1
+ZRANGE jobs:delayed -inf 1792470900 BYSCORE LIMIT 0 10
+ZREM jobs:delayed check:PAY101                        -> (integer) 1, so w1 runs it
+```
+
+## Interview Qs
+
+### How do you build a job queue with Redis?
+
+Producers LPUSH jobs onto a list; workers block on BRPOP. To survive crashes, a worker uses BLMOVE to move each job into its processing list and LREMs it when done.
+
+### How do you run a job later?
+
+Add it to a sorted set with the run time as score. Workers read jobs due up to now with ZRANGE ... BYSCORE and claim each with ZREM: only the worker that gets 1 runs it.
+
+### When would you choose Kafka over Redis Streams?
+
+When events must stay on disk for a long time or be replayed by many services. Redis streams live in memory, are usually capped with MAXLEN, and replicate asynchronously.

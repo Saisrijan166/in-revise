@@ -1,0 +1,73 @@
+---
+id: streams
+tech: redis
+title: Streams and Consumer Groups
+topic: data-types
+level: intermediate
+heat: 2
+hook: "A stream is an append-only log of entries; consumer groups share it out and track what each worker has acknowledged."
+points:
+  - { k: "Entry ID", v: "<milliseconds>-<sequence>, always increasing; XADD * makes one" }
+  - { k: "Kept after reading", v: "entries stay until trimmed, so readers can replay", kind: plus }
+  - { k: "Consumer group", v: "each entry goes to one consumer of the group" }
+  - { k: "At-least-once", v: "unacked entries can be redelivered; make handlers idempotent", kind: minus }
+  - { k: "Capping", v: "XADD MAXLEN or MINID trims old entries; else it grows" }
+trap:
+  wrong: "Once XREADGROUP hands an entry to a consumer, it is done."
+  right: "It stays in the pending entries list until XACK. If the consumer dies, another one claims it with XAUTOCLAIM."
+sayIt: "A stream is a persisted append-only log. Producers XADD, consumer groups split entries across workers, and each worker XACKs after processing. Unacked entries stay pending, so a crash means redelivery: at-least-once."
+confusedWith: [pub-sub-vs-lists-vs-streams]
+tags: [streams, consumer-groups, messaging]
+visual: flow
+sources:
+  - title: "Redis Streams (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/streams/"
+    verifiedOn: "2026-10-20"
+  - title: "Idempotent message processing for streams (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/streams/idempotency/"
+    verifiedOn: "2026-10-20"
+  - title: "Introduction (Apache Kafka docs)"
+    url: "https://kafka.apache.org/intro"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Pub/Sub loses messages when a reader is away, and a popped list item is gone. A stream keeps every event, and lets several workers share the load with acknowledgements.
+
+## How it works
+
+<Mermaid
+  alt="The payment service appends events to the stream payments with XADD. The consumer group billing reads from it. Worker A and worker B each get different entries with XREADGROUP. Each worker sends XACK after processing; entries not yet acknowledged sit in the group's pending entries list."
+  chart={`flowchart LR
+  P[Payment service] -- XADD --> S[(stream: payments)]
+  S --> G{{group: billing}}
+  G -- entry 1 --> A[Worker A]
+  G -- entry 2 --> B[Worker B]
+  A -- XACK --> G
+  B -- XACK --> G`}
+/>
+
+- XREADGROUP with ID `>` gives new entries; with `0` it re-reads your own pending ones.
+- Since Redis 8.6, XADD can drop duplicate retries from a producer (IDMP).
+- Stream, list or Pub/Sub for a queue: [queues](card:queues-with-redis).
+
+## Example
+
+```text
+XGROUP CREATE payments billing $ MKSTREAM     -- OK (only new entries)
+XADD payments MAXLEN ~ 100000 * order PAY101 status SUCCESS  -- "1792490400000-0"
+XREADGROUP GROUP billing worker-a COUNT 10 BLOCK 2000 STREAMS payments >
+XACK payments billing 1792490400000-0          -- 1
+XPENDING payments billing                      -- what is still unacked
+```
+
+## Interview Qs
+
+### What happens if a consumer crashes before XACK?
+
+The entry stays in the group's pending entries list. When it restarts it re-reads with ID 0; if it never returns, another consumer takes the entry with XAUTOCLAIM (Redis 6.2+) after an idle time.
+
+### Redis Streams or Kafka?
+
+Streams fit when you already run Redis and the history fits in memory: groups, acks, replay. Kafka keeps events on disk for as long as you configure and spreads topics over partitions, so it suits long retention and big volumes.

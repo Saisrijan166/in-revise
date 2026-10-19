@@ -1,0 +1,89 @@
+---
+id: distributed-locks
+tech: redis
+title: Distributed Locks with Redis
+topic: coordination
+level: interview
+heat: 3
+hook: "SET NX PX takes a self-expiring lock; only the token holder may delete it, and the lease can expire under you."
+points:
+  - { k: "Acquire", v: "SET key token NX PX 30000: one atomic step, with a lease" }
+  - { k: "Release", v: "delete only if the value is still my token" }
+  - { k: "Lease runs out", v: "a GC pause or slow job can outlive the lock", kind: minus }
+  - { k: "Fencing token", v: "storage rejects writes that carry an older number", kind: plus }
+trap:
+  wrong: "Release the lock with DEL lock:payment:PAY101."
+  right: "After your lease expires, DEL can remove another worker's lock. Compare the token and delete atomically."
+sayIt: "I lock with SET key token NX PX and release with a compare-and-delete script. The lock saves duplicate work; for correctness the database must also reject duplicates."
+confusedWith: []
+tags: [lock, redlock, fencing]
+visual: flow
+sources:
+  - title: "Redis docs: Distributed locks"
+    url: "https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/"
+    verifiedOn: "2026-10-20"
+  - title: "Kleppmann: How to do distributed locking (2016)"
+    url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"
+    verifiedOn: "2026-10-20"
+  - title: "Is Redlock safe? (antirez)"
+    url: "http://antirez.com/news/101"
+    verifiedOn: "2026-10-20"
+  - title: "Redisson docs: Locks"
+    url: "https://redisson.pro/docs/data-and-services/locks-and-synchronizers/"
+    verifiedOn: "2026-10-20"
+  - title: "Stripe API: Idempotent requests"
+    url: "https://docs.stripe.com/api/idempotent_requests"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Several app servers may pick up the same job, such as capturing PAY101. A lock lets one do it while the others skip.
+
+## How it works
+
+<Mermaid
+  alt="Worker 1 gets the lock with fence 33, pauses, and its lease expires. Worker 2 gets fence 34 and writes. Worker 1's late write with 33 is rejected."
+  chart={`sequenceDiagram
+  participant W1 as Worker 1
+  participant L as Redis
+  participant W2 as Worker 2
+  participant DB as Payments DB
+  W1->>L: SET NX PX, granted, fence 33
+  Note over W1: GC pause, lease expires
+  W2->>L: SET NX PX, granted, fence 34
+  W2->>DB: write with fence 34, accepted
+  W1->>DB: write with fence 33, rejected`}
+/>
+
+- Plain SET NX gives no fencing number; Redisson's [RFencedLock](card:lock-redisson-fenced) returns one.
+- [Redlock](card:lock-redlock)'s safety is debated: Kleppmann says it relies on timing; antirez disagrees.
+- Failover can lose a lock: [replication](card:replication) is asynchronous.
+
+## Example
+
+```lua
+SET lock:payment:PAY101 7f3a91c2 NX PX 30000   -> OK     worker 1
+SET lock:payment:PAY101 c0d4e815 NX PX 30000   -> (nil)  worker 2
+-- release: EVAL with KEYS[1] = lock key, ARGV[1] = my token
+if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("del", KEYS[1])
+end
+return 0
+-- Redis 8.4+, same in one command
+DELEX lock:payment:PAY101 IFEQ 7f3a91c2        -> (integer) 1
+```
+
+## Interview Qs
+
+### How do you build a distributed lock with Redis?
+
+SET the key to a random token with NX and PX 30000; OK means you hold it. Release by deleting it only if it still holds your token, atomically.
+
+### What if the work takes longer than the lease?
+
+The key expires, a second worker gets the lock, and both run. Keep work short, extend the lease (Redisson's watchdog), and fence writes.
+
+### Does a Redis lock make a payment happen exactly once?
+
+No. Expiry or failover can let two workers in. Give the payment an idempotency key with a unique constraint in the database, and send it to the provider.

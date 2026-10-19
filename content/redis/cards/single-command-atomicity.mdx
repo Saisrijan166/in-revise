@@ -1,0 +1,72 @@
+---
+id: single-command-atomicity
+tech: redis
+title: Atomic Commands and Counters
+topic: atomicity
+level: beginner
+heat: 3
+hook: "One Redis command always runs whole, so do read-change-write in one command (INCR), never as GET then SET."
+points:
+  - { k: "One command", v: "runs to the end before any other client's command starts" }
+  - { k: "INCR family", v: "INCR, INCRBY, DECR, HINCRBY read, add and write in one step", kind: plus }
+  - { k: "Missing key", v: "INCR starts it at 0; values are 64-bit signed integers" }
+  - { k: "Conditional SET", v: "NX: only if the key is missing; IFEQ (Redis 8.4+): only if unchanged" }
+trap:
+  wrong: "Redis is single-threaded, so my GET followed by SET is safe."
+  right: "Each command is atomic, but another client can run between two commands. Use INCR, or put the steps in one script."
+sayIt: "Each Redis command runs to completion before the next, so INCR is a safe shared counter. GET then SET is two commands and can lose updates; for several steps I use MULTI/EXEC with WATCH or a Lua script."
+confusedWith: []
+tags: [atomicity, counters, incr]
+visual: table
+sources:
+  - title: "INCR command (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/incr/"
+    verifiedOn: "2026-10-20"
+  - title: "SET command (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/set/"
+    verifiedOn: "2026-10-20"
+  - title: "Transactions (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/using-commands/transactions/"
+    verifiedOn: "2026-10-20"
+  - title: "Redis interview questions (Devinterview.io)"
+    url: "https://github.com/Devinterview-io/redis-interview-questions"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Two app servers that read a value, change it and write it back can overwrite each other. Redis offers single commands that do the whole step at once.
+
+## How it works
+
+| Step | Server A | Server B | Count in Redis |
+|---|---|---|---|
+| 1 | GET → 5 | | 5 |
+| 2 | | GET → 5 | 5 |
+| 3 | SET 6 | | 6 |
+| 4 | | SET 6 | 6: one payment lost |
+| Fix | INCR → 6 | INCR → 7 | 7 |
+
+- Redis runs commands one at a time ([why](card:what-is-redis)), so no command sees another half done.
+- Several steps as one: [MULTI/EXEC with WATCH](card:transactions-multi-exec) or a [Lua script](card:lua-and-functions).
+- SET NX as a lock, with its expiry and safe release: [distributed locks](card:distributed-locks).
+
+## Example
+
+```text
+INCR payment:request-count                         -- (integer) 1
+INCRBY merchant:42:paise:2026-10-20 50000          -- ₹500 kept as paise
+EXPIRE merchant:42:paise:2026-10-20 172800         -- keep two days
+HINCRBY merchant:42:methods upi 1                  -- per-method count in a hash
+SET payment:PAY101 PAID IFEQ PENDING               -- OK only if still PENDING (8.4+)
+```
+
+## Interview Qs
+
+### How do you count payments per merchant per day across many servers?
+
+One key per merchant and day, `INCRBY` on every payment, and a [TTL](card:ttl-and-expiration) so old days vanish. Each `INCRBY` is atomic, so no lock is needed.
+
+### Can you use INCRBYFLOAT for money totals?
+
+Better not. It works on double-precision floats, which round. Store paise as integers and use `INCRBY`; format rupees in the app.
