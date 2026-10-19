@@ -1965,3 +1965,651 @@ BFS ≠ Always shortest path
 ```
 
 **If you remember the final rules + complexity tables + "which structure should I choose?" section, you can handle a large portion of common Data Structures interview questions.**
+
+<!-- ===== Owner addition: Java methods for coding rounds (added 20-10-2026). Source file: reference/reference.md ===== -->
+
+JAVA 8 — NORMAL CODING FUNCTIONS TO MEMORIZE
+⭐ STRING
+s.length()
+
+s.charAt(i)
+
+s.substring(start)
+s.substring(start, end)
+
+s.indexOf("x")
+s.lastIndexOf("x")
+
+s.contains("x")
+
+s.startsWith("x")
+s.endsWith("x")
+
+s.equals("x")
+s.equalsIgnoreCase("x")
+
+s.toUpperCase()
+s.toLowerCase()
+
+s.trim()
+
+s.replace("a", "b")
+s.replaceAll("regex", "b")
+
+s.split(" ")
+
+s.isEmpty()
+
+String.valueOf(x)
+
+String → char array
+s.toCharArray()
+
+char array → String
+new String(chars)
+
+StringBuilder ⭐⭐⭐
+StringBuilder sb = new StringBuilder();
+
+sb.append("x");
+
+sb.insert(index, "x");
+
+sb.delete(start, end);
+
+sb.deleteCharAt(index);
+
+sb.setCharAt(index, 'x');
+
+sb.reverse();
+
+sb.length();
+
+sb.charAt(i);
+
+sb.toString();
+
+⭐ ARRAY
+arr.length
+
+Arrays.sort(arr)
+
+Arrays.fill(arr, value)
+
+Arrays.copyOf(arr, newLength)
+
+Arrays.copyOfRange(arr, start, end)
+
+Arrays.equals(a, b)
+
+Arrays.toString(arr)
+
+Arrays.binarySearch(arr, key)
+
+2D Array
+arr.length        // rows
+
+arr[i].length     // columns
+
+⭐ ARRAYLIST / LIST
+List<Integer> list = new ArrayList<>();
+
+list.add(x)
+
+list.add(index, x)
+
+list.get(index)
+
+list.set(index, value)
+
+list.remove(index)
+
+list.remove(Integer.valueOf(x))
+
+list.contains(x)
+
+list.indexOf(x)
+
+list.lastIndexOf(x)
+
+list.size()
+
+list.isEmpty()
+
+list.clear()
+
+list.toArray()
+
+List ↔ sorting
+Collections.sort(list)
+
+Collections.sort(list, Comparator.reverseOrder())
+
+list.sort(Comparator.naturalOrder())
+
+list.sort(Comparator.reverseOrder())
+
+⭐ COLLECTIONS
+Collections.sort(list)
+
+Collections.reverse(list)
+
+Collections.shuffle(list)
+
+Collections.max(list)
+
+Collections.min(list)
+
+Collections.frequency(list, x)
+
+Collections.binarySearch(list, x)
+
+Collections.swap(list, i, j)
+
+Collections.fill(list, x)
+
+⭐ HASHSET
+Set<Integer> set = new HashSet<>();
+
+set.add(x)
+
+set.remove(x)
+
+set.contains(x)
+
+set.size()
+
+set.isEmpty()
+
+set.clear()
+
+Set operations ⭐
+set.addAll(other)
+
+set.removeAll(other)
+
+set.retainAll(other)
+
+set.containsAll(other)
+
+addAll      → UNION
+retainAll   → INTERSECTION
+removeAll   → DIFFERENCE
+⭐ HASHMAP
+Map<Integer, Integer> map = new HashMap<>();
+
+map.put(key, value)
+
+map.get(key)
+
+map.getOrDefault(key, 0)
+
+map.containsKey(key)
+
+map.containsValue(value)
+
+map.remove(key)
+
+map.size()
+
+map.isEmpty()
+
+map.clear()
+
+⭐ Frequency pattern
+map.put(x, map.getOrDefault(x, 0) + 1);
+
+Update
+map.put(key, map.get(key) + 1);
+
+Safe update
+map.put(key, map.getOrDefault(key, 0) + 1);
+
+Important Map functions
+map.putIfAbsent(key, value)
+
+map.replace(key, value)
+
+map.replaceAll((k, v) -> newValue)
+
+map.computeIfAbsent(key, k -> new ArrayList<>())
+
+map.computeIfPresent(key, (k, v) -> newValue)
+
+⭐ MAP LOOPING
+for (Map.Entry<Integer, Integer> e : map.entrySet()) {
+    e.getKey();
+    e.getValue();
+}
+
+for (Integer key : map.keySet()) {
+    map.get(key);
+}
+
+for (Integer value : map.values()) {
+}
+
+map.forEach((key, value) -> {
+});
+
+⭐ QUEUE
+Queue<Integer> q = new LinkedList<>();
+
+q.offer(x)
+
+q.poll()
+
+q.peek()
+
+q.isEmpty()
+
+q.size()
+
+Remember
+offer → INSERT
+poll  → REMOVE + RETURN
+peek  → RETURN
+⭐ DEQUE
+Deque<Integer> dq = new ArrayDeque<>();
+
+dq.addFirst(x)
+dq.addLast(x)
+
+dq.offerFirst(x)
+dq.offerLast(x)
+
+dq.removeFirst()
+dq.removeLast()
+
+dq.pollFirst()
+dq.pollLast()
+
+dq.peekFirst()
+dq.peekLast()
+
+⭐ STACK
+Prefer:
+
+Deque<Integer> stack = new ArrayDeque<>();
+
+stack.push(x)
+
+stack.pop()
+
+stack.peek()
+
+stack.isEmpty()
+
+Remember
+push → INSERT
+pop  → REMOVE + RETURN
+peek → RETURN
+⭐ PRIORITY QUEUE / HEAP
+Min Heap
+PriorityQueue<Integer> pq = new PriorityQueue<>();
+
+pq.offer(x)
+
+pq.poll()
+
+pq.peek()
+
+pq.size()
+
+pq.isEmpty()
+
+Max Heap
+PriorityQueue<Integer> pq =
+    new PriorityQueue<>(Comparator.reverseOrder());
+
+Object
+PriorityQueue<Employee> pq =
+    new PriorityQueue<>(
+        Comparator.comparing(Employee::getSalary)
+    );
+
+Remember
+peek → smallest/largest
+poll → remove smallest/largest
+offer → insert
+⭐ CHARACTER
+Character.isLetter(c)
+
+Character.isDigit(c)
+
+Character.isLetterOrDigit(c)
+
+Character.isWhitespace(c)
+
+Character.isUpperCase(c)
+
+Character.isLowerCase(c)
+
+Character.toUpperCase(c)
+
+Character.toLowerCase(c)
+
+⭐ MATH
+Math.max(a, b)
+
+Math.min(a, b)
+
+Math.abs(x)
+
+Math.pow(a, b)
+
+Math.sqrt(x)
+
+Math.ceil(x)
+
+Math.floor(x)
+
+Math.round(x)
+
+Math.random()
+
+Integer limits
+Integer.MAX_VALUE
+
+Integer.MIN_VALUE
+
+Long limits
+Long.MAX_VALUE
+
+Long.MIN_VALUE
+
+⭐ CONVERSION
+String → int
+Integer.parseInt("123")
+
+String → long
+Long.parseLong("123")
+
+int → String
+String.valueOf(123)
+
+Integer.toString(123)
+
+char → int
+c - '0'
+
+int → char
+(char) ('0' + x)
+
+⭐ SORTING / COMPARATOR
+Numbers ascending
+Arrays.sort(arr)
+
+list.sort(Comparator.naturalOrder())
+
+Descending
+list.sort(Comparator.reverseOrder())
+
+Object
+list.sort(
+    Comparator.comparing(Employee::getSalary)
+);
+
+Descending
+list.sort(
+    Comparator.comparing(Employee::getSalary).reversed()
+);
+
+Multiple fields
+list.sort(
+    Comparator.comparing(Employee::getDepartment)
+        .thenComparing(Employee::getSalary)
+);
+
+⭐ LOOP SHORTCUTS
+Array
+for (int i = 0; i < arr.length; i++) {
+}
+
+List
+for (int i = 0; i < list.size(); i++) {
+}
+
+Enhanced
+for (int x : arr) {
+}
+
+for (int x : list) {
+}
+
+Reverse
+for (int i = arr.length - 1; i >= 0; i--) {
+}
+
+⭐ SWAP
+int temp = arr[i];
+arr[i] = arr[j];
+arr[j] = temp;
+
+⭐ COMMON ARRAY PATTERNS
+Initialize maximum
+int max = Integer.MIN_VALUE;
+
+Initialize minimum
+int min = Integer.MAX_VALUE;
+
+Update max
+max = Math.max(max, x);
+
+Update min
+min = Math.min(min, x);
+
+Running sum
+sum += x;
+
+Frequency
+freq.put(x, freq.getOrDefault(x, 0) + 1);
+
+⭐ SUBSTRING / TWO POINTER BASICS
+int left = 0;
+int right = s.length() - 1;
+
+while (left < right) {
+    // ...
+    left++;
+    right--;
+}
+
+Array
+int left = 0;
+int right = arr.length - 1;
+
+⭐ BINARY SEARCH
+Arrays.binarySearch(arr, target)
+Manual:
+
+int left = 0;
+int right = arr.length - 1;
+
+while (left <= right) {
+    int mid = left + (right - left) / 2;
+
+    if (arr[mid] == target) {
+        return mid;
+    } else if (arr[mid] < target) {
+        left = mid + 1;
+    } else {
+        right = mid - 1;
+    }
+}
+⭐ COMMON JAVA 8 OPTIONAL
+Optional.of(value)
+
+Optional.ofNullable(value)
+
+Optional.empty()
+
+optional.isPresent()
+
+optional.get()
+
+optional.orElse(defaultValue)
+
+optional.orElseGet(() -> defaultValue)
+
+optional.orElseThrow(...)
+Most useful:
+
+.findFirst().orElse(null)
+.max(...).orElse(null)
+
+.min(...).orElse(null)
+
+⭐ MOST IMPORTANT Collections / Arrays / Map / List
+Arrays
+├── sort()
+├── toString()
+├── binarySearch()
+├── equals()
+├── fill()
+└── copyOf()
+
+Collections
+├── sort()
+├── reverse()
+├── max()
+├── min()
+├── frequency()
+├── binarySearch()
+└── swap()
+
+List
+├── add()
+├── get()
+├── set()
+├── remove()
+├── contains()
+├── indexOf()
+├── size()
+└── isEmpty()
+
+Set
+├── add()
+├── remove()
+├── contains()
+├── addAll()
+├── retainAll()
+└── removeAll()
+
+Map
+├── put()
+├── get()
+├── getOrDefault()
+├── putIfAbsent()
+├── containsKey()
+├── remove()
+├── keySet()
+├── values()
+├── entrySet()
+└── forEach()
+
+Queue
+├── offer()
+├── poll()
+└── peek()
+
+Stack / Deque
+├── push()
+├── pop()
+└── peek()
+
+PriorityQueue
+├── offer()
+├── poll()
+└── peek()
+
+String
+├── length()
+├── charAt()
+├── substring()
+├── indexOf()
+├── contains()
+├── equals()
+├── split()
+├── replace()
+├── toCharArray()
+└── toUpperCase()/toLowerCase()
+
+StringBuilder
+├── append()
+├── delete()
+├── insert()
+├── reverse()
+├── charAt()
+└── toString()
+⭐⭐⭐ THE ONES TO MEMORIZE FIRST
+map.getOrDefault(x, 0)
+
+map.put(x, value)
+
+map.containsKey(x)
+
+map.entrySet()
+
+list.add(x)
+
+list.get(i)
+
+list.set(i, x)
+
+list.remove(i)
+
+list.contains(x)
+
+list.size()
+
+set.add(x)
+
+set.contains(x)
+
+set.remove(x)
+
+q.offer(x)
+q.poll()
+q.peek()
+
+stack.push(x)
+stack.pop()
+stack.peek()
+
+pq.offer(x)
+pq.poll()
+pq.peek()
+
+s.length()
+s.charAt(i)
+s.substring(a, b)
+s.indexOf(x)
+s.contains(x)
+s.equals(x)
+s.split(" ")
+s.toCharArray()
+
+sb.append(x)
+sb.reverse()
+sb.toString()
+
+Arrays.sort(arr)
+
+Collections.sort(list)
+
+Math.max(a,b)
+Math.min(a,b)
+Math.abs(x)
+
+Integer.MAX_VALUE
+Integer.MIN_VALUE
+
+Character.isDigit(c)
+Character.isLetter(c)
+
+Integer.parseInt(s)
+String.valueOf(x)
+c - '0'
+
+same for buiding the sql queries

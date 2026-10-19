@@ -5527,3 +5527,1202 @@ Main difference
 → class can extend only ONE class
 → class can implement MULTIPLE interfaces
 This style of "WHY / WHEN / WHAT IF NOT?" questioning is especially useful for Java interviews.
+
+<!-- ===== Owner addition: Java 8 Streams coding (added 20-10-2026). Source file: reference/reference.md ===== -->
+
+
+i want to solve any kind of the java 8 stream problems -> begineer code writing 
+
+simpel aneasy rmebering and solving the problems -> i eman i need to eaily writre the code of any promblem mostlly 
+
+So tricks and short cuts to rmeber and so o to run in person interview -> i have max 1 hour to learn so on
+Yes. For a Java 8 Streams coding interview, you don't need to memorize 100 programs. You need to memorize a small set of stream patterns and combine them.
+
+Java 8 Streams — 1-Hour Coding Cheat Sheet
+1. The Master Pattern
+Almost every beginner/intermediate Stream problem is:
+
+collection.stream()
+    .filter(...)
+    .map(...)
+    .sorted(...)
+    .collect(...);
+
+Remember:
+
+FILTER → TRANSFORM → SORT → COLLECT
+
+Not every problem needs all four.
+
+2. First Decision: What does the question want?
+Question says	Think
+select/find elements	filter()
+change/convert elements	map()
+sort	sorted()
+remove duplicates	distinct()
+count	count()
+first/any element	findFirst() / findAny()
+check condition	anyMatch() / allMatch() / noneMatch()
+combine values	reduce()
+create List/Set/Map	collect()
+group data	groupingBy()
+frequency/count	groupingBy(..., counting())
+max/min	max() / min()
+join strings	joining()
+3. FILTER — "Which elements?"
+Basic
+list.stream()
+    .filter(x -> x > 10)
+    .collect(Collectors.toList());
+
+Common conditions
+.filter(x -> x % 2 == 0)       // even
+.filter(x -> x % 2 != 0)       // odd
+.filter(x -> x > 50)           // greater
+.filter(x -> x.equals("Java")) // equals
+.filter(x -> x.startsWith("A"))
+.filter(x -> x.length() > 5)
+
+Memory trick
+FILTER = KEEP only what matches
+
+4. MAP — "Change each element"
+list.stream()
+    .map(x -> x * 2)
+    .collect(Collectors.toList());
+
+String example:
+
+names.stream()
+    .map(String::toUpperCase)
+    .collect(Collectors.toList());
+
+Object → field:
+
+employees.stream()
+    .map(Employee::getName)
+    .collect(Collectors.toList());
+
+Memory trick
+map = one input → one changed output
+
+5. FILTER + MAP = Most Common Pattern
+Question:
+
+Get names of employees whose salary > 50,000.
+
+employees.stream()
+    .filter(e -> e.getSalary() > 50000)
+    .map(Employee::getName)
+    .collect(Collectors.toList());
+
+Think:
+
+Employee
+   ↓
+FILTER salary
+   ↓
+Employee
+   ↓
+MAP name
+   ↓
+String
+6. SORTING
+Ascending
+list.stream()
+    .sorted()
+    .collect(Collectors.toList());
+
+Descending
+list.stream()
+    .sorted(Comparator.reverseOrder())
+    .collect(Collectors.toList());
+
+Object sorting
+employees.stream()
+    .sorted(Comparator.comparing(Employee::getSalary))
+    .collect(Collectors.toList());
+
+Descending:
+
+employees.stream()
+    .sorted(Comparator.comparing(Employee::getSalary).reversed())
+    .collect(Collectors.toList());
+
+Multiple fields
+.sorted(Comparator.comparing(Employee::getDepartment)
+        .thenComparing(Employee::getSalary))
+
+Remember
+Comparator.comparing(field)
+.reversed() = descending
+
+7. DISTINCT
+Remove duplicates:
+
+list.stream()
+    .distinct()
+    .collect(Collectors.toList());
+
+Example:
+
+Arrays.asList(1, 2, 2, 3, 3, 4)
+→
+
+1 2 3 4
+8. COUNT
+long count = list.stream()
+    .filter(x -> x > 10)
+    .count();
+Think:
+
+If answer is a number of elements → count()
+
+9. FIND FIRST
+Optional<Integer> result =
+    list.stream()
+        .filter(x -> x > 50)
+        .findFirst();
+Usually interview code:
+
+list.stream()
+    .filter(x -> x > 50)
+    .findFirst()
+    .orElse(null);
+
+10. ANY / ALL / NONE
+These are extremely easy points in interviews.
+
+Any
+Does at least one satisfy condition?
+
+list.stream()
+    .anyMatch(x -> x > 100);
+
+All
+list.stream()
+    .allMatch(x -> x > 0);
+
+None
+list.stream()
+    .noneMatch(x -> x < 0);
+
+Remember
+ANY  → at least one
+ALL  → everyone
+NONE → nobody
+11. MAX / MIN
+Maximum
+int max = list.stream()
+    .max(Integer::compareTo)
+    .orElse(0);
+
+Minimum
+int min = list.stream()
+    .min(Integer::compareTo)
+    .orElse(0);
+
+For objects:
+
+Employee highest =
+    employees.stream()
+        .max(Comparator.comparing(Employee::getSalary))
+        .orElse(null);
+
+Shortcut
+For primitive numbers:
+
+int max = list.stream()
+    .mapToInt(Integer::intValue)
+    .max()
+    .orElse(0);
+
+12. SUM / AVERAGE
+Sum
+int sum = list.stream()
+    .mapToInt(Integer::intValue)
+    .sum();
+Average
+double avg = list.stream()
+    .mapToInt(Integer::intValue)
+    .average()
+    .orElse(0);
+Object
+double avg =
+    employees.stream()
+        .mapToInt(Employee::getSalary)
+        .average()
+        .orElse(0);
+Remember:
+
+mapToInt → numeric operations
+
+mapToInt()
+   ↓
+sum()
+average()
+max()
+min()
+13. REDUCE — "Combine everything"
+This is the one pattern to memorize:
+
+.reduce(0, (a, b) -> a + b);
+
+Sum:
+
+int sum = list.stream()
+    .reduce(0, (a, b) -> a + b);
+
+Product:
+
+int product = list.stream()
+    .reduce(1, (a, b) -> a * b);
+
+Maximum:
+
+int max = list.stream()
+    .reduce(Integer.MIN_VALUE, Integer::max);
+Memory trick
+reduce = many → one
+
+14. COLLECT TO LIST / SET
+List
+.collect(Collectors.toList());
+Set
+.collect(Collectors.toSet());
+LinkedHashSet
+.collect(Collectors.toCollection(LinkedHashSet::new));
+For most interviews:
+
+Collectors.toList()
+Collectors.toSet()
+are enough.
+
+15. GROUPING BY — ⭐ VERY IMPORTANT
+This is where many interview questions come from.
+
+Question:
+
+Group employees by department.
+
+Map<String, List<Employee>> result =
+    employees.stream()
+        .collect(Collectors.groupingBy(Employee::getDepartment));
+Think:
+
+GROUPING BY = create Map<Key, List<Value>>
+
+department
+     ↓
+Map
+     ↓
+IT → [employees]
+HR → [employees]
+Sales → [employees]
+16. GROUP + COUNT — ⭐
+Question:
+
+Count employees in each department.
+
+Map<String, Long> result =
+    employees.stream()
+        .collect(Collectors.groupingBy(
+            Employee::getDepartment,
+            Collectors.counting()
+        ));
+Memory:
+
+groupingBy(
+    KEY,
+    counting()
+)
+17. GROUP + SUM
+Question:
+
+Total salary by department.
+
+Map<String, Integer> result =
+    employees.stream()
+        .collect(Collectors.groupingBy(
+            Employee::getDepartment,
+            Collectors.summingInt(Employee::getSalary)
+        ));
+Pattern:
+
+groupingBy(KEY, summingInt(FIELD))
+18. GROUP + AVERAGE
+Map<String, Double> result =
+    employees.stream()
+        .collect(Collectors.groupingBy(
+            Employee::getDepartment,
+            Collectors.averagingInt(Employee::getSalary)
+        ));
+
+19. PARTITIONING BY — ⭐ EASY
+Question:
+
+Separate employees into salary > 50K and salary <= 50K.
+
+Map<Boolean, List<Employee>> result =
+    employees.stream()
+        .collect(Collectors.partitioningBy(
+            e -> e.getSalary() > 50000
+        ));
+
+Think:
+
+partitioningBy = TRUE / FALSE groups
+
+20. STRING JOINING
+Question:
+
+Convert names into comma-separated string.
+
+String result =
+    names.stream()
+        .collect(Collectors.joining(", "));
+Output:
+
+John, Alex, Sam
+21. FLATMAP — ⭐ Know This Pattern
+Question:
+
+List<List<Integer>>
+Convert into:
+
+List<Integer>
+Use:
+
+list.stream()
+    .flatMap(List::stream)
+    .collect(Collectors.toList());
+Think:
+
+map = one level
+flatMap = flatten nested data
+
+Example:
+
+[[1,2], [3,4], [5,6]]
+          ↓
+[1,2,3,4,5,6]
+22. FREQUENCY / DUPLICATES — ⭐ VERY COMMON
+Question:
+
+Find frequency of each number.
+
+Map<Integer, Long> frequency =
+    list.stream()
+        .collect(Collectors.groupingBy(
+            x -> x,
+            Collectors.counting()
+        ));
+
+Shortcut using Function.identity():
+
+Map<Integer, Long> frequency =
+    list.stream()
+        .collect(Collectors.groupingBy(
+            Function.identity(),
+            Collectors.counting()
+        ));
+
+Remember:
+
+frequency = groupingBy + counting
+
+23. DUPLICATE ELEMENTS
+Set<Integer> duplicates =
+    list.stream()
+        .collect(Collectors.groupingBy(
+            Function.identity(),
+            Collectors.counting()
+        ))
+        .entrySet()
+        .stream()
+        .filter(e -> e.getValue() > 1)
+        .map(Map.Entry::getKey)
+        .collect(Collectors.toSet());
+
+Don't panic.
+
+Just remember the pipeline:
+
+LIST
+ ↓
+GROUP BY VALUE
+ ↓
+COUNT
+ ↓
+FILTER count > 1
+ ↓
+GET KEY
+24. SECOND HIGHEST NUMBER — ⭐
+Very common interview problem.
+
+int secondHighest =
+    list.stream()
+        .distinct()
+        .sorted(Comparator.reverseOrder())
+        .skip(1)
+        .findFirst()
+        .orElse(0);
+Memorize:
+
+distinct
+→ sorted descending
+→ skip(1)
+→ findFirst
+Third highest?
+.skip(2)
+Nth highest:
+
+.skip(n - 1)
+25. TOP N
+Top 3:
+
+list.stream()
+    .sorted(Comparator.reverseOrder())
+    .limit(3)
+    .collect(Collectors.toList());
+
+Bottom 3:
+
+list.stream()
+    .sorted()
+    .limit(3)
+    .collect(Collectors.toList());
+
+Remember:
+
+skip → ignore
+limit → take
+26. EMPLOYEE QUESTIONS — MEMORIZE THESE
+Highest salary
+employees.stream()
+    .max(Comparator.comparing(Employee::getSalary))
+    .orElse(null);
+
+Lowest salary
+employees.stream()
+    .min(Comparator.comparing(Employee::getSalary))
+    .orElse(null);
+
+Employees salary > 50K
+employees.stream()
+    .filter(e -> e.getSalary() > 50000)
+    .collect(Collectors.toList());
+
+Names of employees salary > 50K
+employees.stream()
+    .filter(e -> e.getSalary() > 50000)
+    .map(Employee::getName)
+    .collect(Collectors.toList());
+
+Sort employees by salary
+employees.stream()
+    .sorted(Comparator.comparing(Employee::getSalary))
+    .collect(Collectors.toList());
+
+Sort descending
+.sorted(Comparator.comparing(Employee::getSalary).reversed())
+
+Group by department
+.collect(Collectors.groupingBy(Employee::getDepartment));
+
+Count by department
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.counting()
+));
+
+Highest salary in each department
+Map<String, Optional<Employee>> result =
+    employees.stream()
+        .collect(Collectors.groupingBy(
+            Employee::getDepartment,
+            Collectors.maxBy(
+                Comparator.comparing(Employee::getSalary)
+            )
+        ));
+
+27. STRING STREAM QUESTIONS
+Convert to uppercase
+names.stream()
+    .map(String::toUpperCase)
+    .collect(Collectors.toList());
+
+Filter names starting with A
+names.stream()
+    .filter(s -> s.startsWith("A"))
+    .collect(Collectors.toList());
+
+Find longest string
+names.stream()
+    .max(Comparator.comparing(String::length))
+    .orElse("");
+
+Sort by length
+names.stream()
+    .sorted(Comparator.comparing(String::length))
+    .collect(Collectors.toList());
+
+Count strings with length > 5
+long count = names.stream()
+    .filter(s -> s.length() > 5)
+    .count();
+
+Join strings
+String result = names.stream()
+    .collect(Collectors.joining(", "));
+
+28. NUMBER STREAM QUESTIONS
+Even numbers
+list.stream()
+    .filter(x -> x % 2 == 0)
+    .collect(Collectors.toList());
+
+Odd numbers
+.filter(x -> x % 2 != 0)
+
+Square every number
+.map(x -> x * x)
+
+Sum
+.mapToInt(Integer::intValue)
+.sum();
+
+Average
+.mapToInt(Integer::intValue)
+.average()
+.orElse(0);
+
+Remove duplicates
+.distinct()
+
+First 5
+.limit(5)
+
+Skip first 5
+.skip(5)
+
+29. THE INTERVIEW "TRANSLATOR"
+When interviewer says:
+
+"Get..."
+Usually:
+
+filter()
+
+"Convert..."
+map()
+
+"For each..."
+map()
+
+or forEach() if you only need side effects.
+
+"Unique..."
+distinct()
+
+"Sorted..."
+sorted()
+
+"Highest / Lowest..."
+max()
+min()
+
+"Top N..."
+sorted()
+limit()
+
+"Nth highest..."
+distinct()
+sorted(reverseOrder())
+skip(n - 1)
+findFirst()
+
+"Count..."
+count()
+
+"How many of each..."
+groupingBy()
+counting()
+
+"Group by..."
+groupingBy()
+
+"Separate into two groups..."
+partitioningBy()
+
+"Total..."
+mapToInt().sum()
+
+"Average..."
+mapToInt().average()
+
+"Combine into one value..."
+reduce()
+
+30. MOST IMPORTANT: METHOD REFERENCE SHORTCUTS
+Instead of:
+
+.map(x -> x.getName())
+
+write:
+
+.map(Employee::getName)
+
+Instead of:
+
+.map(x -> x.toUpperCase())
+
+write:
+
+.map(String::toUpperCase)
+
+Instead of:
+
+.filter(x -> x.equals("Java"))
+
+you can often use:
+
+.filter("Java"::equals)
+
+Know these:
+
+Employee::getName
+Employee::getSalary
+String::toUpperCase
+String::length
+Integer::intValue
+Function.identity()
+
+31. The 10 Patterns You Actually Need
+If you have only 1 hour, memorize these:
+
+// 1. FILTER
+.stream().filter(x -> condition).collect(toList());
+
+// 2. MAP
+.stream().map(x -> transformation).collect(toList());
+
+// 3. FILTER + MAP
+.stream()
+.filter(...)
+.map(...)
+.collect(toList());
+
+// 4. SORT
+.stream().sorted().collect(toList());
+
+// 5. SORT OBJECT
+.stream()
+.sorted(Comparator.comparing(Employee::getSalary))
+.collect(toList());
+
+// 6. MAX/MIN
+.stream().max(Comparator.comparing(...)).orElse(null);
+
+// 7. COUNT
+.stream().filter(...).count();
+
+// 8. GROUP
+.stream().collect(groupingBy(Employee::getDepartment));
+
+// 9. GROUP + COUNT
+.stream().collect(groupingBy(
+    Employee::getDepartment,
+    counting()
+));
+
+// 10. NTH HIGHEST
+.stream()
+.distinct()
+.sorted(reverseOrder())
+.skip(n - 1)
+.findFirst();
+
+32. Your Mental Algorithm During Interview
+Don't try to remember the entire code.
+
+First identify the operation.
+
+What does interviewer want?
+          ↓
+────────────────────────────
+SELECT?       → filter
+CHANGE?       → map
+SORT?         → sorted
+UNIQUE?       → distinct
+COUNT?        → count
+MAX/MIN?      → max/min
+GROUP?        → groupingBy
+FREQUENCY?    → groupingBy + counting
+SUM?          → mapToInt + sum
+AVERAGE?      → mapToInt + average
+TOP N?        → sorted + limit
+NTH?          → sorted + skip + findFirst
+COMBINE?      → reduce
+NESTED LIST?  → flatMap
+TRUE/FALSE?   → partitioningBy
+Then build:
+
+SOURCE
+ ↓
+FILTER
+ ↓
+MAP
+ ↓
+SORT
+ ↓
+COLLECT
+Only use the steps you need.
+
+33. One Golden Rule
+If you get a completely new Stream problem in an interview, don't freeze.
+
+Translate the English sentence:
+
+"Give me names of employees from IT earning above 60K, sorted by salary descending."
+
+Into:
+
+names       → map
+IT          → filter
+salary      → filter
+sorted      → sorted
+descending  → reversed
+list        → collect
+Then code:
+
+employees.stream()
+    .filter(e -> e.getDepartment().equals("IT"))
+    .filter(e -> e.getSalary() > 60000)
+    .sorted(Comparator.comparing(Employee::getSalary).reversed())
+    .map(Employee::getName)
+    .collect(Collectors.toList());
+
+That's the core skill. Don't memorize the final program; memorize the English → Stream operation translation.
+
+1-hour priority
+★★★★★ filter
+★★★★★ map
+★★★★★ sorted + Comparator
+★★★★★ collect
+★★★★★ groupingBy + counting
+★★★★★ max/min
+★★★★★ distinct
+★★★★★ limit/skip
+★★★★☆ mapToInt
+★★★★☆ reduce
+★★★★☆ flatMap
+★★★☆☆ partitioningBy
+If you know those patterns, you can construct most beginner Java 8 Stream interview coding questions from scratch rather than memorizing solutions.
+
+NOW GIVE THE FUNCTIONS AND ITS INSIDE FUNCTIONS OERWHATEVER VER COMPBIMNATIONS 
+
+MOST IKMPIRTATNT I NEED TO RMEEBER LITSING 
+
+FOR EXMAPLE 
+COLLECT(COLLECTORS.TOLIST)
+ALSO IMPIRTANT 
+COLLECT(COLLECTORS.GRUPINGBY(
+
+LAOS JOINING 
+
+ALSO SO ON 
+
+GIEV ME ALL EACH METHOD NAD ITS WAYS FOR WHT 
+
+ONLY IMPIRTATT ONES USEFULL LIST ONLY DIRECT CODES ONLY NOTING ELSE
+STREAM METHODS + IMPORTANT COMBINATIONS
+// FILTER
+.filter(x -> condition)
+
+// MAP
+.map(x -> transformation)
+
+// MAP → FIELD
+.map(Employee::getName)
+.map(Employee::getSalary)
+
+// SORT
+.sorted()
+
+// SORT DESC
+.sorted(Comparator.reverseOrder())
+
+// SORT BY FIELD
+.sorted(Comparator.comparing(Employee::getSalary))
+
+// SORT BY FIELD DESC
+.sorted(Comparator.comparing(Employee::getSalary).reversed())
+
+// DISTINCT
+.distinct()
+
+// LIMIT
+.limit(n)
+
+// SKIP
+.skip(n)
+
+// COUNT
+.count()
+
+// FIRST
+.findFirst()
+
+// ANY
+.anyMatch(x -> condition)
+
+// ALL
+.allMatch(x -> condition)
+
+// NONE
+.noneMatch(x -> condition)
+
+// MAX
+.max(Comparator.naturalOrder())
+
+// MIN
+.min(Comparator.naturalOrder())
+
+// MAX OBJECT
+.max(Comparator.comparing(Employee::getSalary))
+
+// MIN OBJECT
+.min(Comparator.comparing(Employee::getSalary))
+
+// OPTIONAL RESULT
+.findFirst().orElse(null)
+
+.max(...).orElse(null)
+.min(...).orElse(null)
+
+COLLECT — ⭐⭐⭐
+.collect(Collectors.toList())
+
+.collect(Collectors.toSet())
+
+.collect(Collectors.toCollection(LinkedHashSet::new))
+
+GROUPING BY
+.collect(Collectors.groupingBy(Employee::getDepartment))
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.toList()
+))
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.counting()
+))
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.summingInt(Employee::getSalary)
+))
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.averagingInt(Employee::getSalary)
+))
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.mapping(
+        Employee::getName,
+        Collectors.toList()
+    )
+))
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.maxBy(
+        Comparator.comparing(Employee::getSalary)
+    )
+))
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.minBy(
+        Comparator.comparing(Employee::getSalary)
+    )
+))
+
+PARTITIONING BY
+.collect(Collectors.partitioningBy(
+    x -> condition
+))
+
+.collect(Collectors.partitioningBy(
+    x -> condition,
+    Collectors.toList()
+))
+
+.collect(Collectors.partitioningBy(
+    x -> condition,
+    Collectors.counting()
+))
+
+JOINING — ⭐⭐⭐
+.collect(Collectors.joining())
+
+.collect(Collectors.joining(", "))
+
+.collect(Collectors.joining(", ", "[", "]"))
+
+COUNTING
+Collectors.counting()
+
+Most important combination:
+
+.collect(Collectors.groupingBy(
+    Function.identity(),
+    Collectors.counting()
+))
+
+SUMMING
+Collectors.summingInt(Employee::getSalary)
+
+Collectors.summingLong(Employee::getSalary)
+
+Collectors.summingDouble(Employee::getSalary)
+
+With grouping:
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.summingInt(Employee::getSalary)
+))
+
+AVERAGING
+Collectors.averagingInt(Employee::getSalary)
+
+Collectors.averagingLong(Employee::getSalary)
+
+Collectors.averagingDouble(Employee::getSalary)
+
+With grouping:
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.averagingInt(Employee::getSalary)
+))
+
+MAPPING INSIDE COLLECT
+.collect(Collectors.mapping(
+    Employee::getName,
+    Collectors.toList()
+))
+
+Grouping + mapping:
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.mapping(
+        Employee::getName,
+        Collectors.toList()
+    )
+))
+
+Grouping + mapping + joining:
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.mapping(
+        Employee::getName,
+        Collectors.joining(", ")
+    )
+))
+
+MAX / MIN INSIDE COLLECT
+.collect(Collectors.maxBy(
+    Comparator.naturalOrder()
+))
+
+.collect(Collectors.minBy(
+    Comparator.naturalOrder()
+))
+
+Grouping + max:
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.maxBy(
+        Comparator.comparing(Employee::getSalary)
+    )
+))
+
+Grouping + min:
+
+.collect(Collectors.groupingBy(
+    Employee::getDepartment,
+    Collectors.minBy(
+        Comparator.comparing(Employee::getSalary)
+    )
+))
+
+REDUCE — ⭐⭐⭐
+.reduce((a, b) -> a + b)
+
+.reduce(0, (a, b) -> a + b)
+
+.reduce(1, (a, b) -> a * b)
+
+.reduce(Integer::max)
+
+.reduce(Integer::min)
+
+MAPTOINT — ⭐⭐⭐
+.mapToInt(Integer::intValue)
+
+.mapToInt(Employee::getSalary)
+
+Then:
+
+.mapToInt(...).sum()
+
+.mapToInt(...).average()
+
+.mapToInt(...).max()
+
+.mapToInt(...).min()
+
+.mapToInt(...).count()
+
+TOP / NTH PATTERNS — ⭐⭐⭐
+.sorted(Comparator.reverseOrder())
+.limit(3)
+
+.distinct()
+.sorted(Comparator.reverseOrder())
+.skip(1)
+.findFirst()
+
+.distinct()
+.sorted(Comparator.reverseOrder())
+.skip(n - 1)
+.findFirst()
+
+MOST IMPORTANT COMBINATIONS
+.filter(...).collect(Collectors.toList())
+
+.filter(...).map(...).collect(Collectors.toList())
+
+.map(...).collect(Collectors.toList())
+
+.distinct().collect(Collectors.toList())
+
+.sorted().collect(Collectors.toList())
+
+.sorted(Comparator.reverseOrder())
+.collect(Collectors.toList())
+
+.filter(...).count()
+
+.filter(...).findFirst().orElse(null)
+
+.filter(...).anyMatch(...)
+
+.filter(...).allMatch(...)
+
+.filter(...).noneMatch(...)
+
+.max(Comparator.comparing(...)).orElse(null)
+
+.min(Comparator.comparing(...)).orElse(null)
+
+.mapToInt(...).sum()
+
+.mapToInt(...).average().orElse(0)
+
+.mapToInt(...).max().orElse(0)
+
+.mapToInt(...).min().orElse(0)
+
+.collect(Collectors.groupingBy(...))
+
+.collect(Collectors.groupingBy(..., Collectors.counting()))
+
+.collect(Collectors.groupingBy(..., Collectors.summingInt(...)))
+
+.collect(Collectors.groupingBy(..., Collectors.averagingInt(...)))
+
+.collect(Collectors.groupingBy(..., Collectors.mapping(..., Collectors.toList())))
+
+.collect(Collectors.groupingBy(..., Collectors.maxBy(...)))
+
+.collect(Collectors.partitioningBy(...))
+
+.collect(Collectors.joining(", "))
+
+.collect(Collectors.toSet())
+
+⭐ FINAL MEMORY LIST
+.filter()
+.map()
+.mapToInt()
+
+.sorted()
+.distinct()
+.limit()
+.skip()
+
+.count()
+.findFirst()
+.findAny()
+
+.anyMatch()
+.allMatch()
+.noneMatch()
+
+.max()
+.min()
+.reduce()
+
+.collect(
+    Collectors.toList()
+    Collectors.toSet()
+    Collectors.joining()
+    Collectors.counting()
+    Collectors.groupingBy()
+    Collectors.partitioningBy()
+    Collectors.mapping()
+    Collectors.summingInt()
+    Collectors.averagingInt()
+    Collectors.maxBy()
+    Collectors.minBy()
+)
+
+Comparator.comparing()
+.reversed()
+Function.identity()
+
+.orElse()
+FILTER      → choose
+MAP         → change
+MAPTOINT    → numbers
+SORTED      → order
+DISTINCT    → unique
+SKIP        → ignore
+LIMIT       → take
+COUNT       → how many
+MAX/MIN     → biggest/smallest
+REDUCE      → many → one
+
+COLLECT
+ ├── toList
+ ├── toSet
+ ├── joining
+ ├── groupingBy
+ │    ├── counting
+ │    ├── summingInt
+ │    ├── averagingInt
+ │    ├── mapping
+ │    ├── maxBy
+ │    └── minBy
+ └── partitioningBy
+the same way i want to remebr the normal java functions important for solving the problems so on

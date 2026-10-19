@@ -2263,3 +2263,674 @@ Know these if the job description mentions MySQL.
 - AUTO_INCREMENT and transaction rollback: Generated identifier values are not necessarily reused after a rollback.
 
 
+
+
+<!-- ===== Owner addition: SQL query building (added 20-10-2026). Source file: reference/reference.md ===== -->
+
+SQL QUERY BUILDING — ⭐ INTERVIEW MEMORY LIST
+1. MASTER ORDER ⭐⭐⭐
+SELECT
+FROM
+WHERE
+GROUP BY
+HAVING
+ORDER BY
+LIMIT;
+
+Remember:
+
+FROM
+ ↓
+WHERE
+ ↓
+GROUP BY
+ ↓
+HAVING
+ ↓
+SELECT
+ ↓
+ORDER BY
+ ↓
+LIMIT
+2. SELECT
+SELECT *
+FROM employees;
+
+SELECT name, salary
+FROM employees;
+
+DISTINCT
+SELECT DISTINCT department
+FROM employees;
+
+Alias
+SELECT salary AS employee_salary
+FROM employees;
+
+3. WHERE ⭐⭐⭐
+WHERE salary > 50000
+
+WHERE salary >= 50000
+
+WHERE salary = 50000
+
+WHERE salary <> 50000
+
+WHERE salary BETWEEN 40000 AND 80000
+
+WHERE department IN ('IT', 'HR')
+
+WHERE department NOT IN ('IT', 'HR')
+
+WHERE name LIKE 'A%'
+
+WHERE name LIKE '%A'
+
+WHERE name LIKE '%A%'
+
+WHERE name LIKE '_a%'
+
+NULL ⭐
+WHERE salary IS NULL
+
+WHERE salary IS NOT NULL
+
+❌ Never:
+
+WHERE salary = NULL
+
+4. AND / OR / NOT
+WHERE salary > 50000
+AND department = 'IT';
+
+WHERE department = 'IT'
+OR department = 'HR';
+
+WHERE NOT department = 'HR';
+
+Brackets ⭐
+WHERE department = 'IT'
+AND (salary > 50000 OR experience > 5);
+
+5. AGGREGATE FUNCTIONS ⭐⭐⭐
+COUNT(*)
+COUNT(column)
+COUNT(DISTINCT column)
+
+SUM(column)
+
+AVG(column)
+
+MIN(column)
+
+MAX(column)
+
+Examples:
+
+SELECT COUNT(*)
+FROM employees;
+
+SELECT AVG(salary)
+FROM employees;
+
+SELECT MAX(salary)
+FROM employees;
+SELECT MIN(salary)
+FROM employees;
+SELECT SUM(salary)
+FROM employees;
+6. GROUP BY ⭐⭐⭐
+Count per department
+SELECT department, COUNT(*)
+FROM employees
+GROUP BY department;
+
+Average salary per department
+SELECT department, AVG(salary)
+FROM employees
+GROUP BY department;
+
+Maximum salary per department
+SELECT department, MAX(salary)
+FROM employees
+GROUP BY department;
+
+Multiple columns
+SELECT department, city, COUNT(*)
+FROM employees
+GROUP BY department, city;
+
+7. HAVING ⭐⭐⭐
+Filter groups
+SELECT department, COUNT(*)
+FROM employees
+GROUP BY department
+HAVING COUNT(*) > 5;
+
+Average salary > 50K
+SELECT department, AVG(salary)
+FROM employees
+GROUP BY department
+HAVING AVG(salary) > 50000;
+
+⭐ WHERE vs HAVING
+WHERE  → filter ROWS
+HAVING → filter GROUPS
+8. ORDER BY ⭐⭐⭐
+ORDER BY salary ASC;
+ORDER BY salary DESC;
+Multiple
+ORDER BY department ASC, salary DESC;
+By alias
+SELECT salary AS s
+FROM employees
+ORDER BY s DESC;
+9. LIMIT
+LIMIT 5;
+
+Top 5
+ORDER BY salary DESC
+LIMIT 5;
+
+Pagination
+LIMIT 10 OFFSET 20;
+
+10. JOINS ⭐⭐⭐
+INNER JOIN
+SELECT *
+FROM employees e
+JOIN departments d
+ON e.department_id = d.id;
+
+LEFT JOIN
+SELECT *
+FROM employees e
+LEFT JOIN departments d
+ON e.department_id = d.id;
+
+RIGHT JOIN
+SELECT *
+FROM employees e
+RIGHT JOIN departments d
+ON e.department_id = d.id;
+FULL OUTER JOIN
+SELECT *
+FROM employees e
+FULL OUTER JOIN departments d
+ON e.department_id = d.id;
+11. JOIN + SELECT
+SELECT e.name, d.department_name
+FROM employees e
+JOIN departments d
+ON e.department_id = d.id;
+12. JOIN + WHERE
+SELECT e.name, e.salary
+FROM employees e
+JOIN departments d
+ON e.department_id = d.id
+WHERE d.department_name = 'IT';
+
+13. JOIN + GROUP BY ⭐⭐⭐
+SELECT d.department_name, COUNT(e.id)
+FROM departments d
+LEFT JOIN employees e
+ON e.department_id = d.id
+GROUP BY d.department_name;
+
+14. JOIN + GROUP BY + HAVING ⭐⭐⭐
+SELECT d.department_name, COUNT(e.id)
+FROM departments d
+JOIN employees e
+ON e.department_id = d.id
+GROUP BY d.department_name
+HAVING COUNT(e.id) > 5;
+
+15. CASE ⭐⭐⭐
+CASE
+    WHEN salary >= 100000 THEN 'HIGH'
+    WHEN salary >= 50000 THEN 'MEDIUM'
+    ELSE 'LOW'
+END
+
+In SELECT
+SELECT name,
+       CASE
+           WHEN salary >= 100000 THEN 'HIGH'
+           ELSE 'LOW'
+       END AS salary_level
+FROM employees;
+
+In ORDER BY
+ORDER BY
+    CASE
+        WHEN status = 'ACTIVE' THEN 1
+        ELSE 2
+    END;
+
+16. COALESCE ⭐⭐
+First non-null value:
+
+COALESCE(phone, email, 'N/A')
+
+Example:
+
+SELECT COALESCE(salary, 0)
+FROM employees;
+
+17. STRING FUNCTIONS
+UPPER(name)
+
+LOWER(name)
+
+LENGTH(name)
+
+TRIM(name)
+
+CONCAT(first_name, last_name)
+
+SUBSTRING(name, 1, 3)
+
+REPLACE(name, 'A', 'B')
+
+18. DATE FUNCTIONS
+Common:
+
+CURRENT_DATE
+CURRENT_TIMESTAMP
+YEAR(date)
+MONTH(date)
+DAY(date)
+
+DATEDIFF(date1, date2)
+
+DATE_ADD(date, INTERVAL 7 DAY)
+
+DATE_SUB(date, INTERVAL 7 DAY)
+
+Exact date-function syntax varies by database (MySQL/PostgreSQL/SQL Server).
+
+19. SUBQUERY ⭐⭐⭐
+Employees earning above average
+SELECT *
+FROM employees
+WHERE salary > (
+    SELECT AVG(salary)
+    FROM employees
+);
+
+Maximum salary
+SELECT *
+FROM employees
+WHERE salary = (
+    SELECT MAX(salary)
+    FROM employees
+);
+20. IN SUBQUERY
+SELECT *
+FROM employees
+WHERE department_id IN (
+    SELECT id
+    FROM departments
+    WHERE location = 'Delhi'
+);
+21. EXISTS ⭐⭐⭐
+SELECT *
+FROM employees e
+WHERE EXISTS (
+    SELECT 1
+    FROM departments d
+    WHERE d.id = e.department_id
+);
+
+NOT EXISTS
+SELECT *
+FROM employees e
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM departments d
+    WHERE d.id = e.department_id
+);
+
+Remember:
+
+EXISTS     → matching row exists
+NOT EXISTS → matching row doesn't exist
+22. CTE ⭐⭐⭐
+WITH high_salary AS (
+    SELECT *
+    FROM employees
+    WHERE salary > 50000
+)
+SELECT *
+FROM high_salary;
+
+Multiple CTE
+WITH a AS (
+    SELECT ...
+),
+b AS (
+    SELECT ...
+)
+SELECT ...
+FROM a
+JOIN b ON ...;
+
+23. UNION ⭐⭐
+SELECT name FROM employees
+UNION
+SELECT name FROM managers;
+Keep duplicates
+SELECT name FROM employees
+UNION ALL
+SELECT name FROM managers;
+
+UNION     → removes duplicates
+UNION ALL → keeps duplicates
+24. INSERT
+INSERT INTO employees (name, salary)
+VALUES ('John', 50000);
+
+Multiple:
+
+INSERT INTO employees (name, salary)
+VALUES
+('John', 50000),
+('Alex', 60000);
+
+25. UPDATE
+UPDATE employees
+SET salary = 60000
+WHERE id = 1;
+
+Multiple:
+
+UPDATE employees
+SET salary = salary * 1.10
+WHERE department = 'IT';
+
+26. DELETE
+DELETE FROM employees
+WHERE id = 1;
+
+⚠️ Without WHERE:
+
+DELETE FROM employees;
+
+deletes all rows.
+
+27. NTH HIGHEST ⭐⭐⭐
+2nd highest
+SELECT DISTINCT salary
+FROM employees
+ORDER BY salary DESC
+LIMIT 1 OFFSET 1;
+
+Nth highest
+SELECT DISTINCT salary
+FROM employees
+ORDER BY salary DESC
+LIMIT 1 OFFSET N-1;
+
+28. SECOND HIGHEST — SUBQUERY
+SELECT MAX(salary)
+FROM employees
+WHERE salary < (
+    SELECT MAX(salary)
+    FROM employees
+);
+
+29. DUPLICATES ⭐⭐⭐
+Find duplicate values
+SELECT email, COUNT(*)
+FROM users
+GROUP BY email
+HAVING COUNT(*) > 1;
+
+Duplicate rows based on multiple columns
+SELECT name, city, COUNT(*)
+FROM users
+GROUP BY name, city
+HAVING COUNT(*) > 1;
+
+30. REMOVE DUPLICATES FROM RESULT
+SELECT DISTINCT email
+FROM users;
+
+31. COUNT DISTINCT ⭐⭐⭐
+SELECT COUNT(DISTINCT user_id)
+FROM orders;
+
+Distinct cities per driver
+SELECT driver_id, COUNT(DISTINCT city)
+FROM rides
+GROUP BY driver_id;
+
+32. CONDITIONAL COUNT ⭐⭐⭐
+COUNT(
+    CASE
+        WHEN status = 'COMPLETED' THEN 1
+    END
+)
+
+Example:
+
+SELECT
+    COUNT(*) AS total,
+    COUNT(CASE WHEN status = 'COMPLETED' THEN 1 END) AS completed
+FROM orders;
+
+33. CONDITIONAL SUM
+SUM(
+    CASE
+        WHEN status = 'COMPLETED' THEN amount
+        ELSE 0
+    END
+)
+
+34. WINDOW FUNCTIONS ⭐⭐⭐
+ROW_NUMBER
+ROW_NUMBER() OVER (
+    ORDER BY salary DESC
+)
+
+RANK
+RANK() OVER (
+    ORDER BY salary DESC
+)
+
+DENSE_RANK
+DENSE_RANK() OVER (
+    ORDER BY salary DESC
+)
+
+Partition
+ROW_NUMBER() OVER (
+    PARTITION BY department
+    ORDER BY salary DESC
+)
+
+35. TOP EMPLOYEE PER DEPARTMENT ⭐⭐⭐
+WITH ranked AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY department_id
+               ORDER BY salary DESC
+           ) AS rn
+    FROM employees
+)
+SELECT *
+FROM ranked
+WHERE rn = 1;
+
+Top 3 per department
+WHERE rn <= 3;
+
+36. RANK vs DENSE_RANK vs ROW_NUMBER
+ROW_NUMBER → 1 2 3 4
+RANK       → 1 2 2 4
+DENSE_RANK → 1 2 2 3
+37. LAG / LEAD ⭐⭐
+Previous row:
+
+LAG(salary) OVER (
+    ORDER BY id
+)
+
+Next row:
+
+LEAD(salary) OVER (
+    ORDER BY id
+)
+
+38. RUNNING TOTAL
+SUM(amount) OVER (
+    ORDER BY date
+)
+
+39. WINDOW + PARTITION
+AVG(salary) OVER (
+    PARTITION BY department_id
+)
+
+40. IMPORTANT QUERY COMBINATIONS
+Filter → Sort → Limit
+SELECT *
+FROM employees
+WHERE salary > 50000
+ORDER BY salary DESC
+LIMIT 5;
+
+Group → Count → Filter group
+SELECT department, COUNT(*)
+FROM employees
+GROUP BY department
+HAVING COUNT(*) > 5;
+
+Group → Average → Sort
+SELECT department, AVG(salary) AS avg_salary
+FROM employees
+GROUP BY department
+ORDER BY avg_salary DESC;
+
+Join → Filter → Select
+SELECT e.name
+FROM employees e
+JOIN departments d
+ON e.department_id = d.id
+WHERE d.name = 'IT';
+Join → Group → Count
+SELECT d.name, COUNT(e.id)
+FROM departments d
+LEFT JOIN employees e
+ON e.department_id = d.id
+GROUP BY d.name;
+
+Distinct → Sort → Top N
+SELECT DISTINCT salary
+FROM employees
+ORDER BY salary DESC
+LIMIT 5;
+
+Group → Count → Sort → Top
+SELECT department, COUNT(*) AS total
+FROM employees
+GROUP BY department
+ORDER BY total DESC
+LIMIT 3;
+
+⭐⭐⭐ ENGLISH → SQL TRANSLATOR
+GET                    → SELECT
+FROM                   → FROM
+ONLY WHERE             → WHERE
+UNIQUE                 → DISTINCT
+CONDITION              → WHERE
+AND / OR               → AND / OR
+BETWEEN                → BETWEEN
+LIST                   → IN
+PATTERN                → LIKE
+EMPTY                  → IS NULL
+
+HOW MANY               → COUNT
+TOTAL                  → SUM
+AVERAGE                → AVG
+HIGHEST                → MAX
+LOWEST                 → MIN
+
+PER EACH               → GROUP BY
+FILTER GROUPS          → HAVING
+
+SORT                   → ORDER BY
+HIGHEST FIRST          → DESC
+LOWEST FIRST           → ASC
+
+TOP N                  → ORDER BY + LIMIT
+NTH HIGHEST            → ORDER BY DESC + OFFSET
+
+COMBINE TABLES         → JOIN
+MATCHING ONLY          → INNER JOIN
+KEEP LEFT              → LEFT JOIN
+KEEP RIGHT             → RIGHT JOIN
+
+MATCH EXISTS           → EXISTS
+NO MATCH               → NOT EXISTS
+
+REMOVE DUPLICATES      → DISTINCT
+DUPLICATE VALUES       → GROUP BY + HAVING COUNT(*) > 1
+
+CLASSIFY               → CASE
+REPLACE NULL           → COALESCE
+
+RANK                   → RANK()
+NUMBER EACH            → ROW_NUMBER()
+DENSE RANK             → DENSE_RANK()
+
+PREVIOUS ROW           → LAG()
+NEXT ROW               → LEAD()
+
+PER GROUP              → PARTITION BY
+⭐⭐⭐ THE CORE TO MEMORIZE
+SELECT
+FROM
+WHERE
+GROUP BY
+HAVING
+ORDER BY
+LIMIT
+
+COUNT
+SUM
+AVG
+MIN
+MAX
+
+DISTINCT
+LIKE
+IN
+BETWEEN
+IS NULL
+
+JOIN
+LEFT JOIN
+ON
+
+CASE
+COALESCE
+
+GROUP BY + COUNT
+GROUP BY + HAVING
+JOIN + GROUP BY
+JOIN + WHERE
+ORDER BY + LIMIT
+DISTINCT + ORDER BY + LIMIT
+
+SUBQUERY
+EXISTS
+CTE
+
+ROW_NUMBER()
+RANK()
+DENSE_RANK()
+PARTITION BY
+LAG()
+LEAD()
+If you can recall this list + the combinations, you can build most beginner SQL interview queries by translating the question from English → operation → query.
