@@ -2,7 +2,7 @@
 
 /** Topic line colour as a CSS value. Only 8 validated hues; later topics fall back to neutral. */
 export function topicColor(index: number): string {
-  return index < 8 ? `var(--t${index + 1})` : "var(--t-other)";
+  return index < 9 ? `var(--t${index + 1})` : "var(--t-other)";
 }
 
 export const LEVEL_LABEL = {

@@ -1,12 +1,13 @@
 import { evaluate } from "@mdx-js/mdx";
 import rehypeShikiFromHighlighter from "@shikijs/rehype/core";
 import type { MDXComponents } from "mdx/types";
-import type { ComponentProps, ReactNode } from "react";
+import { isValidElement, type ComponentProps, type ReactNode } from "react";
 import * as runtime from "react/jsx-runtime";
 import remarkGfm from "remark-gfm";
 import { createHighlighter, type Highlighter } from "shiki";
 import { CompareView, CompareLink } from "@/components/compare/CompareView";
 import { Analogy, Note } from "@/components/mdx/Callouts";
+import { CodeOutput, CodePractice } from "@/components/mdx/CodePractice";
 import { CodeTabs } from "@/components/mdx/CodeTabs";
 import { Mermaid } from "@/components/mdx/Mermaid";
 import { PreviewLink, type Preview } from "@/components/mdx/PreviewLink";
@@ -42,6 +43,8 @@ interface Ctx {
 interface MdNode {
   type: string;
   lang?: string | null;
+  meta?: string | null;
+  value?: string;
   children?: MdNode[];
   name?: string;
   attributes?: unknown[];
@@ -86,6 +89,35 @@ function remarkCodeTabs({ languages }: { languages: string[] }) {
     node.children = out;
   };
   return (tree: MdNode) => walk(tree);
+}
+
+/**
+ * remark plugin: a ```text output block is the expected output of the example above it. It
+ * becomes a <CodeOutput> panel (labelled "Output", no practice box) instead of a plain code block.
+ */
+function remarkCodeOutputs() {
+  const walk = (node: MdNode) => {
+    if (!node.children) return;
+    node.children = node.children.map((child) => {
+      if (child.type === "code" && child.meta?.trim() === "output") {
+        return {
+          type: "mdxJsxFlowElement",
+          name: "CodeOutput",
+          attributes: [{ type: "mdxJsxAttribute", name: "text", value: child.value ?? "" }],
+          children: [],
+        };
+      }
+      walk(child);
+      return child;
+    });
+  };
+  return (tree: MdNode) => walk(tree);
+}
+
+/** The highlighted language of a code block, from the class Shiki puts on its <code>. */
+function codeLanguage(children: ReactNode): string {
+  if (!isValidElement<{ className?: string }>(children)) return "text";
+  return /language-([a-z]+)/.exec(children.props.className ?? "")?.[1] ?? "text";
 }
 
 /** Glossary preview. No "Open" button when the term's concept is the page you are on. */
@@ -156,10 +188,11 @@ function components(ctx: Ctx): MDXComponents {
         <table {...props} />
       </div>
     ),
+    // Every code example gets a practice box under it, except plain text (diagrams, sample data).
     pre: (props: ComponentProps<"pre">) => (
-      <div className="scroll-box bg-surface-2/60" role="region" aria-label="Code example" tabIndex={0}>
+      <CodePractice practice={codeLanguage(props.children) !== "text"}>
         <pre {...props} />
-      </div>
+      </CodePractice>
     ),
     Term: ({ id, children }: { id: string; children: ReactNode }) => {
       const t = deck.termById.get(id);
@@ -176,6 +209,7 @@ function components(ctx: Ctx): MDXComponents {
       );
     },
     CodeTabs,
+    CodeOutput,
     Analogy,
     Note,
     Steps,
@@ -187,12 +221,15 @@ function components(ctx: Ctx): MDXComponents {
 async function renderMd(md: string, ctx: Ctx): Promise<ReactNode> {
   const { default: Content } = await evaluate(md, {
     ...runtime,
-    remarkPlugins: [remarkGfm, [remarkCodeTabs, { languages: ctx.deck.codeLanguages }], [remarkTerms, { matchers: ctx.matchers, seen: ctx.seen }]],
+    remarkPlugins: [
+      remarkGfm,
+      remarkCodeOutputs,
+      [remarkCodeTabs, { languages: ctx.deck.codeLanguages }], [remarkTerms, { matchers: ctx.matchers, seen: ctx.seen }]],
     rehypePlugins: [
       [
         rehypeShikiFromHighlighter,
         await getHighlighter(),
-        { themes: { light: "github-light", dark: "github-dark" }, defaultColor: false },
+        { themes: { light: "github-light", dark: "github-dark" }, defaultColor: false, addLanguageClass: true },
       ],
     ],
   });
