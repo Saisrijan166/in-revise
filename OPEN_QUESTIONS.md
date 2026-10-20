@@ -440,3 +440,42 @@ A new accent `pink` (AA-checked: 6.4:1 light, 10.4:1 dark) was added because all
 - Cookies without `SameSite` are treated as Lax in Chrome and Edge, not in Firefox or Safari; the content says to set it explicitly.
 - Splitting state and dispatch into two contexts: worded only as far as react.dev supports (dispatch is stable; readers re-render when the value changes).
 - Zustand's "very little code" rests on the project's GitHub README.
+
+## O. OS & Networking (new tech, 20-10-2026)
+
+The owner's `reference/reference.md` (OS and computer networks for SWE and system-design interviews) was renamed
+`reference/os-networking.md`. The owner asked for "only core important topics, not much in depth", so the tech has 40 concepts
+(the bottom of the 40–70 range) in 8 topics: OS Basics and Processes, Concurrency and Synchronization, Memory, I/O Files and IPC,
+Network Layers and Addressing, TCP and UDP, HTTP TLS and DNS, and Networks in System Design (ending with a "what happens when
+you open a URL" playbook). Every reference item is in `reference/os-networking.coverage.md` (294 keys: 263 mapped, 31 corrected,
+0 dropped as whole items; 121 additions).
+
+| Concepts | Comparisons | Terms | Checked / fixed / dropped | Baseline (20-10-2026) |
+|---|---|---|---|---|
+| 40 | 21 | 282 | ~1,480 / 31 / 1 | Generic OS with Linux as the example (latest stable kernel 7.3; version named only where a fact changed, e.g. EEVDF since 6.6, somaxconn 4096 since 5.4); TCP RFC 9293, HTTP RFC 9110–9114, QUIC RFC 9000, TLS 1.3 RFC 9846; Java 25 app code |
+
+Every Java block was compiled and run on JDK 21 (APIs also in Java 25); every output block is a real run, and outputs that vary
+(PIDs, race counts, client ports) are labelled "example run". Command outputs come from local runs or a throwaway container,
+never from the outside network. A new accent `slate` (AA: 7.6:1 light, 8.4:1 dark) was added because all 14 accents were in use.
+
+### O1. Decisions for the owner
+
+- **Size:** 40 concepts. If you want fewer, `context-switching` can fold into `threads` and `page-replacement` into
+  `paging-and-page-faults` (38).
+- **Overlap with other techs:** System Design, REST API and Java already cover load balancers, CDN, idempotency, HTTP methods
+  and status codes, Java threads and locks. This tech keeps them to the OS / network angle at interview depth, because each
+  tech is read on its own (no cross-tech links). Write-through / write-back caching was left to System Design.
+- **Sources outside the usual list:** the MIT xv6 book (authors' free textbook, like OSTEP) is the only source for "monolithic
+  vs microkernel" and "interrupt vs trap"; a Princeton COS 461 lecture backs hub vs switch behaviour; Cloudflare Learning and
+  iso.org blocked automated reads, so OSI facts cite ITU-T X.200 (same text as ISO/IEC 7498-1) and RFC 1122.
+- **OSI → TCP/IP mapping:** the content uses the usual "OSI 5–7 → Application"; RFC 1122 itself only says the application
+  layer merges OSI 6 and 7.
+
+### O2. Worded carefully (kept)
+
+- TLS 1.3 is now RFC 9846 (July 2026, obsoletes RFC 8446); TLS 1.0/1.1 are deprecated (RFC 8996).
+- The Idempotency-Key header is an expired IETF draft (-07), not a standard; BBR is still a draft; RFC 6928 (initial window 10) is Experimental.
+- HTTP/2 server push is off by default in Chrome 106+ and Firefox 132+; the "TLS effectively required by browsers for HTTP/2" row
+  was left out (no primary source; RFC 9113 still defines cleartext HTTP/2).
+- Latency ladder numbers come from Norvig's table and are marked approximate; the 63% fan-out figure is 1 − 0.99^100.
+- Dropped as true but over budget: Spring Boot's 30 s per shutdown phase default (the Interview Q names the property instead).
