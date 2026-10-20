@@ -1,0 +1,88 @@
+---
+id: image-security
+tech: docker
+title: Secure Images
+topic: security
+level: intermediate
+heat: 2
+hook: "Start from a trusted base, switch to a non-root USER, scan in CI, pin the base and rebuild often."
+points:
+  - { k: "USER", v: "run the app as a non-root user set in the Dockerfile" }
+  - { k: "Trusted base", v: "official or hardened images, as small as the app allows", kind: plus }
+  - { k: "Scan in CI", v: "Docker Scout or Trivy; fail the build on critical CVEs" }
+  - { k: "Pin by digest", v: "repeatable builds, but no automatic security fixes", kind: minus }
+  - { k: "Attestations", v: "SBOM lists contents; provenance records how it was built" }
+trap:
+  wrong: "Our image passed the scan last month, so it is secure."
+  right: "New CVEs appear every day. Rescan in CI and rebuild often so patched base layers come in."
+sayIt: "I use a small trusted base, run as a non-root USER, keep secrets out of layers, scan every build with Scout or Trivy, and pin the base by digest while rebuilding regularly."
+confusedWith: [tag-vs-digest]
+tags: [security, non-root, scanning, sbom]
+visual: flow
+sources:
+  - title: "Building best practices (Docker docs)"
+    url: "https://docs.docker.com/build/building/best-practices/"
+    verifiedOn: "2026-10-20"
+  - title: "Build attestations (Docker docs)"
+    url: "https://docs.docker.com/build/metadata/attestations/"
+    verifiedOn: "2026-10-20"
+  - title: "docker scout cves (Docker CLI reference)"
+    url: "https://docs.docker.com/reference/cli/docker/scout/cves/"
+    verifiedOn: "2026-10-20"
+  - title: "Running containers (Docker docs)"
+    url: "https://docs.docker.com/engine/containers/run/"
+    verifiedOn: "2026-10-20"
+  - title: "eclipse-temurin 25 JRE Dockerfile (Adoptium)"
+    url: "https://github.com/adoptium/containers/blob/main/25/jre/ubuntu/noble/Dockerfile"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Every package in an image can carry a known hole. If the app also runs as root, one exploit gives the attacker root in the container.
+
+## How it works
+
+<Steps label="Securing the payment-service image">
+  <Step title="Base">A trusted base with only what the app needs ([Smaller Images](card:image-size-optimization)).</Step>
+  <Step title="User">Create a user and set `USER`; `RUN`, `CMD` and `ENTRYPOINT` then run as it.</Step>
+  <Step title="Secrets">Nothing secret in `ENV`, `ARG` or copied files: see [secrets](card:env-and-secrets).</Step>
+  <Step title="Scan">`docker scout cves --exit-code` or `trivy image --exit-code 1` fails CI on findings.</Step>
+  <Step title="Attest">`docker buildx build --sbom=true --provenance=mode=max --push` attaches both to the image.</Step>
+</Steps>
+
+- Pin `FROM` by [digest](compare:tag-vs-digest); a bot or rebuild job moves it.
+- Run-time flags: [Locking Down a Running Container](card:container-runtime-security).
+
+## Example
+
+```dockerfile
+FROM eclipse-temurin:25-jre
+RUN groupadd --system app && useradd --system --gid app app
+WORKDIR /app
+COPY --chown=app:app target/payment-service.jar app.jar
+USER app
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| User inside a container | `root` (UID 0); `eclipse-temurin` sets no `USER` | Docker Engine 29 |
+| Provenance attestation | `mode=min` added by default; `--provenance=false` turns it off | BuildKit (Buildx) |
+
+## Interview Qs
+
+### Why should a container not run as root?
+
+A hacked app running as root gives the attacker root inside the container, one step from the host. A non-root `USER` limits the damage.
+
+### Should you pin the base image to a digest?
+
+Yes, for repeatable builds: a tag can move, a digest cannot. But patched bases stop arriving, so bump the digest and rebuild on a schedule.
+
+### What is an SBOM, and why attach it?
+
+A Software Bill of Materials lists every package in the image, so new CVEs can be matched without pulling it.

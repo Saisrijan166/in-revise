@@ -1,0 +1,86 @@
+---
+id: docker-in-ci-cd
+tech: docker
+title: Docker in CI/CD and Testing
+topic: playbook
+level: intermediate
+heat: 2
+hook: "Build the image once, test and scan it, push it with a unique tag, then deploy that same image everywhere."
+points:
+  - { k: "Build once", v: "the image CI tested is the image prod runs" }
+  - { k: "Tags", v: "git SHA plus version, e.g. payment-service:1.4.0; never reuse one" }
+  - { k: "Deploy by digest", v: "every stage pulls exactly the same bytes", kind: plus }
+  - { k: "CI cache", v: "fresh runners reuse layers from a registry cache" }
+  - { k: "Testcontainers", v: "integration tests against a real Postgres in a throwaway container" }
+trap:
+  wrong: "Rebuild the image for each environment: dev, staging and prod."
+  right: "Build once and promote the same image; only config such as env vars and secrets changes per environment."
+sayIt: "CI builds the image once, runs tests and a scan, tags it with the git SHA and version, and pushes it. Each environment deploys that same image by digest; only config changes."
+confusedWith: [tag-vs-digest]
+tags: [ci-cd, testing, registry]
+visual: flow
+sources:
+  - title: "The Twelve-Factor App: V. Build, release, run"
+    url: "https://12factor.net/build-release-run"
+    verifiedOn: "2026-10-20"
+  - title: "Cache storage backends: cache mode (Docker Build docs)"
+    url: "https://docs.docker.com/build/cache/backends/"
+    verifiedOn: "2026-10-20"
+  - title: "Testcontainers (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/testing/testcontainers.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+An image rebuilt per environment may not match the one that passed the tests. Building once and promoting it means production runs exactly what CI checked.
+
+## How it works
+
+<Steps label="One pipeline run for payment-service">
+  <Step title="Build">docker buildx build with a registry cache ([build cache](card:build-cache)).</Step>
+  <Step title="Test">Unit tests, then integration tests with Testcontainers.</Step>
+  <Step title="Scan">Fail on serious CVEs ([secure images](card:image-security)).</Step>
+  <Step title="Tag and push">Git SHA and 1.4.0 to the [registry](card:registries).</Step>
+  <Step title="Deploy">Staging, then prod, by digest; config comes from the environment ([config](card:env-and-secrets)).</Step>
+</Steps>
+
+- A release is never changed: a fix means a new build and a new tag.
+- CI that needs Docker: Docker-in-Docker needs `--privileged`; mounting the host's docker.sock hands over the host ([runtime security](card:container-runtime-security)).
+
+## Example
+
+```java
+@Testcontainers
+@SpringBootTest
+class PaymentRepositoryTest {
+    @Container @ServiceConnection
+    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18");
+    @Autowired PaymentRepository payments;
+    @Test
+    void savesUpiPayment() {
+        payments.save(new Payment("UPI", 500));     // a ₹500 UPI payment
+        assertEquals(1, payments.count());
+    }
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Registry cache export (`--cache-to`) | `mode=min`: only final-image layers; `mode=max` adds build stages | BuildKit (Docker Build docs) |
+
+## Interview Qs
+
+### How would you build and deploy a Docker image in CI/CD?
+
+Build once with a cache, run tests, scan, tag with the git SHA and version, push. Deploy that image by digest to staging, then prod, changing only config.
+
+### Why not deploy `latest` to production?
+
+It is a movable tag, not a version. Two hosts can pull different images and a rollback has no fixed target. Use a unique tag and the [digest](compare:tag-vs-digest).
+
+### How do you test code that needs a real database?
+
+Testcontainers starts Postgres in a throwaway container for the tests; Spring Boot's @ServiceConnection points the app at it. No shared test database, no mocks of SQL.

@@ -1,0 +1,90 @@
+---
+id: container-health-checks
+tech: docker
+title: Container Health Checks
+topic: runtime
+level: intermediate
+heat: 2
+hook: "A health check runs a command inside the container on a timer; Docker marks it starting, healthy or unhealthy."
+points:
+  - { k: "Running", v: "only means PID 1 is alive, not that the app answers" }
+  - { k: "Check result", v: "exit 0 = healthy, exit 1 = unhealthy; 2 is reserved" }
+  - { k: "Start period", v: "failures do not count while the app boots" }
+  - { k: "Plain Docker", v: "marks the container unhealthy; does not restart it", kind: minus }
+  - { k: "Swarm", v: "replaces a task that fails its health check", kind: plus }
+trap:
+  wrong: "Docker restarts an unhealthy container."
+  right: "docker run and Compose only mark it; restart policies react to exits. Swarm replaces it."
+sayIt: "A HEALTHCHECK runs a command, such as a call to /actuator/health, every interval. After 3 failures in a row (default) it is unhealthy. Docker only reports it; Swarm replaces it."
+confusedWith: []
+tags: [healthcheck, actuator]
+visual: flow
+sources:
+  - title: "Dockerfile reference (Docker docs)"
+    url: "https://docs.docker.com/reference/dockerfile/"
+    verifiedOn: "2026-10-20"
+  - title: "How services work (Docker Swarm docs)"
+    url: "https://docs.docker.com/engine/swarm/how-swarm-mode-works/services/"
+    verifiedOn: "2026-10-20"
+  - title: "Services (Compose Specification)"
+    url: "https://docs.docker.com/reference/compose-file/services/"
+    verifiedOn: "2026-10-20"
+  - title: "Endpoints (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/actuator/endpoints.html"
+    verifiedOn: "2026-10-20"
+  - title: "eclipse-temurin 25 JRE Dockerfile (Adoptium)"
+    url: "https://github.com/adoptium/containers/blob/main/25/jre/ubuntu/noble/Dockerfile"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A process can be up but useless: deadlocked, out of DB connections, or still warming up. A health check tests the app itself, not just the process.
+
+## How it works
+
+<Mermaid
+  alt="starting becomes healthy when a check passes; healthy becomes unhealthy after retries failures in a row; one pass makes it healthy again."
+  chart={`stateDiagram-v2
+  [*] --> starting
+  starting --> healthy: check passes
+  healthy --> unhealthy: retries failures in a row
+  unhealthy --> healthy: check passes
+  starting --> unhealthy: failures after start period`}
+/>
+
+- The state shows in `docker ps` and `docker inspect` (`.State.Health`).
+- Compose `healthcheck:` has the same options and defaults. Waiting on it: [startup order](card:compose-startup-order).
+
+## Example
+
+```dockerfile
+FROM eclipse-temurin:25-jre
+# this JRE image ships without curl
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+HEALTHCHECK --interval=10s --timeout=3s --start-period=60s --retries=3 \
+  CMD curl -fsS http://localhost:8080/actuator/health || exit 1
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| `--interval` / `--timeout` | 30 s / 30 s | Docker Engine 29 |
+| `--retries` | 3 | Docker Engine 29 |
+| `--start-period` / `--start-interval` | 0 s / 5 s (start interval needs Engine 25.0+) | Docker Engine 29 |
+
+## Interview Qs
+
+### Is a running container a healthy one?
+
+No. Running means the main process is alive. A HEALTHCHECK also tests the app and shows healthy or unhealthy in `docker ps`.
+
+### Does Docker restart an unhealthy container?
+
+Not with `docker run` or Compose: it only marks it. Restart policies react to the container exiting. Swarm replaces a task that fails its health check.
+
+### What should a Spring Boot health check call?
+
+`/actuator/health`: HTTP 200 when UP, 503 when DOWN or OUT_OF_SERVICE. The check command must exist in the image; the eclipse-temurin JRE image has no curl, so install it or use another check.

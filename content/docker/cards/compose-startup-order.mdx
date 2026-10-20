@@ -1,0 +1,87 @@
+---
+id: compose-startup-order
+tech: docker
+title: "Startup Order: depends_on and Health"
+topic: compose
+level: intermediate
+heat: 3
+hook: "depends_on decides start order, not readiness; add condition: service_healthy to wait for a passing health check."
+points:
+  - { k: "Short form", v: "start order only: Postgres has started, maybe not ready", kind: minus }
+  - { k: "service_healthy", v: "waits until the dependency's healthcheck passes" }
+  - { k: "service_completed_successfully", v: "waits for a one-off job, such as a migration, to finish" }
+  - { k: "Stop order", v: "reverse: payment-service is removed before postgres" }
+  - { k: "App retries", v: "still needed: a dependency can restart later", kind: minus }
+trap:
+  wrong: "depends_on makes the payment service wait until Postgres is ready."
+  right: "The short form waits only until the Postgres container is running; use condition: service_healthy with a healthcheck."
+sayIt: "depends_on sets start and stop order. For readiness I give Postgres a healthcheck and use condition: service_healthy. The app still reconnects on failure, because a dependency can restart later."
+confusedWith: []
+tags: [depends-on, healthcheck, startup-order, readiness]
+visual: flow
+sources:
+  - title: "Control startup and shutdown order in Compose (Docker docs)"
+    url: "https://docs.docker.com/compose/how-tos/startup-order/"
+    verifiedOn: "2026-10-20"
+  - title: "Services: depends_on (Compose file reference)"
+    url: "https://docs.docker.com/reference/compose-file/services/"
+    verifiedOn: "2026-10-20"
+  - title: "Networking in Compose: updating containers (Docker docs)"
+    url: "https://docs.docker.com/compose/how-tos/networking/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Postgres needs a few seconds before it accepts connections. If the payment service starts first, its first database call fails and startup can crash.
+
+## How it works
+
+<Steps label="docker compose up with service_healthy">
+  <Step title="Create dependencies">postgres and redis are created first, in dependency order.</Step>
+  <Step title="Wait for healthy">Compose waits until the postgres healthcheck passes.</Step>
+  <Step title="Start the app">Only then is payment-service created.</Step>
+  <Step title="Stop in reverse">On down, payment-service goes before postgres and redis.</Step>
+</Steps>
+
+- `restart: true` restarts payment-service when a Compose command restarts or updates postgres, not after a crash restart by Docker.
+- `required: false` turns a missing dependency into a warning.
+- The healthcheck options belong to [health checks](card:container-health-checks).
+
+## Example
+
+```yaml
+services:
+  payment-service:
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy, restart: true }
+      redis: { condition: service_started }
+  postgres:
+    image: postgres:18
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d payments"]
+      interval: 10s
+      retries: 5
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Condition when you list only names | `service_started` | Compose Specification |
+| `required` | `true` | Compose 2.20.0+ |
+
+## Interview Qs
+
+### How do you make container 1 start before container 2?
+
+Add `depends_on: [container1]` to container 2's service. Compose creates container 1 first and removes it last. If container 2 needs container 1 ready, not just running, use the long form with `condition: service_healthy` and a healthcheck.
+
+### Does depends_on wait until the database is ready?
+
+Not by default. The short form waits only until the container is running. Readiness needs a healthcheck on the database and `condition: service_healthy` on the app.
+
+### With service_healthy, does the app still need retry logic?
+
+Yes. The condition covers only startup. If Postgres is recreated later, it gets a new IP and open connections close; each client must look up the name again and reconnect.
