@@ -8,7 +8,21 @@ import { z } from "zod";
 export const LEVELS = ["beginner", "intermediate", "interview"] as const;
 export const VISUALS = ["flow", "table", "analogy", "code", "none"] as const;
 /** Accent names with tuned light/dark values in src/app/globals.css. */
-export const ACCENTS = ["blue", "orange", "green", "violet", "rose", "teal", "amber"] as const;
+export const ACCENTS = [
+  "blue",
+  "orange",
+  "green",
+  "violet",
+  "rose",
+  "teal",
+  "amber",
+  "indigo",
+  "sky",
+  "cyan",
+  "red",
+  "fuchsia",
+  "lime",
+] as const;
 
 /** Kinds of key point. Each gets its own marker so a page can be scanned, not read. */
 export const POINT_KINDS = ["key", "plus", "minus", "default"] as const;
