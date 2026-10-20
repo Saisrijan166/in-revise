@@ -221,3 +221,52 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | R9. API Testing and Documentation (part: distributed tracing, trace and span IDs) | also: observability-for-apis (Interview Q, example); tree `distributed-tracing`, `traceparent`; glossary `span-term` |
 | R9. API Testing and Documentation (parts: Spring MockMvc, @WebMvcTest, @SpringBootTest) | also: not in this unit: owned by concept spring-api-testing (linked from api-testing-strategy) |
 | C4 "Best revision order" (REST → Redis → AWS → patterns → payment scenario) | cut: Duplicate of site structure: the site's own tree and story spine set the reading order; it spans several techs. |
+
+## Owner addition (20-10-2026): Integration templates (reference/rest-api.md from line 411; keys I0, I1, I8, I9)
+
+Independently verified on 20-10-2026.
+
+### Mapped
+| Reference item | Landed in | Note |
+|---|---|---|
+| I0 Intro lines and the owner's question ("how do you integrate the ChatGPT API, Redis, Kafka, AWS; simple code if asked to write it") | concept `openai-api-integration`: the table "Write integration code" plus Interview Q 1 | Redis, Kafka and AWS code itself belongs to their own techs; this tech keeps only the map row |
+| I0 "Small correct skeleton, not a production implementation" framing; also the I8 intro ("memorise the shapes, not hundreds of lines") and the I9 closing line ("the level of code to master first") | concept `openai-api-integration` (two short Java blocks; production items as points and bullets) | |
+| I1.Q "How would you integrate ChatGPT API in Java?" | concept `openai-api-integration`, Interview Q "How would you integrate the ChatGPT API in Spring Boot?" | The answer says that code calls the OpenAI API, not ChatGPT |
+| I1.MAP Memory map: Java, HTTP POST, OpenAI API, JSON response | concept `openai-api-integration`, Mermaid sequence in How it works | |
+| I1.REM "Remember only": RestClient, baseUrl, Authorization, POST, JSON body, retrieve() | concept `openai-api-integration`, first Java block and the OpenAI table row | |
+| I1.SAY Interview explanation (key in env vars, RestClient, POST model + messages, parse JSON) | `sayIt` and the `Auth` point | `messages` became `input` (see Corrected I1.CODE-b) |
+| I8.REDIS Template: RedisTemplate, opsForValue(), set()/get() | concept `openai-api-integration`, table row Redis (`StringRedisTemplate`, `opsForValue().set(key, value, ttl)`, `get(key)`) | StringRedisTemplate is the String-typed RedisTemplate |
+| I8.KAFKA-P Template: KafkaTemplate, send(topic, message) | table row Kafka producer (`send(topic, key, value)`) | |
+| I9.CHATGPT row: ChatGPT, RestClient, POST | table row OpenAI | |
+| I9.REDIS row: Redis, RedisTemplate, set/get | table row Redis | |
+| I9.KAFKA-P row: Kafka Producer, KafkaTemplate, send() | table row Kafka producer | |
+| I9.SQS row: AWS SQS, SqsClient, sendMessage() | table row AWS SQS (`sendMessage(SendMessageRequest)`) | |
+| I9.RDS row: AWS RDS, JPA/JDBC, database operations | table row AWS RDS (`JdbcClient` or JPA, as for any SQL database; `sql(...).param(...).update()`) | |
+| I9.R Closing rule: do not claim the skeleton is production-ready; add config, secrets, errors, timeouts/retries, serialization, logging, observability, security | `sayIt` ("Production adds timeouts, capped 429 retries and a token limit"); points `Auth`, `Body`, `429`; bullets on timeouts and the `x-request-id` log; Interview Q on 429 | Short points, not prose. Generic security and observability are owned by `owasp-api-security` and `observability-for-apis` |
+
+### Corrected
+| Reference item | What was wrong | Fixed to | Source URL |
+|---|---|---|---|
+| I1.CODE-a `String apiKey = "YOUR_API_KEY";` | The key was hardcoded in source | `System.getenv("OPENAI_API_KEY")`; on the server only; env var or secret store | https://developers.openai.com/api/reference/overview |
+| I1.CODE-b `POST /chat/completions` with `messages` and `gpt-4o-mini` | Outdated: OpenAI now recommends the Responses API for all new projects (Chat Completions is still supported) | `POST /v1/responses` with `model` + `input`; Chat Completions kept as a tree type | https://developers.openai.com/api/docs/guides/migrate-to-responses |
+| I1.CODE-c Model `gpt-4o-mini` | A hardcoded, dated model name | The model id is read from config (`@Value("${openai.model}")`); no model name is hardcoded | https://developers.openai.com/api/docs/guides/text |
+| I1.CODE-d `.body(String.class)` then print the raw JSON | It does not parse the reply; the usual shortcut `output_text` / `output[0].content[0].text` is wrong for raw HTTP | Map to records; keep `message` items, join their `output_text` parts (trap) | https://developers.openai.com/api/docs/guides/text ; https://developers.openai.com/api/reference/resources/responses/methods/create |
+| I8.KAFKA-C / I9.KAFKA-C `@KafkaListener → consume(message)` | `consume` is not an API method; any method name works | "the method runs for each record" | https://docs.spring.io/spring-kafka/reference/quick-tour.html |
+| I8.S3 / I9.S3 `S3Client → PutObjectRequest → bucket + key → putObject()` | Incomplete: putObject also needs the content | `putObject(PutObjectRequest, RequestBody)` | https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/java_s3_code_examples.html |
+| I8.CHATGPT Template: RestClient, POST, Authorization, JSON, retrieve() | Same endpoint issue as I1.CODE-b | Same table row and code with `/responses` | https://developers.openai.com/api/docs/guides/text |
+
+### Added beyond the reference
+| New item | Landed in | Why |
+|---|---|---|
+| 429 handling: Retry-After, backoff with jitter, quota/spend-limit 429s are not retryable, SDKs already retry 429/503 | point `429`, Interview Q, Mermaid note | The most common production follow-up question |
+| `max_output_tokens` caps reply length and cost | point `Body`, code | Cost and token limits were asked for |
+| Log `x-request-id` | How it works bullet | OpenAI recommends it in production |
+| Official `openai-java` SDK (4.86.0, beta) | tree node `openai-java-sdk` | The alternative to hand-written HTTP |
+| Spring AI 2.0 `ChatClient` and its OpenAI starter (uses Chat Completions) | tree nodes `spring-ai-chatclient`, `spring-ai-openai-starter`; term `spring-ai-term` | The Spring-native alternative asked for |
+| Glossary: LLM, Token (LLM), Responses API, Chat Completions API, Spring AI | `glossary.yaml` | Interviewer words used in the concept |
+| Story step for the AI summary | `_tech.yaml` | Every concept must be on a step |
+
+### Dropped
+| Reference item | Reason |
+|---|---|
+| I1.CODE-e `System.out.println(response);` | Trivial; replaced by returning the parsed text |

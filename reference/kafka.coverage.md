@@ -236,3 +236,36 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | K53 (part: "you don't need deep filesystem internals") | cut: editorial remark, not a fact |
 | K67.9 ISR = replicas sufficiently in sync with leader | also: rule row "Replication … ISR" → `isr-and-min-insync` |
 | K67.11 One partition → at most one consumer in a group | also: concept consumer-groups (point) |
+
+## Owner addition (20-10-2026): Integration template: Kafka (reference/kafka.md from line 1812; key I3)
+
+Independently verified on 20-10-2026.
+
+### Mapped
+| Reference item | Landed in | Note |
+|---|---|---|
+| I3.1 Think: Producer → Kafka topic → Consumer | already covered by `what-is-kafka` and the `spring-kafka` diagram | |
+| I3.4 Remember: KafkaTemplate → send() → topic; @KafkaListener → topic → method() | already covered by `spring-kafka` hook | |
+| I3.5 Interview explanation (producer publishes with KafkaTemplate, consumers listen with @KafkaListener) | `kafka-code-templates` sayIt and Interview Q "How do you integrate Kafka in a Spring Boot service?"; `spring-kafka` sayIt | Reworded, extended with the yml and the error handler |
+| I3.6 "That's enough for a basic coding interview" | `kafka-code-templates` | Extended: the yml and error handling are the usual follow-ups |
+
+### Corrected
+| Reference item | What was wrong | Fixed to | Source URL |
+|---|---|---|---|
+| I3.2 Producer: OrderProducer with KafkaTemplate, `kafka.send("orders", order)` | No key, so events of one order can land on different partitions; the result of send() is ignored | `send("orders", orderId, json)` plus `whenComplete` to log failure or offset (point "Keyless send", link to partition-keys) | https://docs.spring.io/spring-kafka/reference/kafka/sending-messages.html |
+| I3.3 Consumer: `@KafkaListener(topics = "orders")`, prints the order | No group id anywhere: the app fails to start; System.out in a listener | Group id in the yml (trap); listener logs and throws on a bad record so the error handler path shows | https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/listener-annotation.html (and a real run, see above) |
+
+### Added beyond the reference
+| New item | Landed in | Why |
+|---|---|---|
+| Minimal application.yml (bootstrap-servers, group-id, auto-offset-reset) | `kafka-code-templates` Example | Asked with every integration question; the brief lists it |
+| DefaultErrorHandler + DeadLetterPublishingRecoverer bean; Boot attaches a CommonErrorHandler bean to the default factory | `kafka-code-templates` Example, point, Interview Q | Most common follow-up ("what if the listener throws?") |
+| orders-dlt must have at least as many partitions as orders (same-partition default) | `kafka-code-templates` point | Real pitfall stated in the Spring docs |
+| Console producer/consumer commands with real output | `kafka-code-templates` bash block + output; 2 glossary terms | Quick way to test a topic; brief asks for it |
+| `--property` deprecated since Kafka 4.2 (KIP-1147): `--reader-property`, `--formatter-property`, `--command-property` | `kafka-code-templates` point and bash block | Current tool flags; old ones are removed in 5.0 |
+| Picker table linking plain-client, manual-ack, transaction and rebalance code already on the site | `kafka-code-templates` How it works | One place to find every Kafka skeleton without repeating it |
+
+### Dropped
+| Reference item | Reason |
+|---|---|
+| (none) | |

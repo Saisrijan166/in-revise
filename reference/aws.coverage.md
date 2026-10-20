@@ -222,3 +222,43 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | A8 (part: health check) Target healthy enough for traffic | also: concept deployments-on-aws (link to elastic-load-balancing, which owns health-check mechanics); tree ecs-health-check-grace |
 | A8 (parts: disaster recovery, RTO, RPO) | also: concept disaster-recovery (points, table, Interview Q 1); glossary rto, rpo |
 | A9.11 Store secrets: Secrets Manager or another managed config service | also: aws-architecture-playbook (picker row) → secrets-and-parameters |
+
+## Owner addition (20-10-2026): Integration templates: AWS (reference/aws.md from line 284; keys I4–I7)
+
+Independently verified on 20-10-2026.
+
+### Mapped
+| Reference item | Landed in | Note |
+|---|---|---|
+| I4. Don't memorise the AWS SDK: first know which service (S3 files, RDS database, SQS queue, EC2 server, Lambda function, CloudWatch monitoring) | concept `aws-code-templates` (hook); service list already covered by `s3`, `rds`, `sqs`, `ec2`, `lambda`, `cloudwatch` | |
+| I4.1 Think path Java, SDK, S3, bucket | `aws-code-templates` (point "Shape", tree `tpl-sdk-call-shape`) | |
+| I4.2 Code: S3Client.builder().region(AP_SOUTH_1), PutObjectRequest bucket + key, putObject with RequestBody.fromString | `aws-code-templates` S3 block (with output) | |
+| I4.3 Remember chain: S3Client, PutObjectRequest, bucket + key, putObject() | `aws-code-templates` points "Shape" and "S3" | |
+| I4.4 Read: GetObjectRequest + getObjectAsBytes into ResponseBytes<GetObjectResponse> | `aws-code-templates` S3 block (`getObjectAsBytes(get).asUtf8String()`) | |
+| I5. SQS: how to send a message | `aws-code-templates` SQS block | |
+| I5.1 Think path Java, SqsClient, sendMessage(), queue | `aws-code-templates` sayIt; tree `tpl-sqs-send-receive-delete` | |
+| I5.2 Code: SqsClient builder, SendMessageRequest with queueUrl and messageBody, sendMessage | `aws-code-templates` SQS block (consumer-lambda builder form; queue URL from getQueueUrl) | Added receive + delete, which interviewers ask next |
+| I5.3 Remember chain: SqsClient, SendMessageRequest, queueUrl, messageBody, sendMessage() | `aws-code-templates` sayIt; glossary `queue-url` | |
+| I6. RDS: usually no AWS-specific Java code | `aws-code-templates` trap + Interview Q "Do you need the AWS SDK to use RDS from Java?" | |
+| I6.1 Think path Spring Boot, JPA/Hibernate, JDBC, RDS PostgreSQL/MySQL | `aws-code-templates` Interview Q; tree `tpl-rds-over-jdbc` | |
+| I6.3 Then normal JPA: `interface UserRepository extends JpaRepository<User, Long>` | Mapped (already covered by the Spring Boot concept `spring-data-repositories`); AWS concept says "JDBC and JPA" | Not repeated in AWS |
+| I6.4 Distinction: RDS is managed DB infrastructure; app uses normal JDBC/JPA | `aws-code-templates` trap and Interview Q; `rds` hook | |
+| I7. S3 + Spring Boot: Controller, Service, S3Client, bucket | `aws-code-templates` Interview Q "How do you upload a file to S3 from Spring Boot?" | |
+| I7.1 FileService with injected S3Client and upload(fileName, content) via putObject | `aws-code-templates`: plain-SDK call is the S3 block; Spring wiring shown by the Spring Cloud AWS block (`S3Template` injected into a `@Service`) | The injected-S3Client service would repeat the S3 block |
+
+### Corrected
+| Reference item | What was wrong | Fixed to | Source URL |
+|---|---|---|---|
+| I6.2 Configuration: spring.datasource.url / username=USER / password=PASSWORD in the properties file | A hardcoded password in config is a security mistake (and the site's secrets trap says so) | URL to the RDS endpoint; username and password loaded from Secrets Manager through `spring.config.import=aws-secretsmanager:...`; IAM database authentication listed as the no-password option | https://docs.awspring.io/spring-cloud-aws/docs/4.2.0/reference/html/index.html ; https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.Connecting.Java.html |
+
+### Added beyond the reference
+| New item | Landed in | Why |
+|---|---|---|
+| SQS receiveMessage (long polling) + deleteMessage with receipt handle | `aws-code-templates` SQS block; glossary `receipt-handle` | Send alone is half the template; "when is the message deleted" is the follow-up |
+| Spring Cloud AWS 4.2 S3Template / SqsTemplate / @SqsListener (ON_SUCCESS deletes) | `aws-code-templates` Spring block + Interview Q; glossary `s3-template`, `sqs-template`, `sqs-listener` | The Spring way, asked in Spring Boot interviews; verified on 4.2.0 jars and reference |
+| Picker table linking existing skeletons (pre-signed URL, conditional putItem, SSE-KMS, Lambda handler, client timeouts) | `aws-code-templates` How it works | One coding section without repeating code that other concepts own |
+
+### Dropped
+| Reference item | Reason |
+|---|---|
+| (none) | |

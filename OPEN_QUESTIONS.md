@@ -376,3 +376,40 @@ REST API fuchsia, AWS red, Design Patterns cyan, Kafka lime, Docker sky, Kuberne
 1. **Docker has 32 concepts** (CLAUDE.md asks for about 40–70); the Docker part of the reference is short, so it was kept compact.
 2. **Overlap:** containers, Kubernetes objects, probes and deployment strategies also appear briefly in Microservices and AWS.
 3. **S28 (Docker vs Compose vs Kubernetes)** is a comparison in both techs (each tech is self-contained).
+
+## M. Coding practice: practice boxes, outputs, Java Coding Practice, integration templates (20-10-2026)
+
+The owner's `reference/reference.md` had two parts. Part A (Java interview coding, sections 0–96, plus a compile/run tip) was
+appended to `reference/java.md` (from line 6731). Part B (integration templates) was split into `reference/rest-api.md` (ChatGPT /
+OpenAI, "the 4 templates", the integration-code map), `reference/redis.md`, `reference/kafka.md` and `reference/aws.md`.
+
+**Site:** every code block that is not `text` now has a practice box under it (type it from memory; Hide code / Check / Clear;
+nothing is stored), and ` ```text output ` blocks show as an "Output" panel. A 9th topic colour (`--t9`, cyan) was added. CLAUDE.md
+3.1, 5.5, 5.8 and the status were updated.
+
+| Area | What changed | Checked / fixed / dropped |
+|---|---|---|
+| Java | New topic "Coding Practice" (9th): 8 new concepts (coding-method, number-, array-, string-, collection-, oop-, functional-interface-programs, output-prediction) plus stream-coding-patterns and employee-stream-questions moved in; 64 concepts; short theory additions; 62 output panels | ~336 / 19 / 3 |
+| REST API | `openai-api-integration` (Responses API via RestClient; model id from config) with the integration-code map | 52 / 7 / 0 |
+| Redis | `redis-code-templates` | 51 / 4 / 0 |
+| Kafka | `kafka-code-templates`; producer-basics output | 54 / 2 / 0 |
+| AWS | `aws-code-templates` (S3, SQS, Spring Cloud AWS, RDS); code moved out of four concepts | 66 / 6 / 0 |
+| DSA | 23 output panels (call lines on small inputs) | 57 / 3 / 0 |
+| SQL | 17 output panels (real PostgreSQL 18 results) | 36 / 4 / 0 |
+| Design Patterns | 11 output panels; decorator keeps its two-level stacking in code | 22 / 3 / 0 |
+
+Every Java block with an output was compiled and run on JDK 21 (APIs present in Java 25); Redis, Kafka and AWS code compiled against
+current jars and run on throwaway `redis:8`, `apache/kafka:4.3.1` and LocalStack containers; SQL on `postgres:18`.
+
+### M1. Decisions for the owner
+
+- **NULL in SQL outputs** is shown as the word `NULL` (psql `\pset null NULL`), not psql's default blank cell, so it can't be missed.
+- **Command-line blocks get a practice box** too (redis-cli, Kafka console tools, bash). Change a block to `text` if you don't want to practise it.
+- **Removed exception lines:** in `wrapper-classes` (unboxing null) and `threads` (second `start()`) the crashing line was taken out of the runnable code; both facts stay in the points and Interview Qs.
+- **Kafka console block** uses `--command-property group.protocol=consumer` so Kafka 4.3.1 prints no KIP-848 notice; Spring Boot 4.1.1 manages kafka-clients 4.2.1 while the Kafka baseline is 4.3.
+- **Spring AI** 2.0.x's OpenAI chat client supports only Chat Completions, not the Responses API; recheck at the next Spring AI release. The official `openai-java` SDK (4.86.0) is still marked beta.
+
+### M2. Worded carefully (kept)
+
+- `Integer a = 1000, b = 1000; a == b` prints `false` on a default JVM, but the JLS guarantees caching only for -128..127; the panel shows a real run, and `wrapper-classes` states the rule.
+- The Kafka dead letter topic "needs at least as many partitions" as the source (Spring docs); in practice a missing partition logs a WARN and the producer picks one.

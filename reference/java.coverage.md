@@ -443,3 +443,254 @@ headings. Every item of the addition appears in exactly one of Mapped, Corrected
 |---|---|
 
 (Nothing was dropped as a whole item. Sub-details dropped inside mapped rows: the list of example filter conditions in S3, the six string one-liners in S27 as separate code, and every emoji, star and ASCII arrow.)
+
+## Owner addition (20-10-2026): Java coding practice (reference/java.md from line 6731; keys C0–C96 and CT)
+
+Independently verified on 20-10-2026.
+
+**Keys C0, C5, C6, C19–C22, C28, C29, C70–C96 and CT (Coding Practice topic)**
+
+### Mapped
+| Reference item | Landed in | Note |
+|---|---|---|
+| C0 The core rule (six questions, count-even example) | concept `coding-method` (How it works table, Example block 1) | |
+| C5 Methods (skeleton, void, parameter, return) | `coding-method` (point "Signature first", skeleton block) | Overloading part (C7) is J2's |
+| C6 Return vs print | `coding-method` (point and trap) | |
+| C19 Functional interface plus implementing class | `functional-interface-programs` (block 1, steps) | |
+| C20 Functional interface using lambda | `functional-interface-programs` (block 1) | |
+| C22 Default method in interface | `functional-interface-programs` (block 2, with a static method) | |
+| C28 Frequency map, master pattern | `collection-programs` (block 1, points) | |
+| C70.2 Even or odd | `number-programs` (point, trap) | |
+| C70.4 Maximum of two | `number-programs` (picker row "Max of three", `Math.max`) | |
+| C70.5 Maximum of three | `number-programs` (picker row) | |
+| C70.6 Swap two numbers | `number-programs` (picker row, without a temp) | |
+| C70.7 Factorial | `number-programs` (block 3) | |
+| C70.8 Reverse number | `number-programs` (block 1) | |
+| C70.9 Palindrome number | `number-programs` (block 1) | |
+| C70.10 Prime number | `number-programs` (block 2, Interview Q) | |
+| C70.11 Fibonacci | `number-programs` (block 4, Interview Q) | |
+| C70.12 Count digits | `number-programs` (picker row, digit loop) | |
+| C70.13 Sum of digits | `number-programs` (picker row, digit loop) | |
+| C70.14 Power | `number-programs` (picker row, point on `Math.pow`) | |
+| C70.15 Character check | `number-programs` (picker row, `Character.isDigit` and similar) | |
+| C71.1 Print array | `array-programs` (point `Arrays.toString`) | |
+| C71.2 Sum elements | `array-programs` (block 1, picker) | |
+| C71.3 Average | `array-programs` (block 1, picker) | |
+| C71.4 Maximum | `array-programs` (block 1) | |
+| C71.5 Minimum | `array-programs` (block 1) | |
+| C71.6 Second largest | `array-programs` (block 2, trap) | |
+| C71.7 Reverse array | `array-programs` (block 3) | |
+| C71.8 Count even | `array-programs` (picker row); `coding-method` (block 1) | |
+| C71.9 Count odd | `array-programs` (picker row) | |
+| C71.10 Search element | `array-programs` (picker row) | |
+| C71.11 Duplicate detection | `array-programs` (block 4, Interview Q) | |
+| C71.12 Remove duplicates | `array-programs` (block 4, Interview Q) | |
+| C71.13 Frequency | `array-programs` (picker row, links to `collection-programs`) | |
+| C71.14 Sort | `array-programs` (picker row) | |
+| C71.15 Merge arrays | `array-programs` (picker row) | |
+| C72.1 Reverse string | `string-programs` (picker row) | |
+| C72.2 Palindrome | `coding-method` (block 2); `string-programs` picker links to it | |
+| C72.3 Count vowels | `string-programs` (block 1) | |
+| C72.4 Count characters | `string-programs` (point "Letter counts", block 2) | |
+| C72.5 Frequency | `collection-programs` (block 1); `string-programs` picker row | |
+| C72.6 First non-repeating character | `string-programs` (block 2) | Stream version is already in `stream-coding-patterns` |
+| C72.7 Duplicate characters | `string-programs` picker row, links to the frequency map | |
+| C72.8 Remove duplicate characters | `string-programs` (picker row, `LinkedHashSet`) | |
+| C72.9 Anagram | `string-programs` (block 3, Interview Q) | |
+| C72.10 Reverse words | `string-programs` (block 4, Interview Q) | |
+| C72.11 Longest word | `string-programs` (picker row) | |
+| C72.12 Word frequency | `string-programs` picker row, links to the frequency map | |
+| C72.13 String compression | `string-programs` (block 5) | |
+| C72.14 Character replacement | `string-programs` (picker row) | |
+| C73.1 List CRUD | `collection-programs` (picker row, links to `list-arraylist`) | |
+| C73.2 Set duplicate detection | `array-programs` (block 4); `collection-programs` picker | |
+| C73.3 Map frequency | `collection-programs` (block 1) | |
+| C73.4 Map iteration | `collection-programs` (block 1, point) | |
+| C73.5 Sort List | `collection-programs` (block 2) | |
+| C73.6 Sort objects | already covered by `comparable-comparator` and `employee-stream-questions` | |
+| C73.7 Queue | `collection-programs` (picker row, links to `queue-deque`) | |
+| C73.8 Stack using Deque | `collection-programs` (block 3, balanced brackets) | |
+| C73.9 TreeSet | `collection-programs` (picker row, block 4) | |
+| C73.10 TreeMap | `collection-programs` (block 1, picker row) | |
+| C73.11 Priority queue | `collection-programs` (block 4, Interview Q) | |
+| C73.12 Custom comparator | `collection-programs` (block 2) | |
+| C74.1 Functional interface | `functional-interface-programs` | |
+| C74.2 Lambda | `functional-interface-programs` | |
+| C74.3 Anonymous class | `functional-interface-programs` | |
+| C74.4 Predicate | already covered by `lambdas` (table); link from `functional-interface-programs` | |
+| C74.5 Function | already covered by `lambdas` | |
+| C74.6 Consumer | already covered by `lambdas` | |
+| C74.7 Supplier | already covered by `lambdas` | |
+| C74.8 UnaryOperator | already covered by `lambdas` | |
+| C74.9 BinaryOperator | already covered by `lambdas` | |
+| C74.10 Method reference | `functional-interface-programs` (block 1, `Integer::sum`, `even::check`); `lambdas` | |
+| C75 Level F stream operation list | already covered by `streams` (lists every operation), `collectors` (joining, groupingBy, partitioningBy, mapping, counting), `stream-coding-patterns` (table) | |
+| C76.1 Employees with salary > X | already covered by `employee-stream-questions` (table row) | |
+| C76.2 Sort by salary | already covered by `employee-stream-questions` | |
+| C76.3 Highest salary | already covered by `employee-stream-questions` | |
+| C76.4 Lowest salary | already covered by `stream-coding-patterns` (table row "highest, lowest": `max`, `min`) | Fixed in verification: the employee table has no `min` row |
+| C76.5 Average salary | already covered by `primitive-streams` and `collectors` (`averagingInt`) | |
+| C76.6 Employees by department | already covered by `employee-stream-questions` | |
+| C76.7 Highest salary per department | already covered by `employee-stream-questions` (row, example, Q) | |
+| C76.8 Count per department | already covered by `employee-stream-questions` | |
+| C76.9 Names only | already covered by `employee-stream-questions` (`map(Emp::name)`) | |
+| C76.10 Total salary | already covered by `primitive-streams` (`mapToInt(Emp::salary).sum()`) | |
+| C76.11 Second highest salary | already covered by `employee-stream-questions` (Nth highest) | |
+| C76.12 Duplicate departments | already covered by `stream-coding-patterns` (duplicates pattern) | |
+| C77 Most important stream recipe (three shapes) | already covered by `stream-coding-patterns` (table) and `collectors` | |
+| C78 Output thinking training (`x++ > 5`) | `output-prediction` (block 1) | |
+| C79 Pre- vs post-increment | `output-prediction` (block 1, Q); rule owned by `operators-control-flow` | |
+| C80 Reference vs value | `output-prediction` (block 2); rule owned by `pass-by-value` | |
+| C81 Null confusion | `output-prediction` (block 3, Q) | |
+| C82 Autoboxing and unboxing | already covered by `wrapper-classes`; `output-prediction` block 4 | |
+| C84 Null-safe string comparison | `output-prediction` (block 3, tree node `null-safe-equals`) | |
+| C85 Java 8+ and modern Java list | already covered by `modern-java` (and `records-sealed`, `lambdas`, `streams`, `optional`) | |
+| C86 "Write the function" training | `coding-method` (block 2, palindrome with input and output comment) | |
+| C87 Second largest | `array-programs` (block 2) | |
+| C88 Instant syntax bank | `coding-method` skeleton (imports, class, method); every other line is already shown in its owner: arrays in `array-programs`, List/Set/Map/Queue/Stack in `collection-programs`, loops in `coding-method` and `array-programs`, lambda/Predicate/Function in `lambdas`, stream in `streams`, frequency in `collection-programs`, sort in `array-programs`, StringBuilder in `strings`, Comparator in `comparable-comparator`, Optional in `optional`, try/catch in `try-catch-finally` | |
+| C89 Biggest confusions list | Each pair is mapped to its owner. `==` vs equals: comparison `equals-vs-double-equals` (linked from `coding-method`). String vs StringBuilder: `string-vs-stringbuilder-vs-stringbuffer`. length vs length() vs size(): `strings` (How it works; the duplicate `array-programs` point was removed in verification). add vs set: `collection-programs` picker and `list-arraylist`. remove(index) vs remove(Object): `list-arraylist`. HashSet vs HashMap: `set-hashset-treeset`. Queue vs Stack, peek vs poll, push vs pop: `queue-deque`. filter vs map, map vs groupingBy: `stream-coding-patterns` table. map vs flatMap: `map-vs-flatmap` (linked). findFirst vs findAny: `findfirst-vs-findany`. groupingBy vs partitioningBy: `groupingby-vs-partitioningby`. reduce vs collect: `streams` and `collectors` (partly; see For the lead). throw vs throws: `throw-vs-throws` (linked). final vs finally: `final-vs-finally-vs-finalize`. Overloading vs overriding: `overloading-vs-overriding` (linked). Static vs instance: `static-vs-instance`. Abstract class vs interface: `abstract-class-vs-interface`. implements vs extends: `inheritance`. Primitive vs wrapper: `primitive-vs-wrapper`. Value vs reference: `pass-by-value`. Checked vs unchecked: `checked-vs-unchecked`. null vs empty string: partly, `output-prediction` block 3 shows null only (see For the lead). return vs print: `coding-method` trap | |
+| C90 map vs flatMap | already covered by comparison `map-vs-flatmap`, `streams` and `stream-coding-patterns` table | |
+| C91 Practice method (7 rounds) | `coding-method` (`<Steps>` "Practise one question": Write, Predict, Run, Rewrite; "read" is the table) | Merged 7 rounds into 4 steps |
+| C92 Don't memorise programs, memorise patterns | `coding-method` (point "Patterns, not programs") | |
+| C93 Practice order (9 phases) | `coding-method` ("Order" bullet linking the coding concepts) | |
+| C94 What to recognise instantly | Spread over picker tables: duplicates and frequency in `collection-programs`, even numbers with streams in `stream-coding-patterns`, sort descending in `employee-stream-questions`, functional interface and lambda in `functional-interface-programs`, remove duplicates in `array-programs`, group by in `collectors` | |
+| C95 Master Main.java | `coding-method` skeleton block (imports, class, main, one method); the other parts are each in their own concept | The whole file is far over the 15-line limit |
+| C96 Training progression and the 8-question ladder | `coding-method` (Rewrite step: "change one detail"); the ladder is `functional-interface-programs` (steps, blocks 1–3) | |
+
+### Corrected
+| Reference item | What was wrong | Fixed to | Source URL |
+|---|---|---|---|
+| C83 Integer == confusion (100) | Said `Integer a = 100, b = 100; a == b` "may print true" | For -128 to 127 it is guaranteed true; only outside that range is it unreliable. The rule stays in `wrapper-classes`, and `output-prediction` block 4 uses 1000 | https://docs.oracle.com/javase/specs/jls/se25/html/jls-5.html#jls-5.1.7 |
+| C29 String frequency ("banana") | Shown as "b=1 a=3 n=2", as if HashMap kept an order | HashMap promises no order; `collection-programs` block 1 uses a TreeMap for sorted, guaranteed output (a=3, b=1, n=2) | https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/HashMap.html |
+| C21 Calling without implementing (class, anonymous, lambda, method ref) | `MathUtils` is not a JDK class, so the line does not compile as given | `Integer::sum`, a real JDK method with the same shape; lands in `functional-interface-programs` (steps, block 1, Interview Q, trap) | https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Integer.html |
+| CT Compile/run and delete .class files | The tip had no version information for `java Main.java`; the personal path `~/Documents/java` was dropped | Single-file launch is JDK 11+ (JEP 330); other source files are compiled too since JDK 22 (JEP 458); lands in `coding-method` (bash block, point "Run a file", tree nodes `compile-and-run`, `delete-class-files`) | https://openjdk.org/jeps/330 |
+
+### Added beyond the reference
+| New item | Landed in | Why |
+|---|---|---|
+| Odd test must be `n % 2 != 0` (negative remainder) | `number-programs` trap, tree node, glossary `remainder-operator` | Classic bug: -7 % 2 is -1 in Java |
+| 21! overflows a long, silently | `number-programs` block 3 | A common factorial follow-up |
+| Prime loop `i <= n / i` (no overflow) | `number-programs` block 2, Q | Correct square-root bound |
+| `split(" ")` gives empty strings; use `trim().split("\\s+")` | `string-programs` trap, block 4 | Common reverse-words bug |
+| Balanced brackets with ArrayDeque | `collection-programs` block 3 | The most-asked "stack using Deque" program |
+| Kth largest with a min-heap of size k | `collection-programs` block 4, Q | The standard PriorityQueue interview program |
+| Most frequent element | `collection-programs` Q | Common frequency-map follow-up |
+| Interface method must be implemented as public | `oop-programs` trap (the rule itself is owned by `abstract-classes-interfaces`) | Frequent compile error at the whiteboard |
+| Record as a value class | `oop-programs` Q | Modern answer to "write equals/hashCode" |
+| Custom functional interface is not a Predicate (`filter(rule::check)`) | `functional-interface-programs` block 3, point "Into a stream" (the Q was replaced in verification by "Can a functional interface have default and static methods?") | The C96 "use it inside a stream" step fails without it |
+| Static interface method, called on the interface | `functional-interface-programs` block 2 | Pairs with C22's default method |
+| `Long.equals(1000)` is false | `output-prediction` trap, block 4 | Common wrapper output question |
+| `null + "!"` prints `null!` | `output-prediction` block 3, Q | Common null output question |
+| Multi-file source launch (JDK 22, JEP 458) | `coding-method` Q | Current behaviour of `java Main.java` |
+
+### Dropped
+| Reference item | Reason |
+|---|---|
+| C70.1 Add two numbers | Trivial |
+| C70.3 Positive or negative | Trivial (if/else); the rule is in `operators-control-flow` |
+
+**Keys C1–C4, C7–C18, C23–C27, C30–C69 (theory, mapped to existing concepts)**
+
+### Mapped
+
+| Reference item | Landed in | Note |
+|---|---|---|
+| C1. Basic syntax: variables and types | concept `data-types` | int, double, boolean, char, String already covered |
+| C2. if / else and operators | concept `operators-control-flow` | `==`, `!=`, `&&`, `\|\|`, `!` covered; see C2.1 |
+| C2.1 `if (x = 5)` is a mistake | concept `operators-control-flow` (not added) | In Java it does not compile for an int, so the compiler catches it; no text added |
+| C3. Loops: for, for-each, while, do-while | concept `operators-control-flow` (new bullet) | do-while runs at least once (JLS 14.13) |
+| C4. break / continue | concept `operators-control-flow` | already covered, with labelled break |
+| C7. Method overloading | concept `polymorphism`; comparison `overloading-vs-overriding` | |
+| C8. Arrays: create, access, loop | concepts `data-types`, `list-arraylist`, `operators-control-flow` (for-each) | |
+| C8.1 `array.length`, not `length()` | concept `strings` (new bullet) | with `s.length()` and `list.size()` in one line |
+| C9. String methods | concept `strings` (new bullet on `substring` end index) | `toUpperCase` returns a new String already in points |
+| C9.1 `equals`, not `==` | concept `strings`; comparison `equals-vs-double-equals` | |
+| C10. StringBuilder append, reverse, toString | concept `strings` (example) | |
+| C11. Classes and objects | concept `classes-objects` | |
+| C12. Constructor and `this.name = name` | concepts `constructors`, `this-super` | |
+| C13. Encapsulation, getter and setter | concept `oop-principles` | |
+| C14. Static vs instance | concept `static-keyword`; comparison `static-vs-instance` | |
+| C14.1 Why main can call a static method directly | concept `static-keyword` | "no this, no direct instance members" |
+| C15. Inheritance | concept `inheritance` | |
+| C16. Method overriding, `Animal a = new Dog()` | concept `polymorphism` (example now prints `Woof`) | |
+| C17. Abstract class cannot be created with new | concept `abstract-classes-interfaces` | |
+| C18. Interface implementation | concept `abstract-classes-interfaces` | implementing method must be public |
+| C23. Collections overview (List, Set, Map, Queue, Deque) | concept `collections-framework` | |
+| C24. ArrayList methods | concept `list-arraylist` | remove(index) vs remove(Object) trap already there |
+| C25. Instant declarations with the diamond | concept `collections-framework` (sayIt) | |
+| C26. HashSet, duplicate removed | concept `set-hashset-treeset` | `add` returns false on a duplicate |
+| C26.1 Duplicate detection with a set | concept `set-hashset-treeset`; `stream-coding-patterns` (Interview Q) | |
+| C27. HashMap methods | concept `map-hashmap` (new point "Missing key") | get returns null; getOrDefault |
+| C30. Iterating a map | concept `map-hashmap` (new bullet) | entrySet loop and `forEach((k, v) -> ...)` |
+| C31. Generics | concept `generics` | |
+| C32. Queue offer, peek, poll, FIFO | concept `queue-deque` | |
+| C33. Deque at both ends | concept `queue-deque` | |
+| C34. Stack with Deque push, peek, pop | concept `queue-deque` | |
+| C35. Sorting: Arrays.sort, Collections.sort, list.sort | concept `comparable-comparator` (new bullet) | `Arrays.sort(int[])` is ascending only |
+| C36. Comparator by length, reversed | concept `comparable-comparator` | |
+| C37. Object sorting with a lambda | concept `comparable-comparator` (new bullet) | explains why `(Student s) ->` is needed before `.reversed()` |
+| C38. Lambda syntax forms | concept `lambdas` (new bullet) | |
+| C39. Predicate, Function, Consumer, Supplier | concept `lambdas` (table) | |
+| C40. The four-interface table | concept `lambdas` (table) | |
+| C41. Streams: what a stream is | concept `streams` | |
+| C42. Stream mental model | concept `streams` (diagram) | |
+| C43. filter | concepts `streams`, `stream-coding-patterns` | |
+| C44. map, filter vs map | concepts `streams`, `stream-coding-patterns`; comparison `map-vs-flatmap` | |
+| C45. distinct | concepts `streams`, `stream-coding-patterns` | |
+| C46. sorted, reverse order | concepts `streams`, `stream-coding-patterns` | |
+| C47. limit | concepts `streams`, `stream-coding-patterns` | |
+| C48. skip | concepts `streams`, `stream-coding-patterns` | |
+| C49. count | concept `streams` | now says it returns a `long` |
+| C50. forEach and System.out::println | concepts `streams`, `lambdas` | |
+| C51. reduce | concept `streams` (new point); `primitive-streams` for `mapToInt().sum()` | |
+| C52. anyMatch / allMatch / noneMatch | concepts `streams` (empty-stream point), `stream-coding-patterns` | |
+| C53. findFirst with orElse | concepts `streams` (example), `optional`; comparison `findfirst-vs-findany` | |
+| C54. Optional of, orElse, ifPresent | concept `optional` | |
+| C55. Stream output thinking | concept `streams` | The reference runs each stage over all items; the real pipeline pulls one element at a time (the `streams` example with `peek` shows this). The result is the same for these stateless steps. |
+| C56. Stream questions to master | concept `stream-coding-patterns` | |
+| C56.1 Even numbers | `stream-coding-patterns` (filter row) | |
+| C56.2 Squares | `stream-coding-patterns` (map row) | |
+| C56.3 Maximum | `stream-coding-patterns`, `primitive-streams` | |
+| C56.4 Minimum | `stream-coding-patterns`, `primitive-streams` | |
+| C56.5 Sum | `primitive-streams` | |
+| C56.6 Count | `stream-coding-patterns`, `streams` | |
+| C56.7 Remove duplicates | `stream-coding-patterns` (distinct) | |
+| C57. String stream questions | concept `stream-coding-patterns` | |
+| C57.1 Filter equal to "Java" | `stream-coding-patterns` (filter) | |
+| C57.2 Uppercase | `streams` (example), `stream-coding-patterns` | |
+| C57.3 Sort | `stream-coding-patterns` | |
+| C57.4 Lengths | `lambdas` (`String::length`), `stream-coding-patterns` | |
+| C58. Method references | concept `lambdas` (Interview Q on the four kinds) | |
+| C59. Collectors.joining | concept `collectors` | |
+| C60. groupingBy first character | concept `collectors` | |
+| C61. partitioningBy | concept `collectors`; comparison `groupingby-vs-partitioningby` | |
+| C62. Character frequency with streams | concepts `stream-coding-patterns` (frequency point), `primitive-streams` (`chars`, `mapToObj`) | |
+| C63. try / catch, divide by zero | concepts `try-catch-finally`, `data-types` (new bullet) | |
+| C64. finally | concept `try-catch-finally` | |
+| C65. throw vs throws | concept `throw-throws-custom`; comparison `throw-vs-throws` | |
+| C66. Custom exception | concept `throw-throws-custom` | |
+| C67. equals and hashCode | concept `object-class-equals-hashcode` | |
+| C67.1 `==` vs `equals()` on objects | comparison `equals-vs-double-equals` | |
+| C68. Immutability: `s.toUpperCase()` without reassigning | concept `strings` (point "Immutable") | |
+| C69. final variable, method, class | concept `final-keyword` | |
+
+### Corrected
+
+| Reference item | What was wrong | Fixed to | Source URL |
+|---|---|---|---|
+
+(none: the items in this part were correct; C55 is a simplification noted under Mapped)
+
+### Added beyond the reference
+
+| New item | Landed in | Why |
+|---|---|---|
+| Floating-point division by zero gives Infinity or NaN (only integer division throws) | `data-types` | Common output question next to C63's `10 / 0` |
+| `reduce(op)` returns an Optional; `reduce(identity, op)` the value | `streams` | Explains the two `reduce` forms the reference shows only one of |
+
+### Dropped
+
+| Reference item | Reason |
+|---|---|
+
+(none)

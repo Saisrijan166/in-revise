@@ -206,3 +206,37 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | D9 (part: Redis Cluster distributes keys across shards) | also: concept `redis-cluster` |
 | D9 (part: sharding, splitting data across nodes) | also: concept `redis-cluster`; glossary `sharding-term` |
 | D9 (part) Cache failure strategy: fail, fall back to DB, or controlled behaviour | also: concept redis-failure-handling (table per use, trap, Interview Q "Redis goes down") |
+
+## Owner addition (20-10-2026): Integration template: Redis (reference/redis.md from line 289; key I2)
+
+Independently verified on 20-10-2026.
+
+### Mapped
+| Reference item | Landed in | Note |
+|---|---|---|
+| I2.a Q: How do you integrate Redis? | concept `redis-code-templates` (Interview Q 1) | answer rewritten: starter, properties, inject StringRedisTemplate, TTL on write |
+| I2.b Flow: Spring Boot to RedisTemplate to Redis | already covered by `spring-data-redis` (Mermaid flow) | not repeated |
+| I2.e "set saves, get reads" memory line | `redis-code-templates` picker table and points | |
+| I2.f Most interview-friendly example: set/get user:1 | `redis-code-templates` set/get block (PaymentStatusStore) and Interview Q 2 | key renamed to the tech's payment example |
+| I2.g Interview explanation (Redis as fast key-value cache via RedisTemplate) | `redis-code-templates` sayIt | "fast key-value cache" already owned by `what-is-redis` |
+
+### Corrected
+| Reference item | What was wrong | Fixed to | Source URL |
+|---|---|---|---|
+| I2.c RedisConfig: @Bean RedisTemplate<String,String> with only the connection factory | Not needed (Spring Boot auto-configures StringRedisTemplate and RedisTemplate), and without serialisers it JDK-serialises keys and values, so redis-cli sees `\xac\xed...user:1`, not `user:1` (reproduced) | Inject the auto-configured StringRedisTemplate, or set RedisSerializer.string(); Interview Q 2 | https://docs.spring.io/spring-boot/reference/data/nosql.html ; https://docs.spring.io/spring-data/redis/reference/redis/template.html |
+| I2.d UserService saveUser/getUser with set("user:1", ...) | Writes with no TTL, through the JDK-serialising template above | StringRedisTemplate with `set(key, value, Duration)` and `get` returning null on a miss | https://docs.spring.io/spring-data/redis/docs/current/api/org/springframework/data/redis/core/ValueOperations.html |
+
+### Added beyond the reference
+| New item | Landed in | Why |
+|---|---|---|
+| Connection properties block (host, port, password, timeout) | `redis-code-templates`, tree `tpl-connection` | asked in the prompt; first thing written in an integration answer |
+| INCR + EXPIRE in one Lua script (RedisScript) with the two-call trap | `redis-code-templates` block, trap, tree `tpl-counter-script` | asked in the prompt; Redis docs name the two-call race |
+| SET NX lock in Java (setIfAbsent + token release script) | `redis-code-templates` block, tree `tpl-lock` | asked in the prompt; the lock concept had only redis-cli/Lua |
+| RedisScript execution (EVALSHA then EVAL) | Interview Q 3, glossary `redis-script-term` | needed to explain the two script blocks |
+| redis-cli block with real output | `redis-code-templates` | shows what the Java set/get sends |
+| Picker links to cache-aside and @Cacheable skeletons | `redis-code-templates` table | prompt list; skeletons already exist there, so linked, not copied |
+
+### Dropped
+| Reference item | Reason |
+|---|---|
+| (none) | |
