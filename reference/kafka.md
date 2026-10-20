@@ -1807,3 +1807,63 @@ Idempotency → Duplicate safety
 ```
 
 **If you remember that final diagram + the 15 rules, you can answer a large portion of Kafka interview questions correctly.**
+
+
+<!-- ===== Owner addition: Integration template: Kafka (section 3; sections 8-9 are in rest-api.md) (added 20-10-2026). Source file: reference/reference.md ===== -->
+
+3. Kafka
+Interview question:
+How do you integrate Kafka?
+
+Think:
+Producer
+   ↓
+Kafka Topic
+   ↓
+Consumer
+
+Producer
+@Service
+class OrderProducer {
+
+    private final KafkaTemplate<String, String> kafka;
+
+    OrderProducer(KafkaTemplate<String, String> kafka) {
+        this.kafka = kafka;
+    }
+
+    void sendOrder(String order) {
+
+        kafka.send("orders", order);
+    }
+}
+
+Consumer
+@Service
+class OrderConsumer {
+
+    @KafkaListener(topics = "orders")
+    public void consume(String order) {
+
+        System.out.println(order);
+    }
+}
+
+Remember:
+KafkaTemplate
+    ↓
+send()
+    ↓
+topic
+
+Consumer:
+@KafkaListener
+    ↓
+topic
+    ↓
+method()
+
+Interview explanation:
+“The producer publishes messages to a Kafka topic using KafkaTemplate, and consumers listen to that topic using @KafkaListener.”
+
+That's enough for a basic coding interview.

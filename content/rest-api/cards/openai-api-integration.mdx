@@ -1,0 +1,123 @@
+---
+id: openai-api-integration
+tech: rest-api
+title: "Calling the OpenAI API from Java"
+topic: spring
+level: intermediate
+heat: 2
+hook: "An LLM call is a plain HTTPS POST: send model and input as JSON with a Bearer API key from the environment, then read the text from the JSON reply."
+points:
+  - { k: "Endpoint", v: "POST /v1/responses; recommended over Chat Completions for new projects" }
+  - { k: "Auth", v: "Authorization: Bearer key, read from an env var or a secret store" }
+  - { k: "Body", v: "model + input; max_output_tokens caps the reply and the cost" }
+  - { k: "Reply", v: "message items in output[] hold output_text parts" }
+  - { k: "429", v: "wait for Retry-After or back off with jitter; never retry quota errors", kind: minus }
+  - { k: "Model", v: "gpt-6-luna is listed on 20-10-2026; keep the name in config", kind: default }
+trap:
+  wrong: "Read output_text, or output[0].content[0].text, from the raw JSON."
+  right: "output_text is SDK-only, and output[0] may be a reasoning item. Keep message items and join their output_text parts."
+sayIt: "I build a RestClient for https://api.openai.com/v1 with a Bearer key from an environment variable, POST model and input to /responses, and map the JSON to records. Production adds timeouts, capped 429 retries and a token limit."
+confusedWith: []
+tags: [spring, openai, integration]
+visual: code
+sources:
+  - title: "Text generation: Responses API, output array (OpenAI API docs)"
+    url: "https://developers.openai.com/api/docs/guides/text"
+    verifiedOn: "2026-10-20"
+  - title: "API overview: authentication, request IDs (OpenAI API reference)"
+    url: "https://developers.openai.com/api/reference/overview"
+    verifiedOn: "2026-10-20"
+  - title: "Rate limits: 429, Retry-After, backoff (OpenAI API docs)"
+    url: "https://developers.openai.com/api/docs/guides/rate-limits"
+    verifiedOn: "2026-10-20"
+  - title: "Working with objects through RedisTemplate (Spring Data Redis 4.1 reference)"
+    url: "https://docs.spring.io/spring-data/redis/reference/redis/template.html"
+    verifiedOn: "2026-10-20"
+  - title: "Quick tour: KafkaTemplate and @KafkaListener (Spring for Apache Kafka 4.1 reference)"
+    url: "https://docs.spring.io/spring-kafka/reference/quick-tour.html"
+    verifiedOn: "2026-10-20"
+  - title: "Amazon S3 examples using SDK for Java 2.x (AWS docs)"
+    url: "https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/java_s3_code_examples.html"
+    verifiedOn: "2026-10-20"
+  - title: "Amazon SQS examples using SDK for Java 2.x (AWS docs)"
+    url: "https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/java_sqs_code_examples.html"
+    verifiedOn: "2026-10-20"
+  - title: "JDBC core classes: JdbcClient (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/data-access/jdbc/core.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Interviewers ask how a backend adds an AI feature. It is an ordinary call to an external REST API, so the usual client, auth and retry rules apply.
+
+## How it works
+
+<Mermaid
+  alt="Calling the OpenAI API. The Spring service sends POST /v1/responses with Authorization Bearer key and a JSON body holding model and input. OpenAI answers 200 with JSON whose output array holds message items with output_text parts. On 429 the service waits for Retry-After, then retries a capped number of times."
+  chart={`sequenceDiagram
+  participant S as Spring service
+  participant O as OpenAI API
+  S->>O: POST /v1/responses, Bearer key, JSON model + input
+  O-->>S: 200 JSON, output[] then message then output_text
+  Note over S,O: On 429 wait for Retry-After, then capped retries
+`}
+/>
+
+"Write integration code": name the class, then the one call.
+
+| Tech | Java or Spring class | Main call |
+| --- | --- | --- |
+| OpenAI | `RestClient` | `post().uri("/responses").body(...).retrieve()` |
+| Redis | `StringRedisTemplate` | `opsForValue().set(key, value, ttl)`, `get(key)` |
+| Kafka producer | `KafkaTemplate` | `send(topic, key, value)` |
+| Kafka consumer | `@KafkaListener(topics = "...")` | the method runs for each record |
+| AWS S3 | `S3Client` (SDK 2.x) | `putObject(PutObjectRequest, RequestBody)` |
+| AWS SQS | `SqsClient` (SDK 2.x) | `sendMessage(SendMessageRequest)` |
+| AWS RDS | `JdbcClient` or JPA, as for any SQL database | `sql(...).param(...).update()` |
+
+- Timeouts and `onStatus`: [HTTP clients](card:rest-clients); what to retry: [retries and timeouts](card:retries-and-timeouts).
+- [openai-java](card:openai-java-sdk) or [Spring AI](card:spring-ai-chatclient) wrap the same call.
+- Log the `x-request-id` header; OpenAI support traces calls by it.
+
+## Example
+
+```java
+@Service
+class AiClient {
+    private final RestClient http;
+    AiClient(RestClient.Builder b) {
+        http = b.baseUrl("https://api.openai.com/v1")
+                .defaultHeader("Authorization", "Bearer " + System.getenv("OPENAI_API_KEY"))
+                .build();
+    }
+    String ask(String prompt) {
+        return http.post().uri("/responses")
+                .body(Map.of("model", "gpt-6-luna", "input", prompt, "max_output_tokens", 500))
+                .retrieve().body(Reply.class).text();
+    }
+}
+```
+
+```java
+record Reply(List<Item> output) {
+    String text() {                       // skip reasoning items, join the text parts
+        return output.stream().filter(i -> "message".equals(i.type()))
+                .flatMap(i -> i.content().stream())
+                .filter(p -> "output_text".equals(p.type()))
+                .map(Part::text).collect(Collectors.joining());
+    }
+}
+record Item(String type, List<Part> content) {}
+record Part(String type, String text) {}
+```
+
+## Interview Qs
+
+### How would you integrate the ChatGPT API in Spring Boot?
+
+Code calls the OpenAI API, not ChatGPT. One service wraps a RestClient: POST /v1/responses with model and input as JSON and a Bearer key from the environment (never in code, Git or a browser), then map the reply to records.
+
+### What do you do when OpenAI returns 429?
+
+A rate limit is retryable: wait for Retry-After, else back off with jitter, and cap attempts. Quota and spend-limit 429s need action, not retries. Official SDKs already retry 429 and 503; do not stack a second loop.

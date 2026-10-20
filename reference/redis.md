@@ -285,3 +285,64 @@ In a real application, ensure imports, Redis connectivity, configuration, and er
 | Limited query model compared with SQL                         | Joins, indexes, constraints, transactions     |
 
 Rule: For payment records, use a durable database as the source of truth. Redis can accelerate reads, coordinate work, or store temporary information.
+
+
+<!-- ===== Owner addition: Integration template: Redis (section 2; sections 8-9 are in rest-api.md) (added 20-10-2026). Source file: reference/reference.md ===== -->
+
+2. Redis
+Interview question:
+How do you integrate Redis?
+
+Think:
+Spring Boot
+   ↓
+RedisTemplate
+   ↓
+Redis
+
+Simple code:
+@Configuration
+class RedisConfig {
+
+    @Bean
+    RedisTemplate<String, String> redisTemplate(
+            RedisConnectionFactory factory) {
+
+        RedisTemplate<String, String> redis = new RedisTemplate<>();
+        redis.setConnectionFactory(factory);
+        return redis;
+    }
+}
+
+Use it:
+@Service
+class UserService {
+
+    private final RedisTemplate<String, String> redis;
+
+    UserService(RedisTemplate<String, String> redis) {
+        this.redis = redis;
+    }
+
+    void saveUser() {
+        redis.opsForValue().set("user:1", "Srijan");
+    }
+
+    String getUser() {
+        return redis.opsForValue().get("user:1");
+    }
+}
+
+Remember:
+set → save
+get → read
+
+Most interview-friendly example:
+redis.opsForValue().set("user:1", "Srijan");
+
+String value =
+        redis.opsForValue().get("user:1");
+
+Interview explanation:
+“I can use Redis as a fast key-value cache. In Spring Boot, I configure a Redis connection and use RedisTemplate to read and write cached data.”
+

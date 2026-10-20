@@ -279,3 +279,161 @@ For a Spring Boot service, CloudWatch can track error rates and CPU usage. An al
 - Application needs application logs and metrics: Use CloudWatch.
 - Application needs to store secrets: Use Secrets Manager or another suitable managed configuration service.
 - Application needs to survive an Availability Zone failure: Design compute, networking, and data layers for redundancy; simply creating multiple EC2 instances does not guarantee high availability.
+
+
+<!-- ===== Owner addition: Integration templates: AWS SDK, SQS, RDS, S3 (sections 4-7; sections 8-9 are in rest-api.md) (added 20-10-2026). Source file: reference/reference.md ===== -->
+
+4. AWS — Don't Try to Memorize AWS SDK
+For a Java interview, first understand what AWS service you are integrating.
+
+Common examples:
+S3     → file storage
+RDS    → database
+SQS    → queue
+EC2    → server
+Lambda → serverless function
+CloudWatch → monitoring
+
+If asked:
+How would you upload a file to AWS S3?
+
+Think:
+Java
+ ↓
+AWS SDK
+ ↓
+S3
+ ↓
+Bucket
+
+Simple code:
+S3Client s3 = S3Client.builder()
+        .region(Region.AP_SOUTH_1)
+        .build();
+
+PutObjectRequest request =
+        PutObjectRequest.builder()
+                .bucket("my-bucket")
+                .key("hello.txt")
+                .build();
+
+s3.putObject(
+        request,
+        RequestBody.fromString("Hello AWS")
+);
+
+Remember:
+S3Client
+ ↓
+PutObjectRequest
+ ↓
+bucket + key
+ ↓
+putObject()
+
+Read:
+GetObjectRequest request =
+        GetObjectRequest.builder()
+                .bucket("my-bucket")
+                .key("hello.txt")
+                .build();
+
+ResponseBytes<GetObjectResponse> object =
+        s3.getObjectAsBytes(request);
+
+5. AWS SQS
+If interviewer asks:
+How do you send a message to AWS SQS?
+
+Think:
+Java
+ ↓
+SqsClient
+ ↓
+sendMessage()
+ ↓
+Queue
+
+SqsClient sqs = SqsClient.builder()
+        .region(Region.AP_SOUTH_1)
+        .build();
+
+SendMessageRequest request =
+        SendMessageRequest.builder()
+                .queueUrl(queueUrl)
+                .messageBody("Order created")
+                .build();
+
+sqs.sendMessage(request);
+
+Remember:
+SqsClient
+→ SendMessageRequest
+→ queueUrl
+→ messageBody
+→ sendMessage()
+
+6. AWS RDS
+Usually you don't write AWS-specific Java code to connect to RDS.
+
+Think:
+Spring Boot
+    ↓
+JPA/Hibernate
+    ↓
+JDBC
+    ↓
+RDS PostgreSQL/MySQL
+
+Configuration:
+spring.datasource.url=jdbc:postgresql://HOST:5432/mydb
+spring.datasource.username=USER
+spring.datasource.password=PASSWORD
+
+Then normal JPA:
+@Repository
+interface UserRepository
+        extends JpaRepository<User, Long> {
+}
+
+That's an important interview distinction:
+RDS is basically managed database infrastructure; my Java application usually connects using the normal JDBC/JPA mechanism.
+
+7. AWS S3 + Spring Boot — Even Simpler Mental Model
+If they ask:
+“How would you integrate AWS S3 into your Spring Boot application?”
+
+Answer:
+Controller
+    ↓
+Service
+    ↓
+S3Client
+    ↓
+S3 Bucket
+
+Code:
+@Service
+class FileService {
+
+    private final S3Client s3;
+
+    FileService(S3Client s3) {
+        this.s3 = s3;
+    }
+
+    void upload(String fileName, String content) {
+
+        PutObjectRequest request =
+                PutObjectRequest.builder()
+                        .bucket("my-bucket")
+                        .key(fileName)
+                        .build();
+
+        s3.putObject(
+                request,
+                RequestBody.fromString(content)
+        );
+    }
+}
+

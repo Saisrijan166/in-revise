@@ -1,0 +1,127 @@
+---
+id: aws-code-templates
+tech: aws
+title: "AWS Code Templates"
+topic: operations
+level: interview
+heat: 2
+hook: "Do not memorise the SDK: every 2.x call is client builder, then request builder, then one method call. RDS needs no AWS code at all."
+points:
+  - { k: "Shape", v: "S3Client.builder() → PutObjectRequest.builder() → s3.putObject(...)" }
+  - { k: "S3", v: "bucket + key address the object; the bytes go in a RequestBody" }
+  - { k: "SQS consumer", v: "receive, process, then delete with the message's receipt handle" }
+  - { k: "RDS", v: "the normal JDBC URL to the RDS endpoint; password from Secrets Manager" }
+  - { k: "@SqsListener", v: "deletes the message only if the method returns normally", kind: default }
+trap:
+  wrong: "To read and write RDS data from Java, call the AWS SDK's RDS client."
+  right: "The RDS API manages the database (create, snapshot, fail over). Data goes through the normal JDBC driver and JPA."
+sayIt: "In SDK 2.x I build one client per service, then a request with its builder, then call: putObject with bucket, key and body; sendMessage with the queue URL; receive, process, delete. RDS is plain JDBC. In Spring Boot, S3Template, SqsTemplate and @SqsListener do the same."
+confusedWith: []
+tags: [sdk, java, s3, sqs, rds, spring-cloud-aws, coding-round]
+visual: code
+sources:
+  - title: "S3Client (AWS SDK for Java 2.x API Reference)"
+    url: "https://sdk.amazonaws.com/java/api/latest/software/amazon/awssdk/services/s3/S3Client.html"
+    verifiedOn: "2026-10-20"
+  - title: "Send, receive, and delete Amazon SQS messages (AWS SDK for Java 2.x Developer Guide)"
+    url: "https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/examples-sqs-messages.html"
+    verifiedOn: "2026-10-20"
+  - title: "Spring Cloud AWS 4.2 reference: S3Template, SqsTemplate, @SqsListener, acknowledgement"
+    url: "https://docs.awspring.io/spring-cloud-aws/docs/4.2.0/reference/html/index.html"
+    verifiedOn: "2026-10-20"
+  - title: "Connecting with IAM authentication and the AWS SDK for Java (Amazon RDS User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.Connecting.Java.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+"Upload a file to S3" or "send to SQS" are common whiteboard asks. The SDK has thousands of methods, but one shape covers every service.
+
+## How it works
+
+Below: S3 put and get, SQS send-receive-delete, the Spring Cloud AWS way, and RDS from Spring Boot. The rest live with their service:
+
+| Task | Template |
+|---|---|
+| Log in to RDS with no password | [IAM database authentication](term:iam-database-authentication): the SDK or the AWS Advanced JDBC Wrapper makes the token |
+| Share a private file | [pre-signed URL](card:s3) |
+| Write once by key | [conditional putItem](card:dynamodb) |
+| Encrypt with your key | [SSE-KMS upload](card:kms-and-encryption) |
+| Run on a queue message | [Lambda handler](card:lambda) |
+| Timeouts, credentials | [client setup](card:aws-sdk-for-java) |
+
+## Example
+
+```java
+S3Client s3 = S3Client.builder().region(Region.AP_SOUTH_1).build();     // 1. client, once
+
+PutObjectRequest put = PutObjectRequest.builder()                       // 2. request
+        .bucket("payment-receipts").key("receipts/pay_123.txt").build();
+s3.putObject(put, RequestBody.fromString("Paid INR 500 for pay_123"));  // 3. call
+
+GetObjectRequest get = GetObjectRequest.builder()
+        .bucket("payment-receipts").key("receipts/pay_123.txt").build();
+String receipt = s3.getObjectAsBytes(get).asUtf8String();
+System.out.println(receipt);
+```
+
+```text output
+Paid INR 500 for pay_123
+```
+
+```java
+SqsClient sqs = SqsClient.builder().region(Region.AP_SOUTH_1).build();
+String url = sqs.getQueueUrl(b -> b.queueName("receipt-jobs")).queueUrl();
+
+sqs.sendMessage(b -> b.queueUrl(url).messageBody("pay_123"));          // producer
+
+ReceiveMessageRequest receive = ReceiveMessageRequest.builder().queueUrl(url)
+        .waitTimeSeconds(20).maxNumberOfMessages(10).build();         // long polling
+for (Message m : sqs.receiveMessage(receive).messages()) {
+    System.out.println("Making receipt for " + m.body());             // keep it idempotent
+    sqs.deleteMessage(b -> b.queueUrl(url).receiptHandle(m.receiptHandle())); // done
+}
+```
+
+```text output
+Making receipt for pay_123
+```
+
+```java
+@Service
+class ReceiptService {
+    private final S3Template s3;
+    private final SqsTemplate sqs;
+    ReceiptService(S3Template s3, SqsTemplate sqs) { this.s3 = s3; this.sqs = sqs; }
+    void save(String paymentId, InputStream pdf) {
+        s3.upload("payment-receipts", "receipts/" + paymentId + ".pdf", pdf);
+        sqs.send("receipt-jobs", paymentId);                  // queue name or URL
+    }
+    @SqsListener("receipt-jobs")                              // deleted only on success
+    void onJob(String paymentId) { System.out.println("Making receipt for " + paymentId); }
+}
+```
+
+```properties
+# RDS is plain PostgreSQL: the normal driver, pointed at the RDS endpoint
+spring.datasource.url=jdbc:postgresql://payments-db.abc123example.ap-south-1.rds.amazonaws.com:5432/payments
+# with spring-cloud-aws-starter-secrets-manager, the secret's JSON keys become properties
+spring.config.import=aws-secretsmanager:/payments/db
+spring.datasource.username=${username}
+spring.datasource.password=${password}
+```
+
+## Interview Qs
+
+### How do you upload a file to S3 from Spring Boot?
+
+Inject one shared `S3Client` (or `S3Template`), build a `PutObjectRequest` with bucket and key, and call `putObject` with a `RequestBody`. No keys in code: the default chain finds the role.
+
+### Do you need the AWS SDK to use RDS from Java?
+
+No. The app talks to the database through JDBC and JPA like any PostgreSQL or MySQL. The SDK only manages the instance, or fetches its secret or IAM token.
+
+### When does @SqsListener delete a message?
+
+Its default acknowledgement mode is ON_SUCCESS: after the method returns without an exception, the message is acknowledged, which in SQS means deleted. If it throws, the message reappears after the visibility timeout.

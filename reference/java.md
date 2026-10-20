@@ -6726,3 +6726,2558 @@ COLLECT
  │    └── minBy
  └── partitioningBy
 the same way i want to remebr the normal java functions important for solving the problems so on
+
+
+<!-- ===== Owner addition: Java coding practice (sections 0-96) and the compile/run tip (added 20-10-2026). Source file: reference/reference.md ===== -->
+
+For interviews, you need 4 things to become automatic:
+
+Question → identify concept → remember syntax skeleton → write logic → mentally verify output
+
+We should therefore practice Java as a coding language, not as a list of theoretical topics.
+JAVA INTERVIEW CODING MUSCLE — COMPLETE PATH
+Use your existing:
+public class Main {
+
+    public static void main(String[] args) {
+
+    }
+}
+
+For now, write every example yourself in Main.java. Do not copy-paste while learning.
+0. The Core Rule
+For every question, think in this order:
+1. What data do I have?
+2. What do I need to return/print?
+3. What loop / collection / method do I need?
+4. What is the Java syntax?
+5. What happens for each value?
+6. What is the final output?
+
+Example:
+Count even numbers in an array.
+
+Think:
+data → int[]
+condition → number % 2 == 0
+state → count
+loop → for
+output → count
+
+Then code:
+int[] nums = {1, 2, 3, 4, 5, 6};
+
+int count = 0;
+
+for (int n : nums) {
+    if (n % 2 == 0) {
+        count++;
+    }
+}
+
+System.out.println(count);
+
+Output:
+3
+
+That thinking pattern is more important than memorizing the exact code.
+1. JAVA BASIC SYNTAX MUST BECOME AUTOMATIC
+Variables
+int age = 25;
+double salary = 50000.5;
+boolean active = true;
+char grade = 'A';
+String name = "Srijan";
+
+Remember:
+int       → whole number
+double    → decimal
+boolean   → true/false
+char      → single character
+String    → text
+
+2. IF / ELSE
+Basic skeleton:
+if (condition) {
+
+} else if (condition) {
+
+} else {
+
+}
+
+Example:
+int n = 10;
+
+if (n > 0) {
+    System.out.println("Positive");
+} else if (n < 0) {
+    System.out.println("Negative");
+} else {
+    System.out.println("Zero");
+}
+
+Important syntax
+==     // comparison
+!=     // not equal
+>      // greater
+<      // smaller
+>=
+<=
+&&     // AND
+||     // OR
+!      // NOT
+
+Common interview mistake:
+if (x = 5)   // WRONG
+
+Assignment is:
+x = 5;
+
+Comparison:
+x == 5;
+
+3. LOOPS
+Normal for loop
+Memorize this:
+for (int i = 0; i < n; i++) {
+
+}
+
+Example:
+for (int i = 0; i < 5; i++) {
+    System.out.println(i);
+}
+
+Output:
+0
+1
+2
+3
+4
+
+for-each
+Very important for interview coding.
+for (int n : nums) {
+
+}
+
+Example:
+int[] nums = {10, 20, 30};
+
+for (int n : nums) {
+    System.out.println(n);
+}
+
+Think:
+for each element → do something
+
+while
+int i = 0;
+
+while (i < 5) {
+    System.out.println(i);
+    i++;
+}
+
+do-while
+int i = 0;
+
+do {
+    System.out.println(i);
+    i++;
+} while (i < 5);
+
+4. BREAK / CONTINUE
+break;
+
+Means:
+Stop the loop completely.
+
+continue;
+
+Means:
+Skip current iteration.
+
+Example:
+for (int i = 1; i <= 5; i++) {
+
+    if (i == 3) {
+        continue;
+    }
+
+    System.out.println(i);
+}
+
+Output:
+1
+2
+4
+5
+
+5. METHODS — THIS MUST BECOME AUTOMATIC
+Basic syntax:
+returnType methodName(parameters) {
+
+    return value;
+}
+
+Example:
+static int add(int a, int b) {
+    return a + b;
+}
+
+Calling:
+int result = add(10, 20);
+System.out.println(result);
+
+Output:
+30
+
+Void method
+static void printHello() {
+    System.out.println("Hello");
+}
+
+Call:
+printHello();
+
+Method with parameter
+static void greet(String name) {
+    System.out.println("Hello " + name);
+}
+
+Call:
+greet("Srijan");
+
+Method with return value
+static int square(int n) {
+    return n * n;
+}
+
+Call:
+int result = square(5);
+System.out.println(result);
+
+6. RETURN VS PRINT
+This causes many interview mistakes.
+static int add(int a, int b) {
+    return a + b;
+}
+
+means:
+Give the value back to the caller.
+
+Whereas:
+static void add(int a, int b) {
+    System.out.println(a + b);
+}
+
+means:
+Print it.
+
+These are not the same.
+
+Prefer returning values when solving reusable problems.
+7. METHOD OVERLOADING
+Same method name, different parameters.
+static int add(int a, int b) {
+    return a + b;
+}
+
+static int add(int a, int b, int c) {
+    return a + b + c;
+}
+
+static double add(double a, double b) {
+    return a + b;
+}
+
+Java decides based on arguments.
+add(1, 2);
+add(1, 2, 3);
+add(1.5, 2.5);
+
+Remember:
+OVERLOAD = same name + different parameter list
+
+8. ARRAYS
+Create
+int[] nums = {10, 20, 30, 40};
+
+Access:
+nums[0];
+nums[1];
+
+Length:
+nums.length
+
+Important:
+array.length
+
+not:
+array.length()
+
+Loop through array
+for (int i = 0; i < nums.length; i++) {
+    System.out.println(nums[i]);
+}
+
+Or:
+for (int n : nums) {
+    System.out.println(n);
+}
+
+9. STRING — VERY IMPORTANT
+String s = "hello";
+
+Length:
+s.length()
+
+Character:
+s.charAt(0)
+
+Substring:
+s.substring(1, 4)
+
+Convert:
+s.toUpperCase();
+s.toLowerCase();
+
+Comparison:
+s.equals("hello");
+
+NOT:
+s == "hello";
+
+For content comparison:
+equals()
+
+10. STRINGBUILDER
+Whenever you need to repeatedly modify a string:
+StringBuilder sb = new StringBuilder();
+
+Append:
+sb.append("Hello");
+sb.append(" World");
+
+Reverse:
+sb.reverse();
+
+Convert back:
+String result = sb.toString();
+
+Example:
+String s = "hello";
+
+String reversed = new StringBuilder(s)
+        .reverse()
+        .toString();
+
+System.out.println(reversed);
+
+Output:
+olleh
+
+11. CLASSES AND OBJECTS
+Basic class:
+class Student {
+
+    String name;
+    int age;
+
+}
+
+Object:
+Student s = new Student();
+
+Set fields:
+s.name = "Srijan";
+s.age = 25;
+
+12. CONSTRUCTOR
+class Student {
+
+    String name;
+    int age;
+
+    Student(String name, int age) {
+        this.name = name;
+        this.age = age;
+    }
+}
+
+Create:
+Student s = new Student("Srijan", 25);
+
+Important:
+this.name = name;
+
+means:
+object field = constructor parameter
+
+13. ENCAPSULATION
+Normally:
+class Student {
+
+    private String name;
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+}
+
+Remember:
+private field
+↓
+getter / setter
+
+14. STATIC VS INSTANCE
+Instance method
+class Test {
+
+    void hello() {
+        System.out.println("Hello");
+    }
+}
+
+Need object:
+Test t = new Test();
+t.hello();
+
+Static method
+class Test {
+
+    static void hello() {
+        System.out.println("Hello");
+    }
+}
+
+Can call:
+Test.hello();
+
+Inside main:
+hello();
+
+because main is static and hello is static.
+15. INHERITANCE
+class Animal {
+
+    void sound() {
+        System.out.println("Animal sound");
+    }
+}
+
+class Dog extends Animal {
+
+}
+
+Now:
+Dog d = new Dog();
+d.sound();
+
+16. METHOD OVERRIDING
+Parent:
+class Animal {
+
+    void sound() {
+        System.out.println("Animal");
+    }
+}
+
+Child:
+class Dog extends Animal {
+
+    @Override
+    void sound() {
+        System.out.println("Bark");
+    }
+}
+
+Now:
+Animal a = new Dog();
+a.sound();
+
+Output:
+Bark
+
+Remember:
+OVERRIDE = child changes inherited behavior
+
+17. ABSTRACT CLASS
+abstract class Animal {
+
+    abstract void sound();
+
+    void eat() {
+        System.out.println("Eating");
+    }
+}
+
+You cannot:
+new Animal(); // WRONG
+
+Child must implement abstract method:
+class Dog extends Animal {
+
+    @Override
+    void sound() {
+        System.out.println("Bark");
+    }
+}
+
+18. INTERFACE
+interface Payment {
+
+    void pay();
+}
+
+Implement:
+class UPI implements Payment {
+
+    @Override
+    public void pay() {
+        System.out.println("UPI Payment");
+    }
+}
+
+Call:
+Payment payment = new UPI();
+payment.pay();
+
+19. YOUR FUNCTIONAL INTERFACE QUESTION
+This is extremely important.
+
+A functional interface has:
+exactly one abstract method
+
+Example:
+@FunctionalInterface
+interface Calculator {
+
+    int calculate(int a, int b);
+}
+
+Level 1 — implement normally
+class CalculatorImpl implements Calculator {
+
+    @Override
+    public int calculate(int a, int b) {
+        return a + b;
+    }
+}
+
+Then:
+Calculator calculator = new CalculatorImpl();
+
+System.out.println(calculator.calculate(10, 20));
+
+Output:
+30
+
+20. Functional interface using lambda
+You do not need a separate implementation class.
+Calculator calculator = (a, b) -> a + b;
+
+Then:
+System.out.println(calculator.calculate(10, 20));
+
+Output:
+30
+
+This is one of the most important interview transitions:
+Interface
+    ↓
+Functional Interface
+    ↓
+Lambda
+
+21. "HOW CAN YOU CALL IT WITHOUT IMPLEMENTING IT?"
+The key clarification:
+
+The abstract method cannot magically execute without an implementation.
+
+But instead of creating a separate implementation class:
+class CalculatorImpl implements Calculator {
+    ...
+}
+
+you can provide the implementation using:
+Lambda
+Calculator c = (a, b) -> a + b;
+
+Anonymous class
+Calculator c = new Calculator() {
+
+    @Override
+    public int calculate(int a, int b) {
+        return a + b;
+    }
+};
+
+Method reference
+Calculator c = MathUtils::add;
+
+So remember:
+Separate class implementation
+        OR
+Anonymous class
+        OR
+Lambda
+        OR
+Method reference
+
+22. DEFAULT METHOD IN INTERFACE
+This is another possible interview trick.
+interface Test {
+
+    default void hello() {
+        System.out.println("Hello");
+    }
+}
+
+Now a class can implement the interface without implementing hello().
+class Demo implements Test {
+
+}
+
+Then:
+Demo d = new Demo();
+d.hello();
+
+Output:
+Hello
+
+Why?
+
+Because hello() already has an implementation.
+
+Remember:
+abstract method → implementation required
+default method  → implementation already provided
+static method   → belongs to interface itself
+
+23. COLLECTIONS — MUST BECOME AUTOMATIC
+You should instantly know:
+List → ordered, duplicates allowed
+Set  → unique elements
+Map  → key → value
+Queue → processing order
+Deque → both ends
+
+24. ARRAYLIST
+List<Integer> numbers = new ArrayList<>();
+
+Add:
+numbers.add(10);
+numbers.add(20);
+
+Get:
+numbers.get(0);
+
+Set:
+numbers.set(0, 100);
+
+Remove by index:
+numbers.remove(0);
+
+Size:
+numbers.size();
+
+Contains:
+numbers.contains(20);
+
+Loop:
+for (int n : numbers) {
+    System.out.println(n);
+}
+
+25. LIST INSTANT SYNTAX
+You should be able to write these without thinking:
+List<Integer> list = new ArrayList<>();
+
+List<String> names = new ArrayList<>();
+
+Set<Integer> set = new HashSet<>();
+
+Map<String, Integer> map = new HashMap<>();
+
+26. HASHSET
+Set<Integer> set = new HashSet<>();
+
+set.add(10);
+set.add(20);
+set.add(10);
+
+Result contains:
+10
+20
+
+Duplicate removed.
+
+Very useful for:
+duplicate detection
+membership checking
+unique elements
+
+Example:
+int[] nums = {1, 2, 3, 2, 4};
+
+Set<Integer> seen = new HashSet<>();
+
+for (int n : nums) {
+
+    if (seen.contains(n)) {
+        System.out.println("Duplicate: " + n);
+    }
+
+    seen.add(n);
+}
+
+27. HASHMAP — EXTREMELY IMPORTANT
+Create:
+Map<String, Integer> map = new HashMap<>();
+
+Put:
+map.put("Java", 10);
+map.put("Python", 20);
+
+Get:
+map.get("Java");
+
+Check:
+map.containsKey("Java");
+
+Remove:
+map.remove("Java");
+
+Size:
+map.size();
+
+28. FREQUENCY MAP — MASTER PATTERN
+This pattern appears everywhere.
+
+Question:
+Count frequency of each number.
+
+int[] nums = {1, 2, 2, 3, 1, 2};
+
+Map<Integer, Integer> freq = new HashMap<>();
+
+for (int n : nums) {
+
+    freq.put(n, freq.getOrDefault(n, 0) + 1);
+}
+
+System.out.println(freq);
+
+Think:
+map
+key = element
+value = count
+
+The magic syntax:
+map.getOrDefault(key, 0) + 1
+
+Memorize this.
+29. STRING FREQUENCY
+String s = "banana";
+
+Map<Character, Integer> freq = new HashMap<>();
+
+for (char c : s.toCharArray()) {
+    freq.put(c, freq.getOrDefault(c, 0) + 1);
+}
+
+System.out.println(freq);
+
+Output conceptually:
+b=1
+a=3
+n=2
+
+30. ITERATING A MAP
+Keys:
+for (String key : map.keySet()) {
+    System.out.println(key);
+}
+
+Values:
+for (Integer value : map.values()) {
+    System.out.println(value);
+}
+
+Both:
+for (Map.Entry<String, Integer> entry : map.entrySet()) {
+
+    System.out.println(
+        entry.getKey() + " = " + entry.getValue()
+    );
+}
+
+This should become automatic.
+31. GENERICS
+Think:
+Generics = tell Java what type the collection contains
+
+List<Integer>
+List<String>
+Map<String, Integer>
+
+Example:
+List<String> names = new ArrayList<>();
+
+Now only String should be stored.
+32. QUEUE
+Queue<Integer> queue = new LinkedList<>();
+
+Add:
+queue.offer(10);
+queue.offer(20);
+queue.offer(30);
+
+Read first:
+queue.peek();
+
+Remove first:
+queue.poll();
+
+Think:
+FIFO
+First In → First Out
+
+33. DEQUE
+Deque<Integer> deque = new ArrayDeque<>();
+
+Front:
+deque.addFirst(10);
+deque.removeFirst();
+
+Back:
+deque.addLast(20);
+deque.removeLast();
+
+Very useful for stack/queue problems.
+34. STACK
+Prefer Deque.
+Deque<Integer> stack = new ArrayDeque<>();
+
+Push:
+stack.push(10);
+
+Peek:
+stack.peek();
+
+Pop:
+stack.pop();
+
+Think:
+LIFO
+Last In → First Out
+
+35. SORTING
+Normal array:
+Arrays.sort(nums);
+
+List:
+Collections.sort(list);
+
+Modern:
+list.sort(Comparator.naturalOrder());
+
+Descending:
+list.sort(Comparator.reverseOrder());
+
+36. COMPARATOR — MUST KNOW
+Suppose:
+List<String> names = new ArrayList<>(
+    List.of("John", "Alex", "Bob")
+);
+
+Sort by length:
+names.sort(Comparator.comparingInt(String::length));
+
+Descending length:
+names.sort(
+    Comparator.comparingInt(String::length).reversed()
+);
+
+37. OBJECT SORTING
+class Student {
+
+    String name;
+    int marks;
+
+    Student(String name, int marks) {
+        this.name = name;
+        this.marks = marks;
+    }
+}
+
+Sort:
+students.sort(
+    Comparator.comparingInt(s -> s.marks)
+);
+
+Descending:
+students.sort(
+    Comparator.comparingInt((Student s) -> s.marks)
+              .reversed()
+);
+
+This syntax becomes important when streams start.
+38. LAMBDA EXPRESSIONS
+Basic:
+(a, b) -> a + b
+
+One parameter:
+x -> x * 2
+
+Multiple statements:
+x -> {
+    int y = x * 2;
+    return y;
+}
+
+No parameter:
+() -> System.out.println("Hello")
+
+Think:
+(parameters) -> expression
+
+or
+(parameters) -> { statements }
+
+39. BUILT-IN FUNCTIONAL INTERFACES
+These are interview essentials.
+Predicate
+Takes value → returns boolean.
+Predicate<Integer> p = x -> x > 10;
+
+Call:
+p.test(20);
+
+Function
+Input → output.
+Function<Integer, Integer> f = x -> x * 2;
+
+Call:
+f.apply(10);
+
+Consumer
+Input → no return.
+Consumer<String> c = x -> System.out.println(x);
+
+Call:
+c.accept("Hello");
+
+Supplier
+No input → gives output.
+Supplier<Double> s = () -> Math.random();
+
+Call:
+s.get();
+
+40. MEMORIZE THIS TABLE
+Predicate<T>
+T → boolean
+test()
+
+Function<T,R>
+T → R
+apply()
+
+Consumer<T>
+T → nothing
+accept()
+
+Supplier<T>
+nothing → T
+get()
+
+41. STREAMS — YOUR BIG INTERVIEW AREA
+A stream is a pipeline for processing data.
+
+Basic structure:
+collection.stream()
+          .operation()
+          .operation()
+          .terminalOperation();
+
+Example:
+List<Integer> nums = List.of(1, 2, 3, 4, 5);
+
+List<Integer> result = nums.stream()
+        .filter(n -> n % 2 == 0)
+        .map(n -> n * 2)
+        .toList();
+
+Result:
+[4, 8]
+
+42. STREAM MENTAL MODEL
+Always think:
+SOURCE
+   ↓
+filter
+   ↓
+map
+   ↓
+sorted
+   ↓
+collect / toList / count / reduce
+
+Example:
+nums.stream()
+    .filter(...)
+    .map(...)
+    .sorted(...)
+    .toList();
+
+43. FILTER
+Keep only elements satisfying condition.
+List<Integer> result = nums.stream()
+        .filter(n -> n > 10)
+        .toList();
+
+Think:
+filter = REMOVE unwanted elements
+
+44. MAP
+Transform each element.
+List<Integer> result = nums.stream()
+        .map(n -> n * 2)
+        .toList();
+
+Think:
+map = CHANGE each element
+
+Very important distinction:
+filter → fewer/same number of elements
+map    → transforms elements
+
+45. DISTINCT
+nums.stream()
+    .distinct()
+    .toList();
+
+Removes duplicates.
+46. SORTED
+Ascending:
+nums.stream()
+    .sorted()
+    .toList();
+
+Descending:
+nums.stream()
+    .sorted(Comparator.reverseOrder())
+    .toList();
+
+47. LIMIT
+nums.stream()
+    .limit(3)
+    .toList();
+
+Keeps first 3.
+48. SKIP
+nums.stream()
+    .skip(2)
+    .toList();
+
+Skips first 2.
+49. COUNT
+long count = nums.stream()
+        .filter(n -> n % 2 == 0)
+        .count();
+
+Remember:
+count() → long
+
+50. FOREACH
+nums.stream()
+    .forEach(System.out::println);
+
+Equivalent lambda:
+nums.stream()
+    .forEach(n -> System.out.println(n));
+
+51. REDUCE
+Combine many values into one.
+
+Sum:
+int sum = nums.stream()
+        .reduce(0, (a, b) -> a + b);
+
+Or:
+int sum = nums.stream()
+        .mapToInt(Integer::intValue)
+        .sum();
+
+Think:
+reduce → many values → one value
+
+52. ANYMATCH / ALLMATCH / NONEMATCH
+boolean result = nums.stream()
+        .anyMatch(n -> n > 100);
+
+Means:
+Is there at least one?
+
+allMatch()
+
+Means:
+Do all satisfy?
+
+noneMatch()
+
+Means:
+Does no element satisfy?
+
+53. FIND FIRST
+Optional<Integer> result =
+        nums.stream()
+            .filter(n -> n > 10)
+            .findFirst();
+
+Could use:
+result.orElse(-1);
+
+54. OPTIONAL
+Basic:
+Optional<String> name = Optional.of("Java");
+
+Get safely:
+name.orElse("Unknown");
+
+Condition:
+name.ifPresent(System.out::println);
+
+Remember:
+Optional = value may or may not exist
+
+55. STREAM OUTPUT THINKING
+This skill is extremely important.
+
+Suppose:
+List<Integer> nums = List.of(1, 2, 3, 4, 5);
+
+Code:
+List<Integer> result = nums.stream()
+        .filter(n -> n % 2 == 1)
+        .map(n -> n * 10)
+        .filter(n -> n > 20)
+        .toList();
+
+Do not look at it as one complicated statement.
+
+Run mentally:
+Step 1
+1 2 3 4 5
+
+filter odd
+1 3 5
+
+map ×10
+10 30 50
+
+filter >20
+30 50
+
+Final:
+[30, 50]
+
+This is how you should solve stream-output questions.
+56. STREAM QUESTIONS YOU MUST MASTER
+You should eventually be able to write all of these without searching syntax.
+Even numbers
+nums.stream()
+    .filter(n -> n % 2 == 0)
+    .toList();
+
+Squares
+nums.stream()
+    .map(n -> n * n)
+    .toList();
+
+Maximum
+int max = nums.stream()
+        .max(Integer::compareTo)
+        .orElseThrow();
+
+Minimum
+int min = nums.stream()
+        .min(Integer::compareTo)
+        .orElseThrow();
+
+Sum
+int sum = nums.stream()
+        .mapToInt(Integer::intValue)
+        .sum();
+
+Count
+long count = nums.stream()
+        .filter(n -> n > 10)
+        .count();
+
+Remove duplicates
+nums.stream()
+    .distinct()
+    .toList();
+
+57. STRING STREAM QUESTIONS
+Given:
+List<String> names =
+        List.of("Java", "Python", "Java", "Go");
+
+Filter Java:
+names.stream()
+     .filter(s -> s.equals("Java"))
+     .toList();
+
+Uppercase:
+names.stream()
+     .map(String::toUpperCase)
+     .toList();
+
+Sort:
+names.stream()
+     .sorted()
+     .toList();
+
+Length:
+names.stream()
+     .map(String::length)
+     .toList();
+
+58. METHOD REFERENCES
+Instead of:
+x -> x.toUpperCase()
+
+You can use:
+String::toUpperCase
+
+Instead of:
+x -> System.out.println(x)
+
+Use:
+System.out::println
+
+Instead of:
+x -> Integer.parseInt(x)
+
+Use:
+Integer::parseInt
+
+Think:
+lambda → method reference
+
+59. COLLECTORS
+Very important for interview streams.
+
+Imports:
+import java.util.stream.Collectors;
+
+Joining strings:
+String result = names.stream()
+        .collect(Collectors.joining(", "));
+
+Result:
+Java, Python, Java, Go
+
+60. GROUPING BY
+Suppose:
+List<String> names =
+        List.of("Alice", "Bob", "Anna", "Brian");
+
+Group by first character:
+Map<Character, List<String>> result =
+        names.stream()
+             .collect(
+                 Collectors.groupingBy(
+                     s -> s.charAt(0)
+                 )
+             );
+
+Think:
+groupingBy → classify elements into groups
+
+61. PARTITIONING BY
+Split into two groups based on true/false.
+Map<Boolean, List<Integer>> result =
+        nums.stream()
+            .collect(
+                Collectors.partitioningBy(
+                    n -> n % 2 == 0
+                )
+            );
+
+Think:
+partitioningBy → exactly two groups
+true / false
+
+62. STREAM + MAP FREQUENCY
+Very interview-relevant.
+String s = "banana";
+
+Map<Character, Long> freq =
+        s.chars()
+         .mapToObj(c -> (char) c)
+         .collect(
+             Collectors.groupingBy(
+                 c -> c,
+                 Collectors.counting()
+             )
+         );
+
+Concept:
+characters
+→ groupingBy
+→ counting
+
+63. EXCEPTIONS
+Basic syntax:
+try {
+
+} catch (Exception e) {
+
+}
+
+Example:
+try {
+
+    int result = 10 / 0;
+
+} catch (ArithmeticException e) {
+
+    System.out.println("Cannot divide by zero");
+}
+
+64. FINALLY
+try {
+
+} catch (Exception e) {
+
+} finally {
+
+}
+
+finally is generally for cleanup.
+65. THROW VS THROWS
+throw
+Actually throws exception:
+throw new IllegalArgumentException("Invalid age");
+
+throws
+Declares that method may throw:
+static void readFile() throws IOException {
+
+}
+
+Remember:
+throw  → inside method → actually throw
+throws → method signature → declares possibility
+
+66. CUSTOM EXCEPTION
+class InvalidAgeException extends Exception {
+
+    InvalidAgeException(String message) {
+        super(message);
+    }
+}
+
+Use:
+throw new InvalidAgeException("Age is invalid");
+
+67. EQUALS AND HASHCODE
+Very common interview topic.
+
+For objects, if logically comparing content:
+obj1.equals(obj2);
+
+not necessarily:
+obj1 == obj2;
+
+Remember:
+==       → reference comparison for objects
+equals() → logical/content comparison
+
+And when overriding equals(), normally override hashCode() consistently too.
+68. IMMUTABILITY
+Example:
+String s = "hello";
+
+Strings are immutable.
+
+This:
+s.toUpperCase();
+
+does not modify s.
+
+You need:
+s = s.toUpperCase();
+
+Output after just:
+s.toUpperCase();
+System.out.println(s);
+
+is still:
+hello
+
+69. FINAL
+Variable:
+final int x = 10;
+
+Cannot:
+x = 20;
+
+Method:
+final void test() {
+
+}
+
+Class:
+final class Test {
+
+}
+
+Think:
+final variable → cannot reassign
+final method → cannot override
+final class → cannot extend
+
+70. INTERVIEW CODE PATTERNS YOU SHOULD MASTER
+These are the problems that will build your coding fluency.
+Level A — extremely basic
+Write methods for:
+1. add two numbers
+2. check even/odd
+3. positive/negative
+4. maximum of two numbers
+5. maximum of three numbers
+6. swap two numbers
+7. factorial
+8. reverse number
+9. palindrome number
+10. prime number
+11. Fibonacci
+12. count digits
+13. sum of digits
+14. power
+15. character check
+
+71. LEVEL B — ARRAYS
+Write methods for:
+1. print array
+2. sum elements
+3. average
+4. maximum
+5. minimum
+6. second largest
+7. reverse array
+8. count even
+9. count odd
+10. search element
+11. duplicate detection
+12. remove duplicates
+13. frequency
+14. sort
+15. merge arrays
+
+72. LEVEL C — STRINGS
+1. reverse string
+2. palindrome
+3. count vowels
+4. count characters
+5. frequency
+6. first non-repeating character
+7. duplicate characters
+8. remove duplicate characters
+9. anagram
+10. reverse words
+11. longest word
+12. word frequency
+13. string compression
+14. character replacement
+
+73. LEVEL D — COLLECTIONS
+1. List CRUD
+2. Set duplicate detection
+3. Map frequency
+4. Map iteration
+5. sort List
+6. sort objects
+7. Queue
+8. Stack using Deque
+9. TreeSet
+10. TreeMap
+11. priority queue
+12. custom comparator
+
+74. LEVEL E — FUNCTIONAL JAVA
+You must be able to write immediately:
+1. Functional interface
+2. Lambda
+3. Anonymous class
+4. Predicate
+5. Function
+6. Consumer
+7. Supplier
+8. UnaryOperator
+9. BinaryOperator
+10. Method reference
+
+75. LEVEL F — STREAMS
+Practice these until syntax becomes automatic:
+filter
+map
+distinct
+sorted
+limit
+skip
+count
+forEach
+reduce
+min
+max
+anyMatch
+allMatch
+noneMatch
+findFirst
+findAny
+toList
+collect
+joining
+groupingBy
+partitioningBy
+mapping
+counting
+
+76. LEVEL G — OBJECT STREAM PROBLEMS
+Create:
+class Employee {
+
+    int id;
+    String name;
+    String department;
+    double salary;
+
+}
+
+Then practice:
+1. employees with salary > X
+2. sort by salary
+3. highest salary
+4. lowest salary
+5. average salary
+6. employees by department
+7. highest salary per department
+8. count per department
+9. names only
+10. total salary
+11. second highest salary
+12. duplicate departments
+
+These problems combine:
+class
+object
+List
+lambda
+Comparator
+streams
+Collectors
+Map
+
+That is exactly the fluency we want.
+77. MOST IMPORTANT STREAM RECIPE
+Memorize this structure:
+List<Result> result = list.stream()
+        .filter(...)
+        .map(...)
+        .sorted(...)
+        .toList();
+
+And:
+Map<Key, List<Value>> result =
+        list.stream()
+             .collect(
+                 Collectors.groupingBy(...)
+             );
+
+And:
+Map<Key, Long> result =
+        list.stream()
+             .collect(
+                 Collectors.groupingBy(
+                     ...,
+                     Collectors.counting()
+                 )
+             );
+
+These three patterns solve a huge number of interview questions.
+78. OUTPUT THINKING TRAINING
+This is a separate skill.
+
+Given:
+int x = 5;
+
+if (x++ > 5) {
+    System.out.println("A");
+} else {
+    System.out.println("B");
+}
+
+System.out.println(x);
+
+Mentally execute:
+x = 5
+
+x++ > 5
+→ comparison uses 5
+→ 5 > 5 = false
+→ x becomes 6
+
+print B
+
+print 6
+
+Output:
+B
+6
+
+You should practice this independently from writing code.
+79. PRE-INCREMENT VS POST-INCREMENT
+++x
+
+Increment first.
+x++
+
+Use current value first, increment afterward.
+
+Example:
+int x = 5;
+
+System.out.println(x++);
+System.out.println(x);
+
+Output:
+5
+6
+
+80. REFERENCE VS VALUE CONFUSION
+Primitive:
+int a = 10;
+int b = a;
+
+b = 20;
+
+a remains:
+10
+
+For objects, references matter:
+Student s1 = new Student("A", 20);
+Student s2 = s1;
+
+Both references point to the same object.
+
+So:
+s2.name = "B";
+
+also affects what s1 sees.
+
+This needs to become intuitive.
+81. NULL CONFUSION
+String s = null;
+
+This is not:
+""
+
+It means no object reference.
+
+Therefore:
+s.length();
+
+causes:
+NullPointerException
+
+82. AUTOBOXING / UNBOXING
+int x = 10;
+
+Integer y = x;
+
+Autoboxing.
+
+And:
+Integer y = 10;
+
+int x = y;
+
+Unboxing.
+
+This explains why:
+List<Integer>
+
+uses Integer rather than int.
+83. INTEGER == CONFUSION
+This is a classic interview trap.
+Integer a = 100;
+Integer b = 100;
+
+System.out.println(a == b);
+
+May print:
+true
+
+because of Integer caching.
+
+But:
+Integer a = 200;
+Integer b = 200;
+
+System.out.println(a == b);
+
+should not be used as a content comparison.
+
+Use:
+a.equals(b)
+
+for value comparison.
+
+Interview rule:
+Wrapper objects → use equals()
+
+84. NULL-SAFE STRING COMPARISON
+Instead of:
+name.equals("Java");
+
+when name could be null:
+"Java".equals(name);
+
+This avoids:
+NullPointerException
+
+85. JAVA 8+ / MODERN JAVA YOU SHOULD KNOW
+For your interview preparation, know:
+Lambda expressions
+Functional interfaces
+Streams
+Optional
+Method references
+Default interface methods
+Static interface methods
+var
+Records
+Switch expressions
+
+Because you are using modern Java, also recognize:
+record Employee(int id, String name) {}
+
+This is useful conceptually, though it should not replace understanding normal classes.
+86. THE "WRITE THE FUNCTION" TRAINING
+This is probably the most important part for you.
+
+When interviewer says:
+Write a function to check whether a string is palindrome.
+
+Do not immediately think of complete code.
+
+Think:
+Input?
+String
+
+Output?
+boolean
+
+Function signature?
+static boolean isPalindrome(String s)
+
+Logic?
+Compare characters from both ends
+
+Then:
+static boolean isPalindrome(String s) {
+
+    int left = 0;
+    int right = s.length() - 1;
+
+    while (left < right) {
+
+        if (s.charAt(left) != s.charAt(right)) {
+            return false;
+        }
+
+        left++;
+        right--;
+    }
+
+    return true;
+}
+
+Call:
+System.out.println(isPalindrome("madam"));
+
+87. ANOTHER EXAMPLE: SECOND LARGEST
+Question:
+Write a function to find second largest element.
+
+Think:
+Input → int[]
+Output → int
+
+Need:
+largest
+secondLargest
+
+Then code:
+static int secondLargest(int[] nums) {
+
+    int largest = Integer.MIN_VALUE;
+    int secondLargest = Integer.MIN_VALUE;
+
+    for (int n : nums) {
+
+        if (n > largest) {
+
+            secondLargest = largest;
+            largest = n;
+
+        } else if (n > secondLargest && n != largest) {
+
+            secondLargest = n;
+        }
+    }
+
+    return secondLargest;
+}
+
+Again:
+question
+→ input/output
+→ variables
+→ algorithm
+→ Java syntax
+
+88. YOUR CORE JAVA "INSTANT SYNTAX BANK"
+These should become muscle memory.
+Array
+int[] arr = {1, 2, 3};
+
+List
+List<Integer> list = new ArrayList<>();
+
+Set
+Set<Integer> set = new HashSet<>();
+
+Map
+Map<String, Integer> map = new HashMap<>();
+
+Queue
+Queue<Integer> queue = new LinkedList<>();
+
+Stack
+Deque<Integer> stack = new ArrayDeque<>();
+
+Loop
+for (int i = 0; i < arr.length; i++) {
+}
+
+For-each
+for (int x : arr) {
+}
+
+Method
+static int method(int x) {
+    return x;
+}
+
+Lambda
+x -> x * 2
+
+Predicate
+Predicate<Integer> p = x -> x > 10;
+
+Function
+Function<Integer, Integer> f = x -> x * 2;
+
+Stream
+list.stream()
+    .filter(...)
+    .map(...)
+    .toList();
+
+Map frequency
+map.put(x, map.getOrDefault(x, 0) + 1);
+
+Sort
+Arrays.sort(arr);
+
+StringBuilder
+StringBuilder sb = new StringBuilder();
+
+Comparator
+Comparator.comparing(...)
+
+Optional
+Optional<T>
+
+Exception
+try {
+
+} catch (Exception e) {
+
+}
+
+89. THE BIGGEST INTERVIEW CONFUSIONS TO ELIMINATE
+You should specifically practice these pairs:
+== vs equals()
+
+String vs StringBuilder
+
+array.length vs String.length()
+
+List.size() vs array.length
+
+add() vs set()
+
+remove(index) vs remove(object)
+
+HashSet vs HashMap
+
+Queue vs Stack
+
+filter vs map
+
+map vs flatMap
+
+findFirst vs findAny
+
+map vs groupingBy
+
+groupingBy vs partitioningBy
+
+reduce vs collect
+
+throw vs throws
+
+final vs finally
+
+overloading vs overriding
+
+static vs instance
+
+abstract class vs interface
+
+implements vs extends
+
+primitive vs wrapper
+
+value vs reference
+
+checked vs unchecked exception
+
+peek vs poll
+
+push vs pop
+
+null vs empty string
+
+return vs print
+
+This list is extremely important.
+90. ONE IMPORTANT STREAM CONFUSION: MAP VS FLATMAP
+map:
+List<List<Integer>> nums =
+        List.of(
+            List.of(1, 2),
+            List.of(3, 4)
+        );
+
+map keeps nesting:
+nums.stream()
+    .map(list -> list.stream().map(x -> x * 2).toList())
+
+Conceptually:
+[[1,2], [3,4]]
+      ↓
+[[2,4], [6,8]]
+
+flatMap flattens:
+nums.stream()
+    .flatMap(List::stream)
+    .toList();
+
+Result:
+[1, 2, 3, 4]
+
+Remember:
+map     → transform
+flatMap → transform + flatten
+
+91. YOUR PRACTICE METHOD
+This is where your improvement will actually happen.
+
+For each question:
+Round 1 — Read
+Understand the problem.
+Round 2 — Hide the solution
+Do not look at code.
+Round 3 — Write from memory
+Use only your knowledge.
+Round 4 — Predict output
+Before running it.
+Round 5 — Compile
+Find syntax errors.
+Round 6 — Compare logic
+Ask:
+Did I solve the actual question?
+
+Round 7 — Rewrite
+Delete your code and write it again.
+
+This last step is extremely powerful.
+92. DON'T MEMORIZE COMPLETE PROGRAMS
+Memorize patterns.
+
+For example, don't memorize:
+for (int i = 0; i < arr.length; i++) {
+    ...
+}
+
+as a random line.
+
+Understand:
+array traversal pattern
+
+Don't memorize:
+map.getOrDefault(x, 0) + 1
+
+as magic.
+
+Understand:
+frequency:
+key = element
+value = count
+
+Don't memorize:
+.filter(x -> x > 10)
+
+Understand:
+filter = keep only matching elements
+
+That distinction is what creates fluency.
+93. YOUR COMPLETE PRACTICE ORDER
+Do not randomly solve Java questions.
+
+Use this order:
+PHASE 1
+Variables
+if/else
+loops
+operators
+methods
+arrays
+strings
+
+        ↓
+
+PHASE 2
+Classes
+objects
+constructors
+this
+static
+final
+encapsulation
+inheritance
+overloading
+overriding
+abstract
+interface
+
+        ↓
+
+PHASE 3
+List
+Set
+Map
+Queue
+Deque
+Stack
+Generics
+Comparator
+Sorting
+
+        ↓
+
+PHASE 4
+Lambda
+Functional Interface
+Predicate
+Function
+Consumer
+Supplier
+Method Reference
+
+        ↓
+
+PHASE 5
+Streams
+filter
+map
+distinct
+sorted
+limit
+skip
+count
+reduce
+min
+max
+match
+find
+collect
+groupingBy
+partitioningBy
+joining
+flatMap
+
+        ↓
+
+PHASE 6
+Exceptions
+Optional
+equals/hashCode
+immutability
+autoboxing/unboxing
+null
+StringBuilder
+
+        ↓
+
+PHASE 7
+Mixed Interview Problems
+
+        ↓
+
+PHASE 8
+Output Prediction
+
+        ↓
+
+PHASE 9
+Write-from-zero timed practice
+
+94. WHAT YOU SHOULD EVENTUALLY BE ABLE TO DO INSTANTLY
+An interviewer says:
+Write a function to count duplicate characters.
+
+Your brain should immediately go:
+String
+↓
+char loop
+↓
+HashMap
+↓
+frequency
+
+They say:
+Find all even numbers using streams.
+
+Brain:
+list.stream()
+    .filter(n -> n % 2 == 0)
+    .toList()
+
+They say:
+Sort employees by salary descending.
+
+Brain:
+Comparator
+↓
+comparingInt
+↓
+reversed
+
+They say:
+Create functional interface.
+
+Brain:
+@FunctionalInterface
+interface X {
+    returnType method(parameters);
+}
+
+They say:
+Implement using lambda.
+
+Brain:
+X x = parameters -> expression;
+
+They say:
+Count frequency.
+
+Brain:
+map.getOrDefault(x, 0) + 1
+
+They say:
+Remove duplicates.
+
+Brain:
+Set
+
+They say:
+Group objects by department.
+
+Brain:
+Collectors.groupingBy(...)
+
+That is the level we're targeting.
+95. FIRST MASTER Main.java
+Use this as your first reference file. Type it yourself.
+import java.util.*;
+import java.util.function.*;
+import java.util.stream.Collectors;
+
+public class Main {
+
+    public static void main(String[] args) {
+
+        // =========================
+        // BASIC
+        // =========================
+
+        int x = 10;
+        int y = 20;
+
+        System.out.println(x + y);
+
+
+        // =========================
+        // METHOD
+        // =========================
+
+        System.out.println(add(10, 20));
+
+
+        // =========================
+        // ARRAY
+        // =========================
+
+        int[] nums = {1, 2, 3, 4, 5};
+
+        for (int n : nums) {
+            System.out.println(n);
+        }
+
+
+        // =========================
+        // STRING
+        // =========================
+
+        String name = "Java";
+
+        System.out.println(name.length());
+        System.out.println(name.toUpperCase());
+        System.out.println(name.charAt(0));
+
+
+        // =========================
+        // LIST
+        // =========================
+
+        List<Integer> list =
+                new ArrayList<>(List.of(1, 2, 3, 4, 5));
+
+        list.add(6);
+
+        System.out.println(list);
+
+
+        // =========================
+        // SET
+        // =========================
+
+        Set<Integer> set =
+                new HashSet<>(List.of(1, 2, 2, 3, 3));
+
+        System.out.println(set);
+
+
+        // =========================
+        // MAP
+        // =========================
+
+        Map<String, Integer> map = new HashMap<>();
+
+        map.put("Java", 10);
+        map.put("Spring", 20);
+
+        System.out.println(map);
+
+
+        // =========================
+        // FREQUENCY
+        // =========================
+
+        Map<Integer, Integer> freq = new HashMap<>();
+
+        for (int n : nums) {
+            freq.put(n, freq.getOrDefault(n, 0) + 1);
+        }
+
+        System.out.println(freq);
+
+
+        // =========================
+        // FUNCTIONAL INTERFACE
+        // =========================
+
+        Calculator calculator = (a, b) -> a + b;
+
+        System.out.println(
+                calculator.calculate(10, 20)
+        );
+
+
+        // =========================
+        // PREDICATE
+        // =========================
+
+        Predicate<Integer> isEven =
+                n -> n % 2 == 0;
+
+        System.out.println(isEven.test(10));
+
+
+        // =========================
+        // FUNCTION
+        // =========================
+
+        Function<Integer, Integer> square =
+                n -> n * n;
+
+        System.out.println(square.apply(5));
+
+
+        // =========================
+        // CONSUMER
+        // =========================
+
+        Consumer<String> printer =
+                s -> System.out.println(s);
+
+        printer.accept("Hello");
+
+
+        // =========================
+        // SUPPLIER
+        // =========================
+
+        Supplier<Double> random =
+                () -> Math.random();
+
+        System.out.println(random.get());
+
+
+        // =========================
+        // STREAM
+        // =========================
+
+        List<Integer> evenNumbers =
+                list.stream()
+                        .filter(n -> n % 2 == 0)
+                        .toList();
+
+        System.out.println(evenNumbers);
+
+
+        // =========================
+        // MAP
+        // =========================
+
+        List<Integer> squares =
+                list.stream()
+                        .map(n -> n * n)
+                        .toList();
+
+        System.out.println(squares);
+
+
+        // =========================
+        // SORT
+        // =========================
+
+        List<Integer> sorted =
+                list.stream()
+                        .sorted(Comparator.reverseOrder())
+                        .toList();
+
+        System.out.println(sorted);
+
+
+        // =========================
+        // REDUCE
+        // =========================
+
+        int sum =
+                list.stream()
+                        .reduce(0, Integer::sum);
+
+        System.out.println(sum);
+
+
+        // =========================
+        // GROUPING
+        // =========================
+
+        List<String> names =
+                List.of("Alex", "Anna", "Bob", "Brian");
+
+        Map<Character, List<String>> grouped =
+                names.stream()
+                        .collect(
+                                Collectors.groupingBy(
+                                        s -> s.charAt(0)
+                                )
+                        );
+
+        System.out.println(grouped);
+    }
+
+
+    static int add(int a, int b) {
+        return a + b;
+    }
+}
+
+
+@FunctionalInterface
+interface Calculator {
+
+    int calculate(int a, int b);
+}
+
+96. THE ACTUAL TRAINING WE SHOULD DO FROM HERE
+Do not try to memorize this whole thing in one sitting.
+
+The correct progression for you is:
+STEP 1
+I give a tiny problem.
+
+STEP 2
+You identify:
+Input
+Output
+Concept
+
+STEP 3
+You write the function.
+
+STEP 4
+We check syntax.
+
+STEP 5
+We predict output.
+
+STEP 6
+I deliberately change the question.
+
+STEP 7
+You modify the code.
+
+STEP 8
+I add one interview follow-up.
+
+STEP 9
+We mix it with an older concept.
+
+For example:
+Question 1
+Create a functional interface.
+
+Question 2
+Implement it using a normal class.
+
+Question 3
+Implement it using anonymous class.
+
+Question 4
+Implement it using lambda.
+
+Question 5
+Call it.
+
+Question 6
+Add a default method.
+
+Question 7
+Replace lambda with method reference.
+
+Question 8
+Use the same functional interface inside a stream.
+
+That is how we remove the “I understand Java when I see it, but I cannot write it myself” problem.
+Your end target
+You should eventually be able to look at almost any Core Java coding question and immediately recognize:
+DATA STRUCTURE
++
+CONTROL FLOW
++
+METHOD
++
+OOP CONCEPT
++
+FUNCTIONAL CONCEPT
++
+STREAM PATTERN
++
+OUTPUT
+
+and then write the code without mentally searching for syntax.
+
+Start by typing the Main.java master reference above once. Then the real practice should begin from Level 1 with tiny interview questions, where you write the code yourself rather than reading the answer.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+delyet compiled classes at at time ina folder
+
+
+
+
+
+
+
+
+
+
+
+
+
+To delete all compiled Java .class files in the current folder, run:
+rm -f *.class
+
+
+If you want to delete .class files in the folder and all its subfolders:
+find . -type f -name "*.class" -delete
+
+
+For your usual Java practice in ~/Documents/java:
+cd ~/Documents/java
+rm -f *.class
+
+
+Then compile and run again:
+javac *.java && java Main

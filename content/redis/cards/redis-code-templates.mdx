@@ -1,0 +1,132 @@
+---
+id: redis-code-templates
+tech: redis
+title: Redis Code Templates
+topic: java
+level: interview
+heat: 3
+hook: "Four skeletons cover most whiteboard asks: connection properties, set with a TTL and get, an INCR-plus-EXPIRE script, and a SET NX lock released by token."
+points:
+  - { k: "No config class", v: "Spring Boot already builds StringRedisTemplate; inject it", kind: plus }
+  - { k: "set(k, v, Duration)", v: "one SET with EX: the value and its TTL together" }
+  - { k: "get on a miss", v: "returns null, not an exception", kind: minus }
+  - { k: "RedisScript", v: "keep it in a static field; execute(script, keys, args)" }
+  - { k: "setIfAbsent(k, token, ttl)", v: "SET NX EX; true means you hold the lock" }
+trap:
+  wrong: "Rate limit: increment(key), then expire(key) when the count is 1, as two calls."
+  right: "A crash between them leaves a key with no TTL, so that user stays blocked. Run INCR and EXPIRE in one Lua script."
+sayIt: "I add the Redis starter, set spring.data.redis.host and port, and inject the auto-configured StringRedisTemplate. Writes pass a Duration so the TTL goes in the same SET; counters and lock releases run as Lua scripts, so each step is atomic."
+confusedWith: []
+tags: [spring-boot, coding-round, redistemplate, lua]
+visual: code
+sources:
+  - title: "Working with NoSQL: Redis (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/data/nosql.html"
+    verifiedOn: "2026-10-20"
+  - title: "ValueOperations (Spring Data Redis 4.1 API)"
+    url: "https://docs.spring.io/spring-data/redis/docs/current/api/org/springframework/data/redis/core/ValueOperations.html"
+    verifiedOn: "2026-10-20"
+  - title: "Scripting (Spring Data Redis 4.1 reference)"
+    url: "https://docs.spring.io/spring-data/redis/reference/redis/scripting.html"
+    verifiedOn: "2026-10-20"
+  - title: "INCR: pattern rate limiter (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/incr/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+"How would you use Redis in Spring Boot?" usually ends with "write it". A few short skeletons answer almost every version of that ask.
+
+## How it works
+
+| Asked to write | Write |
+|---|---|
+| Connect to Redis | the properties below |
+| Save with a TTL, read it back | `opsForValue().set(k, v, Duration)` and `get(k)`, below |
+| Store Java objects as JSON | a `RedisTemplate` bean in [Spring Data Redis](card:spring-data-redis) |
+| Cache a database read by hand | the [cache-aside](card:cache-aside) method |
+| Cache with annotations | `@Cacheable` and `@CacheEvict` in [Spring Cache](card:spring-cache-abstraction) |
+| Count or rate-limit | INCR and EXPIRE in one script, below |
+| Lock a job | `setIfAbsent`, then a token check on release, below |
+
+- Why one script beats two calls: [Lua scripts](card:lua-and-functions) run whole.
+- The theory behind the last two: [rate limiting](card:rate-limiting-with-redis), [locks](card:distributed-locks).
+
+## Example
+
+```properties
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
+spring.data.redis.password=${REDIS_PASSWORD}
+spring.data.redis.timeout=2s
+```
+
+```java
+@Service
+class PaymentStatusStore {
+    private final StringRedisTemplate redis;           // auto-configured by Spring Boot
+    PaymentStatusStore(StringRedisTemplate redis) { this.redis = redis; }
+
+    void save(String id, String status) {              // SET payment:PAY101:status PAID EX 600
+        redis.opsForValue().set("payment:" + id + ":status", status, Duration.ofMinutes(10));
+    }
+    String find(String id) {                           // null when missing or expired
+        return redis.opsForValue().get("payment:" + id + ":status");
+    }
+}
+```
+
+```bash
+redis-cli SET payment:PAY101:status PAID EX 600
+redis-cli GET payment:PAY101:status
+redis-cli TTL payment:PAY101:status
+redis-cli GET payment:PAY999:status
+```
+
+```text output
+OK
+"PAID"
+(integer) 600
+(nil)
+```
+
+```java
+private static final RedisScript<Long> HIT = RedisScript.of("""
+        local n = redis.call('INCR', KEYS[1])
+        if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+        return n""", Long.class);
+
+boolean allow(String userId) {                         // 5 requests per 60-second window
+    Long n = redis.execute(HIT, List.of("rate:user:" + userId), "60");
+    return n <= 5;                                     // false: answer 429
+}
+```
+
+```java
+private static final RedisScript<Long> UNLOCK = RedisScript.of(
+        "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0",
+        Long.class);
+
+boolean runOnce(String paymentId, Runnable job) {
+    String key = "lock:payment:" + paymentId, token = UUID.randomUUID().toString();
+    Boolean got = redis.opsForValue().setIfAbsent(key, token, Duration.ofSeconds(30));
+    if (!Boolean.TRUE.equals(got)) return false;       // another worker holds the lock
+    try { job.run(); return true; }
+    finally { redis.execute(UNLOCK, List.of(key), token); }   // delete only if still mine
+}
+```
+
+## Interview Qs
+
+### How do you integrate Redis into a Spring Boot service?
+
+Add `spring-boot-starter-data-redis`, set `spring.data.redis.host` and `port`, and inject the auto-configured `StringRedisTemplate`. Write with `opsForValue().set(key, value, Duration)` so every key gets a TTL; read with `get`, which returns `null` on a miss.
+
+### Why does your own `RedisTemplate<String, String>` bean make `redis-cli GET user:1` return nil?
+
+Its default [JDK serialisation](card:spring-data-redis) applies to keys too, so the real key is `\xac\xed\x00\x05t\x00\x06user:1`. Inject `StringRedisTemplate` instead, or set `RedisSerializer.string()` on the template.
+
+### How do you run a Lua script from Spring?
+
+Wrap it once in `RedisScript.of(text, Long.class)` and call `redis.execute(script, keys, args)`. Spring sends EVALSHA and falls back to EVAL when Redis has not cached the script yet.
