@@ -1,0 +1,81 @@
+---
+id: batching-and-compression
+tech: kafka
+title: "Batching, linger.ms and Compression"
+topic: producers
+level: intermediate
+heat: 2
+hook: "The producer packs records for one partition into batches and can compress each batch: fewer, bigger requests move more data."
+points:
+  - { k: "Batch", v: "records for one partition, sent together in one request" }
+  - { k: "Sent when", v: "the batch reaches batch.size or linger.ms has passed" }
+  - { k: "Whole batch", v: "compressed once, stored and fetched compressed", kind: plus }
+  - { k: "Bigger batches", v: "fewer requests and a better compression ratio", kind: plus }
+  - { k: "Cost", v: "CPU to compress; memory for one buffer per partition", kind: minus }
+trap:
+  wrong: "Any linger.ms above 0 makes every send slower."
+  right: "Kafka 4.0 raised the default from 0 to 5 ms because bigger batches usually give similar or lower latency. A full batch is sent at once."
+sayIt: "The producer batches records per partition and sends a batch when it is full or linger.ms runs out. Compression works on the whole batch, so I trade a little CPU and latency for much higher throughput."
+confusedWith: []
+tags: [batching, linger, compression, throughput]
+visual: flow
+sources:
+  - title: "Producer Configs: batch.size, linger.ms, compression.type (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/producer-configs/"
+    verifiedOn: "2026-10-20"
+  - title: "Design: end-to-end batch compression (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-20"
+  - title: "Upgrading to 4.0: linger.ms default (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/getting-started/upgrade/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Sending each record alone wastes network round trips and request overhead. Grouping and compressing records cuts both.
+
+## How it works
+
+<Steps label="Records on their way to payments-0">
+  <Step title="Buffer">`send()` adds the record to its partition's batch in the producer's memory.</Step>
+  <Step title="Close the batch">It leaves when it reaches `batch.size` or after `linger.ms`, whichever comes first.</Step>
+  <Step title="Compress">The whole batch is compressed with `compression.type`.</Step>
+  <Step title="Store">The broker checks the batch and writes it to disk still compressed.</Step>
+  <Step title="Read">Consumers fetch it compressed and decompress it.</Step>
+</Steps>
+
+- One request to a broker carries one batch per partition that has data.
+- Topic `compression.type=producer` (the default) keeps the producer's codec; another codec makes the broker store that one.
+- Tuning across producer, broker and consumer: [performance tuning](card:kafka-performance-tuning).
+
+## Example
+
+```properties
+# analytics events: favour throughput (example values: measure first)
+linger.ms=20
+batch.size=65536
+compression.type=lz4
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| `batch.size` | 16384 bytes | Kafka 4.3 producer |
+| `linger.ms` | 5 ms (0 before 4.0) | Kafka 4.3 producer |
+| `compression.type` | `none`; also gzip, snappy, lz4, zstd | Kafka 4.3 producer |
+
+## Interview Qs
+
+### How does producer batching work?
+
+Records for the same partition collect in a batch. The batch is sent when it reaches `batch.size` bytes or when `linger.ms` has passed, whichever is first. Under heavy load, batching happens even with linger.ms=0.
+
+### Where does compression happen?
+
+On the producer, per batch. The broker validates the batch and keeps it compressed in the log, and consumers decompress it. This saves network and disk at the cost of CPU on both clients.
+
+### What does raising linger.ms trade?
+
+Fewer, fuller requests and better compression, for up to that many milliseconds of extra wait when traffic is light.

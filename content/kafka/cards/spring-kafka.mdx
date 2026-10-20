@@ -1,0 +1,92 @@
+---
+id: spring-kafka
+tech: kafka
+title: "Spring for Apache Kafka"
+topic: ecosystem
+level: intermediate
+heat: 2
+hook: "KafkaTemplate sends, @KafkaListener receives, and a Spring listener container runs the poll loop, commits and error handling."
+points:
+  - { k: "KafkaTemplate.send", v: "asynchronous; returns CompletableFuture<SendResult>" }
+  - { k: "@KafkaListener", v: "a listener container polls and calls your method" }
+  - { k: "concurrency", v: "consumer threads; threads beyond the partition count sit idle", kind: minus }
+  - { k: "Fatal exceptions", v: "e.g. DeserializationException: no retries, straight to the recoverer" }
+  - { k: "Versions", v: "Spring Boot 4.1.1 manages spring-kafka 4.1.1, kafka-clients 4.2.1", kind: default }
+trap:
+  wrong: "@KafkaListener uses Kafka auto-commit, so offsets are committed as records arrive."
+  right: "Spring sets enable.auto.commit=false unless you set it; the container commits after your method returns."
+sayIt: "In Spring Boot I send with KafkaTemplate and consume with @KafkaListener. The container commits after processing, DefaultErrorHandler retries, and DeadLetterPublishingRecoverer sends failures to a -dlt topic."
+confusedWith: [blocking-vs-non-blocking-retries, auto-commit-vs-manual-commit]
+tags: [spring-kafka, spring-boot, kafka-listener, error-handling]
+visual: flow
+sources:
+  - title: "Message Listener Containers (Spring for Apache Kafka 4.1)"
+    url: "https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/message-listener-container.html"
+    verifiedOn: "2026-10-20"
+  - title: "Handling Exceptions (Spring for Apache Kafka 4.1)"
+    url: "https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html"
+    verifiedOn: "2026-10-20"
+  - title: "Sending Messages: KafkaTemplate (Spring for Apache Kafka 4.1)"
+    url: "https://docs.spring.io/spring-kafka/reference/kafka/sending-messages.html"
+    verifiedOn: "2026-10-20"
+  - title: "Apache Kafka support (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/messaging/kafka.html"
+    verifiedOn: "2026-10-20"
+  - title: "Managed Dependency Coordinates (Spring Boot 4.1.1)"
+    url: "https://docs.spring.io/spring-boot/appendix/dependency-versions/coordinates.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+The plain clients leave the poll loop, threads, commits and retries to you. Spring for Apache Kafka handles them; Spring Boot configures it from spring.kafka.* properties.
+
+## How it works
+
+<Mermaid
+  alt="KafkaTemplate sends to payments. A listener container polls, calls the @KafkaListener method and commits. On an exception DefaultErrorHandler redelivers; after the retries DeadLetterPublishingRecoverer publishes to payments-dlt."
+  chart={`flowchart LR
+  T[KafkaTemplate.send] --> P[[payments]]
+  P --> C[Listener container: poll, commit]
+  C --> L["@KafkaListener method"]
+  L -- throws --> E[DefaultErrorHandler]
+  E -- retries used up --> R[DeadLetterPublishingRecoverer]
+  R --> D[[payments-dlt]]`}
+/>
+
+- Add spring-boot-starter-kafka; Boot auto-configures KafkaTemplate and the listener container factory.
+- When to retry in place or through retry topics: [retries and dead letter topics](card:retries-and-dead-letter-topics).
+
+## Example
+
+```java
+// Payment Service: publish, keyed by orderId
+template.send("payments", payment.orderId(), payment)
+        .whenComplete((result, ex) -> {
+            if (ex != null) log.error("PaymentCompleted not sent", ex);
+        });
+
+// Analytics: 3 consumer threads in the group "analytics"
+@KafkaListener(topics = "payments", groupId = "analytics", concurrency = "3")
+void onPayment(PaymentCompleted p) {    // e.g. ₹500 by UPI
+    repository.save(p);                 // throws: DefaultErrorHandler takes over
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| AckMode | BATCH: commit after all records of one poll are processed | Spring for Apache Kafka 4.1 |
+| DefaultErrorHandler | FixedBackOff(0, 9): 10 deliveries, no delay, then log | Spring for Apache Kafka 4.1 |
+| Dead letter topic | original topic plus -dlt, same partition (since 3.3) | DeadLetterPublishingRecoverer |
+
+## Interview Qs
+
+### What happens when a @KafkaListener method throws?
+
+DefaultErrorHandler redelivers it (10 deliveries in all by default), then calls the recoverer: it logs, or DeadLetterPublishingRecoverer publishes the record with exception headers to payments-dlt.
+
+### How do you commit offsets manually in Spring?
+
+Set AckMode to MANUAL or MANUAL_IMMEDIATE, add an Acknowledgment parameter to the listener method, and call acknowledge() after the work is done.

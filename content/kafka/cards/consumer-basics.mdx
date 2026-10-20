@@ -1,0 +1,81 @@
+---
+id: consumer-basics
+tech: kafka
+title: Consumers and the Poll Loop
+topic: consumers
+level: beginner
+heat: 2
+hook: "A consumer pulls records with poll() in a loop, processes them, then commits how far it got."
+points:
+  - { k: "Pull, not push", v: "the consumer fetches at its own pace; a slow one just falls behind", kind: plus }
+  - { k: "subscribe()", v: "join a group; Kafka assigns and rebalances the partitions" }
+  - { k: "assign()", v: "pick partitions yourself; no group rebalancing" }
+  - { k: "max.poll.interval.ms", v: "5 min between polls (Kafka 4.3), or it is removed from the group", kind: default }
+  - { k: "Not thread-safe", v: "one KafkaConsumer per thread; only wakeup() is safe from another", kind: minus }
+trap:
+  wrong: "Kafka pushes each record to the consumer as soon as it arrives."
+  right: "The consumer pulls. A fetch waits briefly for data (long poll), so pulling is not busy waiting."
+sayIt: "A consumer subscribes, then loops: poll a batch, process it, commit the offsets. Pulling lets each consumer read at its own speed. It must poll within max.poll.interval.ms or the group takes its partitions."
+confusedWith: [consumer-vs-consumer-group]
+tags: [consumer, poll, pull-model]
+visual: flow
+sources:
+  - title: "KafkaConsumer (Apache Kafka 4.3 javadoc)"
+    url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html"
+    verifiedOn: "2026-10-20"
+  - title: "Design: push vs. pull (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-20"
+  - title: "Consumer and Share Consumer Configs (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/consumer-configs/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Producers and consumers rarely run at the same speed. If brokers pushed records, a slow consumer would be flooded; pulling lets each consumer read when it is ready.
+
+## How it works
+
+<Steps label="The poll loop">
+  <Step title="Subscribe">Join the group named by group.id, for example payment-service on payments ([consumer groups](card:consumer-groups)).</Step>
+  <Step title="Poll">poll() returns a batch of records from the partitions this consumer owns.</Step>
+  <Step title="Process">Handle each record, such as marking a ₹500 order as paid.</Step>
+  <Step title="Commit">Save the next offset to read ([committing offsets](card:offset-commits)).</Step>
+  <Step title="Repeat">Poll again in time, or the consumer leaves the group and a [rebalance](card:rebalancing) starts.</Step>
+</Steps>
+
+- Long poll: the broker holds a fetch until fetch.min.bytes arrive or fetch.max.wait.ms passes.
+- Deserializers turn bytes back into objects; they must match the [producer's serializers](card:producer-basics).
+- To stop the loop from another thread, call wakeup(); poll() then throws WakeupException.
+
+## Example
+
+```java
+props.put("group.id", "payment-service");
+props.put("enable.auto.commit", "false");
+props.put("key.deserializer", StringDeserializer.class.getName());
+props.put("value.deserializer", StringDeserializer.class.getName());
+try (var consumer = new KafkaConsumer<String, String>(props)) {
+    consumer.subscribe(List.of("payments"));
+    while (running) {
+        for (var rec : consumer.poll(Duration.ofMillis(500)))
+            markPaid(rec.key(), rec.value());   // orderId -> PaymentCompleted
+        consumer.commitSync();                  // only after processing
+    }
+}
+```
+
+## Interview Qs
+
+### Why does Kafka use pull instead of push?
+
+Pull lets each consumer read at its own rate, fetch large batches, and catch up after a slowdown. A push system can flood a slow consumer. Long polling stops an idle consumer from spinning.
+
+### Can two threads share one KafkaConsumer?
+
+No. KafkaConsumer is not thread-safe; only wakeup() may be called from another thread. Run one consumer per thread, or one polling thread that hands work to a pool and commits with care.
+
+### subscribe() or assign()?
+
+subscribe() joins a consumer group: Kafka spreads the partitions and rebalances them when members change. assign() takes fixed partitions with no group management, so failover is your job.

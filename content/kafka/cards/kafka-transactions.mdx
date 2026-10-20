@@ -1,0 +1,90 @@
+---
+id: kafka-transactions
+tech: kafka
+title: "Kafka Transactions and Exactly-Once"
+topic: reliability
+level: interview
+heat: 2
+hook: "A transaction writes output records and consumer offsets atomically: all become visible together, or none do."
+points:
+  - { k: "transactional.id", v: "a stable id per producer instance; turns on idempotence" }
+  - { k: "read_committed", v: "consumers set it to skip records of aborted transactions" }
+  - { k: "Zombie fencing", v: "initTransactions bumps the epoch; the old instance is fenced", kind: plus }
+  - { k: "Kafka only", v: "a database write or API call is not part of it", kind: minus }
+trap:
+  wrong: "A Kafka transaction can include my database write."
+  right: "It covers only Kafka topics and consumer offsets. For a database, use the transactional outbox or idempotent writes."
+sayIt: "For read-process-write I set a transactional.id, send the results and call sendOffsetsToTransaction in one transaction, and consumers use read_committed. Database side effects still need idempotency."
+confusedWith: [at-most-once-vs-at-least-once-vs-exactly-once]
+tags: [transactions, exactly-once, producer]
+visual: code
+sources:
+  - title: "Design: Using Transactions (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-20"
+  - title: "KafkaProducer (Apache Kafka 4.3 javadoc)"
+    url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html"
+    verifiedOn: "2026-10-20"
+  - title: "Consumer Configs: isolation.level (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/configuration/consumer-configs/"
+    verifiedOn: "2026-10-20"
+  - title: "KIP-98: Exactly Once Delivery and Transactional Messaging"
+    url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+In read-process-write, a crash after writing the output but before committing the offset makes the next run write it again. A transaction joins both steps.
+
+## How it works
+
+<Mermaid
+  alt="The Payment Service reads the orders topic. Inside one transaction it sends results to the payments topic and sends its consumed offsets to __consumer_offsets. It begins and commits through the transaction coordinator, which keeps state in __transaction_state and writes commit markers into the payments topic."
+  chart={`flowchart LR
+  IN[(orders)] --> APP[Payment Service]
+  APP -- send --> OUT[(payments)]
+  APP -- sendOffsetsToTransaction --> OFF[(__consumer_offsets)]
+  APP -- begin, commit --> TC[Transaction coordinator]
+  TC --> TS[(__transaction_state)]
+  TC -. commit markers .-> OUT`}
+/>
+
+- Aborted records stay in the log; `read_committed` consumers skip them and wait while a transaction is open.
+- The consumer sets `enable.auto.commit=false`; the producer commits its offsets.
+- [Kafka Streams](card:kafka-streams) does all of this with `processing.guarantee=exactly_once_v2`.
+
+## Example
+
+```java
+producer.initTransactions();                       // once: fences older instances
+while (true) {
+    var records = consumer.poll(Duration.ofMillis(500));
+    producer.beginTransaction();
+    try {
+        for (var r : records)
+            producer.send(new ProducerRecord<>("payments", r.key(), charge(r.value())));
+        producer.sendOffsetsToTransaction(records.nextOffsets(), consumer.groupMetadata());
+        producer.commitTransaction();
+    } catch (ProducerFencedException e) { producer.close(); throw e; } // newer instance won
+    catch (KafkaException e) { producer.abortTransaction(); }          // then seek back
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| `isolation.level` | `read_uncommitted` | Kafka 4.3 consumer |
+| `transaction.timeout.ms` | 60 s, then the coordinator aborts | Kafka 4.3 producer |
+| `processing.guarantee` | `at_least_once` | Kafka Streams 4.3 |
+
+## Interview Qs
+
+### How do Kafka transactions give exactly-once?
+
+The producer writes output records and the consumed offsets in one transaction. On commit both become visible; on abort neither does. read_committed consumers skip aborted records, so a crash means a retry, not a visible duplicate.
+
+### What is zombie fencing?
+
+A paused old instance and its replacement share a transactional.id. initTransactions in the new one bumps the epoch, so the old one gets ProducerFencedException.

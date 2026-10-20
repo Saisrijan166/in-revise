@@ -1,0 +1,77 @@
+---
+id: partition-keys
+tech: kafka
+title: Partition Keys and Hot Partitions
+topic: storage
+level: intermediate
+heat: 3
+hook: "Same key, same partition, same order: key every order event by orderId."
+points:
+  - { k: "Key present", v: "murmur2 hash of the key bytes, mod the partition count" }
+  - { k: "No key", v: "Kafka 3.3+: stay on one partition until batch.size bytes, then switch", kind: default }
+  - { k: "Count changes", v: "adding partitions changes hash mod N, so keys can move", kind: minus }
+  - { k: "Hot partition", v: "one busy key overloads one partition and its consumer", kind: minus }
+  - { k: "Good key", v: "the entity that needs order, with many distinct values" }
+trap:
+  wrong: "Records without a key are spread round-robin, one per partition."
+  right: "Since Kafka 2.4 the producer sticks to one partition per batch; since 3.3 it switches after batch.size bytes. Round-robin needs RoundRobinPartitioner."
+sayIt: "The producer hashes the key with murmur2 modulo the partition count, so one orderId always goes to one partition and stays in order. No key means sticky batches. One very busy key makes a hot partition."
+confusedWith: []
+tags: [partition-key, partitioner, hot-partition]
+visual: table
+sources:
+  - title: "Producer Configs: partitioner.class (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/producer-configs/"
+    verifiedOn: "2026-10-20"
+  - title: "BuiltInPartitioner.java (Apache Kafka 4.3 source)"
+    url: "https://github.com/apache/kafka/blob/4.3/clients/src/main/java/org/apache/kafka/clients/producer/internals/BuiltInPartitioner.java"
+    verifiedOn: "2026-10-20"
+  - title: "Upgrade notes 3.3: new sticky partitioner (Apache Kafka)"
+    url: "https://kafka.apache.org/33/getting-started/upgrade/"
+    verifiedOn: "2026-10-20"
+  - title: "Apache Kafka Partition Key: hot partitions (Confluent)"
+    url: "https://www.confluent.io/learn/kafka-partition-key/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Events of one order must be read in order. Order holds only inside a [partition](card:partitions), so related events must reach the same one.
+
+## How it works
+
+| The record has | Partition chosen (Kafka 4.3 producer) | Order |
+| --- | --- | --- |
+| A partition number | That partition | Per partition |
+| A key | murmur2(key bytes) mod partition count | Kept per key |
+| Neither | A sticky partition, changed after batch.size bytes | None between records |
+
+- `partitioner.class` picks RoundRobinPartitioner or your own Partitioner; `partitioner.ignore.keys` (default false) can ignore keys.
+- More partitions remap keys and old data stays put: [ordering vs scaling](card:ordering-and-scaling).
+- Hot key fixes: a key with more values, or sub-keys (merchant-42-0 to -3) with order only per sub-key.
+
+## Example
+
+```java
+// Every event of order-101 uses the same key, so the same partition
+var record = new ProducerRecord<>("orders", "order-101", orderPlacedJson);
+producer.send(record, (meta, ex) -> {
+    if (ex == null) log.info("partition {} offset {}", meta.partition(), meta.offset());
+});
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| `partitioner.class` | not set: built-in hash or sticky logic | Kafka 4.3 producer |
+
+## Interview Qs
+
+### Why send a key with a record?
+
+So all events of one orderId go to one partition: they stay in order and one consumer in the group sees them all. Compaction also works per key.
+
+### What causes a hot partition, and how do you fix it?
+
+One key carries most traffic, such as a big merchant. Use a key with more values, or split the hot key into sub-keys, with order only per sub-key. More partitions do not help: one key maps to one partition.

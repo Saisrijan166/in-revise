@@ -1,0 +1,66 @@
+---
+id: fault-tolerance
+tech: kafka
+title: "Fault Tolerance and Leader Election"
+topic: reliability
+level: intermediate
+heat: 2
+hook: "When a broker dies, the controller hands its partitions' leadership to in-sync followers; clients find the new leaders and retry."
+points:
+  - { k: "broker.session.timeout.ms", v: "9 s (Kafka 4.3): no heartbeat for this long, broker offline", kind: default }
+  - { k: "New leader", v: "picked from the ISR, so committed records survive", kind: plus }
+  - { k: "Rack awareness", v: "broker.rack spreads a partition's replicas over racks or zones" }
+  - { k: "Controlled shutdown", v: "on by default: a planned stop moves leadership first", kind: default }
+  - { k: "All safe replicas down", v: "the partition stays offline until one returns", kind: minus }
+trap:
+  wrong: "Turn on unclean leader election so a partition never goes offline."
+  right: "It lets an out-of-sync replica lead and drops committed records it never copied. Keep it false (the default) unless uptime beats data."
+sayIt: "Every partition has replicas on several brokers. If the leader's broker fails, the controller elects an in-sync follower and clients retry against it. With RF 3 and min.insync 2, one broker loss loses nothing."
+confusedWith: []
+tags: [fault-tolerance, leader-election, high-availability]
+visual: flow
+sources:
+  - title: "Design: Replication and Unclean leader election (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-20"
+  - title: "Basic Kafka Operations: graceful shutdown, leadership, racks (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
+    verifiedOn: "2026-10-20"
+  - title: "Broker Configs (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/configuration/broker-configs/"
+    verifiedOn: "2026-10-20"
+  - title: "Kafka Interview Questions and Answers (GeeksforGeeks)"
+    url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Brokers crash, and they are restarted for upgrades. Every partition must stay writable and lose no committed record while that happens.
+
+## How it works
+
+<Steps label="Broker 1, leader of payments P0, fails">
+  <Step title="Broker stops">Followers on brokers 2 and 3 are in the ISR of P0.</Step>
+  <Step title="Controller notices">No heartbeat in time; broker 1 leaves every ISR.</Step>
+  <Step title="New leader">The controller elects broker 2 from the ISR and records it in the cluster metadata.</Step>
+  <Step title="Clients retry">Producers and consumers refresh metadata and talk to broker 2.</Step>
+  <Step title="Broker returns">It catches up as a follower, rejoins the ISR, then takes leadership back: it is P0's preferred leader.</Step>
+</Steps>
+
+- If the controller itself fails, see [KRaft](card:kraft). Consumer and producer failures: [failure scenarios](card:kafka-failure-scenarios).
+- Losing a whole cluster or region: copy topics to another cluster with [MirrorMaker 2](card:mirrormaker2-geo-replication).
+
+## Interview Qs
+
+### How does Kafka achieve fault tolerance?
+
+Replicas of each partition on different brokers (and racks, with `broker.rack`), an ISR of caught-up copies, and controller-led election of a new leader from that ISR. acks=all with min.insync.replicas 2 puts each confirmed write on at least two brokers.
+
+### What is unclean leader election?
+
+Letting a replica outside the ISR lead when no ISR replica is alive. The partition returns sooner, but records it never copied are lost. `unclean.leader.election.enable` has been false by default since Kafka 0.11.
+
+### Why use controlled shutdown?
+
+Before a planned stop the broker syncs its logs and moves its leaderships to other replicas, so partitions pause for only milliseconds and restart needs no log recovery. It needs RF above 1.

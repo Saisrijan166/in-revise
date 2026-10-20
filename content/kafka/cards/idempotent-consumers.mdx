@@ -1,0 +1,71 @@
+---
+id: idempotent-consumers
+tech: kafka
+title: Idempotent Consumers and Deduplication
+topic: patterns
+level: intermediate
+heat: 3
+hook: "Kafka can deliver a record twice, so make a repeat do nothing: remember each eventId and skip one you have seen."
+points:
+  - { k: "Duplicates come from", v: "redelivery after a crash, rebalances, re-sends and replay" }
+  - { k: "Dedupe key", v: "a business id in the event (eventId, paymentId), never the offset" }
+  - { k: "One transaction", v: "store the eventId and apply the effect in the same DB transaction" }
+  - { k: "Natural idempotency", v: "set status = PAID by id is safe to repeat; add 500 is not", kind: plus }
+trap:
+  wrong: "Exactly-once is on, so the consumer does not need to be idempotent."
+  right: "Kafka's exactly-once covers writes back to Kafka. A database write or API call can still run twice, so dedupe there."
+sayIt: "I assume at-least-once. The consumer inserts each eventId into a processed-events table with a unique key, in the same transaction as the effect, so a repeat inserts nothing and the ₹500 is charged once."
+confusedWith: [idempotent-producer-vs-idempotent-consumer]
+tags: [idempotency, deduplication, duplicates]
+visual: table
+sources:
+  - title: "Pattern: Idempotent Consumer (microservices.io, Chris Richardson)"
+    url: "https://microservices.io/patterns/communication-style/idempotent-consumer.html"
+    verifiedOn: "2026-10-20"
+  - title: "KafkaConsumer: offsets and at-least-once delivery (Apache Kafka 4.3 javadoc)"
+    url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html"
+    verifiedOn: "2026-10-20"
+  - title: "INSERT: ON CONFLICT (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/current/sql-insert.html"
+    verifiedOn: "2026-10-20"
+  - title: "Kafka Interview Questions and Answers (GeeksforGeeks)"
+    url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+With at-least-once delivery, a record can arrive again after a crash, a rebalance or a replay. Charging a ₹500 UPI payment twice is far worse than processing it late.
+
+## How it works
+
+| Technique | How | Fits |
+|---|---|---|
+| Processed-events table | Insert the eventId under a unique key, in the same transaction as the effect | Any effect in the same database |
+| Upsert | Write the final state by id: `ON CONFLICT DO UPDATE` | State, not increments |
+| Version check | Update only when the event's version is newer than the stored one | Updates that may arrive out of order |
+
+- Dedupe on an id inside the event: a re-sent copy lands at a new [offset](card:offsets).
+- If the dedupe insert and the effect commit separately, a crash between them still double-charges or skips.
+
+## Example
+
+```sql
+CREATE TABLE processed_events (event_id text PRIMARY KEY);
+
+BEGIN;
+INSERT INTO processed_events (event_id) VALUES ('evt-7f3a')
+  ON CONFLICT DO NOTHING;     -- 0 rows inserted: a repeat, so ROLLBACK
+INSERT INTO ledger (payment_id, amount_inr) VALUES ('pay-77', 500);
+COMMIT;
+```
+
+## Interview Qs
+
+### How do you prevent duplicate processing in Kafka?
+
+Accept that delivery is at-least-once and make the consumer idempotent. Store each eventId in a processed-events table in the same transaction as the business change, or make the write itself idempotent with an upsert or a version check.
+
+### Why not use the offset as the dedupe key?
+
+An offset is only a position in one partition. If the producer or an outbox relay sends the same event again, the copy gets a new offset, so only a business id inside the event shows it is a repeat.

@@ -1,0 +1,82 @@
+---
+id: transactional-outbox
+tech: kafka
+title: "Transactional Outbox: Database and Kafka Together"
+topic: patterns
+level: interview
+heat: 2
+hook: "Save the order and its event row in one database transaction; a relay publishes the event to Kafka afterwards."
+points:
+  - { k: "Dual write", v: "a DB commit and a Kafka send cannot be atomic", kind: minus }
+  - { k: "Outbox row", v: "written in the same local transaction as the business row" }
+  - { k: "Relay", v: "a polling publisher, or log tailing (CDC) such as Debezium" }
+  - { k: "Kafka key", v: "the aggregate id (orderId), so each order's events stay in order" }
+  - { k: "At-least-once", v: "the relay can publish twice after a crash: consumers dedupe", kind: minus }
+trap:
+  wrong: "Put the database write and the Kafka send in one Kafka transaction."
+  right: "A Kafka transaction covers only Kafka writes and offsets. With an outbox, the database transaction decides."
+sayIt: "Writing the database and Kafka separately can lose events or send them for rolled-back data. With an outbox, the order and its OrderPlaced row commit together, and a relay such as Debezium publishes it."
+confusedWith: []
+tags: [outbox, dual-write, cdc, debezium]
+visual: flow
+sources:
+  - title: "Pattern: Transactional outbox (microservices.io, Chris Richardson)"
+    url: "https://microservices.io/patterns/data/transactional-outbox.html"
+    verifiedOn: "2026-10-20"
+  - title: "Pattern: Polling publisher (microservices.io)"
+    url: "https://microservices.io/patterns/data/polling-publisher.html"
+    verifiedOn: "2026-10-20"
+  - title: "Pattern: Transaction log tailing (microservices.io)"
+    url: "https://microservices.io/patterns/data/transaction-log-tailing.html"
+    verifiedOn: "2026-10-20"
+  - title: "Outbox Event Router (Debezium 3.7 docs)"
+    url: "https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html"
+    verifiedOn: "2026-10-20"
+  - title: "Reliable Microservices Data Exchange With the Outbox Pattern (Debezium blog)"
+    url: "https://debezium.io/blog/2019/02/19/reliable-microservices-data-exchange-with-the-outbox-pattern/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+If the Order Service saves an order and crashes before sending OrderPlaced, no one hears of it. Sending first risks an event for an order that rolled back.
+
+## How it works
+
+<Mermaid
+  alt="The Order Service writes the order row and an outbox row in one database transaction. A relay, a poller or Debezium reading the database log, publishes OrderPlaced with key orderId to the orders topic. Consumers skip repeats by eventId."
+  chart={`flowchart LR
+  S[Order Service] -- "one DB transaction" --> DB[("orders + outbox")]
+  DB -- "poll or read the log" --> R[Relay]
+  R -- "OrderPlaced, key orderId" --> K[[orders topic]]
+  K --> C[Consumers skip repeats by eventId]`}
+/>
+
+- The event is published only if the transaction commits, but maybe more than once ([idempotent consumers](card:idempotent-consumers)).
+- Log tailing reads the MySQL binlog or PostgreSQL WAL ([CDC with Connect](card:kafka-connect)).
+
+## Example
+
+```sql
+BEGIN;
+INSERT INTO orders (order_id, customer_id, total_inr)
+VALUES ('ord-1001', 'c-42', 500);
+INSERT INTO outbox (id, aggregatetype, aggregateid, type, payload)
+VALUES ('evt-9b1c', 'order', 'ord-1001', 'OrderPlaced',
+        '{"orderId":"ord-1001","totalInr":500}');
+COMMIT;   -- both rows or neither
+```
+
+## Interview Qs
+
+### What is the dual-write problem?
+
+A service updates its database and publishes an event, but the two cannot share one transaction. A crash between them leaves an order with no event, or an event for an order never saved.
+
+### Polling publisher or log tailing?
+
+Polling is simple and works with any SQL database, but keeping order is tricky. Log tailing, such as Debezium, reads the database log instead, but needs database-specific setup.
+
+### Does the outbox give exactly-once delivery?
+
+No. A relay that crashes after publishing but before recording it sends the event again. Consumers dedupe on the event id.

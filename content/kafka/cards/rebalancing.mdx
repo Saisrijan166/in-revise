@@ -1,0 +1,83 @@
+---
+id: rebalancing
+tech: kafka
+title: Rebalancing and Group Protocols
+topic: consumers
+level: intermediate
+heat: 3
+hook: "A rebalance moves partitions between group members when members or partitions change; moved partitions pause."
+points:
+  - { k: "Triggers", v: "join, leave, crash, a missed poll deadline, new partitions" }
+  - { k: "Cost", v: "moved partitions pause; uncommitted work is redone", kind: minus }
+  - { k: "Static membership", v: "group.instance.id: a quick restart keeps its partitions", kind: plus }
+  - { k: "Consumer protocol", v: "group.protocol=consumer (KIP-848): the broker assigns, step by step" }
+  - { k: "Client default", v: "group.protocol=classic in Kafka 4.3; consumer is opt-in", kind: default }
+trap:
+  wrong: "A rebalance happens only when a consumer crashes."
+  right: "Also on a join, a clean leave, a missed max.poll.interval.ms or new partitions. A slow handler alone can cause one."
+sayIt: "When members join, leave, die or stall, the coordinator moves partitions. I use cooperative sticky assignment or the consumer protocol, static membership for restarts, and commit on revoke to limit duplicates."
+confusedWith: []
+tags: [rebalance, cooperative, static-membership, kip-848]
+visual: table
+sources:
+  - title: "ConsumerRebalanceListener (Apache Kafka 4.3 javadoc)"
+    url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/ConsumerRebalanceListener.html"
+    verifiedOn: "2026-10-20"
+  - title: "Consumer Rebalance Protocol (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/operations/consumer-rebalance-protocol/"
+    verifiedOn: "2026-10-20"
+  - title: "Consumer and Share Consumer Configs (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/consumer-configs/"
+    verifiedOn: "2026-10-20"
+  - title: "Design: static membership (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-20"
+  - title: "KIP-429: Kafka Consumer Incremental Rebalance Protocol"
+    url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-429%3A+Kafka+Consumer+Incremental+Rebalance+Protocol"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Group members come and go, and each partition must always have exactly one owner. Someone has to hand out partitions again, without stopping the whole group for long.
+
+## How it works
+
+<Compare id="eager-vs-cooperative-rebalancing" />
+
+- Kafka 4.0 brokers run the consumer protocol (KIP-848): no global sync barrier; the broker assigns partitions.
+- With it, heartbeat, session timeout and assignor are broker settings; client assignor configs no longer apply.
+- Commit in onPartitionsRevoked, so the next owner starts at the right offset.
+
+## Example
+
+```java
+consumer.subscribe(List.of("payments"), new ConsumerRebalanceListener() {
+    public void onPartitionsRevoked(Collection<TopicPartition> parts) {
+        consumer.commitSync(processedOffsets);   // save progress before handing over
+    }
+    public void onPartitionsAssigned(Collection<TopicPartition> parts) { }
+});
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Session timeout (classic) | 45 s, session.timeout.ms | Kafka 4.3 consumer |
+| Heartbeat interval (classic) | 3 s, heartbeat.interval.ms | Kafka 4.3 consumer |
+| Assignors (classic) | RangeAssignor, CooperativeStickyAssignor | Kafka 4.3 consumer |
+
+## Interview Qs
+
+### What triggers a rebalance?
+
+A consumer joins or leaves, misses heartbeats for the session timeout, or does not call poll() within max.poll.interval.ms. Adding partitions, or a new topic matching a subscribed pattern, also triggers one.
+
+### How do you reduce rebalance pain?
+
+Use CooperativeStickyAssignor or group.protocol=consumer so only moved partitions pause. Set group.instance.id for rolling restarts. Keep each batch short, and commit in onPartitionsRevoked.
+
+### What is static membership?
+
+A consumer with group.instance.id keeps its identity across restarts. If it returns within the session timeout, it gets its partitions back with no rebalance (KIP-345, since Kafka 2.3).

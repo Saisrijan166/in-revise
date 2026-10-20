@@ -1,0 +1,69 @@
+---
+id: replay
+tech: kafka
+title: "Replay: Reading Old Events Again"
+topic: storage
+level: intermediate
+heat: 3
+hook: "Replay means moving a group's offset back to read kept records again; the broker simply serves what is asked for."
+points:
+  - { k: "Why it works", v: "records stay after reading, and each group owns its offsets" }
+  - { k: "Other groups", v: "unaffected: payment-service keeps its own offsets", kind: plus }
+  - { k: "Only within retention", v: "records already deleted cannot be replayed", kind: minus }
+  - { k: "Side effects repeat", v: "emails and refunds run again unless consumers are idempotent", kind: minus }
+trap:
+  wrong: "Replay is a broker feature that resends old messages to consumers."
+  right: "The broker pushes nothing. The consumer seeks, or the group's committed offsets are reset, and its next fetches start there."
+sayIt: "Kafka keeps records and each group stores its own offsets, so I can rewind one group with seek() or kafka-consumer-groups.sh --reset-offsets, within retention. Its consumers must be idempotent, as side effects run again."
+confusedWith: []
+tags: [replay, reprocessing, offsets]
+visual: table
+sources:
+  - title: "KafkaConsumer: seek, seekToBeginning, offsetsForTimes (Apache Kafka 4.3 Javadoc)"
+    url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html"
+    verifiedOn: "2026-10-20"
+  - title: "Basic Kafka Operations: reset offsets of a consumer group (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
+    verifiedOn: "2026-10-20"
+  - title: "Design: the consumer position and rewinding (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A bug may have processed payments wrongly, or a new service needs past orders. Because Kafka keeps records after reading, a consumer can read them again instead of asking the producers to resend.
+
+## How it works
+
+| Way | How | Use it for |
+| --- | --- | --- |
+| `seek()`, `seekToBeginning()` | Consumer code sets its own position | A start-up rule in the app |
+| `offsetsForTimes()`, then `seek()` | Finds the first offset at or after a timestamp | Start from yesterday 00:00 |
+| `--reset-offsets` | CLI moves a stopped group: `--to-earliest`, `--to-datetime`, `--shift-by` | Reprocess after a bug fix |
+| A new `group.id` | Starts where `auto.offset.reset` says, e.g. earliest | Backfill a new service |
+
+- Make the replaying consumer [idempotent](card:idempotent-consumers): emails and payments must not repeat.
+- `auto.offset.reset` is explained in [consumer configs](card:consumer-configs).
+
+## Example
+
+```bash
+# Stop every analytics instance first. Without --execute this only previews.
+bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group analytics \
+  --topic payments --reset-offsets --to-datetime 2026-10-19T00:00:00.000
+
+# Apply it, then start the instances again
+bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group analytics \
+  --topic payments --reset-offsets --to-datetime 2026-10-19T00:00:00.000 --execute
+```
+
+## Interview Qs
+
+### How would you reprocess yesterday's payments after fixing a bug?
+
+Deploy the fix, stop the group, reset its offsets with --to-datetime, then restart. Only that group rereads; others are untouched. The consumer must be idempotent so ₹500 is not charged or mailed twice.
+
+### Can a new service read all past orders?
+
+Only what retention still keeps. A new group.id with auto.offset.reset=earliest starts at the oldest kept record. For the full current state, keep a compacted topic.

@@ -1,0 +1,73 @@
+---
+id: ordering-and-scaling
+tech: kafka
+title: Ordering vs Scaling and Choosing Partition Count
+topic: patterns
+level: interview
+heat: 3
+hook: "Kafka keeps order only inside a partition: key by the entity whose order matters, and scale by adding partitions."
+points:
+  - { k: "Global order", v: "one partition, so only one consumer per group", kind: minus }
+  - { k: "Per-key order", v: "same key, same partition: each order in sequence, orders in parallel", kind: plus }
+  - { k: "Partition count", v: "at least max(t/p, t/c) from measured per-partition rates" }
+  - { k: "Change later", v: "you can add partitions, never remove them (Kafka 4.3)", kind: minus }
+  - { k: "Too many", v: "more open files, client memory and longer failover", kind: minus }
+trap:
+  wrong: "Adding partitions is safe: each key stays on its partition."
+  right: "The partition is hash(key) mod the partition count, so adding partitions moves keys, and per-key order can break during the change."
+sayIt: "Kafka orders only within a partition. I key by the entity, like orderId, so each order's events stay in sequence while orders run in parallel, and I size partitions from measured throughput with headroom."
+confusedWith: []
+tags: [ordering, partition-count, scaling]
+visual: flow
+sources:
+  - title: "Basic Kafka Operations: modifying topics (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
+    verifiedOn: "2026-10-20"
+  - title: "KafkaConsumer: consumer groups and multithreaded processing (Apache Kafka 4.3 javadoc)"
+    url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html"
+    verifiedOn: "2026-10-20"
+  - title: "How to choose the number of topics/partitions in a Kafka cluster? (Jun Rao, Confluent blog)"
+    url: "https://www.confluent.io/blog/how-choose-number-topics-partitions-kafka-cluster/"
+    verifiedOn: "2026-10-20"
+  - title: "Kafka Interview Questions and Answers (GeeksforGeeks)"
+    url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+More partitions let more consumers work in parallel, but Kafka orders records only inside one partition. Decide which order you really need.
+
+## How it works
+
+<Steps label="Keep each order's events in sequence">
+  <Step title="Key by the entity">Send with key orderId; a key maps to one partition ([keys](card:partition-keys)).</Step>
+  <Step title="Producer keeps order">The [idempotent producer](card:idempotent-producer) stops retries from reordering a partition.</Step>
+  <Step title="One reader per partition">The group gives each partition to one consumer ([groups](card:consumer-groups)).</Step>
+  <Step title="Process in order">Do not hand records to a thread pool that can finish a later one first.</Step>
+</Steps>
+
+- t is the target throughput; p and c are what one partition handles on the producer and consumer side, measured on your setup.
+
+## Example
+
+```bash
+# orders has 6 partitions; grow it to 12 (it can never shrink back)
+kafka-topics.sh --bootstrap-server localhost:9092 --alter \
+  --topic orders --partitions 12
+# now hash(orderId) % 12 sends some orders to a new partition
+```
+
+## Interview Qs
+
+### How do you guarantee ordering in Kafka?
+
+Only per partition. Key by the entity id, such as orderId, keep the idempotent producer on, and process each partition in order. Global order needs one partition, so one consumer per group.
+
+### How do you choose the number of partitions?
+
+Measure what one partition handles for producing (p) and consuming (c). For target throughput t, use at least max(t/p, t/c), plus headroom, since adding partitions later moves keys.
+
+### Can you reduce a topic's partition count?
+
+No. Kafka does not support it. The usual workaround is a new topic with fewer partitions, then moving producers and consumers to it.
