@@ -304,3 +304,44 @@ Apache Kafka 4.3, Kubernetes 1.37, Resilience4j 2.x.
    Spring Boot; saga, 2PC and outbox in SQL & Databases. Each tech stays self-contained (no cross-tech links).
 4. Some concepts cite 4–5 primary pages (one per product default) instead of 1–3; three units have 33–38 glossary terms.
 5. "Cache a not-found result" (a common fix for cache penetration) was left out: no primary source found; a Bloom filter is given.
+
+## K. REST API, Redis, AWS, Design Patterns and Kafka (new techs from one owner reference, 20-10-2026)
+
+The owner's `reference/reference.md` held five parts plus a payment-system scenario. It was split into `reference/rest-api.md`
+(Part 1 + the Part 5 payment scenario), `reference/redis.md`, `reference/aws.md`, `reference/design-patterns.md` and
+`reference/kafka.md`; each tech has its own `reference/<slug>.coverage.md`. Each tech was planned by one agent, drafted by eight
+units in parallel and checked by eight independent verifiers.
+
+| Tech | Concepts | Comparisons | Terms | Tree nodes | Checked / fixed / dropped | Baseline (20-10-2026) |
+|---|---|---|---|---|---|---|
+| REST API | 39 | 20 | 238 | 294 | ~1,470 / ~50 / 0 | RFC 9110/9111/9457, OpenAPI 3.2.1, Spring Boot 4.1 / Framework 7.0, Java 25 |
+| Redis | 38 | 14 | 202 | 270 | ~1,290 / ~26 / 0 | Redis Open Source 8.10, Spring Data Redis 4.1 (Lettuce) |
+| AWS | 44 | 24 | 239 | 348 | ~1,490 / ~50 / 0 | as of 20-10-2026, each limit with its AWS doc page; SDK for Java 2.x |
+| Design Patterns | 37 | 15 | 193 | 244 | ~1,240 / ~41 / 0 | Java 25, Spring Framework 7; GoF (1994) via authors' pages |
+| Kafka | 40 | 16 | 201 | 293 | ~1,350 / ~44 / 1 | Apache Kafka 4.3 (KRaft only), Spring for Apache Kafka 4.1 |
+
+Notable current facts found while verifying (each sourced in the content): RFC 9846 (2026) replaced RFC 8446 for TLS 1.3;
+RestTemplate deprecated in Spring Framework 7.0 (`@Deprecated` planned for 7.1); Redis 8.6 added two eviction policies (10 in
+total) and 8.4 added DELEX; EventBridge relaunched custom event buses (24-09-2026); SQS messages up to 1 MiB; S3 objects up to
+50 TB; X-Ray SDKs in maintenance since 25-02-2026; Kafka share groups production-ready in 4.2; Spring Cloud Contract moved out.
+
+### K1. Worded carefully or weakly sourced (kept)
+
+1. "Cache penetration" and "cache avalanche" (Redis): interview names with no vendor page; the mechanisms and fixes are sourced.
+2. KISS (Design Patterns) rests on c2.com; Interpreter's terminal / non-terminal / AST nodes cite GeeksforGeeks (GoF is not online).
+3. `lld-term` and `machine-coding-round-term` (Design Patterns) cite GeeksforGeeks and workat.tech (interview rounds, no primary page).
+4. "Actor (SRP)" comes from Martin's Clean Architecture book (not online); the cited 2014 post backs the meaning only.
+5. AWS: no AWS page dates the Free Tier credit plan start or App Runner closing to new customers; the content states no dates.
+6. Kafka: the example sizing rates in kafka-design-formula (10 MB/s per partition, 2,000 events/s per consumer) are labelled as
+   assumptions to replace by measurements; DLT ownership/re-drive advice is backed only by the Amazon SQS DLQ docs.
+7. Spring Cloud AWS 4.x is documented for Spring Boot 4.0; Boot 4.1 support is not stated, so AWS shows plain SDK v2 code.
+
+### K2. Decisions for the owner
+
+1. **Accents:** only seven supported accents exist. Redis uses rose (new); REST API reuses blue (System Design), AWS orange
+   (Java), Design Patterns violet (DSA), Kafka green (Spring Boot). Adding new accent colours needs tuned values in globals.css.
+2. **Overlap between techs:** REST API, Redis and Kafka repeat some ideas that also live in Microservices, Spring Boot, SQL and
+   System Design (idempotency keys, caching, outbox, Spring REST). Each tech stays self-contained, as before.
+3. **Lua highlighting** was added (`lua` in `src/lib/content/render.tsx`, CLAUDE.md 3.1 updated) for Redis scripts.
+4. **System Design** still cites RFC 8446 for TLS 1.3 (now obsoleted by RFC 9846); not changed because other techs were untouched.
+5. REST API has 39 concepts (CLAUDE.md asks for about 40–70).
