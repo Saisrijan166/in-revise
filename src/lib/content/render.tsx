@@ -27,7 +27,7 @@ let highlighter: Promise<Highlighter> | null = null;
 function getHighlighter() {
   highlighter ??= createHighlighter({
     themes: ["github-light", "github-dark"],
-    langs: ["python", "sql", "json", "nginx", "text", "yaml", "bash", "java", "typescript", "javascript", "proto", "properties", "xml", "lua"],
+    langs: ["python", "sql", "json", "nginx", "text", "yaml", "bash", "java", "typescript", "javascript", "proto", "properties", "xml", "lua", "dockerfile"],
   });
   return highlighter;
 }
