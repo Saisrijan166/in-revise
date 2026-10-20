@@ -413,3 +413,30 @@ current jars and run on throwaway `redis:8`, `apache/kafka:4.3.1` and LocalStack
 
 - `Integer a = 1000, b = 1000; a == b` prints `false` on a default JVM, but the JLS guarantees caching only for -128..127; the panel shows a real run, and `wrapper-classes` states the rule.
 - The Kafka dead letter topic "needs at least as many partitions" as the source (Spring docs); in practice a missing partition logs a WARN and the producer picks one.
+
+## N. React & Frontend (new tech, 20-10-2026)
+
+The owner's `reference/reference.md` (React performance only) was renamed `reference/react.md`. The owner asked for React plus
+the frontend basics every developer should know, "strictly not many concepts", so the tech has 39 concepts (below the usual
+40–70) in 8 topics: Web and Browser Basics, CSS Essentials, JavaScript Essentials, React Fundamentals, Hooks, State, Data and
+Routing, Performance, and Next.js, Testing and Playbook. Everything outside performance is "added beyond the reference".
+
+| Concepts | Comparisons | Terms | Checked / fixed / dropped | Baseline (20-10-2026) |
+|---|---|---|---|---|
+| 39 | 18 | 250 | ~1,440 / 55 / 0 | React 19.3 (React Compiler 1.0), Next.js 16.4, React Router 8, Vite 8, TanStack Query v5, Redux Toolkit 2, Zustand 5, Vitest 5, Jest 30, ECMAScript 2026 |
+
+All JavaScript "predict the output" examples were run on Node 20 (DOM ones in headless Chrome); JSX compiled with esbuild and
+rendered with react-dom/server 19.3.1; router, Redux, TanStack Query and Zustand examples run against their current packages.
+A new accent `pink` (AA-checked: 6.4:1 light, 10.4:1 dark) was added because all 13 accents were in use.
+
+### N1. Decisions for the owner
+
+- **Size:** 39 concepts on purpose (owner: "not many"). One slot under the 40 cap is free (for example error handling or build tooling).
+- **ISR example** uses the Next.js 16 Cache Components form (`'use cache'` + `cacheLife`); the older `export const revalidate` is named as the previous model.
+- **Sources outside react.dev:** legacy.reactjs.org (virtual DOM FAQ, HOCs, reconciliation) and kentcdodds.com (testing trophy, the author's own page) are cited where react.dev has no page.
+
+### N2. Worded carefully (kept)
+
+- Cookies without `SameSite` are treated as Lax in Chrome and Edge, not in Firefox or Safari; the content says to set it explicitly.
+- Splitting state and dispatch into two contexts: worded only as far as react.dev supports (dispatch is stable; readers re-render when the value changes).
+- Zustand's "very little code" rests on the project's GitHub README.
