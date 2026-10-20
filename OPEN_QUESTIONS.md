@@ -345,3 +345,34 @@ total) and 8.4 added DELEX; EventBridge relaunched custom event buses (24-09-202
 3. **Lua highlighting** was added (`lua` in `src/lib/content/render.tsx`, CLAUDE.md 3.1 updated) for Redis scripts.
 4. **System Design** still cites RFC 8446 for TLS 1.3 (now obsoleted by RFC 9846); not changed because other techs were untouched.
 5. REST API has 39 concepts (CLAUDE.md asks for about 40–70).
+
+## L. Docker and Kubernetes (new techs from one owner reference, 20-10-2026), and new accent colours
+
+The owner's `reference/reference.md` (Docker & Kubernetes cheat sheet) was split into `reference/docker.md` (Part 1 + the shared
+revision sections 28–32) and `reference/kubernetes.md` (Part 2 + the same shared sections). Each coverage file records the other
+tech's shared items as "covered by the Docker / Kubernetes tech".
+
+| Tech | Concepts | Comparisons | Terms | Tree nodes | Checked / fixed / dropped | Baseline (20-10-2026) |
+|---|---|---|---|---|---|---|
+| Docker | 32 | 16 | 159 | 261 | ~1,330 / ~55 / 2 | Docker Engine 29.x, Compose Specification (v5 tooling), BuildKit, OCI 1.1.1, Java 25 |
+| Kubernetes | 39 | 23 | 248 | 332 | ~1,500 / ~50 / 0 | Kubernetes 1.37, Gateway API v1.6, Helm 4 |
+
+Examples were run where possible: Dockerfiles built (stub and real Spring Boot 4.1 jars), Compose files checked with
+`docker compose config`, container behaviour (signals, OOM exit 137, restart back-off) tested on throwaway containers.
+
+**Accent colours (owner: "use new if required"):** six AA-checked accents were added (`indigo`, `sky`, `cyan`, `red`, `fuchsia`,
+`lime`) in `src/app/globals.css` and `src/lib/content/schema.ts`; CLAUDE.md 0 and 5.5 list them. Every tech now has its own colour:
+REST API fuchsia, AWS red, Design Patterns cyan, Kafka lime, Docker sky, Kubernetes indigo. `dockerfile` code highlighting was added.
+
+### L1. Worded carefully (kept)
+
+1. The default bridge network: Docker's docs say a running container cannot be connected to it, but Engine 29.1 allowed it in a
+   test; the comparison row was dropped rather than state either.
+2. VPA in-place resize: the Kubernetes 1.37 docs and the VPA project docs disagree; the tree note follows the VPA project.
+3. Example values that are made up for illustration (a kernel version string, `<digest>` placeholders, sizing numbers).
+
+### L2. Decisions for the owner
+
+1. **Docker has 32 concepts** (CLAUDE.md asks for about 40–70); the Docker part of the reference is short, so it was kept compact.
+2. **Overlap:** containers, Kubernetes objects, probes and deployment strategies also appear briefly in Microservices and AWS.
+3. **S28 (Docker vs Compose vs Kubernetes)** is a comparison in both techs (each tech is self-contained).
