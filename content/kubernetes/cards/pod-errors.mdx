@@ -1,0 +1,81 @@
+---
+id: pod-errors
+tech: kubernetes
+title: Common Pod Errors
+topic: troubleshooting
+level: intermediate
+heat: 3
+hook: "The status names the stage that failed: scheduling, image, config or the running app. The exit code tells you why."
+points:
+  - { k: "Pending", v: "no node fits; scheduler events say why" }
+  - { k: "Image errors", v: "ErrImagePull, then ImagePullBackOff with growing waits" }
+  - { k: "Pull retry cap", v: "300 s between image pull attempts (Kubernetes 1.37)", kind: default }
+  - { k: "Exit 137", v: "128 + 9: SIGKILL; OOMKilled if the reason says so", kind: minus }
+  - { k: "Exit 143", v: "128 + 15: SIGTERM, the container was asked to stop" }
+trap:
+  wrong: "CrashLoopBackOff is the error; fix CrashLoopBackOff."
+  right: "It is a symptom: the container keeps exiting and the kubelet waits longer each time. The cause is in the logs and exit code."
+sayIt: "I read the status as a stage. Pending is scheduling, image errors are the pull, CreateContainerConfigError is a missing ConfigMap or Secret, and CrashLoopBackOff means the app exits: I check logs --previous and the exit code."
+confusedWith: []
+tags: [troubleshooting, crashloopbackoff, oomkilled]
+visual: table
+sources:
+  - title: "Pod Lifecycle (Kubernetes docs)"
+    url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/"
+    verifiedOn: "2026-10-20"
+  - title: "Images (Kubernetes docs)"
+    url: "https://kubernetes.io/docs/concepts/containers/images/"
+    verifiedOn: "2026-10-20"
+  - title: "Debug Pods (Kubernetes docs)"
+    url: "https://kubernetes.io/docs/tasks/debug/debug-application/debug-pods/"
+    verifiedOn: "2026-10-20"
+  - title: "Kubelet container errors (Kubernetes 1.37 source)"
+    url: "https://github.com/kubernetes/kubernetes/blob/release-1.37/pkg/kubelet/kuberuntime/kuberuntime_container.go"
+    verifiedOn: "2026-10-20"
+  - title: "Exit Status (GNU Bash manual)"
+    url: "https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+`kubectl get pods` shows one word per Pod. The word names the failing stage, so it tells you where to look first.
+
+## How it works
+
+| Status | Means | First check |
+|---|---|---|
+| Pending | Not scheduled: no node fits | `describe` events: CPU, memory, [taints](card:taints-and-tolerations) |
+| ContainerCreating | Still starting: image, Secret data | `describe` events |
+| ErrImagePull, ImagePullBackOff | Image not pulled; retrying | Image name, tag, registry, pull secret |
+| CreateContainerConfigError | Container config not built | Missing [ConfigMap or Secret](card:configmaps-and-secrets) or key |
+| CrashLoopBackOff | App exits again and again | `logs --previous`, exit code |
+| OOMKilled | Over its memory limit | [Limits](card:resource-requests-limits), JVM heap |
+| Evicted | Node under pressure | [QoS and eviction](card:qos-and-eviction) |
+| Stuck Terminating | Deleted, but a finalizer remains | Finalizers, webhooks; do not strip them blindly |
+
+- Phases and restart back-off: [Pod lifecycle](card:pod-lifecycle). Commands in order: [debugging](card:kubectl-debugging).
+
+## Example
+
+```text
+$ kubectl get pods -n payments
+NAME                              READY   STATUS             RESTARTS
+payment-service-7d9f8c6b5-x2k4q   0/1     CrashLoopBackOff   5
+$ kubectl describe pod payment-service-7d9f8c6b5-x2k4q -n payments
+    Last State:     Terminated
+      Reason:       OOMKilled
+      Exit Code:    137
+```
+
+The JVM outgrew the 512Mi limit: raise the limit or cap the heap.
+
+## Interview Qs
+
+### How do you debug CrashLoopBackOff?
+
+Read `kubectl logs --previous`, then `describe`: Last State, exit code, events. Exit 1 is usually an app or config error, 137 a kill, often OOM. Also check probes and dependencies.
+
+### A Pod is stuck in Pending. Why?
+
+The scheduler found no node that fits. Usual causes: requests bigger than free capacity, a nodeSelector or affinity no node matches, or a taint the Pod does not tolerate. The events name the reason.

@@ -1,0 +1,87 @@
+---
+id: autoscaling
+tech: kubernetes
+title: "Autoscaling: HPA, VPA and Cluster Autoscaler"
+topic: scaling-releases
+level: intermediate
+heat: 3
+hook: "HPA adds Pods, VPA resizes Pods, a node autoscaler adds nodes. HPA on CPU works only if Pods set CPU requests."
+points:
+  - { k: "HPA formula", v: "desired = ceil(current replicas × current metric ÷ target)" }
+  - { k: "CPU utilisation", v: "a % of the request; no request, no CPU scaling", kind: minus }
+  - { k: "Metrics", v: "CPU and memory from metrics-server; others via custom or external metrics" }
+  - { k: "VPA", v: "an add-on, not built in; by default it evicts Pods to apply new requests", kind: minus }
+  - { k: "Node autoscalers", v: "add nodes for Pending Pods' requests, not for real CPU use" }
+trap:
+  wrong: "Run HPA and VPA together on CPU, so Pods grow in number and in size."
+  right: "They fight over one signal. The VPA docs say never on the same CPU or memory metric; split them, or run HPA on custom metrics."
+sayIt: "HPA changes the replica count from a metric such as CPU against the request. VPA right-sizes requests. When Pods stay Pending, Cluster Autoscaler or Karpenter adds nodes."
+confusedWith: []
+tags: [hpa, vpa, cluster-autoscaler, karpenter, scaling]
+visual: table
+sources:
+  - title: "Horizontal Pod Autoscaling (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/"
+    verifiedOn: "2026-10-20"
+  - title: "Vertical Pod Autoscaler known limitations (VPA 1.8)"
+    url: "https://github.com/kubernetes/autoscaler/blob/master/vertical-pod-autoscaler/docs/known-limitations.md"
+    verifiedOn: "2026-10-20"
+  - title: "Node Autoscaling (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/cluster-administration/node-autoscaling/"
+    verifiedOn: "2026-10-20"
+  - title: "Kubernetes Interview Questions (GeeksforGeeks)"
+    url: "https://www.geeksforgeeks.org/devops/kubernetes-interview-questions/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Load changes through the day. Fixed counts waste money at night and fail at the peak, so Kubernetes resizes from metrics.
+
+## How it works
+
+<Compare id="hpa-vs-vpa-vs-cluster-autoscaler" />
+
+- Scale-up acts at once; scale-down waits for the stabilisation window, so replicas do not flap.
+- The `behavior` field tunes both directions per HPA: windows, step size and tolerance.
+
+## Example
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: payment-service, namespace: payments }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: payment-service }
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+```
+
+At 105% average CPU of the 250m request: ceil(3 × 105 ÷ 70) = ceil(4.5) = 5 Pods.
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| HPA check interval | 15 s | kube-controller-manager, Kubernetes 1.37 |
+| Scale-down stabilisation window | 300 s (scale-up: 0 s) | HPA behaviour, Kubernetes 1.37 |
+| Tolerance (no action this close to target) | 10% | HPA, Kubernetes 1.37 |
+
+## Interview Qs
+
+### The HPA is set but never scales. What do you check?
+
+Does `kubectl top pods` work (metrics-server)? Do containers set CPU requests? Then `kubectl describe hpa`: its ScalingActive condition and events say why.
+
+### Horizontal or vertical scaling: which, and when?
+
+Horizontal adds replicas: best for stateless services like payment-service, and it adds availability. Vertical gives each Pod more CPU or memory: for apps that cannot run many copies.
+
+### The HPA wants 10 Pods, but 4 stay Pending. Why?
+
+HPA only sets the replica count. A node autoscaler, Cluster Autoscaler or Karpenter, must add nodes; without one the Pods wait.

@@ -1,0 +1,88 @@
+---
+id: jobs-and-cronjobs
+tech: kubernetes
+title: Jobs and CronJobs
+topic: workloads
+level: intermediate
+heat: 2
+hook: "A Job runs Pods until the work succeeds; a CronJob creates a Job on a schedule. Make the work safe to run twice."
+points:
+  - { k: "Job vs Deployment", v: "a Job finishes and stops; a Deployment keeps Pods running" }
+  - { k: "restartPolicy", v: "Never or OnFailure only; Always is rejected", kind: minus }
+  - { k: "completions, parallelism", v: "how many Pods must succeed; how many run at once" }
+  - { k: "activeDeadlineSeconds", v: "caps the Job's total run time; wins over backoffLimit" }
+trap:
+  wrong: "A CronJob runs exactly once per schedule."
+  right: "It may create two Jobs or none for one tick, and failed Pods are retried. Make the work idempotent: settle each payment once."
+sayIt: "A Job runs a task to completion, retrying up to backoffLimit; a CronJob creates a Job on a cron schedule. Runs can repeat, so the work must be idempotent, and concurrencyPolicy Forbid stops overlapping runs."
+confusedWith: []
+tags: [job, cronjob, batch, idempotency]
+visual: flow
+sources:
+  - title: "Jobs (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/workloads/controllers/job/"
+    verifiedOn: "2026-10-20"
+  - title: "CronJob (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Batch work, like a nightly settlement report or a database migration, must run, finish and stop. A Deployment would restart it forever.
+
+## How it works
+
+<Mermaid
+  alt="Each night the CronJob creates a Job, which creates a Pod. Exit 0 completes the Job. On failure the Job retries with a new Pod after a back-off, until no retries are left and the Job is Failed."
+  chart={`flowchart LR
+  CJ[CronJob settlement-report] -- "each tick" --> J[Job]
+  J --> P[Pod]
+  P -- "exit 0" --> S[Job Complete]
+  P -- fails --> R{Retries left?}
+  R -- "yes, after back-off" --> J
+  R -- no --> F[Job Failed]`}
+/>
+
+- concurrencyPolicy Forbid skips a run while the last one is still going; Replace stops the old one.
+- Set timeZone (stable since 1.27); otherwise the schedule uses the controller manager's time zone.
+
+## Example
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: settlement-report, namespace: payments }
+spec:
+  schedule: "30 1 * * *"             # 01:30 every night
+  timeZone: Asia/Kolkata
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers: [{ name: report, image: "settlement-report:1.0" }]
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| backoffLimit (retries) | 6 | Kubernetes 1.37 Job |
+| concurrencyPolicy | Allow (runs may overlap) | Kubernetes 1.37 CronJob |
+| History kept | 3 successful, 1 failed Job | Kubernetes 1.37 CronJob |
+
+## Interview Qs
+
+### What is the difference between a Job and a Deployment?
+
+A Job runs Pods until enough succeed, then stops; its restartPolicy is Never or OnFailure. A Deployment keeps Pods running and replaces them, with restartPolicy Always.
+
+### Last night's CronJob run is still going when the next one is due. What happens?
+
+With the default Allow, both run. Set concurrencyPolicy Forbid to skip the new run, or Replace to stop the old Job and start the new one.
+
+### How do you stop a failing Job from retrying too long?
+
+backoffLimit (default 6) marks the Job Failed after that many retries. activeDeadlineSeconds caps total run time and takes priority over backoffLimit.

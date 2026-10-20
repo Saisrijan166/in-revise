@@ -1,0 +1,85 @@
+---
+id: rbac
+tech: kubernetes
+title: "RBAC: Who Can Do What"
+topic: security-ops
+level: intermediate
+heat: 3
+hook: "RBAC answers one question: may this subject use this verb on this resource? A Role lists the rules; a binding grants them."
+points:
+  - { k: "Rule", v: "apiGroups + resources + verbs (get, list, watch, create…)" }
+  - { k: "Subjects", v: "a User, a Group or a ServiceAccount" }
+  - { k: "Additive only", v: "rules only allow; there are no deny rules", kind: minus }
+  - { k: "roleRef", v: "fixed once bound: delete and recreate the binding to change it", kind: minus }
+  - { k: "Least privilege", v: "RoleBindings per namespace, no wildcards", kind: plus }
+trap:
+  wrong: "RBAC also stops Pods from talking to each other."
+  right: "RBAC controls only calls to the Kubernetes API. Limit Pod-to-Pod traffic with NetworkPolicies."
+sayIt: "RBAC controls API permissions: a Role or ClusterRole lists allowed verbs on resources; a RoleBinding or ClusterRoleBinding grants it to users, groups or ServiceAccounts. Rights only add up; the rest is refused."
+confusedWith: []
+tags: [rbac, security, authorisation, serviceaccount]
+visual: flow
+sources:
+  - title: "Using RBAC Authorization (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/reference/access-authn-authz/rbac/"
+    verifiedOn: "2026-10-20"
+  - title: "Controlling Access to the Kubernetes API (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/security/controlling-access/"
+    verifiedOn: "2026-10-20"
+  - title: "Role Based Access Control Good Practices (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/security/rbac-good-practices/"
+    verifiedOn: "2026-10-20"
+  - title: "kubectl auth can-i (Kubernetes 1.37 reference)"
+    url: "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_auth/kubectl_auth_can-i/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Many people and programs call the same API server. Without rules, any of them could read Secrets or delete Deployments.
+
+## How it works
+
+<Steps label="One request to the API server">
+  <Step title="Authenticate">Who is calling? Certificate, token or ServiceAccount token. No match: 401.</Step>
+  <Step title="Authorise">RBAC checks the bindings. No rule allows it: 403.</Step>
+  <Step title="Admission">Admission controllers may change or reject writes. One rejection is final.</Step>
+  <Step title="Store">The object is validated and saved.</Step>
+</Steps>
+
+<Compare id="role-vs-clusterrole" />
+
+- A RoleBinding may point to a ClusterRole: the common rules are reused, but rights stay in that namespace.
+- Who the Pod is comes from its [ServiceAccount](card:service-accounts); RBAC decides what it may do.
+
+## Example
+
+payment-service may only read ConfigMaps in `payments`:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: config-reader, namespace: payments }
+rules:
+  - { apiGroups: [""], resources: [configmaps], verbs: [get, list, watch] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: payment-service-config-reader, namespace: payments }
+subjects: [{ kind: ServiceAccount, name: payment-service, namespace: payments }]
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: config-reader }
+```
+
+## Interview Qs
+
+### How do you check what a ServiceAccount is allowed to do?
+
+Ask the API server: `kubectl auth can-i list configmaps -n payments --as=system:serviceaccount:payments:payment-service`. It answers yes or no. Add `--list` to see every allowed action in the namespace.
+
+### How do you protect Secrets with RBAC?
+
+Grant `get` on named Secrets only to the ServiceAccount that needs them. `list` and `watch` also reveal contents. Anyone who can create Pods in a namespace can mount its Secrets, so limit that too.
+
+### Why use a ClusterRole in a RoleBinding?
+
+To write a rule set once, like the built-in `view` or `edit`, and grant it namespace by namespace. The binding keeps the rights inside its own namespace.

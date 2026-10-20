@@ -1,0 +1,81 @@
+---
+id: rolling-updates-rollbacks
+tech: kubernetes
+title: "Rolling Updates and Rollbacks"
+topic: scaling-releases
+level: intermediate
+heat: 3
+hook: "A Deployment swaps old Pods for new ones in steps, within maxSurge and maxUnavailable; rollout undo goes back a revision."
+points:
+  - { k: "New revision", v: "only when the Pod template changes; scaling is not a rollout" }
+  - { k: "Revision", v: "kept as an old ReplicaSet at 0 replicas; undo scales it back up" }
+  - { k: "When a Pod counts", v: "once Ready, and Ready for minReadySeconds" }
+  - { k: "Stuck rollout", v: "reports ProgressDeadlineExceeded; Kubernetes does not undo it", kind: minus }
+  - { k: "Recreate", v: "stops all old Pods first: a short outage, never two versions", kind: minus }
+trap:
+  wrong: "kubectl rollout undo also rolls back the database change."
+  right: "Undo restores only the old Pod template. Schema changes stay, so make them backward compatible: expand first, contract later."
+sayIt: "A Deployment makes a new ReplicaSet and moves Pods to it within maxSurge and maxUnavailable, gated by readiness. If it goes wrong, rollout undo scales the old ReplicaSet back up."
+confusedWith: [rolling-vs-blue-green-vs-canary]
+tags: [rolling-update, rollback, maxsurge, maxunavailable, deployment]
+visual: flow
+sources:
+  - title: "Deployments (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
+    verifiedOn: "2026-10-20"
+  - title: "kubectl rollout restart (Kubernetes 1.37 reference)"
+    url: "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_rollout/kubectl_rollout_restart/"
+    verifiedOn: "2026-10-20"
+  - title: "Parallel Change (martinfowler.com)"
+    url: "https://martinfowler.com/bliki/ParallelChange.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Stopping every Pod to upgrade means downtime. Replacing a few at a time keeps payment-service serving; old ReplicaSets make going back quick.
+
+## How it works
+
+<Steps label="payment-service 1.4.0 to 1.5.0, 3 replicas, default 25% settings">
+  <Step title="Work out limits">25% of 3: maxSurge rounds up to 1, maxUnavailable down to 0. At most 4 Pods, at least 3 available.</Step>
+  <Step title="Surge">The new ReplicaSet starts one 1.5.0 Pod.</Step>
+  <Step title="Swap">When it is Ready, the old ReplicaSet stops one 1.4.0 Pod.</Step>
+  <Step title="Repeat">Until 3 new Pods run; the old ReplicaSet stays at 0 as the previous revision.</Step>
+</Steps>
+
+- Readiness decides when a new Pod counts: see [probes](card:probes).
+- Blue-green and canary need more than a Deployment: see [release strategies](card:release-strategies).
+
+## Example
+
+```bash
+kubectl -n payments set image deployment/payment-service payment-service=payment-service:1.5.0
+kubectl -n payments annotate deployment/payment-service kubernetes.io/change-cause="1.5.0: UPI retry fix"
+kubectl -n payments rollout status deployment/payment-service
+kubectl -n payments rollout history deployment/payment-service
+kubectl -n payments rollout undo deployment/payment-service      # or --to-revision=2
+kubectl -n payments rollout restart deployment/payment-service
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| strategy | RollingUpdate | Deployment, Kubernetes 1.37 |
+| maxSurge / maxUnavailable | 25% / 25% | Deployment, Kubernetes 1.37 |
+| progressDeadlineSeconds / revisionHistoryLimit / minReadySeconds | 600 / 10 / 0 | Deployment, Kubernetes 1.37 |
+
+## Interview Qs
+
+### What do maxSurge and maxUnavailable mean with 4 replicas?
+
+With the 25% defaults both become 1: up to 5 Pods, at least 3 available. maxSurge 1 with maxUnavailable 0 never loses capacity, but needs room for one extra Pod.
+
+### A rollout is stuck. What happens, and what do you do?
+
+After progressDeadlineSeconds it reports ProgressDeadlineExceeded; nothing is rolled back. Check the new Pods' events, then fix forward or run `kubectl rollout undo`.
+
+### When would you choose Recreate?
+
+When two versions must never run together, such as an incompatible schema change. It costs a short outage.

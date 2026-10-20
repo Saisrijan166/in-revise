@@ -1,0 +1,92 @@
+---
+id: cluster-networking-dns
+tech: kubernetes
+title: Pod Networking and DNS
+topic: networking
+level: intermediate
+heat: 2
+hook: "Every Pod gets its own IP and reaches any Pod without NAT; apps still call Service names, because Pod IPs change."
+points:
+  - { k: "Network model", v: "one IP per Pod; all Pods reach all Pods, no NAT" }
+  - { k: "CNI plugin", v: "gives Pods IPs and connects nodes: Calico, Cilium, Flannel" }
+  - { k: "Service name", v: "payment-service.payments.svc.cluster.local → its ClusterIP" }
+  - { k: "Short names", v: "same namespace: payment-service; other: payment-service.payments" }
+  - { k: "kube-proxy modes", v: "iptables, nftables (stable 1.33), IPVS (deprecated 1.35)" }
+trap:
+  wrong: "Save a Pod's IP in config and call it directly."
+  right: "A replaced Pod gets a new IP. Call the Service DNS name; DNS and the Service track the Pods."
+sayIt: "Each Pod has its own IP and Pods talk without NAT, over a network built by a CNI plugin. CoreDNS names each Service, like payment-service.payments.svc.cluster.local; apps call names, not Pod IPs."
+confusedWith: []
+tags: [cni, coredns, kube-proxy]
+visual: flow
+sources:
+  - title: "The Kubernetes network model (Kubernetes 1.37 documentation)"
+    url: "https://kubernetes.io/docs/concepts/services-networking/"
+    verifiedOn: "2026-10-20"
+  - title: "DNS for Services and Pods (Kubernetes 1.37 documentation)"
+    url: "https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/"
+    verifiedOn: "2026-10-20"
+  - title: "Virtual IPs and Service Proxies (Kubernetes 1.37 documentation)"
+    url: "https://kubernetes.io/docs/reference/networking/virtual-ips/"
+    verifiedOn: "2026-10-20"
+  - title: "Installing Addons (Kubernetes documentation)"
+    url: "https://kubernetes.io/docs/concepts/cluster-administration/addons/"
+    verifiedOn: "2026-10-20"
+  - title: "Using CoreDNS (Kubernetes documentation)"
+    url: "https://kubernetes.io/docs/tasks/administer-cluster/coredns/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Apps on different nodes must find and reach each other, though Pods move and change IPs.
+
+## How it works
+
+<Mermaid
+  alt="order-service asks CoreDNS for payment-service.payments and gets the ClusterIP. kube-proxy rules on its node turn that into one Pod IP, and the CNI network carries the packet to that Pod on another node."
+  chart={`flowchart LR
+  A[order-service Pod] -- "1 lookup payment-service.payments" --> D[CoreDNS]
+  D -- "2 ClusterIP" --> A
+  A -- "3 connect" --> K[kube-proxy rules]
+  K -- "4 one Pod IP" --> N[CNI Pod network]
+  N --> P[payment-service Pod, other node]`}
+/>
+
+- Some CNI plugins replace kube-proxy with their own proxy.
+- A [headless Service](card:headless-service) name returns the Pod IPs, not one ClusterIP.
+- Who may talk to whom is set by [NetworkPolicies](card:network-policies).
+
+## Example
+
+```text
+# from namespace payments
+payment-service                             -> 10.96.12.34 (example ClusterIP)
+payment-service.payments                    -> 10.96.12.34
+payment-service.payments.svc.cluster.local  -> 10.96.12.34 (full name)
+
+# from namespace orders
+payment-service                             -> not found (searches orders)
+payment-service.payments                    -> 10.96.12.34
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| kube-proxy mode on Linux | iptables | Kubernetes 1.37 |
+| Pod `dnsPolicy` | ClusterFirst (use cluster DNS) | Kubernetes 1.37 |
+
+## Interview Qs
+
+### How does a Pod on one node reach a Pod on another node?
+
+Directly by Pod IP: the CNI plugin links nodes without NAT. Via a Service, kube-proxy (or the CNI's proxy) first turns the ClusterIP into one Pod IP.
+
+### Why does `payment-service` resolve in one namespace but not in another?
+
+A short name is looked up only in the caller's namespace. From elsewhere, add the namespace: `payment-service.payments`.
+
+### What does a headless Service return in DNS?
+
+The IPs of its Pods, not a ClusterIP. A StatefulSet's Pods also get their own names: `payments-db-0.payments-db.payments.svc.cluster.local`.

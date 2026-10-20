@@ -1,0 +1,88 @@
+---
+id: pod-security
+tech: kubernetes
+title: "Pod Security: securityContext and Admission"
+topic: security-ops
+level: intermediate
+heat: 2
+hook: "Harden each Pod with securityContext; let a namespace label reject Pods that break the baseline or restricted level."
+points:
+  - { k: "Three levels", v: "privileged (open), baseline (no known escalations), restricted (hardened)" }
+  - { k: "Namespace label", v: "pod-security.kubernetes.io/enforce: restricted" }
+  - { k: "Modes", v: "enforce rejects the Pod; audit logs it; warn warns the user" }
+  - { k: "Workloads", v: "enforce checks Pods only; a bad Deployment is accepted, its Pods fail", kind: minus }
+  - { k: "Pod Security Admission", v: "built in, stable since 1.25; PodSecurityPolicy removed in 1.25", kind: default }
+trap:
+  wrong: "Use a PodSecurityPolicy to stop containers running as root."
+  right: "PodSecurityPolicy was removed in 1.25. Label the namespace for Pod Security Admission, and set runAsNonRoot in securityContext."
+sayIt: "I set securityContext on every Pod: non-root, no privilege escalation, drop ALL capabilities, RuntimeDefault seccomp. Then I label the namespace to enforce the restricted Pod Security Standard."
+confusedWith: []
+tags: [security, securitycontext, pod-security-admission, non-root]
+visual: table
+sources:
+  - title: "Pod Security Standards (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/security/pod-security-standards/"
+    verifiedOn: "2026-10-20"
+  - title: "Pod Security Admission (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/security/pod-security-admission/"
+    verifiedOn: "2026-10-20"
+  - title: "Configure a Security Context for a Pod or Container (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/tasks/configure-pod-container/security-context/"
+    verifiedOn: "2026-10-20"
+  - title: "Enforce Pod Security Standards with Namespace Labels (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/tasks/configure-pod-container/enforce-standards-namespace-labels/"
+    verifiedOn: "2026-10-20"
+  - title: "Kubernetes v1.25 release: PodSecurityPolicy is removed"
+    url: "https://kubernetes.io/blog/2022/08/23/kubernetes-v1-25-release/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A root container with extra kernel powers can break out to the node. Pods need safe settings, and the cluster must refuse unsafe ones.
+
+## How it works
+
+| securityContext field | Set to | Stops |
+|---|---|---|
+| `runAsNonRoot` | `true` | Starting a container whose user is root (UID 0) |
+| `allowPrivilegeEscalation` | `false` | A process gaining more rights than its parent |
+| `capabilities.drop` | `[ALL]` | Extra kernel powers such as `NET_RAW` |
+| `seccompProfile.type` | `RuntimeDefault` | Unneeded system calls |
+| `readOnlyRootFilesystem` | `true` | Writes to the container's own files |
+
+- Restricted needs the first four; read-only root is extra. Container values override Pod values.
+- Custom rules (allowed registries, required labels): ValidatingAdmissionPolicy (CEL, stable since 1.30), Kyverno or OPA Gatekeeper.
+- Private images: pull with `imagePullSecrets`; see [Secrets](card:configmaps-and-secrets).
+
+## Example
+
+payment-service under the restricted level:
+
+```yaml
+# Namespace payments
+metadata:
+  labels: { pod-security.kubernetes.io/enforce: restricted }
+---
+# Pod template of the payment-service Deployment
+spec:
+  securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
+  containers:
+    - name: payment-service
+      image: payment-service:1.4.0
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+```
+
+## Interview Qs
+
+### How do you stop containers running as root?
+
+Set `runAsNonRoot: true`; the kubelet then refuses a container whose image runs as UID 0. Enforce `restricted` on the namespace to reject Pods without it.
+
+### What replaced PodSecurityPolicy?
+
+Pod Security Admission (stable since 1.25): three fixed levels set by namespace labels. Custom rules go to ValidatingAdmissionPolicy, Kyverno or OPA Gatekeeper.
+
+### How do you move an existing namespace to restricted safely?
+
+Keep enforce at baseline; set audit and warn to restricted. Preview with `kubectl label --dry-run=server`, fix the reported Pods, then enforce restricted.

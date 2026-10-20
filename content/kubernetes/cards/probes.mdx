@@ -1,0 +1,83 @@
+---
+id: probes
+tech: kubernetes
+title: Liveness, Readiness and Startup Probes
+topic: health-resources
+level: beginner
+heat: 3
+hook: "Liveness restarts a stuck container, readiness keeps traffic away until it is ready, startup gives a slow app time to boot."
+points:
+  - { k: "Liveness fails", v: "the kubelet kills and restarts the container" }
+  - { k: "Readiness fails", v: "Pod leaves the Service's EndpointSlices; no restart" }
+  - { k: "Startup probe", v: "runs first; liveness and readiness wait until it passes" }
+  - { k: "Liveness scope", v: "check the app itself, never the database", kind: minus }
+trap:
+  wrong: "A failing readiness probe restarts the container."
+  right: "Readiness only takes the Pod out of Service traffic and keeps probing. Only liveness and startup failures restart it."
+sayIt: "Liveness asks 'is it stuck?' and restarts it; readiness asks 'can it take traffic?' and removes it from the Service; startup protects a slow boot. In Spring Boot they hit the Actuator liveness and readiness groups."
+confusedWith: []
+tags: [probes, health-check, actuator, self-healing]
+visual: table
+sources:
+  - title: "Liveness, Readiness, and Startup Probes (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/"
+    verifiedOn: "2026-10-20"
+  - title: "Configure Liveness, Readiness and Startup Probes: gRPC probes (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/"
+    verifiedOn: "2026-10-20"
+  - title: "Actuator Endpoints: Kubernetes Probes (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/actuator/endpoints.html"
+    verifiedOn: "2026-10-20"
+  - title: "Kubernetes Interview Questions: health probes (GeeksforGeeks)"
+    url: "https://www.geeksforgeeks.org/devops/kubernetes-interview-questions/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+The kubelet only sees that the process is running. A running app can still be deadlocked or warming up, so Kubernetes asks the app itself.
+
+## How it works
+
+<Compare id="liveness-vs-readiness-vs-startup" />
+
+- Each probe uses one check: `httpGet` (status 200–399), `tcpSocket`, `exec` (exit code 0) or `grpc` (stable since 1.27).
+- Startup budget is `failureThreshold × periodSeconds`: 30 × 10s gives the app 300 seconds.
+- A Pod with no readiness probe counts as ready as soon as its containers start.
+
+## Example
+
+```yaml
+# payment-service container (Spring Boot 4.1, port 8080)
+startupProbe:
+  httpGet: { path: /actuator/health/liveness, port: 8080 }
+  failureThreshold: 30        # up to 300s to boot
+  periodSeconds: 10
+livenessProbe:
+  httpGet: { path: /actuator/health/liveness, port: 8080 }
+readinessProbe:
+  httpGet: { path: /actuator/health/readiness, port: 8080 }
+  periodSeconds: 5
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| `periodSeconds` / `timeoutSeconds` | 10s / 1s | Kubernetes 1.37 |
+| `failureThreshold` / `successThreshold` | 3 / 1 | Kubernetes 1.37 |
+| Actuator liveness and readiness groups | enabled automatically | Spring Boot 4.1 |
+
+## Interview Qs
+
+### What happens when a readiness probe fails?
+
+The Pod's IP is removed from the EndpointSlices of every matching Service, so it gets no new traffic. The container keeps running and is probed again; when it passes, traffic returns.
+
+### Why should a liveness probe not check the database?
+
+If the database goes down, every replica fails liveness and restarts together. Restarts cannot fix the database and cause a cascade. Spring Boot keeps external checks out of both groups by default.
+
+### When do you need a startup probe?
+
+When boot can take longer than `initialDelaySeconds + failureThreshold × periodSeconds` of the liveness probe. Point it at the liveness endpoint with a high `failureThreshold`, so liveness stays strict after start.

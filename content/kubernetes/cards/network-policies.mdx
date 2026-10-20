@@ -1,0 +1,88 @@
+---
+id: network-policies
+tech: kubernetes
+title: NetworkPolicies
+topic: networking
+level: intermediate
+heat: 2
+hook: "Every Pod can reach every Pod until a NetworkPolicy selects it; then only the traffic it allows gets through."
+points:
+  - { k: "Isolated", v: "a policy that selects a Pod blocks all but its allow rules" }
+  - { k: "Directions", v: "ingress and egress are isolated separately (policyTypes)" }
+  - { k: "Allow only", v: "no deny rules; policies add up, order does not matter" }
+  - { k: "Both ends", v: "sender's egress and receiver's ingress must both allow it" }
+  - { k: "Needs the CNI", v: "a plugin without support ignores policies silently", kind: minus }
+trap:
+  wrong: "Namespaces or RBAC already keep the payments Pods apart."
+  right: "RBAC controls API calls and namespaces group objects. Only an enforced NetworkPolicy limits Pod traffic."
+sayIt: "NetworkPolicies are label-based allow lists for Pod traffic at layers 3 and 4. I start with default deny in the namespace, allow only the callers I need, keep DNS egress open, and check that the CNI enforces them."
+confusedWith: []
+tags: [networkpolicy, default-deny]
+visual: flow
+sources:
+  - title: "Network Policies (Kubernetes 1.37 documentation)"
+    url: "https://kubernetes.io/docs/concepts/services-networking/network-policies/"
+    verifiedOn: "2026-10-20"
+  - title: "The Kubernetes network model (Kubernetes 1.37 documentation)"
+    url: "https://kubernetes.io/docs/concepts/services-networking/"
+    verifiedOn: "2026-10-20"
+  - title: "Debugging DNS Resolution (Kubernetes documentation)"
+    url: "https://kubernetes.io/docs/tasks/administer-cluster/dns-debugging-resolution/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+By default any Pod, even a hacked one, can call any Pod, such as the payments database. Policies allow only needed calls.
+
+## How it works
+
+<Mermaid
+  alt="A NetworkPolicy selects the payment-service Pods. order-service (namespace orders) and the gateway (namespace infra) may connect on 8080; any other Pod is blocked."
+  chart={`flowchart LR
+  O[order-service, ns orders] -- "allowed :8080" --> P[payment-service Pods]
+  G[gateway, ns infra] -- "allowed :8080" --> P
+  X[any other Pod] -. blocked .-> P`}
+/>
+
+- One `from` item with both selectors means AND; two items mean OR.
+- Default deny egress also blocks DNS; allow port 53 to the cluster DNS.
+- No layer 7 rules, TLS or explicit deny: use a [service mesh](card:service-mesh) or Gateway.
+
+## Example
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: payment-service-callers, namespace: payments }
+spec:
+  podSelector: { matchLabels: { app: payment-service } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: orders } }
+          podSelector: { matchLabels: { app: order-service } }    # AND
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: infra } }  # OR
+      ports: [{ port: 8080 }]
+```
+
+## Defaults
+
+| What | Default | Where |
+| --- | --- | --- |
+| Traffic when no policy selects a Pod | all allowed, in and out | Kubernetes 1.37 |
+| `policyTypes` left out | Ingress, plus Egress if egress rules exist | Kubernetes 1.37 |
+
+## Interview Qs
+
+### How do you let only order-service call payment-service?
+
+Add default deny (`podSelector: {}`, no rules) in payments, then allow order-service's namespace and labels on port 8080, as in the example.
+
+### You added default deny for egress and now nothing resolves. Why?
+
+Egress deny blocks DNS too. Allow egress on port 53 (UDP and TCP) to the cluster DNS Pods.
+
+### Does a NetworkPolicy work on every cluster?
+
+No. The CNI plugin enforces it; without support the object is accepted but does nothing.
