@@ -1,0 +1,88 @@
+---
+id: blocking-and-non-blocking-io
+tech: os-networking
+title: "Blocking vs Non-blocking, Sync vs Async I/O"
+topic: io
+level: intermediate
+heat: 3
+hook: "Blocking: the thread waits for the data. Non-blocking: the call returns at once. Async: the kernel does the job, then tells you."
+points:
+  - { k: "Blocking", v: "read() sleeps until data arrives; one thread per waiting call" }
+  - { k: "Non-blocking", v: "O_NONBLOCK fd: read() fails at once with EAGAIN" }
+  - { k: "Sync vs async", v: "sync: you copy the data when ready; async: the kernel finishes, then tells you" }
+  - { k: "Regular files", v: "Linux ignores O_NONBLOCK on them; disk reads still block", kind: minus }
+  - { k: "io_uring", v: "Linux async I/O through shared rings, since Linux 5.1", kind: default }
+trap:
+  wrong: "Non-blocking I/O is the same as async I/O, and it makes each request faster."
+  right: "Non-blocking only means the call will not wait; you still read the data yourself. It saves threads, not time per request."
+sayIt: "Blocking I/O parks the thread until data arrives. Non-blocking returns at once, so one thread can serve many sockets with epoll. Async I/O, like io_uring, does the whole job and reports when done."
+confusedWith: [thread-per-request-vs-event-loop]
+tags: [io, non-blocking, async]
+visual: table
+sources:
+  - title: "read(2): EAGAIN (Linux man-pages)"
+    url: "https://man7.org/linux/man-pages/man2/read.2.html"
+    verifiedOn: "2026-10-20"
+  - title: "open(2): O_NONBLOCK (Linux man-pages)"
+    url: "https://man7.org/linux/man-pages/man2/open.2.html"
+    verifiedOn: "2026-10-20"
+  - title: "io_uring(7) (Linux man-pages)"
+    url: "https://man7.org/linux/man-pages/man7/io_uring.7.html"
+    verifiedOn: "2026-10-20"
+  - title: "syscalls(2): io_uring in kernel 5.1 (Linux man-pages)"
+    url: "https://man7.org/linux/man-pages/man2/syscalls.2.html"
+    verifiedOn: "2026-10-20"
+  - title: "Spring WebFlux overview: Performance (Spring Framework)"
+    url: "https://docs.spring.io/spring-framework/reference/web/webflux/new-framework.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Backend work is mostly waiting: a database call takes milliseconds while the CPU sits idle ([concurrency](card:concurrency-and-parallelism)). How a thread waits decides how many threads you need.
+
+## How it works
+
+<Compare id="blocking-vs-non-blocking-io" />
+
+| Model | The thread... | Linux example |
+|---|---|---|
+| Blocking, sync | sleeps inside the call until data is copied | plain `read()` |
+| Non-blocking, sync | gets EAGAIN, comes back later | `O_NONBLOCK` |
+| Readiness (multiplexed) | waits on many fds, then reads the ready ones | [epoll](card:io-multiplexing) |
+| Async completion | submits the work; the kernel reports when done | io_uring, POSIX aio |
+
+- The first three are synchronous: your thread still copies the data.
+- Java 21+ [virtual threads](card:thread-pools) make blocking code cheap again.
+
+## Example
+
+In non-blocking mode a Java NIO read returns 0 bytes instead of waiting:
+
+```java
+var addr = new InetSocketAddress("localhost", 8080);
+try (var server = ServerSocketChannel.open().bind(addr);
+     var client = SocketChannel.open(addr);
+     var conn = server.accept()) {
+    conn.configureBlocking(false);                  // like O_NONBLOCK
+    System.out.println("non-blocking read: " + conn.read(ByteBuffer.allocate(64)));
+    conn.configureBlocking(true);                   // reads wait again
+    client.write(ByteBuffer.wrap("GET /orders/42".getBytes()));
+    System.out.println("blocking read: " + conn.read(ByteBuffer.allocate(64)));
+}
+```
+
+```text output
+non-blocking read: 0
+blocking read: 14
+```
+
+## Interview Qs
+
+### Blocking vs non-blocking I/O?
+
+Blocking I/O makes the calling thread wait until the operation can complete. Non-blocking I/O returns at once, with EAGAIN if nothing is ready, so the thread can serve other work and come back when the fd is ready.
+
+### Is non-blocking the same as asynchronous?
+
+No. Non-blocking means the call does not wait; you still wait for readiness and copy the data yourself. Asynchronous I/O hands the whole operation to the kernel, which reports completion, as io_uring does.

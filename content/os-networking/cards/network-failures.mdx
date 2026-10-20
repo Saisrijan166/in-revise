@@ -1,0 +1,85 @@
+---
+id: network-failures
+tech: os-networking
+title: "Network Failures: Timeouts, Retries and Idempotency"
+topic: system-design-bridge
+level: interview
+heat: 3
+hook: "A timeout tells you nothing about whether the call ran, so every retry must be safe to repeat."
+points:
+  - { k: "Timeout = unknown", v: "the work may have run; only the reply is missing", kind: minus }
+  - { k: "Two timeouts", v: "connect (reach the server) and request (get the reply)" }
+  - { k: "Retry rules", v: "only transient errors and idempotent calls, with a cap" }
+  - { k: "Backoff + jitter", v: "wait up to 100, 200, 400 ms, picked at random each time" }
+  - { k: "Idempotency key", v: "client sends a unique key; server replays the stored result", kind: plus }
+trap:
+  wrong: "Retry immediately at every layer until the call works."
+  right: "Retries multiply: 3 tries at each of 5 layers is 243× load on the database. Retry at one layer, with backoff and jitter."
+sayIt: "On a timeout I do not know if the call ran. So I set connect and request timeouts, retry only idempotent calls with capped backoff and jitter, and make POSTs safe with an idempotency key."
+confusedWith: []
+tags: [timeout, retry, idempotency]
+visual: flow
+sources:
+  - title: "Timeouts, retries, and backoff with jitter (AWS Builders' Library)"
+    url: "https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/"
+    verifiedOn: "2026-10-20"
+  - title: "The Idempotency-Key HTTP Header Field (IETF draft -07, expired)"
+    url: "https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/"
+    verifiedOn: "2026-10-20"
+  - title: "HttpRequest.Builder (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.net.http/java/net/http/HttpRequest.Builder.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Networks drop packets, slow down and split while servers stay up. Without timeouts and safe retries, one slow dependency hangs threads or charges twice.
+
+## How it works
+
+<Mermaid
+  alt="The client sends POST /payments. The server charges the card but its reply is lost. The client times out and retries, and the server charges again."
+  chart={`sequenceDiagram
+  participant C as Client
+  participant S as Payments API
+  C->>S: POST /payments (₹1,499)
+  S->>S: charge the card
+  S-xC: 201 Created (lost)
+  Note over C: timeout: did it run?
+  C->>S: retry POST /payments
+  S->>S: charges again: double charge`}
+/>
+
+- No timeout means waiting forever, holding a [thread](card:thread-pools) and a [pooled connection](card:connection-pooling).
+- With an idempotency key the server stores key → result; the retry gets the first result.
+- A [circuit breaker](card:circuit-breaker) stops calls for a while; a [partition](card:network-partition) forces a consistency trade-off.
+
+## Example
+
+```java
+HttpClient client = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(2))      // connect within 2 s
+        .build();
+String key = UUID.randomUUID().toString();          // reuse this key on every retry
+HttpRequest req = HttpRequest.newBuilder(URI.create("https://api.shop.example/payments"))
+        .timeout(Duration.ofSeconds(5))             // reply within 5 s
+        .header("Idempotency-Key", key)
+        .POST(HttpRequest.BodyPublishers.ofString("{\"orderId\":42,\"amount\":1499}"))
+        .build();
+// throws HttpConnectTimeoutException or HttpTimeoutException
+HttpResponse<String> res = client.send(req, HttpResponse.BodyHandlers.ofString());
+```
+
+## Interview Qs
+
+### Why is a timeout not proof that the request failed?
+
+The server may have done the work and only the reply was lost. Retrying a non-idempotent call can repeat it: a second payment.
+
+### How do you make POST /payments safe to retry?
+
+Send a unique Idempotency-Key; the server stores key → result and answers a retry with the stored result. The header is only an expired IETF draft.
+
+### Why exponential backoff and jitter together?
+
+Backoff spaces out retries so a struggling server can recover. Jitter adds randomness so clients do not all retry at the same moment.

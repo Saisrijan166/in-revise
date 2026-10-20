@@ -1,0 +1,72 @@
+---
+id: io-multiplexing
+tech: os-networking
+title: "I/O Multiplexing, epoll and Event Loops"
+topic: io
+level: intermediate
+heat: 3
+hook: "One thread asks the kernel which of many sockets are ready, then serves only those. That loop is how Nginx and Node.js scale."
+points:
+  - { k: "Multiplexing", v: "one thread waits on many fds and wakes when any is ready" }
+  - { k: "Ready, not done", v: "the loop still reads the data itself, on a non-blocking fd" }
+  - { k: "epoll (Linux)", v: "register each fd once; epoll_wait returns only the ready ones", kind: plus }
+  - { k: "Golden rule", v: "never block or run long CPU work inside a callback", kind: minus }
+trap:
+  wrong: "Node.js has one thread, so it can only wait on one I/O operation at a time."
+  right: "One thread runs the callbacks, but thousands of sockets wait in the kernel at once; file I/O goes to a worker pool."
+sayIt: "With I/O multiplexing, one thread registers many sockets with epoll, waits, and handles only the ready ones in an event loop. It scales to thousands of connections as long as no callback blocks."
+confusedWith: [blocking-vs-non-blocking-io]
+tags: [io, epoll, event-loop, nginx, nodejs]
+visual: flow
+sources:
+  - title: "epoll(7) (Linux man-pages)"
+    url: "https://man7.org/linux/man-pages/man7/epoll.7.html"
+    verifiedOn: "2026-10-20"
+  - title: "select(2): FD_SETSIZE warning and BUGS (Linux man-pages)"
+    url: "https://man7.org/linux/man-pages/man2/select.2.html"
+    verifiedOn: "2026-10-20"
+  - title: "The C10K problem (Dan Kegel, author page)"
+    url: "https://www.kegel.com/c10k.html"
+    verifiedOn: "2026-10-20"
+  - title: "Don't Block the Event Loop (or the Worker Pool) (Node.js docs)"
+    url: "https://nodejs.org/en/learn/asynchronous-work/dont-block-the-event-loop"
+    verifiedOn: "2026-10-20"
+  - title: "Connection processing methods: epoll, kqueue, select, poll (nginx documentation)"
+    url: "https://nginx.org/en/docs/events.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A thread per connection wastes memory and switches when most connections sit idle. The [C10k problem](card:c10k-problem) asked how one server can hold 10,000 clients at once.
+
+## How it works
+
+<Steps label="One turn of an event loop">
+<Step title="Register">Add each socket fd once with `epoll_ctl`.</Step>
+<Step title="Wait">`epoll_wait` sleeps until one or more fds are ready.</Step>
+<Step title="Dispatch">Run the callback for each ready fd: accept, read or write.</Step>
+<Step title="Repeat">Go back to waiting. A callback that blocks stalls every connection.</Step>
+</Steps>
+
+| API | Each call | Limit |
+|---|---|---|
+| `select` | passes and checks the whole fd set | fds below 1024 (glibc) |
+| `poll` | passes and checks the whole list | none fixed; slow at thousands |
+| `epoll` | returns only the ready fds | scales to many idle fds |
+
+<Compare id="thread-per-request-vs-event-loop" />
+
+## Interview Qs
+
+### select vs poll vs epoll?
+
+select and poll pass the whole fd list on every call and the kernel checks each one; select also stops at fd 1023 in glibc. epoll keeps the list in the kernel and returns only the ready fds.
+
+### What happens if you block inside an event-loop callback?
+
+Every other connection on that loop waits, because one thread runs all callbacks. Move blocking or CPU-heavy work to a worker pool, as Node.js does with libuv's pool, and keep callbacks short.
+
+### Level-triggered vs edge-triggered epoll?
+
+Level-triggered, the default, keeps reporting an fd while data remains. Edge-triggered reports only new arrivals, so use non-blocking fds and read until EAGAIN, or the loop can wait forever on data already there.

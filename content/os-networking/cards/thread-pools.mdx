@@ -1,0 +1,95 @@
+---
+id: thread-pools
+tech: os-networking
+title: Thread Pools and Sizing
+topic: os-basics
+level: intermediate
+heat: 3
+hook: "A thread pool feeds tasks from a queue to N reusable workers, so a spike cannot create unlimited threads."
+points:
+  - { k: "Reuse", v: "no new thread per request; workers take the next task", kind: plus }
+  - { k: "Bound", v: "at most N tasks run at once; the rest wait or are rejected" }
+  - { k: "CPU-bound", v: "about one thread per core; more threads add no throughput" }
+  - { k: "I/O-bound", v: "more threads than cores, since most of them are waiting" }
+trap:
+  wrong: "Executors.newFixedThreadPool(n) protects the server from overload."
+  right: "It caps threads, not work: its queue is unbounded, so tasks pile up. Use a bounded queue and a rejection policy."
+sayIt: "A pool reuses a fixed set of threads fed from a queue, so concurrency is bounded. I size it near the core count for CPU work, larger for I/O, and bound the queue."
+confusedWith: [thread-per-request-vs-event-loop]
+tags: [thread-pool, executor, tomcat]
+visual: flow
+sources:
+  - title: "ThreadPoolExecutor (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/ThreadPoolExecutor.html"
+    verifiedOn: "2026-10-20"
+  - title: "Executors (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/Executors.html"
+    verifiedOn: "2026-10-20"
+  - title: "JEP 444: Virtual Threads (OpenJDK, Java 21)"
+    url: "https://openjdk.org/jeps/444"
+    verifiedOn: "2026-10-20"
+  - title: "Application properties (Spring Boot 4.1)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+A thread per request costs creation time, a stack each and more [context switches](card:context-switching); a spike can exhaust memory.
+
+## How it works
+
+<Mermaid
+  alt="Requests enter a bounded task queue; workers 1 to N take tasks from it. When it is full, new tasks are rejected or run by the caller."
+  chart={`flowchart LR
+  R1([GET /orders/42]) --> Q[[Bounded task queue]]
+  Q --> W1[Worker 1]
+  Q --> WN[Worker N]
+  Q -. full .-> X[Reject or caller runs]`}
+/>
+
+- 100 threads on 10 CPUs: at most 10 run at once; the rest wait.
+- Full queue: AbortPolicy (default) throws; CallerRunsPolicy makes the caller run it, slowing senders.
+- Java 21+ [virtual threads](card:virtual-thread): one per task, never pooled; cap scarce resources with [semaphores](card:semaphores).
+
+## Example
+
+Two workers, four orders (example run; order varies):
+
+```java
+import java.util.concurrent.*;
+public class Main {
+    public static void main(String[] args) {
+        try (ExecutorService pool = Executors.newFixedThreadPool(2)) {  // 2 reusable workers
+            for (int id = 41; id <= 44; id++) {
+                int order = id;
+                pool.submit(() -> System.out.println("order " + order + " on " + Thread.currentThread().getName()));
+            }
+        }                                                  // close() waits for queued tasks
+    }
+}
+```
+
+```text output
+order 41 on pool-1-thread-1
+order 42 on pool-1-thread-2
+order 44 on pool-1-thread-2
+order 43 on pool-1-thread-1
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Max request threads | 200 | Spring Boot 4.1, `server.tomcat.threads.max` |
+| Virtual threads | off | Spring Boot 4.1, `spring.threads.virtual.enabled` |
+
+## Interview Qs
+
+### How do you size a thread pool?
+
+CPU-bound: about the core count. I/O-bound: by Little's Law, in-flight work = throughput × latency (200 requests/s × 50 ms = 10). Then measure CPU, queue length and latency.
+
+### Do virtual threads make thread pools obsolete?
+
+For blocking request code, mostly: one virtual thread per task, never pooled. Limits move to scarce resources, such as database connections, via a semaphore or a [connection pool](card:connection-pooling).

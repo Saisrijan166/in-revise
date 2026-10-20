@@ -1,0 +1,80 @@
+---
+id: semaphores
+tech: os-networking
+title: Semaphores and Producer-Consumer
+topic: concurrency
+level: intermediate
+heat: 3
+hook: "A semaphore is a counter of permits: acquire takes one or waits, release gives one back. It caps how many run at once."
+points:
+  - { k: "acquire (P, wait)", v: "take a permit; block while none is left" }
+  - { k: "release (V, signal)", v: "add a permit back; may wake a waiting thread" }
+  - { k: "Counting vs binary", v: "N permits limit concurrency; 1 permit acts like a lock" }
+  - { k: "Typical use", v: "at most N calls to a payment provider, or N DB connections", kind: plus }
+  - { k: "Java fairness", v: "new Semaphore(n) is non-fair; new Semaphore(n, true) is FIFO", kind: default }
+trap:
+  wrong: "A binary semaphore is the same as a mutex."
+  right: "A mutex has an owner, and only it unlocks. A semaphore has no owner: any thread may release it, so it can also signal between threads."
+sayIt: "A semaphore holds N permits. A thread acquires one before using a limited resource and releases it in finally. A mutex protects a critical section and has an owner; a semaphore limits how many threads go in."
+confusedWith: []
+tags: [semaphore, producer-consumer, bounded-buffer, concurrency-limit]
+visual: table
+sources:
+  - title: "Semaphores (OSTEP, Arpaci-Dusseau)"
+    url: "https://pages.cs.wisc.edu/~remzi/OSTEP/threads-sema.pdf"
+    verifiedOn: "2026-10-20"
+  - title: "Class Semaphore (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/Semaphore.html"
+    verifiedOn: "2026-10-20"
+  - title: "Interface BlockingQueue (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/BlockingQueue.html"
+    verifiedOn: "2026-10-20"
+  - title: "Mutex vs Semaphore (GeeksforGeeks)"
+    url: "https://www.geeksforgeeks.org/operating-systems/mutex-vs-semaphore/"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Some resources take N users, not one: a pool of 10 connections, or a partner API allowing 3 calls at once. A lock is too strict; no limit overloads them.
+
+## How it works
+
+<Compare id="mutex-vs-semaphore" />
+
+- [Producer-consumer](card:producer-consumer): a bounded buffer uses two counting semaphores (empty slots, full slots) and a mutex for the buffer.
+- In Java a `BlockingQueue` does this for you: `put` waits while full, `take` waits while empty.
+- A pool of connections is permits too: see [connection pooling](card:connection-pooling).
+
+## Example
+
+Example run: 10 tasks, 3 permits.
+
+```java
+Semaphore permits = new Semaphore(3);              // 3 calls at a time
+AtomicInteger inside = new AtomicInteger(), max = new AtomicInteger();
+try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (int i = 0; i < 10; i++) pool.submit(() -> {
+        permits.acquire();                         // wait for a permit
+        try { max.accumulateAndGet(inside.incrementAndGet(), Math::max);
+              Thread.sleep(50); }                  // the slow remote call
+        finally { inside.decrementAndGet(); permits.release(); }
+        return null;
+    });
+}                                                  // close() waits for all 10
+System.out.println("most at once: " + max.get());
+```
+
+```text output
+most at once: 3
+```
+
+## Interview Qs
+
+### Our API runs on three instances. Each uses Semaphore(3) for a partner API. How many calls can reach the partner at once?
+
+Nine. A semaphore lives inside one JVM, so each instance has its own 3 permits. For one total limit, the count must live in a store that all instances share.
+
+### Why must release() be in finally?
+
+A permit that is never returned is lost for good. After N such leaks every caller blocks forever. Releasing in `finally` returns it even when the call throws.

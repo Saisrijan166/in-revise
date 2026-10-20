@@ -1,0 +1,76 @@
+---
+id: caching-and-cdn
+tech: os-networking
+title: HTTP Caching and CDNs
+topic: system-design-bridge
+level: intermediate
+heat: 3
+hook: "Keep a copy close to the user; Cache-Control says for how long, and ETag checks if it is still good."
+points:
+  - { k: "max-age=N", v: "fresh for N seconds; reuse without asking the server" }
+  - { k: "no-cache", v: "may store, but must revalidate before every reuse" }
+  - { k: "no-store", v: "must not store the response at all" }
+  - { k: "private / public", v: "private: browser only; public: shared caches such as a CDN too" }
+  - { k: "s-maxage", v: "freshness for shared caches only; overrides max-age there" }
+trap:
+  wrong: "no-cache means the response is not cached."
+  right: "no-cache lets caches store it but forces revalidation first (often a cheap 304). no-store is the one that forbids storing."
+sayIt: "Caches sit in the browser, at CDN edges and in proxies. Cache-Control sets freshness; when stale, the cache revalidates with ETag and gets 304 if unchanged. Static files get versioned names and a long max-age."
+confusedWith: []
+tags: [caching, cdn, http]
+visual: table
+sources:
+  - title: "RFC 9111 HTTP Caching, section 5.2 Cache-Control"
+    url: "https://www.rfc-editor.org/rfc/rfc9111#section-5.2"
+    verifiedOn: "2026-10-20"
+  - title: "HTTP caching (MDN Web Docs)"
+    url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching"
+    verifiedOn: "2026-10-20"
+  - title: "How CloudFront delivers content (AWS documentation)"
+    url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/HowCloudFrontWorks.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+The same files and responses travel long distances again and again. A copy stored closer to the user cuts latency and takes load off the origin server.
+
+## How it works
+
+| Cache | Shared? | In our shop |
+|---|---|---|
+| Browser cache | No, one user | `GET /orders/42`: `private, no-cache` |
+| CDN edge | Yes, many users | product image: `public, max-age=31536000` |
+| Reverse proxy cache | Yes | only non-personal responses |
+| App cache (Redis) | Yes, app decides | hot rows; HTTP rules do not apply |
+
+- A CDN serves from the edge nearest the user (chosen by DNS or anycast, see [DNS](card:dns)); a miss is fetched from the origin once.
+- Files that change get a hash in the name (`app.3f2a.js`): each deploy is a new URL. Purging the CDN is the fallback.
+- The price is stale data: short TTLs for data that changes, or invalidate on write.
+
+## Example
+
+```text
+GET /orders/42
+200 OK
+Cache-Control: private, no-cache
+ETag: "v7"
+
+GET /orders/42              (next visit: revalidate first)
+If-None-Match: "v7"
+304 Not Modified            (no body: reuse the stored copy)
+```
+
+## Interview Qs
+
+### no-cache vs no-store?
+
+no-cache: a cache may store the response but must check with the server before each reuse, usually getting a small 304. no-store: no cache may keep it at all.
+
+### How does a CDN make a site faster?
+
+Edge servers near users hold copies of static files, so most requests travel a short distance and never reach the origin. A miss goes to the origin once and is cached for the next user.
+
+### You deployed new CSS but users still get the old file. Fix?
+
+The old file was cached with a long max-age, and there is no standard way to delete it from caches. Use versioned file names so a deploy changes the URL; purge the CDN only as a fallback.

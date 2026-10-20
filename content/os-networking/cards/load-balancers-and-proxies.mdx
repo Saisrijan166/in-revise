@@ -1,0 +1,86 @@
+---
+id: load-balancers-and-proxies
+tech: os-networking
+title: Load Balancers and Reverse Proxies
+topic: system-design-bridge
+level: intermediate
+heat: 3
+hook: "Many identical servers sit behind one address; the load balancer spreads requests and skips the sick ones."
+points:
+  - { k: "Scale out", v: "add instances behind one name instead of one bigger box", kind: plus }
+  - { k: "Health checks", v: "a failing server gets no traffic until it passes again" }
+  - { k: "Stateless servers", v: "keep sessions in a shared store, so any instance can answer" }
+  - { k: "Default method", v: "nginx and AWS ALB: round robin", kind: default }
+  - { k: "Not a single point", v: "run the LB in pairs, or managed across zones", kind: minus }
+trap:
+  wrong: "A reverse proxy and a load balancer are the same thing."
+  right: "They overlap: Nginx as a reverse proxy can load-balance, but an L4 load balancer only forwards connections and never reads HTTP."
+sayIt: "A load balancer spreads requests over identical servers and skips unhealthy ones. L4 routes connections by IP and port; L7 reads HTTP, routes by host or path, and usually terminates TLS."
+confusedWith: [forward-vs-reverse-proxy]
+tags: [load-balancer, reverse-proxy, scaling]
+visual: flow
+sources:
+  - title: "Module ngx_http_upstream_module (nginx documentation)"
+    url: "https://nginx.org/en/docs/http/ngx_http_upstream_module.html"
+    verifiedOn: "2026-10-20"
+  - title: "HAProxy 3.2 Starter Guide: load balancing, health checks, stickiness"
+    url: "https://docs.haproxy.org/3.2/intro.html"
+    verifiedOn: "2026-10-20"
+  - title: "How Elastic Load Balancing works (AWS documentation)"
+    url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/userguide/how-elastic-load-balancing-works.html"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+One server has a ceiling and is a single point of failure. A load balancer puts many servers behind one address, so you add capacity and survive a crash.
+
+## How it works
+
+<Mermaid
+  alt="Clients call api.shop.example over HTTPS. The load balancer sends requests to app instances 1 and 2. Instance 3 failed its health check, so it gets no traffic. All instances use PostgreSQL."
+  chart={`flowchart LR
+  C([Clients]) -- "HTTPS api.shop.example" --> LB[Load balancer]
+  LB --> A1[App 1]
+  LB --> A2[App 2]
+  LB -. "failed health check: no traffic" .-> A3[App 3]
+  A1 --> DB[(PostgreSQL)]
+  A2 --> DB`}
+/>
+
+<Compare id="l4-vs-l7-load-balancer" />
+
+- [Health checks](card:lb-health-check): active probes of a path like `/actuator/health`, or passive marking after real requests fail.
+- A [reverse proxy](card:reverse-proxy) also does [TLS termination](card:tls-termination), compression and caching, and hides backend addresses.
+- 502 and 504 come from the proxy: bad or late upstream reply ([status codes](card:http-basics)).
+
+## Example
+
+```nginx
+upstream orders_api {
+    least_conn;                          # default: round robin
+    server 10.0.1.11:8080 weight=2;      # bigger box, double share
+    server 10.0.1.12:8080;
+    server 10.0.1.13:8080 max_fails=3 fail_timeout=30s;
+}
+server {
+    listen 443 ssl;                      # TLS ends here
+    server_name api.shop.example;
+    ssl_certificate shop.crt; ssl_certificate_key shop.key;
+    location /orders/ { proxy_pass http://orders_api; }
+}
+```
+
+## Interview Qs
+
+### L4 or L7 load balancer: which would you choose?
+
+L7 when routing needs the host, path or headers, or cookie stickiness. L4 for raw speed, non-HTTP traffic or end-to-end TLS. Big setups chain both: L4 in front of L7.
+
+### Why avoid sticky sessions?
+
+If the pinned server dies, its users lose their session, and load gets uneven. Keep session state in a shared store or a token instead.
+
+### How do you stop the load balancer itself being a single point of failure?
+
+Run at least two nodes, or a managed load balancer across availability zones (an AWS ALB needs two).

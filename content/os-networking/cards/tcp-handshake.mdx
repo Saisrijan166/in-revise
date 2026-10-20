@@ -1,0 +1,81 @@
+---
+id: tcp-handshake
+tech: os-networking
+title: TCP Handshake, Close and TIME_WAIT
+topic: transport
+level: intermediate
+heat: 3
+hook: "SYN, SYN-ACK, ACK: each side sends its starting sequence number and sees it confirmed. It costs one round trip."
+points:
+  - { k: "Purpose", v: "both sides agree to talk and swap initial sequence numbers (ISNs)" }
+  - { k: "Cost", v: "1 round trip before the first request byte", kind: minus }
+  - { k: "Close", v: "each side sends FIN and gets an ACK; one side may half-close" }
+  - { k: "TIME_WAIT", v: "the side that closes first waits; 60 s on Linux", kind: default }
+trap:
+  wrong: "Two steps would do: the client sends SYN and the server answers."
+  right: "Then the server never learns the client got its ISN, and an old delayed SYN could open a false connection."
+sayIt: "Client SYN with its ISN, server SYN-ACK with its own ISN acknowledging the client's, client ACK. Three messages, because each side must send its ISN and see it acknowledged."
+confusedWith: []
+tags: [tcp, handshake, time-wait]
+visual: flow
+sources:
+  - title: "RFC 9293: Transmission Control Protocol (3.4.1 ISN selection, 3.5 Establishing, 3.6 Closing)"
+    url: "https://www.rfc-editor.org/rfc/rfc9293"
+    verifiedOn: "2026-10-20"
+  - title: "RFC 4987: TCP SYN Flooding Attacks and Common Mitigations"
+    url: "https://www.rfc-editor.org/rfc/rfc4987"
+    verifiedOn: "2026-10-20"
+  - title: "IP Sysctl: tcp_syncookies (Linux kernel docs)"
+    url: "https://docs.kernel.org/networking/ip-sysctl.html"
+    verifiedOn: "2026-10-20"
+  - title: "include/net/tcp.h: TCP_TIMEWAIT_LEN (Linux kernel source)"
+    url: "https://github.com/torvalds/linux/blob/master/include/net/tcp.h"
+    verifiedOn: "2026-10-20"
+---
+
+## Why it exists
+
+Before data flows, both ends must know the other is there and agree where byte numbering starts, so they can spot lost, repeated or stale segments.
+
+## How it works
+
+<Mermaid
+  alt="Open: SYN seq=x, SYN-ACK seq=y ack=x+1, ACK ack=y+1. Close: a FIN and an ACK each way, then the client waits in TIME_WAIT."
+  chart={`sequenceDiagram
+  participant C as Client
+  participant S as api.shop.example
+  C->>S: SYN seq=x
+  S->>C: SYN-ACK seq=y ack=x+1
+  C->>S: ACK ack=y+1 (may carry GET /orders/42)
+  Note over C,S: data flows both ways
+  C->>S: FIN
+  S->>C: ACK
+  S->>C: FIN
+  C->>S: ACK
+  Note over C: TIME_WAIT, then closed`}
+/>
+
+- **TIME_WAIT** re-ACKs a repeated FIN and lets late segments from the old connection die out.
+- **RST** aborts a connection at once; it also answers a SYN to a port nobody listens on.
+- **SYN flood:** fake SYNs fill the queue of half-open connections; Linux then falls back to SYN cookies.
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| TIME_WAIT length | 60 s (constant TCP_TIMEWAIT_LEN, not a sysctl) | Linux |
+| SYN cookies | 1: sent only when the SYN queue overflows | Linux `net.ipv4.tcp_syncookies` |
+
+## Interview Qs
+
+### Why three steps and not two?
+
+Each side must send its ISN and see it acknowledged. The server's SYN and ACK share one segment, so it takes three. With two, the server cannot tell a fresh SYN from an old duplicate.
+
+### A client shows thousands of TIME_WAIT sockets. Is that a bug?
+
+No, TIME_WAIT is normal on the side that closes first. Thousands mean a new connection per request, which can use up [ephemeral ports](card:ports-and-sockets). Reuse connections with keep-alive or a [pool](card:connection-pooling).
+
+### What are SYN cookies?
+
+The server stops storing half-open connections. It packs their state into the SYN-ACK's sequence number and rebuilds it from the client's final ACK.
