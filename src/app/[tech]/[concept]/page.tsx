@@ -72,19 +72,34 @@ export default async function ConceptPage({ params }: PageProps<"/[tech]/[concep
     .filter((cid) => !embedded.has(cid))
     .map((cid) => deck.comparisonById.get(cid)!);
   const quiz = quizItems(deck, card, r);
+  const v3 = card.template === 3;
+  const buildsOn = m.buildsOn.map((bid) => deck.cardById.get(bid)!);
+  const nextCard = nb.next ? deck.cardById.get(nb.next.id) : undefined;
+  const confusedTitle = v3 ? "Not to be confused with" : "Often confused";
+  const trapTitle = v3 ? "Common mistakes" : "Common trap";
 
   // Sections in display order; "show" = modes in which the section is visible.
   const toc: TocItem[] = [
-    r.why && { id: "why", label: "Why it exists", show: "learn" },
+    r.what && { id: "what", label: "What it is", show: "learn" },
+    r.why && { id: "why", label: v3 ? "Why we need it" : "Why it exists", show: "learn" },
     r.how && { id: "how", label: "How it works", show: "learn" },
     r.analogy && { id: "analogy", label: "Analogy", show: "learn" },
     r.example && { id: "example", label: "Example", show: "learn" },
+    r.rules && { id: "rules", label: "Rules and defaults", show: "learn" },
     { id: "points", label: "Key points", show: "learn revise" },
     r.defaults && { id: "defaults", label: "Defaults", show: "learn" },
-    m.trap && { id: "trap", label: "Common trap", show: "learn revise" },
-    comparisons.length > 0 && { id: "confused", label: "Often confused", show: "learn" },
+    (comparisons.length > 0 || r.confusion) && {
+      id: "confused",
+      label: confusedTitle,
+      show: "learn",
+    },
+    (m.trap || r.mistakes) && {
+      id: "trap",
+      label: trapTitle,
+      show: m.trap ? "learn revise" : "learn",
+    },
     r.questions.length > 0 && { id: "questions", label: "Interview questions", show: "learn" },
-    m.sayIt && { id: "say-it", label: "Say it like this", show: "learn revise" },
+    m.sayIt && { id: "say-it", label: "Interview takeaway", show: "learn revise" },
     { id: "quiz", label: "Quiz", show: "quiz" },
   ].filter((x): x is TocItem => Boolean(x));
 
@@ -127,11 +142,38 @@ export default async function ConceptPage({ params }: PageProps<"/[tech]/[concep
                 {m.hook}
               </p>
             </div>
+
+            {buildsOn.length > 0 && (
+              <p data-show="learn" className="mt-3 text-ink-2">
+                <span className="font-semibold text-ink-3">Builds on: </span>
+                {buildsOn.map((b, i) => (
+                  <span key={b.meta.id}>
+                    {i > 0 && ", "}
+                    <Link
+                      href={urls.concept(tech, b.meta.id)}
+                      className="font-semibold text-accent-ink underline underline-offset-2"
+                    >
+                      {b.meta.title}
+                    </Link>
+                  </span>
+                ))}
+              </p>
+            )}
           </header>
 
           {/* ---------- Learn ---------- */}
+          {r.what && (
+            <Section id="what" title="What it is" show="learn" icon={IconBook}>
+              <div className="prose-card">{r.what}</div>
+            </Section>
+          )}
           {r.why && (
-            <Section id="why" title="Why it exists" show="learn" icon={IconHelp}>
+            <Section
+              id="why"
+              title={v3 ? "Why we need it" : "Why it exists"}
+              show="learn"
+              icon={IconHelp}
+            >
               <div className="prose-card">{r.why}</div>
             </Section>
           )}
@@ -151,6 +193,12 @@ export default async function ConceptPage({ params }: PageProps<"/[tech]/[concep
             </Section>
           )}
 
+          {r.rules && (
+            <Section id="rules" title="Rules and defaults" show="learn" icon={IconSliders}>
+              <div className="prose-card">{r.rules}</div>
+            </Section>
+          )}
+
           {/* ---------- Learn + Revise: the parts to remember ---------- */}
           <Section id="points" title="Key points" show="learn revise" icon={IconCheck}>
             <KeyPoints points={m.points} />
@@ -160,14 +208,10 @@ export default async function ConceptPage({ params }: PageProps<"/[tech]/[concep
               <div className="prose-card">{r.defaults}</div>
             </Section>
           )}
-          {m.trap && (
-            <Section id="trap" title="Common trap" show="learn revise" icon={IconAlert}>
-              <Trap wrong={m.trap.wrong} right={m.trap.right} />
-            </Section>
-          )}
 
-          {comparisons.length > 0 && (
-            <Section id="confused" title="Often confused" show="learn" icon={IconColumns}>
+          {(comparisons.length > 0 || r.confusion) && (
+            <Section id="confused" title={confusedTitle} show="learn" icon={IconColumns}>
+              {r.confusion && <div className="prose-card mb-4">{r.confusion}</div>}
               <ul className="flex flex-col gap-3">
                 {comparisons.map((c) => (
                   <li key={c.id} className="rounded-2xl border border-line bg-surface p-4">
@@ -182,6 +226,28 @@ export default async function ConceptPage({ params }: PageProps<"/[tech]/[concep
                   </li>
                 ))}
               </ul>
+            </Section>
+          )}
+
+          {(m.trap || r.mistakes) && (
+            <Section
+              id="trap"
+              title={trapTitle}
+              show={m.trap ? "learn revise" : "learn"}
+              icon={IconAlert}
+            >
+              {m.trap && <Trap wrong={m.trap.wrong} right={m.trap.right} />}
+              {m.trap?.why && (
+                <p data-show="learn" className="mt-3 text-ink-2">
+                  <strong className="text-ink">Why people get this wrong: </strong>
+                  {renderInline(m.trap.why)}
+                </p>
+              )}
+              {r.mistakes && (
+                <div data-show="learn" className="prose-card mt-4">
+                  {r.mistakes}
+                </div>
+              )}
             </Section>
           )}
 
@@ -210,7 +276,7 @@ export default async function ConceptPage({ params }: PageProps<"/[tech]/[concep
           )}
 
           {m.sayIt && (
-            <Section id="say-it" title="Say it like this" show="learn revise">
+            <Section id="say-it" title="Interview takeaway" show="learn revise">
               <SayIt text={m.sayIt} />
             </Section>
           )}
@@ -303,6 +369,11 @@ export default async function ConceptPage({ params }: PageProps<"/[tech]/[concep
                     Next
                   </span>
                   <span className="font-semibold text-ink">{nb.next.title}</span>
+                  {v3 && nextCard && (
+                    <span data-show="learn" className="mt-0.5 block text-sm text-ink-2">
+                      {nextCard.meta.hook}
+                    </span>
+                  )}
                 </span>
                 <IconArrowRight
                   size={20}

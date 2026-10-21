@@ -18,6 +18,7 @@ import {
   type GlossaryTerm,
   type SectionKey,
   type Source,
+  type Template,
   type TreeNodeInput,
 } from "./schema";
 
@@ -48,6 +49,8 @@ export interface Card {
   /** Raw markdown per section (without the `##` heading). */
   sections: Partial<Record<SectionKey, string>>;
   questions: Question[];
+  /** Concept template of the tech (2 = compact, 3 = teaching). */
+  template: Template;
 }
 
 export interface SpineStep {
@@ -91,6 +94,7 @@ export interface Deck {
   summary: string;
   /** App-code languages from _tech.yaml (System Design: Java and Python; Spring Boot: Java only). */
   codeLanguages: string[];
+  template: Template;
   spine: SpineStep[];
   topics: Topic[];
   /** Concepts in reading order: the order of the concept tree. */
@@ -166,7 +170,7 @@ export function splitHeadings(
   };
 }
 
-function parseCard(file: string, techSlug: string, issues: Issue[]): Card | null {
+function parseCard(file: string, techSlug: string, template: Template, issues: Issue[]): Card | null {
   const text = fs.readFileSync(file, "utf8");
   const fm = splitFrontmatter(text);
   if (!fm) {
@@ -201,26 +205,33 @@ function parseCard(file: string, techSlug: string, issues: Issue[]): Card | null
   if (preamble) err("body text before the first `##` section is not allowed");
 
   const sections: Partial<Record<SectionKey, string>> = {};
+  const defs = SECTION_DEFS.filter((d) => (d.v as readonly number[]).includes(template));
   let lastIndex = -1;
   for (const part of parts) {
-    const idx = SECTION_DEFS.findIndex((d) => d.heading === part.heading);
+    const idx = defs.findIndex((d) => d.heading === part.heading);
     if (idx === -1) {
       err(
-        `unknown section "## ${part.heading}". Allowed: ${SECTION_DEFS.map((d) => d.heading).join(", ")}. ` +
+        `unknown section "## ${part.heading}" for template v${template}. Allowed: ${defs.map((d) => d.heading).join(", ")}. ` +
           "Key points, trap and say-it live in frontmatter (points, trap, sayIt).",
       );
       continue;
     }
-    const key = SECTION_DEFS[idx].key;
+    const key = defs[idx].key;
     if (sections[key] !== undefined) err(`duplicate section "## ${part.heading}"`);
     if (idx < lastIndex) err(`section "## ${part.heading}" is out of order`);
     lastIndex = Math.max(lastIndex, idx);
     if (!part.body) err(`section "## ${part.heading}" is empty`);
     sections[key] = part.body;
   }
-  for (const def of SECTION_DEFS) {
-    if (def.required && sections[def.key] === undefined) err(`missing required section "## ${def.heading}"`);
+  for (const def of defs) {
+    if ((def.required as readonly number[]).includes(template) && sections[def.key] === undefined) {
+      err(`missing required section "## ${def.heading}"`);
+    }
   }
+  if (template === 2 && (meta.buildsOn.length || meta.scenarios.length || meta.trap?.why)) {
+    err("buildsOn, scenarios and trap.why need template 3 (set `template: 3` in _tech.yaml)");
+  }
+  if (template === 3 && meta.trap && !meta.trap.why) err("trap.why: say why people believe the wrong line");
 
   const questions: Question[] = [];
   if (sections.questions !== undefined) {
@@ -235,7 +246,7 @@ function parseCard(file: string, techSlug: string, issues: Issue[]): Card | null
     }
   }
 
-  return { meta, file: rel(file), sections, questions };
+  return { meta, file: rel(file), sections, questions, template };
 }
 
 function parseSpineText(text: string): { problem: string; fix: string } {
@@ -268,8 +279,11 @@ export function readingStats(card: Card): { core: number; revise: number; learn:
     m.points.reduce((n, p) => n + countWords(`${p.k} ${p.v}`), 0) +
     (m.trap ? countWords(`${m.trap.wrong} ${m.trap.right}`) : 0) +
     (m.sayIt ? countWords(m.sayIt) : 0);
-  const core = w("why") + w("how") + w("analogy") + w("example");
-  return { core, revise, learn: core + revise + w("defaults") + w("questions") };
+  const core = w("what") + w("why") + w("how") + w("analogy") + w("example");
+  const extra =
+    w("defaults") + w("rules") + w("confusion") + w("mistakes") + w("questions") +
+    (m.trap?.why ? countWords(m.trap.why) : 0);
+  return { core, revise, learn: core + revise + extra };
 }
 
 /** Checks body-level references that the build would otherwise render as broken. */
@@ -332,13 +346,35 @@ function checkBody(card: Card, deck: Deck, issues: Issue[], fileIds: Set<string>
   // Reading budgets (CLAUDE.md 2.2): short, glanceable, no leftovers.
   const stats = readingStats(card);
   const warn = (m: string) => err(m, "warning");
-  if (card.sections.why && countWords(card.sections.why) > 50) warn("Why it exists: keep it to 1–2 sentences (≤ 50 words)");
-  if (stats.core > 260) warn(`core (why/how/analogy/example) is ${stats.core} words; aim for 260 or fewer`);
-  if (stats.revise > 170) warn(`Revise view is ${stats.revise} words; aim for 170 or fewer`);
+  const words = (k: SectionKey) => (card.sections[k] ? countWords(card.sections[k]!) : 0);
+  if (card.template === 2) {
+    if (words("why") > 50) warn("Why it exists: keep it to 1–2 sentences (≤ 50 words)");
+    if (stats.core > 260) warn(`core (why/how/analogy/example) is ${stats.core} words; aim for 260 or fewer`);
+    if (stats.revise > 170) warn(`Revise view is ${stats.revise} words; aim for 170 or fewer`);
+    for (const q of card.questions) {
+      const n = countWords(q.markdown);
+      if (n > 50) warn(`Interview answer "${q.q}" is ${n} words; aim for 50 or fewer`);
+    }
+    return;
+  }
+
+  // Template v3 (teaching): enough words to explain, never an essay.
+  if (words("what") > 90) warn(`What it is is ${words("what")} words; aim for 90 or fewer`);
+  if (words("why") > 110) warn(`Why it exists is ${words("why")} words; aim for 110 or fewer`);
+  if (stats.core > 650) warn(`core (what/why/how/analogy/example) is ${stats.core} words; aim for 650 or fewer`);
+  if (stats.learn > 1100) warn(`Learn view is ${stats.learn} words; aim for 1100 or fewer`);
+  if (stats.revise > 210) warn(`Revise view is ${stats.revise} words; aim for 210 or fewer`);
   for (const q of card.questions) {
     const n = countWords(q.markdown);
-    if (n > 50) warn(`Interview answer "${q.q}" is ${n} words; aim for 50 or fewer`);
+    if (n > 70) warn(`Interview answer "${q.q}" is ${n} words; aim for 70 or fewer`);
   }
+  // An example is explained, not just shown: prose must follow the last code block.
+  const ex = card.sections.example;
+  if (ex && /```/.test(ex)) {
+    const tail = ex.slice(ex.lastIndexOf("```") + 3);
+    if (countWords(tail) < 12) err("Example: explain the code after it (what to notice, what it prints and why)");
+  }
+  if (card.sections.what && /```/.test(card.sections.what)) err("What it is: no code here; start in plain words");
 }
 
 function buildTree(
@@ -440,7 +476,7 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
   const fileIds = new Set(cardFiles.map((f) => f.replace(/\.mdx$/, "")));
   const rawCards: Card[] = [];
   for (const f of cardFiles) {
-    const c = parseCard(path.join(cardsDir, f), slug, issues);
+    const c = parseCard(path.join(cardsDir, f), slug, tech.template, issues);
     if (c) rawCards.push(c);
   }
   const rawById = new Map(rawCards.map((c) => [c.meta.id, c]));
@@ -465,6 +501,13 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
     if (c.gist.length !== c.compares.length) e("gist: give exactly one line per compared item");
     if (c.diagrams && c.diagrams.length !== c.compares.length) e("diagrams: give exactly one per compared item");
     if (c.diagrams && !c.diagramAlt) e("diagramAlt: diagrams need a text alternative");
+    if (c.explain && c.explain.length !== c.compares.length) e("explain: give exactly one line per compared item");
+    if (tech.template === 3) {
+      if (!c.explain) e("explain: template 3 explains each side in plain words first (one line per item)");
+      if (!c.sayIt) e("sayIt: template 3 needs a ready interview answer");
+    } else if (c.explain || c.example || c.sayIt) {
+      e("explain, example and sayIt need template 3 (set `template: 3` in _tech.yaml)");
+    }
     const cols = ["a", "b", "c", "d"].slice(0, c.compares.length) as ("a" | "b" | "c" | "d")[];
     c.rows.forEach((row, i) => {
       for (const col of ["a", "b", "c", "d"] as const) {
@@ -550,6 +593,7 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
     accent: tech.accent,
     summary: tech.summary,
     codeLanguages: tech.codeLanguages,
+    template: tech.template,
     spine,
     topics,
     cards: ordered,
@@ -577,6 +621,13 @@ function loadDeck(dir: string, slug: string, issues: Issue[]): Deck | null {
       if (Date.parse(`${s.verifiedOn}T00:00:00Z`) > Date.now() + 86_400_000) {
         e(`source "${s.title}": verifiedOn is in the future`);
       }
+    }
+    const pos = ordered.indexOf(c);
+    for (const id of c.meta.buildsOn) {
+      const dep = deck.cardById.get(id);
+      if (!dep) e(`buildsOn: "${id}" is not a concept of this tech`);
+      else if (id === c.meta.id) e("buildsOn: a concept cannot build on itself");
+      else if (ordered.indexOf(dep) > pos) e(`buildsOn: "${id}" comes later in the reading order; move it earlier or drop the link`);
     }
     if (!spine.some((s) => s.cards.includes(c.meta.id))) {
       e("concept is not placed on the story spine (add its id to a storySpine step's cards)");

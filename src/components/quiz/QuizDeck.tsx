@@ -10,13 +10,14 @@ const CHIP_ROW =
 
 export interface QuizDeckItem extends QuizItem {
   topic: string;
-  kind: "one-liner" | "trap" | "question";
+  kind: "one-liner" | "trap" | "question" | "scenario";
 }
 
 const KINDS: { value: "all" | QuizDeckItem["kind"]; label: string }[] = [
   { value: "all", label: "Everything" },
   { value: "one-liner", label: "One-liners" },
   { value: "question", label: "Interview Qs" },
+  { value: "scenario", label: "Scenarios" },
   { value: "trap", label: "Traps" },
 ];
 
@@ -31,6 +32,8 @@ export function QuizDeck({
   const [topic, setTopic] = useState("all");
   const [kind, setKind] = useState<(typeof KINDS)[number]["value"]>("all");
   const [seed, setSeed] = useState(0);
+  // Only offer kinds this tech has (scenarios exist in template v3 techs only).
+  const kinds = KINDS.filter((k) => k.value === "all" || items.some((it) => it.kind === k.value));
 
   const list = useMemo(() => {
     let out = items.filter(
@@ -91,7 +94,7 @@ export function QuizDeck({
             Ask
           </span>
           <div data-no-swipe className={CHIP_ROW}>
-            {KINDS.map((k) => (
+            {kinds.map((k) => (
               <button
                 key={k.value}
                 type="button"

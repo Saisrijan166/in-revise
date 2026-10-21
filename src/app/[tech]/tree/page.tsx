@@ -80,6 +80,22 @@ function Branch({
                 <span className="text-ink-2">{card ? card.meta.hook : n.note}</span>
               )}
             </div>
+            {card && card.meta.buildsOn.length > 0 && (
+              <p className="text-sm text-ink-3">
+                Builds on{" "}
+                {card.meta.buildsOn.map((bid, i) => (
+                  <span key={bid}>
+                    {i > 0 && ", "}
+                    <a
+                      href={`#node-${bid}`}
+                      className="font-semibold text-ink-2 underline underline-offset-2"
+                    >
+                      {deck.cardById.get(bid)?.meta.title ?? bid}
+                    </a>
+                  </span>
+                ))}
+              </p>
+            )}
             {n.children.length > 0 && (
               <Branch deck={deck} nodes={n.children} color={color} depth={depth + 1} />
             )}

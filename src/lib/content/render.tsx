@@ -239,11 +239,15 @@ async function renderMd(md: string, ctx: Ctx): Promise<ReactNode> {
 export { renderInline } from "../inline";
 
 export interface RenderedCard {
+  what?: ReactNode;
   why?: ReactNode;
   how?: ReactNode;
   analogy?: ReactNode;
   example?: ReactNode;
   defaults?: ReactNode;
+  rules?: ReactNode;
+  confusion?: ReactNode;
+  mistakes?: ReactNode;
   questions: { q: string; a: ReactNode }[];
   /** Glossary terms that were linked inside this concept. */
   terms: GlossaryTerm[];
@@ -266,11 +270,15 @@ async function doRenderCard(deck: Deck, card: Card): Promise<RenderedCard> {
   const s = card.sections;
   // Sequential, in reading order, so the first mention of each term is the one that gets linked.
   const r: RenderedCard = { questions: [], terms: [] };
+  if (s.what) r.what = await renderMd(s.what, ctx);
   if (s.why) r.why = await renderMd(s.why, ctx);
   if (s.how) r.how = await renderMd(s.how, ctx);
   if (s.analogy) r.analogy = await renderMd(s.analogy, ctx);
   if (s.example) r.example = await renderMd(s.example, ctx);
   if (s.defaults) r.defaults = await renderMd(s.defaults, ctx);
+  if (s.rules) r.rules = await renderMd(s.rules, ctx);
+  if (s.confusion) r.confusion = await renderMd(s.confusion, ctx);
+  if (s.mistakes) r.mistakes = await renderMd(s.mistakes, ctx);
   for (const q of card.questions) r.questions.push({ q: q.q, a: await renderMd(q.markdown, ctx) });
   r.terms = deck.glossary.filter((t) => ctx.seen.has(t.id));
   return r;

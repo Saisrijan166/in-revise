@@ -4,7 +4,7 @@ import { renderInline } from "../inline";
 import { urls } from "../urls";
 import type { QuizItem } from "@/components/quiz/QuizSession";
 
-export type QuizKind = "one-liner" | "trap" | "question";
+export type QuizKind = "one-liner" | "trap" | "question" | "scenario";
 
 export interface QuizItemWithKind extends QuizItem {
   kind: QuizKind;
@@ -13,7 +13,7 @@ export interface QuizItemWithKind extends QuizItem {
 
 /**
  * Flashcards for one concept, all from content that already exists (no extra writing):
- * the one-liner, the trap and the interview questions.
+ * the one-liner, the trap, the interview questions and (template v3) the scenarios.
  */
 export function quizItems(deck: Deck, card: Card, r: RenderedCard): QuizItemWithKind[] {
   const m = card.meta;
@@ -41,12 +41,25 @@ export function quizItems(deck: Deck, card: Card, r: RenderedCard): QuizItemWith
       eyebrow: "Right or wrong?",
       q: <>&ldquo;{renderInline(m.trap.wrong)}&rdquo;</>,
       a: (
-        <p>
-          <strong>Wrong.</strong> {renderInline(m.trap.right)}
-        </p>
+        <>
+          <p>
+            <strong>Wrong.</strong> {renderInline(m.trap.right)}
+          </p>
+          {m.trap.why && <p className="mt-2 text-ink-2">{renderInline(m.trap.why)}</p>}
+        </>
       ),
     });
   }
+  m.scenarios.forEach((sc, i) =>
+    items.push({
+      ...base,
+      key: `${m.id}:s${i}`,
+      kind: "scenario",
+      eyebrow: "Scenario",
+      q: renderInline(sc.q),
+      a: <p>{renderInline(sc.a)}</p>,
+    }),
+  );
   r.questions.forEach((q, i) =>
     items.push({ ...base, key: `${m.id}:q${i}`, kind: "question", eyebrow: "Interview question", q: renderInline(q.q), a: q.a }),
   );

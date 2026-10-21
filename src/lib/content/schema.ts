@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 /**
- * Content schema (template v2, Phase 2). Mirrors CLAUDE.md Section 3. Shared by the site loader
+ * Content schema (template v2, Phase 2; template v3 = the teaching template, opted in per tech
+ * with `template: 3` in _tech.yaml). Mirrors CLAUDE.md Section 3. Shared by the site loader
  * and scripts/validate-content.ts, so the build and the validator can never disagree.
  */
 
@@ -35,15 +36,25 @@ export type Visual = (typeof VISUALS)[number];
 export type Accent = (typeof ACCENTS)[number];
 export type PointKind = (typeof POINT_KINDS)[number];
 
-/** Body sections a concept may have, in display order. `##` heading text must match exactly. */
+/**
+ * Body sections a concept may have, in display order. `##` heading text must match exactly.
+ * `v`: the templates that allow the section; `required`: the templates that need it.
+ */
 export const SECTION_DEFS = [
-  { key: "why", heading: "Why it exists", required: true },
-  { key: "how", heading: "How it works", required: true },
-  { key: "analogy", heading: "Analogy", required: false },
-  { key: "example", heading: "Example", required: false },
-  { key: "defaults", heading: "Defaults", required: false },
-  { key: "questions", heading: "Interview Qs", required: true },
+  { key: "what", heading: "What it is", v: [3], required: [3] },
+  { key: "why", heading: "Why it exists", v: [2, 3], required: [2, 3] },
+  { key: "how", heading: "How it works", v: [2, 3], required: [2, 3] },
+  { key: "analogy", heading: "Analogy", v: [2, 3], required: [] },
+  { key: "example", heading: "Example", v: [2, 3], required: [] },
+  { key: "defaults", heading: "Defaults", v: [2], required: [] },
+  { key: "rules", heading: "Rules and defaults", v: [3], required: [] },
+  { key: "confusion", heading: "Not to be confused with", v: [3], required: [] },
+  { key: "mistakes", heading: "Common mistakes", v: [3], required: [] },
+  { key: "questions", heading: "Interview Qs", v: [2, 3], required: [2, 3] },
 ] as const;
+
+export const TEMPLATES = [2, 3] as const;
+export type Template = (typeof TEMPLATES)[number];
 
 export type SectionKey = (typeof SECTION_DEFS)[number]["key"];
 
@@ -82,7 +93,7 @@ const oneLine = (max: number) =>
 export const pointSchema = z
   .object({
     k: oneLine(30),
-    v: oneLine(80),
+    v: oneLine(110),
     kind: z.enum(POINT_KINDS).default("key"),
   })
   .strict();
@@ -97,8 +108,23 @@ export const cardMetaSchema = z
     heat: z.int().min(1).max(3),
     hook: oneLine(170),
     points: z.array(pointSchema).min(3, "give 3–6 key points").max(6, "give 3–6 key points"),
-    trap: z.object({ wrong: oneLine(120), right: oneLine(160) }).strict().optional(),
+    trap: z
+      .object({
+        wrong: oneLine(120),
+        right: oneLine(160),
+        /** Template v3: why people believe the wrong line (Learn mode and Quiz only). */
+        why: oneLine(240).optional(),
+      })
+      .strict()
+      .optional(),
     sayIt: oneLine(280).optional(),
+    /** Template v3: concepts of this tech the reader should know first (they come earlier). */
+    buildsOn: z.array(kebab).max(3).default([]),
+    /** Template v3: scenario, output or "which one" questions; Quiz only. */
+    scenarios: z
+      .array(z.object({ q: oneLine(240), a: oneLine(360) }).strict())
+      .max(3)
+      .default([]),
     confusedWith: z.array(kebab).default([]),
     tags: z.array(z.string().min(1)).default([]),
     visual: z.enum(VISUALS),
@@ -125,6 +151,12 @@ export const comparisonSchema = z
     compares: z.array(kebab).min(2).max(4),
     /** One short line per side, shown before you open the comparison. */
     gist: z.array(oneLine(70)),
+    /** Template v3: each side explained on its own first, in plain words (one per side). */
+    explain: z.array(oneLine(260)).optional(),
+    /** Template v3: one small scenario that shows the difference. */
+    example: oneLine(400).optional(),
+    /** Template v3: a ready interview answer. */
+    sayIt: oneLine(300).optional(),
     /** Optional mini diagram per side (Mermaid), with one text alternative for all of them. */
     diagrams: z.array(z.string().min(10)).optional(),
     diagramAlt: z.string().min(10).optional(),
@@ -151,6 +183,10 @@ export const techSchema = z
     accent: z.enum(ACCENTS),
     summary: z.string().min(10).max(200),
     /** App-code languages: an example in one of them is shown in all of them, as adjacent tabs. */
+    /** Concept template: 2 (compact) or 3 (teaching: what, why, how, example explained, mistakes). */
+    template: z
+      .union([z.literal(2), z.literal(3)])
+      .default(2),
     codeLanguages: z
       .array(z.string().regex(/^[a-z]+$/))
       .min(1)

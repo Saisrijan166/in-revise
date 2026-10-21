@@ -3,6 +3,7 @@ import type { Deck } from "@/lib/content/load";
 import type { ComparisonData } from "@/lib/content/schema";
 import { nodeHref } from "@/lib/content/nav";
 import { formatDate } from "@/lib/ui";
+import { renderInline } from "@/lib/inline";
 import { Mermaid } from "@/components/mdx/Mermaid";
 import { IconArrowRight, IconLink } from "@/components/ui/icons";
 import { IconScale } from "./icons";
@@ -56,6 +57,37 @@ export function CompareGist({
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Template v3: each side explained on its own, in plain words, before the differences. */
+function CompareExplain({ deck, c }: { deck: Deck; c: ComparisonData }) {
+  if (!c.explain) return null;
+  const sides = c.compares.map((id) => resolveSide(deck, id));
+  return (
+    <div className="flex flex-col gap-3">
+      <ul className="flex flex-col gap-2">
+        {c.explain.map((text, i) => (
+          <li key={sides[i].id} className="flex gap-3 text-ink-2">
+            <span
+              aria-hidden="true"
+              className="mt-2 h-2.5 w-2.5 flex-none rounded-full"
+              style={{ background: SIDE_COLOR[i] }}
+            />
+            <span>
+              <strong className="text-ink">{sides[i].title}: </strong>
+              {renderInline(text)}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {c.example && (
+        <p className="rounded-2xl border border-line bg-surface px-4 py-3 text-ink-2">
+          <strong className="text-ink">Example: </strong>
+          {renderInline(c.example)}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -189,6 +221,7 @@ export function CompareView({
   return (
     <div className="flex flex-col gap-4">
       <CompareGist deck={deck} c={c} />
+      <CompareExplain deck={deck} c={c} />
       <CompareDiagrams deck={deck} c={c} />
       {embedded ? (
         <details className="group rounded-2xl border border-line bg-surface">
@@ -205,6 +238,12 @@ export function CompareView({
         <CompareRows deck={deck} c={c} />
       )}
       <Verdict text={c.verdict} />
+      {c.sayIt && (
+        <p className="text-ink-2">
+          <strong className="text-ink">Say it in the interview: </strong>
+          {renderInline(c.sayIt)}
+        </p>
+      )}
       {embedded ? null : (
         <>
           {usedIn.length > 0 && (
