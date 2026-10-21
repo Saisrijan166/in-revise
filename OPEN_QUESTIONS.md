@@ -479,3 +479,39 @@ never from the outside network. A new accent `slate` (AA: 7.6:1 light, 8.4:1 dar
   was left out (no primary source; RFC 9113 still defines cleartext HTTP/2).
 - Latency ladder numbers come from Norvig's table and are marked approximate; the 63% fan-out figure is 1 − 0.99^100.
 - Dropped as true but over budget: Spring Boot's 30 s per shutdown phase default (the Interview Q names the property instead).
+
+## P. AI Engineering (new tech, 21-10-2026)
+
+The owner's `reference/reference.md` (LLMs, prompt engineering, RAG and AI integration, 77 sections) was renamed
+`reference/ai-engineering.md`. The owner asked to add the AI techs "and all foundations, whatever I have to know". The four
+parts of the reference are each too small for their own tech (15–20 concepts against the usual 40–70), so they form one tech,
+**AI Engineering**, with 45 concepts in 8 topics: AI Foundations (added beyond the reference), How LLMs Work, Prompt
+Engineering, Tools Agents and Memory, Embeddings and Vector Search, RAG, Safety and Evaluation, and AI in Java Backends (ending
+with a "how would you build an AI feature" playbook). Every reference item is in `reference/ai-engineering.coverage.md`
+(250 keys: 231 mapped, 18 corrected, 1 dropped closing remark; 87 additions).
+
+| Concepts | Comparisons | Terms | Checked / fixed / dropped | Baseline (21-10-2026) |
+|---|---|---|---|---|
+| 45 | 22 | 254 | ~1,510 / 32 / 0 | Java 25, Spring Boot 4.1, Spring AI 2.0.1, PostgreSQL 18 + pgvector 0.8.7, MCP spec 2026-07-28, OWASP Top 10 for LLM Applications 2025; prose vendor-neutral, OpenAI and Anthropic named only for dated facts |
+
+Spring AI examples compile against the Spring AI 2.0.1 jars; plain Java examples were run on JDK 21 with real outputs; SQL ran on
+PostgreSQL 18.6 with pgvector 0.8.7; token counts come from tiktoken (`o200k_base`). No LLM reply is shown as an output panel
+(replies are not reproducible); example replies are labelled. A new accent `purple` (AA: 5.9:1 or more in both themes) was
+added because all 15 accents were in use.
+
+### P1. Decisions for the owner
+
+- **One tech, not four:** say if you want it split (for example "LLMs and Prompting" and "RAG and AI Integration"); each part would be below 40 concepts.
+- **Size:** 45 concepts. For fewer, `neural-networks` can fold into `how-models-learn` and `chain-of-thought` into `prompt-design` (43).
+- **Dated vendor facts kept (they change fast, re-check before interviews):** OpenAI is winding down its fine-tuning platform
+  (closed to new users); Anthropic deprecates temperature / top_p / top_k on models released after Claude Opus 4.6 and
+  `budget_tokens` on 4.6+; OpenAI's hosted Evals platform goes read-only on 31-10-2026 (not mentioned in the content).
+- **"Start with prompts and evals, then pull the lever the failures point to"** replaces the reference's fixed ladder (prompt → RAG → fine-tuning), following OpenAI's accuracy guide.
+- **Overlap:** REST API already has `openai-api-integration` (raw HTTP call); this tech uses Spring AI and links nothing across techs.
+
+### P2. Worded carefully (kept)
+
+- Spring AI 2.0.1 OpenAI defaults (60 s timeout, 3 SDK retries via `spring.ai.openai.max-retries`): the Spring AI OpenAI page still lists the older `spring.ai.retry.*` keys, which the 2.0.1 OpenAI model no longer uses.
+- OpenTelemetry GenAI metric names are still in Development status; the content names only Spring AI's `gen_ai.client.token.usage`.
+- Left out for lack of a primary source: parent-child (small-to-big) chunking, a "small language model" glossary term, A/B tests as an eval signal.
+- "Deep learning contains generative AI" is the usual teaching picture; Google's glossary notes GenAI has no formal definition.
