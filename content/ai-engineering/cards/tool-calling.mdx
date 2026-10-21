@@ -1,0 +1,85 @@
+---
+id: tool-calling
+tech: ai-engineering
+title: Tool Calling (Function Calling)
+topic: tools-agents
+level: intermediate
+heat: 3
+hook: "The model only asks for a function by name with JSON arguments; your code checks it, runs it and sends the result back."
+points:
+  - { k: "Tool definition", v: "name, description and a JSON Schema for the arguments" }
+  - { k: "Model's part", v: "returns a call request; it never runs code itself" }
+  - { k: "Strict mode", v: "arguments always match the schema (OpenAI, Anthropic)", kind: plus }
+  - { k: "Parallel calls", v: "several calls in one turn; can be switched off" }
+  - { k: "Token cost", v: "few tools: definitions are billed as input tokens", kind: minus }
+trap:
+  wrong: "The model executes the function and reads the database."
+  right: "The model only returns a call request; your app validates it, runs approved code and sends the result back."
+sayIt: "I send tool definitions with the prompt. The model replies with a call like getOrderStatus(42); my code checks the user owns that order, runs it and returns the result for the final answer."
+confusedWith: [tool-calling-vs-mcp]
+tags: [tools, function-calling, spring-ai]
+visual: flow
+sources:
+  - title: "Function calling (OpenAI API docs)"
+    url: "https://developers.openai.com/api/docs/guides/function-calling"
+    verifiedOn: "2026-10-21"
+  - title: "Tool use with Claude, incl. strict tool use (Anthropic docs)"
+    url: "https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview"
+    verifiedOn: "2026-10-21"
+  - title: "Tool Calling (Spring AI 2.0 reference)"
+    url: "https://docs.spring.io/spring-ai/reference/api/tools.html"
+    verifiedOn: "2026-10-21"
+---
+
+## Why it exists
+
+An LLM only writes text. It cannot read live order rows or start a refund. Tool calling lets it ask your backend for data or actions through code you control.
+
+## How it works
+
+<Mermaid
+  alt="The app sends the question and tool definitions to the model. The model returns a call getOrderStatus(orderId=42). The app checks the user owns order 42, reads the database and sends the tool result back. The model writes the answer."
+  chart={`sequenceDiagram
+  participant A as App (Spring Boot)
+  participant M as Model
+  participant D as Database
+  A->>M: question + tool definitions
+  M-->>A: call getOrderStatus(orderId=42)
+  A->>A: user owns order 42?
+  A->>D: read order, payment, refund
+  A->>M: tool result
+  M-->>A: final answer`}
+/>
+
+- Validate every argument; identity comes from the session, not the model.
+- Keep tools few and narrow, read-only first; confirm money-moving actions and make them [idempotent](card:calling-llm-apis).
+- The model never touches the database: tool, then backend, then DB ([wiring](card:ai-and-databases)). Full risk list: [LLM security](card:llm-security).
+
+## Example
+
+Spring AI 2.0; the user id comes through `ToolContext`, which the model never sees:
+
+```java
+@Component
+class OrderTools {
+    private final OrderService orders;
+    OrderTools(OrderService orders) { this.orders = orders; }
+
+    @Tool(description = "Status, payment and refund of one order")
+    OrderStatus getOrderStatus(long orderId, ToolContext ctx) {
+        long userId = (long) ctx.getContext().get("userId"); // from the session
+        return orders.statusFor(userId, orderId);            // checks ownership
+    }
+}
+// chatClient.prompt(q).tools(orderTools).toolContext(Map.of("userId", id)).call().content();
+```
+
+## Interview Qs
+
+### Does the LLM execute the function?
+
+No. It returns the tool name and JSON arguments. Your application decides whether to run it, runs it, and sends the result back so the model can continue or answer.
+
+### How do you stop the model refunding someone else's order?
+
+Never let the model supply the user id; pass it from the session (Spring AI `ToolContext`). Check ownership and business rules in the backend, ask for confirmation, and use an idempotency key.

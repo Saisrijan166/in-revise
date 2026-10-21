@@ -1,0 +1,82 @@
+---
+id: metadata-and-filtering
+tech: ai-engineering
+title: Metadata, Filters and Permission-Aware Retrieval
+topic: rag
+level: interview
+heat: 3
+hook: "Tag every chunk with tenant and access metadata, and filter inside the search, never after the LLM has read the text."
+points:
+  - { k: "Metadata", v: "tenant, document id, title, page, access group, date" }
+  - { k: "Uses", v: "filters, access control, citations, debugging, freshness" }
+  - { k: "Filter in the search", v: "WHERE tenant_id = the caller's tenant, from the login" }
+  - { k: "ANN post-filter", v: "pgvector filters after the index scan: fewer than K rows", kind: minus }
+  - { k: "pgvector 0.8+", v: "iterative index scans keep scanning until enough rows match", kind: plus }
+trap:
+  wrong: "Retrieve everything and tell the LLM not to show documents the user may not see."
+  right: "The LLM is not an access-control layer. Rows the user may not see must never reach the prompt."
+sayIt: "Authorisation and tenant isolation live in the data and retrieval layer. I take the tenant and groups from the login, filter during the vector search, and never trust the LLM to hide text."
+confusedWith: []
+tags: [rag, metadata, multi-tenancy, security, pgvector]
+visual: code
+sources:
+  - title: "pgvector README: filtering, multitenancy, iterative index scans (v0.8.7)"
+    url: "https://github.com/pgvector/pgvector"
+    verifiedOn: "2026-10-21"
+  - title: "Vector Databases: metadata filters (Spring AI 2.0 reference)"
+    url: "https://docs.spring.io/spring-ai/reference/api/vectordbs.html"
+    verifiedOn: "2026-10-21"
+  - title: "LLM08:2025 Vector and Embedding Weaknesses (OWASP Top 10 for LLM Applications)"
+    url: "https://genai.owasp.org/llmrisk/llm082025-vector-and-embedding-weaknesses/"
+    verifiedOn: "2026-10-21"
+---
+
+## Why it exists
+
+One shared vector store holds many shops' policies and internal notes. Without filters, shop B's customer can get shop A's chunk, a leak OWASP lists as LLM08 (2025).
+
+## How it works
+
+```json
+{
+  "id": "refund-policy#4",
+  "content": "UPI refunds reach the customer in 5-7 working days.",
+  "metadata": {
+    "tenant_id": "shop-17", "document_id": "refund-policy",
+    "title": "Refund policy", "page": 2,
+    "access_group": "customer", "effective_from": "2026-04-01"
+  }
+}
+```
+
+- **Pre-filtering** limits the search to allowed rows; **post-filtering** drops rows after the nearest-neighbour search.
+- Strong isolation: a table or partition per tenant (pgvector's advice), or [row-level security](card:pg-row-level-security).
+- Removed or replaced documents: delete their chunks by `document_id`.
+
+## Example
+
+```java
+String ask(String question, Jwt user) {
+    String tenant = user.getClaimAsString("tenant_id");   // from the login, never from the prompt
+    return chat.prompt().user(question)
+        .advisors(a -> a.param(QuestionAnswerAdvisor.FILTER_EXPRESSION,
+            "tenant_id == '" + tenant + "' && access_group in ['customer', 'public']"))
+        .call().content();
+}
+```
+
+- In Spring AI 2.0 this per-request filter replaces the advisor's default filter, so repeat every condition.
+
+## Interview Qs
+
+### How do you stop one customer seeing another tenant's documents?
+
+Store `tenant_id` on every chunk and filter on it in the vector query, taking the tenant from the authenticated session. For stronger isolation, use a partition or table per tenant, or row-level security.
+
+### Why can a filtered vector search return fewer results than K?
+
+Approximate indexes such as HNSW find candidates first and filter after. With pgvector's default `hnsw.ef_search` of 40 and a filter matching 10% of rows, about 4 rows survive. Enable iterative index scans or use partitions.
+
+### Can a system prompt enforce permissions?
+
+No. Instructions can be overridden by [prompt injection](card:prompt-injection), and the text has already leaked into the context. Enforce access in code and SQL; see [securing LLM apps](card:llm-security).

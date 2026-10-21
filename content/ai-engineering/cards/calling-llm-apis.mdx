@@ -1,0 +1,91 @@
+---
+id: calling-llm-apis
+tech: ai-engineering
+title: "Calling LLM APIs: Streaming, Timeouts, Retries, Limits"
+topic: ai-in-production
+level: intermediate
+heat: 3
+hook: "Stream for speed, time-box every call, retry only transient errors with backoff, and rate-limit users before the provider does."
+points:
+  - { k: "Retry", v: "timeouts, network errors, 429, 5xx: exponential backoff + jitter" }
+  - { k: "Retry-After", v: "when the header is present, wait at least that long" }
+  - { k: "Do not retry", v: "400, 401, 403, and quota or spend-limit 429s", kind: minus }
+  - { k: "Provider limits", v: "requests and tokens per minute (RPM, TPM)" }
+  - { k: "Per-user limits", v: "requests per minute and tokens per day, set by you", kind: plus }
+trap:
+  wrong: "Retry every failed call, including refundPayment, until it succeeds."
+  right: "Retry only transient errors, and send an idempotency key with actions so a retry cannot refund twice."
+sayIt: "I stream replies over SSE, set connect and request timeouts, retry 429s and 5xx with capped exponential backoff, jitter and Retry-After, and rate-limit each user by requests and tokens."
+tags: [streaming, resilience, rate-limiting]
+visual: table
+sources:
+  - title: "OpenAI Chat (Spring AI 2.0)"
+    url: "https://docs.spring.io/spring-ai/reference/api/chat/openai-chat.html"
+    verifiedOn: "2026-10-21"
+  - title: "Error codes (OpenAI docs)"
+    url: "https://developers.openai.com/api/docs/guides/error-codes"
+    verifiedOn: "2026-10-21"
+  - title: "Rate limits (OpenAI docs)"
+    url: "https://developers.openai.com/api/docs/guides/rate-limits"
+    verifiedOn: "2026-10-21"
+  - title: "LLM10:2025 Unbounded Consumption (OWASP)"
+    url: "https://genai.owasp.org/llmrisk/llm102025-unbounded-consumption/"
+    verifiedOn: "2026-10-21"
+  - title: "Errors (Claude API docs)"
+    url: "https://platform.claude.com/docs/en/api/errors"
+    verifiedOn: "2026-10-21"
+  - title: "Timeouts, retries and backoff with jitter (AWS)"
+    url: "https://builder.aws.com/content/3EumjoZascWd1oZiEgL8ORlv3qE/timeouts-retries-and-backoff-with-jitter"
+    verifiedOn: "2026-10-21"
+---
+
+## Why it exists
+
+LLM calls are slow, rate-limited and sometimes fail. Without streaming users stare at a spinner; without timeouts and limits, threads pile up and bills spike.
+
+## How it works
+
+<Compare id="streaming-vs-blocking-response" />
+
+- Set a connect timeout and a request timeout; a stuck call otherwise holds a thread and a connection.
+- Retry at one layer only, with capped attempts; after repeated failures, a circuit breaker fails fast and a fallback answers.
+- Limit each user in front of the AI service; this also caps spend ([unbounded consumption](card:llm-security)).
+
+## Example
+
+Spring AI 2.0 streaming endpoint; it needs Reactor on the classpath, e.g. `spring-boot-starter-webflux`.
+
+```java
+@RestController
+class AskStreamController {
+    private final ChatClient chatClient;
+
+    AskStreamController(ChatClient.Builder builder) { this.chatClient = builder.build(); }
+
+    @GetMapping(value = "/api/ask/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    Flux<String> ask(@RequestParam String q) {
+        return chatClient.prompt().user(q).stream().content();   // tokens as they arrive
+    }
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Request timeout | 60 s | Spring AI 2.0, `spring.ai.openai.timeout` |
+| Client retries | 3 | Spring AI 2.0, `spring.ai.openai.max-retries` |
+
+## Interview Qs
+
+### Why stream LLM responses?
+
+Generation is token by token, so long replies take seconds. Streaming shows the first words early; total time does not drop. Errors can arrive mid-stream after a 200, so handle them.
+
+### Which errors do you retry, and how?
+
+Timeouts, network errors, 429 and 5xx: capped exponential backoff with jitter and a max attempts, waiting at least Retry-After. Not 400, 401, 403 or billing and quota 429s: they keep failing.
+
+### How do you stop one user from burning the AI budget?
+
+A rate limiter in front of the AI service: requests per user per minute, tokens per user per day, and an output-token cap per call. Over the limit, return 429.

@@ -1,0 +1,89 @@
+---
+id: conversation-memory
+tech: ai-engineering
+title: Conversation Memory and State
+topic: tools-agents
+level: intermediate
+heat: 2
+hook: "LLM APIs forget everything between calls; 'memory' is your app resending earlier messages, trimmed to fit and kept per user."
+points:
+  - { k: "Stateless API", v: "each call sees only the messages you send in it" }
+  - { k: "Cost", v: "resent history is billed as input tokens every turn", kind: minus }
+  - { k: "Conversation id", v: "built on the server from user + session, never shared" }
+  - { k: "Provider-stored state", v: "convenient, but still billed as input tokens", kind: minus }
+trap:
+  wrong: "The model remembers me between calls."
+  right: "The model keeps nothing; the app, or a conversation the provider stores, sends the history again on every call."
+sayIt: "LLM APIs are stateless, so I store messages per conversation id and resend a window or a summary each turn. Long-term facts go in a store I search like RAG, scoped to the user."
+confusedWith: []
+tags: [memory, state, chat-memory, spring-ai]
+visual: table
+sources:
+  - title: "Conversation state (OpenAI API docs)"
+    url: "https://developers.openai.com/api/docs/guides/conversation-state"
+    verifiedOn: "2026-10-21"
+  - title: "Using the Messages API (Anthropic docs)"
+    url: "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+    verifiedOn: "2026-10-21"
+  - title: "Chat Memory (Spring AI 2.0 reference)"
+    url: "https://docs.spring.io/spring-ai/reference/api/chat-memory.html"
+    verifiedOn: "2026-10-21"
+---
+
+## Why it exists
+
+A follow-up like "and order 43?" means nothing alone. The API keeps no state, so the app sends earlier turns.
+
+## How it works
+
+| Strategy | What is sent each turn | Watch out |
+|---|---|---|
+| Full history | every earlier message | tokens and cost grow each turn |
+| Sliding window | only the last N messages | early facts drop out |
+| Summary | a summary of old turns + recent turns | details can be lost |
+| Long-term store | facts found by search, read on demand | needs per-user filters |
+
+- The [context window](card:context-window) caps how much history fits; search-style memory works like a [RAG pipeline](card:rag-pipeline).
+- Provider-managed state exists: OpenAI `previous_response_id` or the Conversations API.
+- Follow-ups need rewriting before retrieval: see [retrieval tuning](card:retrieval-tuning).
+
+## Example
+
+Spring AI 2.0: a memory advisor loads and saves history by conversation id.
+
+```java
+@Service
+class SupportChat {
+    private final ChatClient chat;
+    SupportChat(ChatClient.Builder builder, ChatMemory memory) {
+        this.chat = builder
+            .defaultAdvisors(MessageChatMemoryAdvisor.builder(memory).build()).build();
+    }
+    String ask(String userId, String sessionId, String question) {
+        return chat.prompt().user(question)
+            .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, userId + ":" + sessionId))
+            .call().content();
+    }
+}
+```
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| Memory type | `MessageWindowChatMemory`, last 20 messages | Spring AI 2.0 auto-configured `ChatMemory` |
+| Storage | `InMemoryChatMemoryRepository` (lost on restart) | Spring AI 2.0 |
+
+## Interview Qs
+
+### How does a chatbot remember earlier messages if the API is stateless?
+
+The app stores the conversation and resends the relevant earlier messages with each request. The model only seems to remember.
+
+### The conversation is getting too long. What do you do?
+
+Keep a sliding window of recent turns, summarise older ones, and move durable facts to a searchable store.
+
+### How do you keep one user's history from leaking to another?
+
+Build the conversation id on the server from user and session, never from client input, and only list or delete the current user's conversations.

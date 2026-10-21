@@ -1,0 +1,88 @@
+---
+id: ai-and-databases
+tech: ai-engineering
+title: "AI with Databases: Tools, Text-to-SQL, pgvector"
+topic: ai-in-production
+level: intermediate
+heat: 2
+hook: "The model never touches the database: it asks for an approved tool, and the backend checks who is asking first."
+points:
+  - { k: "Approved tool", v: "a fixed query, e.g. getOrderStatus(orderId), behind backend auth" }
+  - { k: "User id", v: "from the logged-in session, never from the model" }
+  - { k: "Generated SQL", v: "untrusted input: validate and parameterise (OWASP LLM05)", kind: minus }
+  - { k: "Text-to-SQL guard", v: "read-only role, allowlisted views, one SELECT, timeout, row limit" }
+trap:
+  wrong: "Give the LLM a database connection so it can answer anything."
+  right: "Expose narrow tools that run fixed queries as the logged-in user; the backend enforces authorisation, not the model."
+sayIt: "The model gets data only through approved tools; the backend takes the user from the session and checks access. For internal text-to-SQL: read-only role, allowlisted views, validation, timeout, row limit."
+tags: [databases, text-to-sql, authorisation]
+visual: flow
+sources:
+  - title: "LLM06:2025 Excessive Agency (OWASP)"
+    url: "https://genai.owasp.org/llmrisk/llm062025-excessive-agency/"
+    verifiedOn: "2026-10-21"
+  - title: "LLM05:2025 Improper Output Handling (OWASP)"
+    url: "https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/"
+    verifiedOn: "2026-10-21"
+  - title: "Tool Calling (Spring AI 2.0)"
+    url: "https://docs.spring.io/spring-ai/reference/api/tools.html"
+    verifiedOn: "2026-10-21"
+  - title: "Client Connection Defaults (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/runtime-config-client.html"
+    verifiedOn: "2026-10-21"
+---
+
+## Why it exists
+
+A model with raw database access can be talked into reading or changing any row. Tools give it only what this user may see.
+
+## How it works
+
+<Mermaid
+  alt="Bad: the LLM sends any SQL to the database. Better: the LLM asks for getOrderStatus(42); the backend checks the user owns order 42, then runs a fixed query or refuses."
+  chart={`flowchart LR
+  subgraph Bad
+    L1[LLM] -- any SQL --> D1[(Database)]
+  end
+  subgraph Better
+    L2[LLM] -- "getOrderStatus(42)" --> A{Session user owns order 42?}
+    A -- yes --> D2[(Fixed query)]
+    A -- no --> X[Refuse]
+  end`}
+/>
+
+- "Show my orders": the tool reads the user id from Spring AI's `ToolContext`, not from model arguments ([tool calling](card:tool-calling)).
+- Text-to-SQL suits internal analytics; customer support uses fixed tools.
+- Orders and policy chunks can share one PostgreSQL ([pgvector](card:vector-databases)).
+
+## Example
+
+Example: a read-only role for internal analytics (PostgreSQL 18).
+
+```sql
+CREATE ROLE ai_reader LOGIN;                          -- password from a secrets manager
+CREATE VIEW order_stats AS                            -- allowlisted columns only
+  SELECT id, status, total_inr, created_at FROM orders;
+GRANT SELECT ON order_stats TO ai_reader;             -- no grant on the tables
+ALTER ROLE ai_reader SET statement_timeout = '5s';    -- stop runaway queries
+ALTER ROLE ai_reader SET default_transaction_read_only = on;   -- safety net
+```
+
+As `ai_reader`, the view works; `orders`, `DELETE` and a 7-second query fail. Sessions can turn read-only off: the `GRANT` is the real guard.
+
+## Defaults
+
+| What | Default | Where |
+|---|---|---|
+| `statement_timeout` | 0 (no timeout) | PostgreSQL 18 |
+| `default_transaction_read_only` | off | PostgreSQL 18 |
+
+## Interview Qs
+
+### Should an LLM query the database directly?
+
+No. It uses approved tools; the backend takes identity from the session, checks access and runs fixed, parameterised queries, so prompt injection cannot widen access.
+
+### How would you make text-to-SQL safe?
+
+Read-only role with SELECT on allowlisted views; parse and allow one SELECT; force a LIMIT; set a statement timeout; apply the user's permissions; log every query. Generated SQL is untrusted input.
