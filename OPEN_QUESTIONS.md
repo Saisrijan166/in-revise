@@ -549,3 +549,27 @@ All Java examples compile against Spring Framework 7.0.5 and Spring Boot 4.0.3 /
 - That Boot's build plugins compile with `-parameters`, which the parameter-name fallback for bean selection relies on. It is worded as a condition.
 - Eureka `healthcheck.enabled`: one property table says true, the code and guide say off. The content follows the code.
 - Config Server's default Git label (main vs master): the docs differ. The content follows the Git backend page.
+
+## R. Template v3 rollout to the other techs (from 21-10-2026)
+
+The owner approved the Spring Boot pilot, both the concept rewrite (section Q) and the cheat-sheet map, and asked for every tech to be done the same way, one by one. Each tech got:
+- topics reordered by dependency where needed;
+- a running example;
+- every concept and comparison rewritten in v3, with a cheat card;
+- an independent verification pass;
+- coverage additions recorded in its coverage file.
+
+### R1. DSA with Java
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 51 | 25 | 218 | ~1,800 / 24 / 5 | ~12 min |
+
+- **Order:** "Recursion, Searching and Sorting" now comes before Trees and Graphs, because traversals and DFS use recursion.
+- **Examples:** running inputs are `nums = [2, 7, 11, 15]`, a 6-city road graph and the tree 8 (3 (1, 6), 10 (–, 14)). All programs ran on JDK 21 and Java 25.
+- **Sources not re-checked:** algs4.cs.princeton.edu refused connections all day. Facts backed only by it keep their 19-10-2026 check: heap sort is not stable, bubble sort's early exit, union by size keeps trees log n tall, and Kruskal on a disconnected graph gives a forest. Most were re-confirmed from cp-algorithms, MIT 6.006, McGill COMP 251 or Waterloo CS 240.
+- **GeeksforGeeks only:** multi-source BFS and the two-heaps running median. A primary or academic source should replace it.
+- **Left out (not confirmable today):** MST with negative edge weights; the merge-sort compare-count bound.
+- **For the owner:**
+  - Big-O costs in key points use `kind: default` (CLAUDE.md reserves it for defaults). Say if you prefer `key`.
+  - java-pitfalls repeats `remove(int)` vs `remove(Object)`, which dynamic-array owns.

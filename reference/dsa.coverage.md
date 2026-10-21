@@ -1,5 +1,5 @@
 # Coverage: DSA with Java
-Reference: reference/dsa.md  ·  Last updated: 20-10-2026
+Reference: reference/dsa.md  ·  Last updated: 21-10-2026
 
 Every numbered section (1–47) and every sub-item that carries its own claim (the 11 "cannot" rules of section 34, the 8 traps of
 section 35, the 9 "why" answers of section 44, the 9 pattern blocks of section 40, the 6 terms of section 42 and the 20 questions of
@@ -287,3 +287,235 @@ No key needed a correction: every method in the new part exists and behaves as l
 | J-OPTIONAL | Belongs to the Java tech (concept optional). The one DSA use, `Arrays.stream(a).max().getAsInt()`, is a row in `java-coding-toolkit` |
 
 Also cut inside mapped keys (recorded in their Note cells): `Collections.shuffle`, `Collections.fill`, `Math.random`, `ceil` / `floor` / `round`, `containsAll`, `containsValue`, `putIfAbsent`, `replace`, `replaceAll`, `computeIfPresent`, `map.forEach`, `Arrays.copyOf`, `Long` limits: rare in coding rounds or obvious from a listed sibling.
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass then checked about 1,800 claims and fixed 24, removing 5.
+
+### Unit arrays-hashing
+
+**Added from the reference**
+
+- 3. Array, "Advantages: cache-friendly" -> arrays (point "Next to each other", Interview Q on looping speed).
+- 3. Array, "Insert at end depends on capacity" -> arrays (How it works table row "Add when the array is full").
+- 4. Dynamic Array, "old array -> larger array -> copy" -> dynamic-array (Steps, numbered growth 10 -> 15 -> 22 -> 33 ...).
+- J-LIST remove(index) vs remove(Integer.valueOf(x)) -> dynamic-array (point, example, scenario).
+- J-STRING / J-STRINGBUILDER (length(), substring end exclusive, split regex, reverse, deleteCharAt) -> strings (Rules, Common mistakes, scenario) and string-vs-stringbuilder.
+- 11. HashMap "one null key, many null values, no order, not synchronised" -> hashmap-hashset points; get-returns-null ambiguity and containsKey added (Rules, scenario).
+- J-HASHMAP "map.put(key, map.get(key) + 1)" unsafe -> hashmap-hashset example note (NPE).
+- J-HASHSET set algebra -> hashmap-hashset Rules.
+- 32 / 33 tables -> comparisons (explain, example).
+
+**Added beyond the reference (verified)**
+
+- Literals are interned, run-time text is a new object (why == "works" in tests): strings trap.why, Rules (JLS 3.10.5).
+- StringBuilder does not override equals; StringBuffer is the synchronised twin (StringBuilder API).
+- Growth by a fixed step is O(n^2) in total vs growth by a multiple O(n) (dynamic-array Interview Q; MIT 6.006 lecture 2).
+- ArrayList growth policy is unspecified in the API; 1.5x and lazy allocation of 10 slots are OpenJDK details (ArrayList API, OpenJDK source).
+- Mutable keys break HashMap (Map API) -> hashmap-hashset Rules and Interview Q.
+- Records give equals/hashCode (Record API, Java 16) -> hashmap-hashset example.
+- Hashtable: synchronised, no nulls, docs recommend HashMap/ConcurrentHashMap -> hashmap-hashset "Not to be confused with".
+- "Aa" and "BB" share hashCode 2112 (run) -> hashing Interview Q.
+- OpenJDK bucket index (n - 1) & hash -> hashing example note.
+- Java's HashMap uses chaining, IdentityHashMap uses linear probing (IdentityHashMap API) -> chaining-vs-open-addressing row.
+- TreeSet/TreeMap use the comparator for equality (TreeSet API) -> ordered-maps-sets point, Common mistakes, scenario.
+- LinkedHashMap iteration proportional to size vs HashMap to capacity (LinkedHashMap API) -> ordered-maps-sets Rules.
+- lowerKey, higherKey, headMap, tailMap (TreeMap API) -> ordered-maps-sets Rules.
+
+**Corrections**
+
+- Draft hashing example idea "use Math.floorMod for negative keys" was replaced by what OpenJDK actually does ((n - 1) & hash, OpenJDK HashMap.java).
+- Draft dynamic-array said "capacity 10" for new ArrayList<>() as a plain fact; now: the API states ten; OpenJDK allocates the ten slots at the first add (OpenJDK ArrayList.java, DEFAULTCAPACITY_EMPTY_ELEMENTDATA).
+- ordered-maps-sets: confusedWith no longer lists hashmap-vs-linkedhashmap-vs-treemap, because the concept embeds it with <Compare> (CLAUDE.md 3.3).
+- No reference claim was wrong in this unit.
+
+### Unit foundations
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 1. Static vs dynamic (array length fixed, ArrayList grows) | data-structures (point, Rules and defaults, scenario) |
+| 1. Main categories | data-structures (family table, kept) |
+| 2. Growth order | big-o (cheat flow) |
+| 2. Ignore constants / n + n² → n² | big-o (points, How step 4, Example with real counts) |
+| 2. Input space vs auxiliary space | big-o (Rules, Interview Q, now with an in-place example) |
+| 30. Collection hierarchy, Map is not a Collection | java-collections (diagram, trap, Interview Q) |
+| Added beyond: algorithm vs ADT vs data structure | data-structures (Not to be confused with); glossary `algorithm` |
+| Added beyond: how to count steps (add sequential, multiply nested) | big-o (How steps, points, Common mistakes) |
+| Added beyond: O vs Ω vs Θ in the body | big-o (Not to be confused with) |
+| Added beyond: Collection vs Collections | java-collections (Not to be confused with); glossary `collections-class` |
+| Added beyond: SequencedCollection (Java 21: getFirst, getLast, reversed) | java-collections (Rules, Example line); glossary `sequenced-collection` |
+| Added beyond: map.get on a missing key unboxed to int throws NPE | java-collections (scenario) |
+
+**Corrections**
+
+| What | Source |
+|---|---|
+| None new in this unit. Earlier corrections (drop constants and smaller terms, not only constants) are kept. | — |
+| Draft Interview answer used "sorting in place" as the O(1) auxiliary-space example; replaced with reversing in place, since quick sort's recursion is not O(1) extra space. | Own check |
+
+### Unit graphs
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 19. Graph kinds (directed, weighted, cyclic, acyclic) | graph-basics points and How it works step 2 |
+| 20. Interview rule "most problems use adjacency lists" | graph-basics Rules ("Default choice"), comparison sayIt |
+| 22. BFS vs DFS table, "more memory on wide / deep graphs" | bfs-vs-dfs row "Holds" now says large on wide graphs / long on deep graphs; dfs Interview Q 1 |
+| 22. DFS uses: path finding, topological sorting, maze problems | dfs Why it exists; bfs scenario 2 (maze) |
+| 24. Union-find uses: network connectivity | union-find Why it exists (roads opening one at a time), scenario 2 |
+| 34. BFS no shortest path in weighted graphs; DFS no shortest path | bfs trap, dfs trap (new) |
+| 39. Sparse vs dense | graph-basics Rules |
+| W-Graph "Why use Graph?" | graph-basics Why it exists |
+| Q17, Q18, Q20 | bfs-vs-dfs / dfs Interview Q; graph-basics Interview Q 1; union-find Interview Q 1 |
+Also added (beyond the reference, verified): BFS parent array for path reconstruction, early stop, multi-source BFS, matrix cost O(V²) (bfs Rules, Interview Q 3); BFS mark-on-push reason shown on city 3 (cp-algorithms BFS); tree DFS vs graph DFS visited mark (dfs Not to be confused with); directed-cycle false positive 0→1, 0→2, 1→2 (dfs scenario 1, Common mistakes); Kahn's vs BFS trigger (topological-sort Not to be confused with); reversed Course Schedule edges (topological-sort scenario 2, Rules); topological order non-unique, shown with [0, 2, 1, 3] (cp-algorithms); 0-1 BFS with a deque, O(E) (shortest-paths Rules, scenario 1; cp-algorithms 01_bfs); Bellman-Ford early stop when a round changes nothing (cp-algorithms); Integer.MAX_VALUE overflow as infinity (shortest-paths Common mistakes; JLS 15.18.2); stale-entry check matters for speed, up to O(nm) without it (cp-algorithms dijkstra_sparse); union by size alone O(log n), path compression alone O(log n) average, α(n) <= 4 for realistic n (cp-algorithms DSU); Graph Valid Tree via n - 1 edges + no failed union (union-find Interview Q 2, scenario 1); union-find vs DFS ("why union-find when DFS exists") in Not to be confused with; parent[a] == parent[b] mistake; Prim O(V²) dense form and Prim on a disconnected graph covers only one component (cp-algorithms mst_prim; minimum-spanning-tree Rules, kruskal-vs-prim row and sayIt); why Kruskal skipping an equal-root edge never hurts (minimum-spanning-tree Interview Q 3).
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft dfs trap "DFS uses a queue" was a weak trap | Trap now: stopping DFS at the first arrival does not give the shortest path | algs4 4.1; reference 34 |
+| bfs-vs-dfs row "Holds: The frontier still to explore" used an undefined word | "Vertices found but not yet explored; large on wide graphs" / "The current path; long on deep graphs" | Tech Interview Handbook graph page (queue tracks encountered-not-explored nodes, stack tracks the current path) |
+| kruskal-vs-prim row "Min-heap of crossing edges" used an undefined word | "Min-heap of edges leaving the tree"; Time row now adds Prim O(V²) with a matrix | cp-algorithms mst_prim |
+| dijkstra-vs-bellman-ford had 4 rows | Added row "Method" (settle closest vs relax every edge in rounds) | cp-algorithms dijkstra_sparse, bellman_ford |
+| Interview answer "Dijkstra fails with negative weights" was abstract | Now with a concrete counter-example (A→B 2, A→C 3, C→B -2), phrased for the classic settled-set algorithm | algs4 4.4 |
+Note: the lazy (re-push) Dijkstra shown in the Example can sometimes recover from a negative edge because it re-relaxes a vertex when a cheaper entry arrives; the cards therefore say "classic Dijkstra" when they explain the failure, and never claim the lazy version is safe with negative weights.
+
+### Unit linear
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 5. Singly vs doubly node layout | linked-list (What it is, Interview Q "singly vs doubly") |
+| 5. Cost table, insert after a known node | linked-list (How steps 2–4, points) |
+| 6. Operations push / pop / peek / isEmpty | stack (How steps, points) |
+| 6. Uses (call stack, parentheses, DFS, expression evaluation) | stack (Why it exists, Interview Q); undo/redo and backtracking still left out (no primary source) |
+| 7. Queue operations enqueue / dequeue / peek | queue-and-deque (How steps, Rules table) |
+| 7. Uses (BFS, scheduling, task processing) | queue-and-deque (Why it exists: print jobs, requests, BFS); message queues and producer-consumer not added (system-design topics) |
+| 8. Deque operations at both ends | queue-and-deque (Example, Rules, scenario) |
+| Added beyond: Deque push/pop/peek work on the front, so an ArrayDeque prints top first (Stack prints bottom first) | stack (Rules, scenario; both orders run) |
+| Added beyond: min stack in O(1) | stack (Interview Q) |
+| Added beyond: queue from two stacks, amortised O(1) | queue-and-deque (Interview Q) |
+| Added beyond: circular queue index arithmetic | queue-and-deque (How step 5, scenario) |
+| Added beyond: Queue vs PriorityQueue, deque vs dequeue | queue-and-deque (Not to be confused with) |
+| Added beyond: linked-list corner cases (empty, one node, two nodes, cycles) and dummy node | linked-list (Rules, Common mistakes) |
+| Added beyond: call stack vs a stack you create | stack (Not to be confused with) |
+
+**Corrections**
+
+| What | Source |
+|---|---|
+| None new. Kept: singly list deletion needs the predecessor (reference cost table said O(1) for both). | https://opendatastructures.org/ods-java/3_1_SLList_Singly_Linked_Li.html |
+| Dropped the old draft's "browser back button" stack use: algs4 could not be reached today to re-check it. | — |
+
+### Unit patterns-a
+
+**Added from the reference**
+
+The reference (section 40 Must-Know Problem Patterns, 41 Monotonic Stack, J-ARRAY-PATTERNS, J-SUBSTRING, frequency pattern) only lists "useful for" items; all were already mapped. Added to teach each pattern per the tech notes (clue, template, worked problem, classic problems):
+- 40 intro "patterns over problems" → spotting-the-pattern: Example "same array, three questions" and Common mistakes ("memorise hundreds of problems").
+- 40 Two Pointers (palindromes) → two-pointers: Interview Q on the in-place palindrome check; trace table on nums = [2, 7, 11, 15].
+- 40 Sliding Window (fixed/variable) → sliding-window: step-by-step trace of "abcabcbb"; fixed-size variant in How it works; Minimum Window Substring Interview Q.
+- 40 HashMap / Frequency Map (duplicates, anagrams) → frequency-counting: trace table of Two Sum on unsorted [11, 15, 2, 7]; HashSet.add for duplicates; "why ever sort?" Interview Q.
+- 41 Monotonic Stack (next smaller, stock span) → monotonic-stack: next-smaller scenario, "previous greater" rule, Daily Temperatures example with distances.
+- Added beyond the reference: prefix-sum overflow mistake (use long), Fenwick tree for updates (new glossary term `fenwick-tree`), Product of Array Except Self Interview Q; fast-slow middle node for even length.
+- Comparison: explain, example (same array, pair vs longest run) and sayIt.
+
+**Corrections**
+
+- fast-slow-pointers: the "both checks" note. Dropping `fast.next != null` throws a NullPointerException on lists with an ODD number of nodes (checked by running `Npe.java`), not even.
+- sliding-window: the "negatives break it" scenario now uses a verified failing case, nums = [3, -2, 4], at least 4 (window reports 3, true answer 1; `Neg.java`).
+- sliding-window: no longer embeds `<Compare>`; it lists the comparison in `confusedWith` like two-pointers, and How it works is the template trace.
+- frequency-counting: "sorting gives O(1) extra space" avoided (Arrays.sort on int[] is not strictly O(1) space); now "far less extra memory".
+- Minimum Window Substring cost stated as O(n + m).
+
+### Unit patterns-b
+
+**Added from the reference**
+
+The reference (section 40 "Must-Know Problem Patterns", "Why use Heap?") is thin for this unit; all its points were already covered. Teaching points added in v3:
+- 40. Binary Search "minimum / maximum possible X", "monotonic condition" → binary-search-on-answer (What it is, Rules: smallest vs largest, bounds, monotonic-or-nothing; scenario on a non-monotonic check).
+- 40. Heap "Top K, kth largest/smallest, merge K sorted" → top-k-heap (step trace table, k smallest = max-heap point, scenario on using the wrong heap).
+- 40. DFS / Backtracking "combinations, permutations, subsets, N-Queens, decision problems" → backtracking (choice-tree diagram for [1, 2, 3], Rules for subsets / permutations / duplicates, pruning scenario with Combination Sum).
+- 40. Dynamic Programming "state + transition + base case, overlapping subproblems, optimal substructure, max/min, how many ways" → dynamic-programming (What it is defines both conditions; fib call-tree picture; five-step recipe applied to coin change; DP vs divide and conquer in Not to be confused with).
+- Greedy now lists dp-vs-greedy in confusedWith (it no longer embeds the comparison; How it works is now the activity-selection picture and steps).
+
+**Corrections**
+
+None to the reference in this unit (the earlier "Maze under DFS" correction stays, and grid-traversal states BFS for fewest steps).
+Draft fixes: none of the kept facts were wrong. New, checked facts:
+- PriorityQueue: natural ordering, head = least element, O(log n) offer/poll, constant peek (Java SE 25 API, verified 21-10-2026).
+- List.remove(int index) vs remove(Object); on List<Integer> an int argument removes by index (Java SE 25 API, verified 21-10-2026).
+- Koko table values (hours per speed for piles 3, 6, 7, 11) computed by running the check for speeds 1 to 11.
+
+### Unit search-sort
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 27. Recursion: base case, recursive case, progress toward the base case | recursion (points, What it is, Rules and defaults) |
+| 27. Every call creates a stack frame; too-deep recursion overflows | recursion (How it works, Rules and defaults, scenario 2, Interview Q 4) |
+| 26. Binary search needs sorted data or a monotonic condition ("common mistake") | binary-search (point "Needs order", Common mistakes, Interview Q 3) |
+| 34. "Cannot" rule: binary search not on unsorted data | binary-search (Common mistakes) |
+| 25. Stable sorting example (A, B, C with marks 90/80/90) | sorting-basics (Example with Asha, Ravi, Meera; scenario 1) |
+| 42. In-place and Stable are independent | sorting-basics (trap, Not to be confused with) |
+Also new (beyond reference, verified): -Xss default thread stack (1024 KB on Linux/x64, Java SE 25); a new frame per call, so tail form does not help in Java (JVMS 2.6); the "result not used" recursion mistake; lower/upper bound pair; Collections.binarySearch on LinkedList; TimSort temporary storage and nearly sorted cost (Arrays API note); why primitives and objects use different sorts (stability); quick sort stability counter-example; quickselect as an Interview Q; inversion count worked example.
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| sorting-basics no longer lists `merge-sort-vs-quick-sort` in `confusedWith` (it came before either sort is taught) | The comparison now shows only under quick-sort, the first concept where both sides are known | n/a (structure) |
+| recursion-vs-iteration row "Too deep / No call-stack limit" was vague | "Your own stack lives on the heap, so no call-stack limit" | JVMS SE 25 2.5.2 |
+| quick-sort visual was `flow` | now `table` (the partition trace is a table) | n/a |
+| merge-sort visual was `table` (only an embedded Compare) | now `flow` (Mermaid split/merge tree); the Compare embed was removed so the comparison is not shown before quick sort is taught | n/a |
+| Sorting draft said "Dual-Pivot Quicksort" for primitives without the API's performance claim | Added "offers O(n log n) on all data sets" from the Java SE 25 API note | Arrays (Java SE 25 API) |
+
+### Unit trees
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 12. Sibling, parent, child terms | tree-basics (What it is, Rules and defaults) |
+| 15. Preorder: serialisation / copying; postorder: deleting, bottom-up | traversal-orders explain; tree-traversals Why |
+| 17. Heap is a complete binary tree; build heap O(n); search O(n) | heap-priority-queue (What it is, points, Interview Q) |
+| 18. Priority queue uses (Top K, Dijkstra, median, merge K lists) | heap-priority-queue Rules ("Where it is used", links forward) |
+| 23. Trie uses (autocomplete, dictionary, prefix matching) | trie (Why it exists, scenario 2, Interview Q 1) |
+| 37. Balanced vs skewed tree costs | tree-basics Interview Q 3; balanced-trees Example (1,000,000 sorted keys) |
+| 44. Why use Heap / Trie | heap-priority-queue Why; trie Why |
+Also added (beyond the reference, verified): iterative inorder with a stack (tree-traversals Interview Q); level order needs the size read before the loop and ArrayDeque rejects null (tree-traversals); red-black colour rules and the 2 lg(n+1) height bound, at most 2 rotations per red-black insert (balanced-trees Rules); edges-vs-nodes counting convention, LeetCode 104 counts nodes (tree-basics Rules; depth-vs-height sayIt); PriorityQueue ties broken arbitrarily, not synchronized (PriorityBlockingQueue), ClassCastException for non-comparable items (heap-priority-queue Rules); array vs HashMap children in a trie (trie Rules); confusedWith avl-vs-red-black added to balanced-trees (the comparison is owned by the foundations unit; only the id was referenced).
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Reference 16 "height ≈ log n" | O(log n); red-black height at most 2 lg(n + 1) | McGill COMP 251 lecture 7 (Lemma 3) |
+| Draft trie used an int[26]-style array only | Example now uses HashMap children (fits 15 lines, any character); array variant kept as a rule with its memory cost | CSES handbook 26.2; Map.computeIfAbsent Javadoc |
+| Glossary `red-black-tree` says "red and black links; height at most 2 lg n" (algs4 left-leaning form) | Card uses the node-colour form (CLRS) and 2 lg(n + 1). Both are correct; consider aligning the glossary wording | McGill COMP 251 lecture 7 |
+
+### Unit tricks
+
+**Added from the reference**
+
+| Item | Concept |
+|---|---|
+| 29 / 45. Which structure / decision tree: "Need fast index access, sorted data, min/max, LIFO, FIFO, prefix, hierarchy, relationships, groups" | choosing-a-data-structure (table kept, rows reworded as "you need, again and again"; scenarios on nearest key, membership, prerequisites) |
+| 44. Interview "why?" answers (why HashSet, why Heap...) | choosing-a-data-structure Example (three problems decided by their repeated operation); each structure's own "why" stays in its concept |
+| J-COLLECTIONS / J-ARRAY / J-CONVERSION / J-MATH | java-coding-toolkit: new How-it-works steps (convert, prepare, process, convert back); new Interview Q "int[] to List and back"; new common mistakes `Arrays.deepToString` for 2D arrays, `Collections.sort` takes a List |
+| J-CONVERSION (`Integer.parseInt`) | java-coding-toolkit Rules: accepts a leading + or -, throws NumberFormatException otherwise (run on Java 25) |
+| J-ARRAY-PATTERNS (start max at MIN_VALUE) | stays in edge-cases (removed the duplicate line from java-coding-toolkit) |
+Added beyond the reference (verified): TIH rubric (communication, problem solving, technical competency, testing) in problem-solving-steps; "know the floor" (cannot beat reading every item) in problem-solving-steps Rules; value-range check with the 10^14 sum example in constraints-to-complexity; `x & -x`, shift distance for long (6 bits), and the n > 0 guard (0 and Integer.MIN_VALUE) in bit-manipulation; removing inside a for-each can silently skip an item instead of throwing, and casting after an int multiplication is too late, in java-pitfalls; StackOverflowError on skewed trees and disconnected-graph BFS in edge-cases.
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Old bit-manipulation trap said `x & 1 == 0` "does not compile" with no reason | Kept, now explained: it parses as `x & (1 == 0)`, int & boolean; confirmed with javac 25 | https://docs.oracle.com/javase/tutorial/java/nutsandbolts/operators.html |
+| `powerOfTwo` text said only "with x > 0" | Explains why: 0 and Integer.MIN_VALUE also give 0 (run on Java 25) | CPH ch. 10; run |
+| java-pitfalls had the int range, also in constraints-to-complexity | Range stays in constraints-to-complexity; pitfalls rule now states only the wrap-around behaviour | JLS 4.2.1, 15.18.2 |
+No reference claim was found wrong in this unit (the reference's "Stack / BST" looseness was already corrected in the coverage file, section 29 and 45).
