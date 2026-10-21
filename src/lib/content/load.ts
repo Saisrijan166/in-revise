@@ -232,6 +232,8 @@ function parseCard(file: string, techSlug: string, template: Template, issues: I
     err("buildsOn, scenarios and trap.why need template 3 (set `template: 3` in _tech.yaml)");
   }
   if (template === 3 && meta.trap && !meta.trap.why) err("trap.why: say why people believe the wrong line");
+  if (template === 3 && !meta.cheat) err("cheat: template 3 needs the cheat-sheet card (idea, remember; flow and code optional)");
+  if (template === 2 && meta.cheat) err("cheat needs template 3 (set `template: 3` in _tech.yaml)");
 
   const questions: Question[] = [];
   if (sections.questions !== undefined) {
@@ -375,6 +377,11 @@ function checkBody(card: Card, deck: Deck, issues: Issue[], fileIds: Set<string>
     if (countWords(tail) < 12) err("Example: explain the code after it (what to notice, what it prints and why)");
   }
   if (card.sections.what && /```/.test(card.sections.what)) err("What it is: no code here; start in plain words");
+  const ch = card.meta.cheat;
+  if (ch) {
+    const n = countWords(`${ch.idea} ${ch.flow ?? ""} ${ch.remember}`);
+    if (n > 60) warn(`cheat card is ${n} words (idea + flow + remember); aim for 60 or fewer`);
+  }
 }
 
 function buildTree(

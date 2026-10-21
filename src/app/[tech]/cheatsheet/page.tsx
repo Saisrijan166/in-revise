@@ -11,6 +11,7 @@ import { CompareGist } from "@/components/compare/CompareView";
 import { PageHeader } from "@/components/ui/Breadcrumbs";
 import { IconCheck, IconClose } from "@/components/ui/icons";
 import { PrintButton } from "@/components/ui/PrintButton";
+import { CheatMap } from "@/components/cheat/CheatMap";
 
 export const dynamicParams = false;
 
@@ -102,6 +103,8 @@ function Row({ deck, tech, n }: { deck: Deck; tech: string; n: TreeNode }) {
 export default async function CheatSheetPage({ params }: PageProps<"/[tech]/cheatsheet">) {
   const { tech } = await params;
   const deck = getDeck(tech);
+  // Template v3 techs get the visual learning map; the others keep the compact list below.
+  if (deck.template === 3) return <CheatMap deck={deck} />;
 
   return (
     <div className="mx-auto max-w-5xl px-4 pt-4 pb-12 sm:px-6 lg:px-10 print:max-w-none print:p-0">

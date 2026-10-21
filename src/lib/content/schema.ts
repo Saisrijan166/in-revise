@@ -120,6 +120,25 @@ export const cardMetaSchema = z
     sayIt: oneLine(280).optional(),
     /** Template v3: concepts of this tech the reader should know first (they come earlier). */
     buildsOn: z.array(kebab).max(3).default([]),
+    /**
+     * Template v3: the concept's card on the cheat sheet. `idea` explains it in 1–2 plain
+     * sentences, `flow` is an optional tiny "A → B → C", `code` an optional snippet of at most
+     * 3 lines, and `remember` the one rule to keep. Written only from facts already in the concept.
+     */
+    cheat: z
+      .object({
+        idea: oneLine(260),
+        flow: oneLine(90).optional(),
+        code: z
+          .string()
+          .min(2)
+          .max(200, "keep it tiny (max 200 characters)")
+          .refine((s) => s.trimEnd().split("\n").length <= 3, "at most 3 lines")
+          .optional(),
+        remember: oneLine(150),
+      })
+      .strict()
+      .optional(),
     /** Template v3: scenario, output or "which one" questions; Quiz only. */
     scenarios: z
       .array(z.object({ q: oneLine(240), a: oneLine(360) }).strict())
