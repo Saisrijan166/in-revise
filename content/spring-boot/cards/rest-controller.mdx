@@ -5,17 +5,25 @@ title: "@RestController"
 topic: web
 level: beginner
 heat: 3
-hook: "@RestController = @Controller + @ResponseBody: every return value becomes the response body, usually JSON."
+hook: "@RestController is @Controller plus @ResponseBody: whatever a method returns is written into the response body, usually as JSON."
 points:
-  - { k: "@Controller", v: "a returned String is a view name, rendered as HTML" }
-  - { k: "@ResponseBody", v: "a message converter writes the return value to the body" }
-  - { k: "ResponseEntity", v: "return the body plus a chosen status and headers" }
-  - { k: "JSON", v: "written by Jackson; Boot 4 prefers Jackson 3", kind: default }
-  - { k: "Thin controller", v: "handle HTTP only; business rules go in a service" }
+  - { k: "@Controller", v: "a returned String is treated as a view name, and a template engine renders that page as HTML" }
+  - { k: "@ResponseBody", v: "a message converter writes the return value itself into the response body" }
+  - { k: "@RestController", v: "applies @ResponseBody to every method of the class, so each one returns data" }
+  - { k: "ResponseEntity", v: "return it when the status code or headers depend on the outcome, such as 201 with a Location header" }
+  - { k: "@ResponseStatus", v: "sets one fixed status for a method, for example 201 for every successful create" }
+  - { k: "JSON library", v: "Spring Boot 4.0 and later write JSON with Jackson 3 (package tools.jackson)", kind: default }
 trap:
-  wrong: "A @Controller cannot return JSON; you need @RestController."
-  right: "Put @ResponseBody on a @Controller method and it returns JSON too. @RestController just applies it to every method."
-sayIt: "@RestController is @Controller plus @ResponseBody, so return values go through a message converter, JSON with Jackson. I use @Controller for server-rendered pages and ResponseEntity when the status or headers vary."
+  wrong: "A @Controller cannot return JSON; only a @RestController can."
+  right: "Put @ResponseBody on a @Controller method and it returns JSON too. @RestController only applies that to every method at once."
+  why: "Tutorials show @Controller with HTML pages and @RestController with JSON, so the two look like separate mechanisms rather than one annotation added."
+sayIt: "@RestController is @Controller plus @ResponseBody, so every return value goes through a message converter, usually Jackson for JSON. I use @Controller for server-rendered pages, and ResponseEntity when the status or headers depend on the result."
+buildsOn: [dispatcher-servlet, component-scanning]
+scenarios:
+  - q: "A @Controller method returns the String \"payments\". The developer expected the text payments in the body, but the client gets an error page instead. Why?"
+    a: "In a plain @Controller, a returned String is a view name, so Spring tries to render a page called payments, and there is none. Add @ResponseBody to the method, or use @RestController, and the String is written to the body instead."
+  - q: "After creating a payment, the API should answer 201 Created and tell the client where the new payment lives. What do you return?"
+    a: "A ResponseEntity built with ResponseEntity.created(uri).body(payment). It sets the 201 status, the Location header with the new URL, and the JSON body in one value. @ResponseStatus(CREATED) alone cannot add the Location header."
 confusedWith: []
 tags: [web, rest, controllers]
 visual: table
@@ -25,54 +33,85 @@ sources:
     verifiedOn: "2026-10-19"
   - title: "ResponseEntity (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-methods/responseentity.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Boot 4.0 Migration Guide: Upgrading Jackson (spring-projects wiki)"
     url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
+    verifiedOn: "2026-10-19"
+  - title: "RFC 9110: HTTP Semantics, 201 Created and Location (IETF)"
+    url: "https://www.rfc-editor.org/rfc/rfc9110.html"
     verifiedOn: "2026-10-19"
   - title: "Spring Boot Interview Questions: @RestController vs @Controller (InterviewBit)"
     url: "https://www.interviewbit.com/spring-boot-interview-questions/"
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+`@RestController` marks a class whose methods answer HTTP requests with data, not with web pages. It is a [stereotype](card:component-scanning), so component scanning finds it and makes it a bean, the way it finds `@Service`. It combines two annotations: `@Controller`, which marks a web controller, and `@ResponseBody`, which says "write the return value into the response body". In the [request flow](card:dispatcher-servlet), that value goes to a message converter, which turns it into JSON.
+
 ## Why it exists
 
-Some apps render HTML on the server; most APIs send data to apps and other services. One controller model serves both; the annotation decides if a return value is a page name or data.
+Some apps build HTML pages on the server; most backends today send data to mobile apps, browsers and other services. Spring MVC serves both with one controller model. The only question is what a return value means: the name of a page to render, or the data itself. Writing `@ResponseBody` on every method of an API would be noise, so `@RestController` sets it once for the whole class.
 
 ## How it works
 
 <Compare id="controller-vs-restcontroller" />
 
-- `ResponseEntity` sets the status and headers per call; `@ResponseStatus(HttpStatus.CREATED)` sets one fixed status.
-- Return a [DTO](card:dto), not the database entity.
+1. Component scanning finds the class, and the HandlerMapping records each mapped method in it.
+2. A request arrives and the matching method runs and returns a value, for example a `PaymentResponse`.
+3. Because of `@ResponseBody`, Spring does not look for a view. It picks a message converter that can write this type in a format the client accepts, usually JSON.
+4. The converter (Jackson) writes the object's fields as JSON into the body. The status is 200 unless you set another one.
+
+So the annotation decides one thing: whether a return value is a view name or the body itself.
 
 ## Example
 
+The `PaymentController` from the request flow, now with a read endpoint and a create endpoint that answers 201:
+
 ```java
-@RestController
+@RestController                                    // @Controller + @ResponseBody
 @RequestMapping("/payments")
 class PaymentController {
     private final PaymentService service;
     PaymentController(PaymentService service) { this.service = service; }
-
     @GetMapping("/{id}")
-    PaymentResponse get(@PathVariable long id) { return service.find(id); }   // 200 + JSON
-
+    PaymentResponse get(@PathVariable long id) {
+        return service.find(id);                   // 200 OK, body = JSON
+    }
     @PostMapping
-    @ResponseStatus(HttpStatus.CREATED)                                       // 201
-    PaymentResponse create(@RequestBody CreatePayment request) { return service.create(request); }
+    ResponseEntity<PaymentResponse> create(@RequestBody PaymentRequest request) {
+        PaymentResponse saved = service.create(request);
+        return ResponseEntity.created(URI.create("/payments/" + saved.id())).body(saved);
+    }
 }
 ```
+
+What to notice:
+
+- `get` returns a plain object. Spring writes it as JSON with status 200 and no extra code.
+- `create` returns a `ResponseEntity`. `created(uri)` sets status 201 and the `Location` header, which tells the client the URL of the new payment.
+- Change `@RestController` to `@Controller` and `get` breaks: Spring would look for a view to render instead of writing the object to the body.
+
+## Rules and defaults
+
+- **Default status:** a method that returns normally answers 200 OK. Use `@ResponseStatus(HttpStatus.CREATED)` for one fixed status, or `ResponseEntity` when it varies.
+- **JSON:** Spring Boot 4.0 and later use Jackson 3, whose classes live in `tools.jackson` packages. The Jackson annotations such as `@JsonProperty` keep their old package.
+- **What to return:** return a [DTO](card:dto) such as `PaymentResponse`, not the database entity. You will see why in the next concepts.
+
+## Common mistakes
+
+- **"The controller should hold the business rules."** Keep the controller thin: it reads the request and shapes the response. Rules such as "a payment above the limit needs a fraud check" belong in `PaymentService`, where other callers and tests can reuse them.
 
 ## Interview Qs
 
 ### If @RestController exists, why do we still need @Controller?
 
-For server-rendered pages. A @Controller method returns a view name that a template engine renders as HTML; @RestController always writes data to the body. Use the one that matches the response style.
+For server-rendered pages. A @Controller method returns a view name, and a template engine such as Thymeleaf renders the HTML. A @RestController always writes data to the body. Use the one that matches what the client expects.
 
-### When do you return ResponseEntity?
+### When do you return ResponseEntity instead of the object itself?
 
-When the status or headers depend on the outcome: 201 with a Location header after a create, or 404 when nothing is found. For one fixed status, @ResponseStatus on the method is enough.
+When the status or headers depend on the outcome: 201 with a Location header after a create, 404 when nothing was found, or a custom header. For one fixed status, @ResponseStatus on the method is enough.
 
-### How does an object become JSON?
+### How does a Java object become JSON in the response?
 
-The method's return value goes to an HttpMessageConverter chosen for the requested media type. For JSON, Spring Boot uses Jackson, which reads the object's properties and writes them out.
+The return value goes to an HttpMessageConverter chosen for the return type and the format the client accepts. For JSON, Spring Boot uses Jackson, which reads the object's properties, or a record's components, and writes them as JSON fields.

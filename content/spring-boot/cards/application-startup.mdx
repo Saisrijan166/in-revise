@@ -5,24 +5,34 @@ title: Startup Flow and Runners
 topic: boot-basics
 level: intermediate
 heat: 2
-hook: "run() loads config, builds the context and all beans, starts the server, calls your runners, then says ready."
+hook: "SpringApplication.run() loads your settings, creates every bean, starts the web server, calls your runners once, and only then marks the app ready for traffic."
 points:
-  - { k: "Context type", v: "Spring MVC: servlet; only WebFlux: reactive; else plain" }
-  - { k: "Refresh", v: "creates the singleton beans; a web app starts its server" }
-  - { k: "Runners", v: "CommandLineRunner, ApplicationRunner: once, after refresh" }
-  - { k: "Ready", v: "ApplicationReadyEvent after the runners; then traffic" }
-  - { k: "Failure analysers", v: "turn a startup error into a cause and a fix", kind: plus }
+  - { k: "Order", v: "settings loaded, then beans created and server started, then runners, then ApplicationReadyEvent" }
+  - { k: "Context type", v: "Spring MVC on the classpath gives a servlet app; only WebFlux gives a reactive app; else no web" }
+  - { k: "Runners", v: "CommandLineRunner and ApplicationRunner beans run once, after all beans exist, before run() returns" }
+  - { k: "Ready", v: "ApplicationReadyEvent comes after the runners; only then does the app report it accepts traffic" }
+  - { k: "Slow runner", v: "runners run one by one on the main thread, so a slow one delays the ready state", kind: minus }
+  - { k: "Failure analysers", v: "when startup fails, Boot prints the cause and a suggested fix, e.g. port 8080 in use", kind: plus }
 trap:
-  wrong: "Put app-wide startup work, like loading data, in a @PostConstruct method."
-  right: "@PostConstruct runs while that one bean is set up, before the rest is ready. Use a runner: it runs after the whole context."
-sayIt: "SpringApplication.run prepares the Environment, creates and refreshes the context, which builds the beans and starts the server, calls the runners, then publishes ApplicationReadyEvent."
+  wrong: "Put app-wide startup work, like loading demo data, in a @PostConstruct method."
+  right: "@PostConstruct runs while that one bean is being set up, before the rest of the app is ready. Use a runner, which runs after all beans exist."
+  why: "@PostConstruct is the first startup hook people learn, and it does run during startup, so it looks like the right place."
+sayIt: "SpringApplication.run prepares the Environment, creates and refreshes the context, which builds the beans and starts the server, then calls the runners and publishes ApplicationReadyEvent. App-wide startup work goes in a runner."
+buildsOn: [spring-boot-application, bean-lifecycle, application-events]
+scenarios:
+  - q: "The payment service starts with java -jar payment.jar --seed=demo report.txt. What do args.getOptionValues(\"seed\") and args.getNonOptionArgs() return in an ApplicationRunner?"
+    a: "[demo] and [report.txt]. ApplicationArguments parses --name=value as an option, and anything without -- in front is a non-option argument."
+  - q: "A runner throws an exception while seeding data. Does the app keep running?"
+    a: "No. The exception makes SpringApplication.run fail with \"Application run failed\", and an ApplicationFailedEvent is published. Runners are part of startup, so a failure there is a startup failure."
+  - q: "You must warm a cache before any request is served. @PostConstruct, a runner, or an ApplicationReadyEvent listener?"
+    a: "A runner. It runs after every bean exists but before the app reports it accepts traffic. @PostConstruct runs too early, and an ApplicationReadyEvent listener runs after the app is already marked ready."
 confusedWith: [command-line-runner-vs-application-runner]
 tags: [startup, spring-application, runners]
 visual: flow
 sources:
-  - title: "SpringApplication (Spring Boot 4.1.1 reference)"
+  - title: "SpringApplication: events, runners, failure analyzers, availability (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/features/spring-application.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Customizing the Nature of a Bean: initialization callbacks (Spring Framework 7.0.9 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/factory-nature.html"
     verifiedOn: "2026-10-19"
@@ -31,58 +41,97 @@ sources:
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+The startup flow is what happens inside `SpringApplication.run(...)`, the one line in `main()`. In that call Boot reads your settings, builds all the [beans](card:ioc-container), starts the web server and finally reports that the app is ready. A **runner** is a bean that implements `CommandLineRunner` or `ApplicationRunner`; Boot calls its `run` method once, near the end of startup, so you can do app-wide work at a safe moment.
+
 ## Why it exists
 
-`main` only calls `SpringApplication.run`, yet you end up with a running app. Knowing the order tells you where to put startup work and why startup fails.
+`main()` has one line, yet you end up with a running server. When startup fails, or when you must do something "at startup", you need to know what is ready at each moment. Without that, people put startup work in `@PostConstruct`, where other parts of the app may not be set up yet. Runners give one clear hook: every bean exists, and the app does not yet report that it takes traffic.
 
 ## How it works
 
-<Steps label="SpringApplication.run(App.class, args)">
-<Step title="Pick the context type">
-From the classpath: servlet, reactive or plain.
+<Steps label="SpringApplication.run(PaymentApplication.class, args)">
+<Step title="1. Pick the app type">
+Spring MVC on the classpath: servlet app. Only WebFlux: reactive app. Neither: no web server.
 </Step>
-<Step title="Prepare the Environment">
-Arguments, properties and profiles are loaded.
+<Step title="2. Prepare the Environment">
+Command-line arguments, environment variables, config files and active profiles are read.
 </Step>
-<Step title="Refresh the context">
-Scanning and auto-configuration give bean definitions; singletons are created; the web server starts.
+<Step title="3. Refresh the context">
+Scanning and auto-configuration register beans; singletons are created and injected; the web server starts.
 </Step>
-<Step title="Call the runners">
-Every CommandLineRunner and ApplicationRunner bean runs once.
+<Step title="4. Call the runners">
+Every CommandLineRunner and ApplicationRunner bean runs once, in @Order order.
 </Step>
-<Step title="Ready">
-ApplicationReadyEvent is published; the app takes traffic.
+<Step title="5. Ready">
+ApplicationReadyEvent is published, and the app reports that it accepts traffic.
 </Step>
 </Steps>
 
-- This is the interview-level order; the real code has more events in between.
-- Order several runners with `@Order`.
+1. Boot looks at the classpath and decides which kind of application context to create.
+2. It builds the Environment, the merged set of all settings, which you will see in [externalized configuration](card:externalized-configuration).
+3. It refreshes the context: beans are created, `@PostConstruct` methods run bean by bean, and a web app starts its embedded server. Boot logs "Started PaymentApplication in … seconds".
+4. It calls the runners on the main thread, one after another.
+5. It publishes `ApplicationReadyEvent`. If anything failed on the way, it publishes `ApplicationFailedEvent` instead and a failure analyser prints the cause.
+
+This is the interview-level order; the real code publishes a few more events in between.
 
 ## Example
 
+One bean in the payment service shows all three moments. The app was started with `--seed=demo report.txt`:
+
 ```java
 @Component
-class SeedData implements ApplicationRunner {
+class DemoDataLoader implements ApplicationRunner {
+    @PostConstruct
+    void init() { System.out.println("1. @PostConstruct: this one bean is ready"); }
+
     @Override
     public void run(ApplicationArguments args) {
-        // java -jar shop.jar --seed=demo
-        if (args.containsOption("seed")) {
-            // load the demo rows
-        }
+        System.out.println("2. Runner: seed = " + args.getOptionValues("seed"));
+        System.out.println("   non-option args = " + args.getNonOptionArgs());
     }
+
+    @EventListener(ApplicationReadyEvent.class)
+    void ready() { System.out.println("3. ApplicationReadyEvent: open for traffic"); }
 }
 ```
 
+```text output
+1. @PostConstruct: this one bean is ready
+2. Runner: seed = [demo]
+   non-option args = [report.txt]
+3. ApplicationReadyEvent: open for traffic
+```
+
+What to notice:
+
+- `@PostConstruct` printed first, while the context was still being built. In the full log, Boot's "Started PaymentApplication" line appears between lines 1 and 2.
+- `ApplicationArguments` already split the arguments: `--seed=demo` is an option, `report.txt` is a non-option argument.
+- If `run` threw an exception, startup would fail with "Application run failed" and line 3 would never print.
+
+## Rules and defaults
+
+- **When runners run:** once, just before `SpringApplication.run(...)` returns. Order several with `@Order` or the `Ordered` interface.
+- **Readiness:** while runners run, the app's readiness state still refuses traffic; it switches to accepting traffic after `ApplicationReadyEvent`.
+- **Same thread:** runners and event listeners run on the main thread by default. Keep them short, or hand long work to another thread.
+- **Context type:** if both Spring MVC and WebFlux are on the classpath, Boot picks the servlet (MVC) app. `spring.main.web-application-type` overrides it.
+
+## Not to be confused with
+
+`@PostConstruct` sets up **one bean** right after its dependencies are injected. A runner does **app-wide** work after all beans exist. An `ApplicationReadyEvent` listener runs after the runners, when the app already counts as ready. Rule: one bean = `@PostConstruct`; before traffic = runner; after ready = `ApplicationReadyEvent`.
+
 ## Interview Qs
 
-### How does a Spring Boot application start?
+### What happens when a Spring Boot application starts?
 
-`main` calls `SpringApplication.run`. It picks the context type, prepares the Environment, refreshes the context (beans are created, the server starts), calls the runners, then publishes ApplicationReadyEvent.
+`main` calls `SpringApplication.run`. Boot picks the app type from the classpath, prepares the Environment, then refreshes the context: beans are created and the embedded server starts. Next it calls the runners, and finally publishes `ApplicationReadyEvent`, after which the app accepts traffic.
 
-### CommandLineRunner vs ApplicationRunner?
+### How do you run code once the application has started?
 
-Same timing: once, after the context is refreshed. CommandLineRunner gets raw `String...` arguments; ApplicationRunner gets `ApplicationArguments` with `--name=value` options parsed.
+Implement `ApplicationRunner` or `CommandLineRunner` for work that must finish before traffic arrives. For work after the app is ready, listen for `ApplicationReadyEvent`. Avoid `@PostConstruct` for app-wide work, because other beans and the server may not be ready yet.
 
-### How do you run code once the app is fully started?
+### Why might a Spring Boot app fail to start, and how do you find out?
 
-Implement a runner, or listen for `ApplicationReadyEvent`, which comes after all runners.
+Common causes are a port already in use, a missing bean, or a wrong property. Boot's failure analysers print a description and an action, such as "Port 8080 was already in use". If that is not enough, start with `--debug` to see the condition evaluation report.

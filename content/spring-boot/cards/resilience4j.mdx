@@ -5,27 +5,41 @@ title: Circuit Breaker and Retry
 topic: spring-cloud
 level: interview
 heat: 2
-hook: "A circuit breaker stops calling a failing service and fails fast; retry calls again for brief faults. Resilience4j gives both as annotations."
+hook: "A circuit breaker stops calling a service that keeps failing and answers at once with a fallback; a retry calls again after a brief fault. Resilience4j gives both."
 points:
-  - { k: "@CircuitBreaker", v: "opens at a high failure rate, then tests recovery" }
-  - { k: "@Retry", v: "calls again for brief faults, with a wait or backoff" }
-  - { k: "@Bulkhead, @RateLimiter", v: "cap concurrent calls, and calls per period" }
-  - { k: "fallbackMethod", v: "same class, same parameters plus one exception" }
-  - { k: "Order", v: "Retry wraps CircuitBreaker, so each attempt passes the breaker" }
+  - { k: "@CircuitBreaker", v: "counts failed calls; past the failure-rate threshold it opens and rejects calls at once" }
+  - { k: "@Retry", v: "calls again after a failure, with a fixed wait or a growing backoff, up to a limit" }
+  - { k: "fallbackMethod", v: "a method in the same class, same parameters plus one exception, that returns a safe answer instead" }
+  - { k: "Order", v: "Retry wraps CircuitBreaker by default, so each attempt passes through the breaker" }
+  - { k: "Breaker default", v: "opens at 50% failures over the last 100 calls; stays open 60 s (Resilience4j 2.4)", kind: default }
+  - { k: "@Bulkhead, @RateLimiter", v: "cap how many calls run at once, and how many are allowed per time period" }
 trap:
   wrong: "Spring Framework 7's @Retryable replaces Resilience4j."
-  right: "It covers retry and concurrency limits only. For a circuit breaker or rate limiter you still need Resilience4j."
-sayIt: "I wrap remote calls in a circuit breaker that opens past a failure-rate threshold and returns a fallback, plus a retry with backoff for brief faults. Each named instance is tuned under resilience4j.*."
+  right: "It covers retry and concurrency limits only. For a circuit breaker or a rate limiter you still need a library such as Resilience4j."
+  why: "Framework 7 added resilience annotations to the core, so it sounds as if the whole toolbox moved there."
+sayIt: "I wrap remote calls in a circuit breaker that opens past a failure-rate threshold and returns a fallback, plus a retry with backoff for brief faults. Each named instance is tuned under resilience4j.* properties."
+buildsOn: [http-clients, aop-proxies]
+scenarios:
+  - q: "The fraud-check service is down for 10 minutes. The payment service calls it 200 times a second with a 5-second timeout. What happens without a circuit breaker, and with one?"
+    a: "Without one, every request waits 5 seconds, threads pile up, and the payment service becomes slow or stops too. With one, after enough failures the breaker opens, calls fail at once and the fallback answers, so threads are free and fraud-check gets no load while it recovers."
+  - q: "You put fallbackMethod on @CircuitBreaker and @Retry has none. The call fails. How many attempts happen?"
+    a: "Just one. The breaker's fallback runs inside the retry, turns the failure into a normal return value, and Retry sees a success, so it never retries. Put the fallback on the outer @Retry instead."
 confusedWith: [retry-vs-circuit-breaker]
 tags: [spring-cloud, resilience]
 visual: flow
 sources:
   - title: "CircuitBreaker: states and config (Resilience4j docs)"
     url: "https://resilience4j.readme.io/docs/circuitbreaker"
-    verifiedOn: "2026-10-19"
-  - title: "Getting started with Spring Boot: fallback, aspect order (Resilience4j docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Getting started with Spring Boot: config keys, fallback, aspect order (Resilience4j docs)"
     url: "https://resilience4j.readme.io/docs/getting-started-3"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Boot 4.0 Migration Guide: spring-boot-starter-aop renamed to spring-boot-starter-aspectj (Spring Boot wiki)"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
+    verifiedOn: "2026-10-21"
+  - title: "resilience4j-spring-boot4 2.4.0 (Maven Central)"
+    url: "https://repo1.maven.org/maven2/io/github/resilience4j/resilience4j-spring-boot4/2.4.0/"
+    verifiedOn: "2026-10-21"
   - title: "Retry: defaults (Resilience4j docs)"
     url: "https://resilience4j.readme.io/docs/retry"
     verifiedOn: "2026-10-19"
@@ -37,59 +51,79 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Resilience4j is a library of guards for calls to other services. The two most used are the **circuit breaker** and **retry**. A circuit breaker watches a call's failures and, when too many fail, stops making the call for a while and fails at once. A retry repeats a failed call a few times, because many faults last only a moment. When a guard gives up, a **fallback** method can return a safe answer instead. In Spring Boot you apply them with annotations, which work through [AOP proxies](card:aop-proxies).
+
 ## Why it exists
 
-A failing service holds threads in every caller until they fail too. Guards around each call stop one sick service from taking others down.
+The payment service calls fraud-check over HTTP. If fraud-check hangs, every payment request waits for the timeout, holding a thread. Soon all threads are waiting and the payment service is down too, although its own code is fine: one sick service has spread its failure. A circuit breaker cuts the call off quickly. A retry hides short blips, such as one dropped connection, so users do not see an error for them.
 
 ## How it works
 
 <Mermaid
-  alt="Circuit breaker states. Closed: calls pass and failures are counted. When the failure rate passes the threshold, it moves to Open, where calls fail at once. After a wait it moves to Half-open and lets a few trial calls through. If they succeed it goes back to Closed; if they fail it goes back to Open."
+  alt="Circuit breaker states. Closed: calls pass and failures are counted. When the failure rate passes the threshold, it moves to Open, where calls fail at once. After a wait it moves to Half-open and lets a few trial calls through. If their failure rate is below the threshold it goes back to Closed; otherwise it goes back to Open."
   chart={`stateDiagram-v2
   [*] --> Closed
   Closed --> Open: failure rate over threshold
   Open --> HalfOpen: wait time ends
-  HalfOpen --> Closed: trial calls succeed
-  HalfOpen --> Open: trial calls fail`}
+  HalfOpen --> Closed: trial failure rate below threshold
+  HalfOpen --> Open: trial failure rate at or above threshold`}
 />
 
-- Open: calls are rejected at once with `CallNotPermittedException`, and the fallback answers.
-- Put `fallbackMethod` on the outer `@Retry`: a fallback on `@CircuitBreaker` hides failures, so Retry never retries.
-- Add `resilience4j-spring-boot4` and `spring-boot-starter-aspectj`; tune instances under `resilience4j.*`.
+1. **Closed:** every call goes through, and the breaker records whether it succeeded in a sliding window of recent calls.
+2. When the failure rate in that window passes the threshold, the breaker moves to **Open**.
+3. **Open:** calls are rejected at once with `CallNotPermittedException`, without touching the network, and the fallback answers if one is set.
+4. After the wait time, it moves to **Half-open** and lets a few trial calls through.
+5. If the failure rate of the trial calls is below the threshold, it closes again; otherwise it opens again.
 
 ## Example
 
+The payment service guards its call to fraud-check. When fraud-check cannot answer, the payment is sent for manual review instead of failing.
+
 ```java
-@CircuitBreaker(name = "inventory")
-@Retry(name = "inventory", fallbackMethod = "unknownStock")
-public Stock stock(String sku) {
-    return inventory.get().uri("/stock/{sku}", sku).retrieve().body(Stock.class);
+@CircuitBreaker(name = "fraudCheck")
+@Retry(name = "fraudCheck", fallbackMethod = "reviewLater")
+public FraudResult check(PaymentRequest request) {
+    return http.post().uri("/checks").body(request).retrieve().body(FraudResult.class);
 }
 
-private Stock unknownStock(String sku, Exception cause) {
-    return Stock.unknown(sku);   // retries used up, or circuit open
+private FraudResult reviewLater(PaymentRequest request, Exception cause) {
+    return FraudResult.manualReview();   // all attempts failed
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Breaker opens at | 50% failed calls, over the last 100 calls | Resilience4j 2.4 |
-| Stays open | 60 s, then 10 trial calls | Resilience4j 2.4 |
-| Retry | 3 attempts in total, 500 ms apart | Resilience4j 2.4 |
-| `@Retryable` | 3 retries after the first call, 1 s apart | Spring Framework 7.0 |
+- Both annotations use the name `fraudCheck`, so they read their settings from `resilience4j.circuitbreaker.instances.fraudCheck.*` and `resilience4j.retry.instances.fraudCheck.*`.
+- The fallback has the same parameters plus one exception. It runs when all attempts have failed. While the circuit is open, each attempt fails fast, but Retry still waits between them unless you ignore `CallNotPermittedException` (see Common mistakes).
+- The fallback is on `@Retry`, the outer guard. On `@CircuitBreaker` it would hide each failure from Retry.
+- Calling `check` from another method of the same class skips the proxy, so neither guard runs.
+
+## Rules and defaults
+
+- **Setup:** add `resilience4j-spring-boot4` and `spring-boot-starter-aspectj`, because the annotations are applied by aspects.
+- **Breaker defaults (Resilience4j 2.4):** opens at a 50% failure rate over the last 100 calls, stays open 60 s, then allows 10 trial calls.
+- **Retry defaults (Resilience4j 2.4):** 3 attempts in total, including the first call, 500 ms apart.
+- **Aspect order:** Retry ( CircuitBreaker ( RateLimiter ( TimeLimiter ( Bulkhead ( your method ) ) ) ) ).
+- **Fallback matching:** if several fallbacks exist, the one whose exception type is closest to the thrown one is used.
+- **Spring's own `@Retryable` (Framework 7.0):** 3 retries after the first call, 1 s apart; switch it on with `@EnableResilientMethods`. It has no circuit breaker.
+
+## Common mistakes
+
+- **"Retry every failure."** Retrying a non-idempotent call, such as charging a card, can charge twice. Retry only safe or [idempotent](card:rest-api-design) calls, or send an idempotency key.
+- **Retrying while the circuit is open.** Each attempt fails fast anyway. Add `CallNotPermittedException` to the retry's `ignoreExceptions` to stop at once.
 
 ## Interview Qs
 
 ### Explain the circuit breaker states.
 
-Closed: calls pass and outcomes are recorded. Open: past the failure-rate threshold, calls fail at once. Half-open: after a wait, a few trial calls decide whether it closes again or reopens.
+Closed: calls pass and outcomes are recorded. Open: once the failure rate passes the threshold, calls fail at once without reaching the service. Half-open: after a wait, a few trial calls decide whether the breaker closes again or opens again.
 
 ### How does fallbackMethod work?
 
-A method in the same class with the same parameters plus one exception. The best-matching exception type wins, so an open circuit can be handled apart from other errors.
+It names a method in the same class with the same parameters plus one exception parameter. When the guarded call fails, or the circuit is open, Resilience4j calls it and returns its value. With several fallbacks, the best-matching exception type wins, so an open circuit can be handled apart from other errors.
 
 ### Why combine retry with a circuit breaker?
 
-Retry rides out blips; the breaker stops calls in an outage. Retry is the outer aspect, so once the breaker is open, each attempt fails fast. Add `CallNotPermittedException` to the retry's `ignoreExceptions` to stop retrying at once.
+They handle different faults. Retry rides out short blips; the breaker stops calls during a real outage, so you do not pile retries onto a sick service. Retry is the outer guard, so once the breaker is open, each attempt fails fast.

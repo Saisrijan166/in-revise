@@ -5,82 +5,133 @@ title: Spring Cache
 topic: data
 level: intermediate
 heat: 2
-hook: "@Cacheable reads the cache, @CachePut writes it, @CacheEvict deletes from it; a provider such as Caffeine or Redis stores the data."
+hook: "Annotate a method with @Cacheable and Spring stores its result; the next call with the same argument returns the stored copy without running the method."
 points:
-  - { k: "@EnableCaching", v: "needed once; without it the annotations do nothing" }
-  - { k: "Cache hit", v: "@Cacheable returns the stored value; the method does not run", kind: plus }
-  - { k: "No provider found (Boot 4.1)", v: "a ConcurrentHashMap: no expiry, not for production", kind: default }
-  - { k: "TTL", v: "set on the provider, e.g. spring.cache.redis.time-to-live" }
-  - { k: "Proxy based", v: "self-invocation and non-public methods are not cached", kind: minus }
+  - { k: "@EnableCaching", v: "needed once on a @Configuration class; without it the cache annotations do nothing" }
+  - { k: "Three annotations", v: "@Cacheable reads the cache, @CachePut writes to it, @CacheEvict deletes from it" }
+  - { k: "Cache hit", v: "@Cacheable returns the stored value and the method body does not run", kind: plus }
+  - { k: "No provider (Boot 4.1)", v: "Boot falls back to a ConcurrentHashMap with no expiry; not for production", kind: default }
+  - { k: "TTL", v: "set on the provider, e.g. spring.cache.redis.time-to-live, not on the annotation" }
+  - { k: "Proxy only", v: "this-calls and non-public methods are not cached, and no error is raised", kind: minus }
 trap:
   wrong: "The cache replaces the database."
-  right: "The database stays the source of truth; the cache is a fast copy that can be stale or lost."
-sayIt: "I add @EnableCaching, use @Cacheable on reads, @CachePut on updates and @CacheEvict on deletes. Boot picks the provider from the classpath: Caffeine for a local cache, Redis for a shared one, with the TTL set there."
-confusedWith: []
+  right: "The database stays the source of truth; the cache is a fast copy that can be stale or lost at any time."
+  why: "The cache answers reads faster than the database and usually holds the same data, so it feels like a second database."
+sayIt: "I add @EnableCaching, put @Cacheable on reads, @CachePut on updates and @CacheEvict on deletes. Boot picks the provider from the classpath: Caffeine for a cache inside each instance, Redis for one shared by all instances, with the TTL set there."
+buildsOn: [aop-proxies, persistence-context]
+scenarios:
+  - q: "find(42) is @Cacheable. A batch job changes payment 42's status through the repository, not through any cache method. What does find(42) return next?"
+    a: "The old status. Spring updates the cache only through methods annotated with @CachePut or @CacheEvict. A change that bypasses them leaves a stale entry until it expires or is evicted."
+  - q: "The service runs on three instances with Caffeine. cancel(42) with @CacheEvict runs on instance A. What does instance B return for find(42)?"
+    a: "The cancelled payment's old data. Caffeine is a local cache, so each instance has its own copy and the eviction only cleared A's. Use a shared cache such as Redis, or a short TTL if some staleness is fine."
+  - q: "You add @Cacheable to find(), but every call still runs a SQL query. There is no error. What do you check?"
+    a: "First that @EnableCaching is present. Then that the call goes through the proxy: no this-call from the same class, a public method, a bean from Spring. Then that the key really repeats between calls."
+confusedWith: [cacheable-vs-cacheput-vs-cacheevict]
 tags: [caching, performance]
-visual: table
+visual: flow
 sources:
   - title: "Caching (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/io/caching.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Declarative Annotation-based Caching (Spring Framework 7.0.9 reference)"
     url: "https://docs.spring.io/spring-framework/reference/integration/cache/annotations.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "How can I set the TTL/TTI/eviction policy? (Spring Framework 7.0.9 reference)"
     url: "https://docs.spring.io/spring-framework/reference/integration/cache/specific-config.html"
     verifiedOn: "2026-10-19"
+  - title: "Common Application Properties: spring.cache.redis.time-to-live (Spring Boot 4.1.1 appendix)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
   - title: "A Guide To Caching in Spring (Baeldung)"
     url: "https://www.baeldung.com/spring-cache-tutorial"
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+A cache is a fast store that keeps copies of results you have already fetched, so the next request gets them without asking the database. Spring Cache adds caching to a method with an annotation: `@Cacheable` to read, `@CachePut` to write, `@CacheEvict` to delete. Spring decides *when* to use the cache; a **provider** stores the data. Caffeine keeps it in memory inside your app; Redis keeps it on a separate server that all instances share.
+
 ## Why it exists
 
-Some reads are slow and return the same result many times, such as a product lookup. Caching by hand fills every method with "get it, else load it and store it" code.
+A front end polls `GET /payments/42` every few seconds to show the status. Each call runs the same SQL query and returns the same answer. Caching by hand means writing "look in the map, else load it and put it" in every such method, plus the code to remove old entries, all mixed with business logic. Spring Cache moves that into one annotation per method, and the same code works with any provider.
 
 ## How it works
 
-<Compare id="cacheable-vs-cacheput-vs-cacheevict" />
+<Mermaid
+  alt="A call to find(42) reaches the Spring proxy. The proxy builds the key 42 and looks in the payments cache. On a hit it returns the stored value without running the method. On a miss it runs the method, stores the result under key 42, and returns it."
+  chart={`flowchart LR
+  C["find(42)"] --> P["Proxy: key = 42"]
+  P --> Q{In the cache?}
+  Q -- "yes: hit" --> R[Return stored value]
+  Q -- "no: miss" --> M[Run the method]
+  M --> S[Store result under 42]
+  S --> R`}
+/>
 
-- Spring's cache is an abstraction; the provider stores the data and owns expiry and size limits.
-- Boot checks providers in order (JCache, Hazelcast, Redis, Caffeine and others) and falls back to a simple map.
-- The default key is the single argument, or a `SimpleKey` of all arguments.
+1. The controller calls `paymentQueries.find(42)`. Like `@Transactional`, this goes through a [proxy](card:aop-proxies).
+2. The proxy builds a key from the arguments, here `42`, and looks in the cache named `payments`.
+3. On a hit, it returns the stored value. Your method does not run, so no SQL is sent.
+4. On a miss, it runs your method, stores the result under key `42`, and returns it.
+5. Later, a method with `@CachePut` replaces that entry with its new result, and a method with `@CacheEvict` removes it, so the next read loads fresh data.
+
+So reads fill the cache, and only the write methods you annotate keep it correct.
 
 ## Example
 
+The payment service caches the response for a payment and keeps it fresh on change:
+
 ```java
-@Configuration
-@EnableCaching
-class CacheConfig { }
-
 @Service
-public class ProductService {   // repository injected through the constructor
-    @Cacheable(cacheNames = "products", key = "#id")
-    public Product find(long id) { return repository.findById(id).orElseThrow(); }
+public class PaymentQueryService {     // repository injected through the constructor
+    @Cacheable(cacheNames = "payments", key = "#id")
+    public PaymentResponse find(long id) {
+        return PaymentResponse.from(payments.findById(id).orElseThrow());
+    }
 
-    @CacheEvict(cacheNames = "products", key = "#id")
-    public void delete(long id) { repository.deleteById(id); }
+    @CachePut(cacheNames = "payments", key = "#id")
+    public PaymentResponse complete(long id) {
+        return PaymentResponse.from(payments.markCompleted(id));
+    }
+
+    @CacheEvict(cacheNames = "payments", key = "#id")
+    public void cancel(long id) { payments.deleteById(id); }
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Provider | First found; else Simple (`ConcurrentHashMap`) | Spring Boot 4.1 |
-| Expiry with Simple | None | Spring Framework 7.0 |
-| `@CacheEvict` timing | After the method succeeds | Spring Framework 7.0 |
+- The second `find(42)` returns the stored `PaymentResponse` and runs no SQL.
+- `complete(42)` always runs and replaces the entry, so the next `find(42)` shows the new status.
+- Remove `@CacheEvict` from `cancel()` and `find(42)` keeps returning the cancelled payment. With the fallback provider, which never expires entries, that lasts until a restart.
+- This caches a DTO, not the entity. The persistence context does not track cached copies, so changing one would never reach the database.
+
+## Rules and defaults
+
+- **Switch it on:** add `spring-boot-starter-cache` and put `@EnableCaching` on a `@Configuration` class. Boot advises against putting it on the main application class, because caching then runs in every test too.
+- **Provider choice (Spring Boot 4.1):** if you define no `CacheManager`, Boot uses the first provider it finds, in this order: Generic, JCache, Hazelcast, Infinispan, Couchbase, Redis, Caffeine, Cache2k, Simple. Simple is a `ConcurrentHashMap` with no expiry. `spring.cache.type=none` turns caching off.
+- **Expiry:** the annotations have no TTL. Set it on the provider: `spring.cache.redis.time-to-live=10m` (Redis entries never expire by default) or `spring.cache.caffeine.spec=maximumSize=500,expireAfterAccess=600s`.
+- **Default key:** no arguments gives `SimpleKey.EMPTY`, one argument is the key itself, several arguments give a `SimpleKey` of all of them.
+- **Public methods only:** with proxies, cache annotations on protected, package-private or private methods are silently ignored.
+- **Useful attributes:** `unless = "#result == null"` skips storing a result; `sync = true` lets only one thread load a missing entry while the others wait; `@CacheEvict(allEntries = true)` clears the whole cache. Eviction runs after the method succeeds unless `beforeInvocation = true`.
+
+## Not to be confused with
+
+**Spring Cache** stores method results at the service layer, under keys you choose. Hibernate's **second-level cache**, from the [persistence context](card:persistence-context) concept, stores entities by id inside JPA. Rule: Spring Cache caches what your methods return; the second-level cache caches what Hibernate loads.
 
 ## Interview Qs
 
-### If the database stores the data, why add a cache?
+### If the database already stores the data, why add a cache?
 
-The database is the durable source of truth; the cache is a fast copy. It cuts response time and database load for data read often and changed rarely.
+They do different jobs. The database is the durable source of truth; the cache is a fast, temporary copy. For data read often and changed rarely, the cache cuts response time and takes load off the database. Every change must still go to the database first.
 
 ### Why is my @Cacheable not working?
 
-Check @EnableCaching first. Then the call must pass through the proxy: no self-invocation, a public method, a bean from Spring. Also check that the key really repeats.
+Check @EnableCaching first. Then the call must pass through the proxy: no this-call from the same class, a public method, a bean created by Spring. Finally, check that the key really repeats between calls; an argument with no proper equals() gives a new key every time.
 
-### How do you set a TTL?
+### How do you set a TTL on a Spring cache?
 
-Not on the annotation; the abstraction leaves expiry to the provider. Use spring.cache.redis.time-to-live for Redis, or a Caffeine spec such as expireAfterAccess=600s.
+Not on the annotation; the abstraction leaves expiry to the provider. With Redis, set spring.cache.redis.time-to-live. With Caffeine, set spring.cache.caffeine.spec, for example expireAfterAccess=600s, or build your own CacheManager bean.
+
+### Caffeine or Redis?
+
+Caffeine lives inside each instance: very fast, but every instance has its own copy, so an eviction on one does not reach the others. Redis is one shared cache over the network: a bit slower, but all instances see the same entries. With several instances and data that changes, choose Redis.

@@ -5,16 +5,25 @@ title: "@Component vs @Bean"
 topic: beans-di
 level: beginner
 heat: 3
-hook: "@Component: Spring finds your class and builds it. @Bean: your method builds the object, and Spring manages what it returns."
+hook: "@Component: Spring finds your class and calls its constructor. @Bean: your method builds the object, and Spring manages what it returns."
 points:
-  - { k: "Stereotypes", v: "@Service, @Repository, @Controller are all @Component" }
-  - { k: "@Repository", v: "also gets persistence exception translation", kind: plus }
-  - { k: "@Bean is for", v: "library classes you cannot annotate, or objects needing setup code" }
-  - { k: "@Configuration", v: "a @Component for @Bean methods; calls between them return the bean" }
+  - { k: "@Component", v: "on your own class; scanning finds it and Spring calls its constructor to make the bean" }
+  - { k: "@Bean", v: "on a method in a @Configuration class; the object the method returns becomes the bean" }
+  - { k: "@Bean is for", v: "library classes you cannot annotate, or objects that need setup code before use" }
+  - { k: "Stereotypes", v: "@Service, @Repository and @Controller are kinds of @Component that name the layer" }
+  - { k: "@Repository extra", v: "database exceptions thrown from it can be translated into Spring's DataAccessException", kind: plus }
+  - { k: "@Configuration", v: "a @Component for @Bean methods; a call to another @Bean method returns the shared bean" }
 trap:
   wrong: "@Service and @Repository are separate bean mechanisms, different from @Component."
-  right: "Both are specialised @Component annotations, registered by the same scanning. @Repository adds exception translation."
-sayIt: "@Component marks my own class for scanning, and @Service or @Repository say which layer it is. @Bean is a factory method in a @Configuration class, for library classes or objects that need setup code."
+  right: "Both are specialised @Component annotations, registered by the same scanning. Only @Repository adds behaviour: exception translation."
+  why: "The names sound like different features and are taught in separate chapters, so people expect each one to work differently."
+sayIt: "@Component marks my own class for scanning, and @Service or @Repository also say which layer it is in. @Bean is a factory method in a @Configuration class; I use it for library classes I cannot annotate or objects that need setup code."
+buildsOn: [ioc-container, dependency-injection]
+scenarios:
+  - q: "A library gives you SmsGatewayClient, built with new SmsGatewayClient(apiKey). You cannot edit its source. How do you make it a bean?"
+    a: "Write a @Bean method in a @Configuration class that creates the client with the key and returns it. @Component is not possible, because you cannot add an annotation to a class you do not own."
+  - q: "In a @Configuration class, two @Bean methods both call clock() to get a Clock. How many Clock objects exist?"
+    a: "One. With proxyBeanMethods = true, the default, Spring intercepts the call and returns the existing Clock bean. In a plain @Component class the same calls are ordinary Java calls that run clock() again, so a method that builds a new object makes a new one on every call."
 confusedWith: [component-vs-service-vs-repository]
 tags: [component, bean, configuration, stereotypes]
 visual: table
@@ -25,49 +34,85 @@ sources:
   - title: "Using the @Bean Annotation (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/java/bean-annotation.html"
     verifiedOn: "2026-10-19"
+  - title: "Basic Concepts: @Bean and @Configuration, full and lite mode (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/beans/java/basic-concepts.html"
+    verifiedOn: "2026-10-21"
   - title: "Configuration: proxyBeanMethods (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/context/annotation/Configuration.html"
     verifiedOn: "2026-10-19"
+  - title: "Repository (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/stereotype/Repository.html"
+    verifiedOn: "2026-10-19"
 ---
+
+## What it is
+
+There are two ways to tell the [container](card:ioc-container) "make this a bean". `@Component` goes on a class you wrote: Spring finds the class and calls its constructor. `@Bean` goes on a method, usually inside a `@Configuration` class: Spring calls your method and registers the object it returns. `@Service`, `@Repository` and `@Controller` are special kinds of `@Component`, called stereotypes, that also name the layer the class belongs to.
 
 ## Why it exists
 
-The container must know which objects to manage. For your own class an annotation is enough; for a library class you cannot edit, you write a method that builds it.
+The container must know which objects to build. For your own class, one annotation on the class is the shortest way. But you cannot add an annotation to a class from a library, such as the JDK's `Clock`, and some objects need setup code before use, such as a client built with an API key. `@Bean` covers those cases: you write the code that builds the object, and Spring still manages the result.
 
 ## How it works
 
 <Compare id="component-vs-bean-annotation" />
 
-- `@Configuration` is itself a `@Component`. By default (`proxyBeanMethods = true`) a call to another `@Bean` method returns the shared bean, not a new object.
-- A `@Bean` method gets its own dependencies as method parameters.
+1. At startup, [component scanning](card:component-scanning), the next concept, finds the classes marked `@Component` or a stereotype, and Spring creates each one by calling its constructor.
+2. Spring also reads every `@Configuration` class and calls each of its `@Bean` methods once. The returned object becomes a bean.
+3. A `@Bean` method receives the beans it needs as method parameters, the same way a constructor does.
+4. Either way, the result is an ordinary bean that can be injected anywhere by type.
+
+So the only difference is who builds the object: Spring calling your constructor, or your own method.
 
 ## Example
 
+The payment service needs the current time. `Clock` is a JDK class, so it comes from a `@Bean` method; `PaymentService` is your class, so it is a `@Service`.
+
 ```java
 @Configuration
-public class TimeConfig {
+public class AppConfig {
     @Bean                                  // JDK class: you cannot annotate it
     Clock clock() {
-        return Clock.system(ZoneId.of("Asia/Kolkata"));
+        return Clock.systemUTC();
     }
 }
 
-@Service                                   // your class: scanned, Spring calls the constructor
-public class InvoiceService {
-    InvoiceService(Clock clock) { }
+@Service                                   // your own class: scanning finds it
+public class PaymentService {
+    private final Clock clock;
+    public PaymentService(Clock clock) { this.clock = clock; }
 }
 ```
+
+What to notice:
+
+- The `Clock` bean is named after the method, `clock`. The `PaymentService` bean is named after the class with a lower-case first letter, `paymentService`.
+- Spring passes the `Clock` bean into the constructor. A test can pass `Clock.fixed(...)` instead, so time-based code gives the same result on every run.
+- Remove `@Configuration` and `AppConfig` is no longer found, so there is no `Clock` bean. Startup then fails, because `PaymentService` requires one.
+
+## Rules and defaults
+
+- **Stereotypes are components:** `@Service`, `@Repository`, `@Controller` and `@Configuration` are all annotated with `@Component`, so scanning registers them the same way.
+- **`@Service`:** adds no behaviour today; it tells readers and tools that the class holds business logic.
+- **`@Repository`:** also makes the class eligible for exception translation, so a database error reaches callers as Spring's `DataAccessException`.
+- **`@Controller`:** marks a web controller; [@RestController](card:rest-controller) builds on it.
+- **Calls between `@Bean` methods:** in a `@Configuration` class (`proxyBeanMethods = true` by default) a call to another `@Bean` method returns the existing bean, not a new object.
+- **Own names:** `@Service("payments")` or `@Bean("utcClock")` replace the default bean name.
+
+## Not to be confused with
+
+`@Configuration` is also a `@Component`, but it exists to hold `@Bean` methods, and Spring makes calls between those methods return the shared bean. If you put `@Bean` methods in a plain `@Component`, Spring calls this "lite mode": a call from one method to another is a normal Java call and creates a new object. Rule: put `@Bean` methods in a `@Configuration` class, or take other beans as method parameters instead of calling methods.
 
 ## Interview Qs
 
 ### If @Component and @Bean both create beans, why do we need both?
 
-@Component goes on a class you own; scanning finds it and Spring calls the constructor. @Bean goes on a method; your code builds the object. Use @Bean for third-party classes or when creation needs logic.
+`@Component` goes on a class you own; scanning finds it and Spring calls the constructor. `@Bean` goes on a method, and your code builds the object. You need `@Bean` for third-party classes you cannot annotate, or when creating the object needs logic, such as reading an API key.
 
 ### Why use @Service and @Repository if they are just components?
 
-They name the layer, which helps readers, tooling and aspects. @Repository also enables translation of persistence exceptions into Spring's DataAccessException. @Service behaves like @Component today.
+They name the layer, which helps readers, tooling and aspects that target one layer. `@Repository` also enables translation of persistence exceptions into Spring's `DataAccessException`. `@Service` behaves exactly like `@Component` today.
 
 ### @Component vs @Configuration?
 
-@Configuration is a @Component meant for @Bean methods. Spring subclasses it so calls between its @Bean methods return the shared singleton instead of creating new objects.
+`@Configuration` is a `@Component` meant for `@Bean` methods. Spring subclasses it at runtime, so a call from one `@Bean` method to another returns the shared bean instead of a new object. In a plain `@Component`, the same call creates a new object each time.

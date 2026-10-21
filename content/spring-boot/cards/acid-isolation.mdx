@@ -5,17 +5,24 @@ title: ACID and Isolation Levels
 topic: data
 level: intermediate
 heat: 2
-hook: "ACID is what a transaction promises; the isolation level decides how much it sees of other transactions running at the same time."
+hook: "ACID is the four promises a transaction makes; the isolation level decides how much one transaction may see of others running at the same time."
 points:
-  - { k: "ACID", v: "all or nothing, rules kept, isolated, survives a crash" }
-  - { k: "Isolation.DEFAULT", v: "Spring uses the database's own level", kind: default }
+  - { k: "ACID", v: "all or nothing, rules kept at commit, kept apart from others, and saved even after a crash" }
+  - { k: "Isolation.DEFAULT", v: "Spring sets no level of its own; the database's default applies", kind: default }
   - { k: "PostgreSQL 18", v: "READ COMMITTED by default", kind: default }
-  - { k: "MySQL 8.4 InnoDB", v: "REPEATABLE READ by default", kind: default }
-  - { k: "Higher level", v: "fewer read problems, but more waiting and less throughput", kind: minus }
+  - { k: "MySQL 9.7 InnoDB", v: "REPEATABLE READ by default", kind: default }
+  - { k: "Higher level", v: "stops more read problems, but transactions wait more or must be retried", kind: minus }
 trap:
   wrong: "Spring sets READ COMMITTED for every @Transactional method."
-  right: "The default is Isolation.DEFAULT: the database decides, so PostgreSQL and MySQL behave differently."
-sayIt: "ACID means atomic, consistent, isolated and durable. Isolation levels trade safety for speed: READ COMMITTED stops dirty reads, REPEATABLE READ also stops non-repeatable reads, SERIALIZABLE stops phantoms too."
+  right: "The default is Isolation.DEFAULT: the database decides, so the same code behaves differently on PostgreSQL and MySQL."
+  why: "READ COMMITTED is PostgreSQL's default, and many Spring tutorials use PostgreSQL, so it looks like a Spring default."
+sayIt: "ACID means atomic, consistent, isolated and durable. Isolation levels trade safety for speed: READ COMMITTED stops dirty reads, REPEATABLE READ also stops non-repeatable reads, and SERIALIZABLE also stops phantoms. Spring uses the database's level unless I set one."
+buildsOn: [transactional, transaction-propagation]
+scenarios:
+  - q: "A report reads payment 42 twice in one transaction. Between the two reads another transaction changes its amount and commits. With the default level, what does the second read return on PostgreSQL and on MySQL?"
+    a: "PostgreSQL uses READ COMMITTED, so the second read sees the new amount: a non-repeatable read. MySQL InnoDB uses REPEATABLE READ, so both reads come from the snapshot taken at the first read and return the old amount."
+  - q: "A teammate wants isolation = SERIALIZABLE on every service method to be safe. What do you say?"
+    a: "It stops all three read problems, but transactions then wait for each other or fail with serialization errors that must be retried, so throughput drops. Use it only for the few methods whose correctness needs it."
 confusedWith: []
 tags: [transactions, acid, isolation]
 visual: table
@@ -25,51 +32,80 @@ sources:
     verifiedOn: "2026-10-19"
   - title: "Transaction Isolation (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/current/transaction-iso.html"
-    verifiedOn: "2026-10-19"
-  - title: "InnoDB Transaction Isolation Levels (MySQL 8.4 Reference Manual)"
-    url: "https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "InnoDB Transaction Isolation Levels (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-transaction-isolation-levels.html"
+    verifiedOn: "2026-10-21"
   - title: "Glossary: ACID, atomicity, consistency, isolation, durability (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/current/glossary.html"
     verifiedOn: "2026-10-19"
+  - title: "Using @Transactional: isolation applies only to REQUIRED or REQUIRES_NEW (Spring Framework 7.0.9 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A [transaction](card:transactional) makes four promises, called ACID. **Atomicity:** all its steps happen, or none do. **Consistency:** the data's rules, such as constraints, hold when it commits. **Isolation:** transactions running at the same time do not disturb each other beyond an agreed limit. **Durability:** once committed, the data survives a crash. The isolation level is that agreed limit: how much one transaction may see of the work of others.
 
 ## Why it exists
 
-Many users change the same data at once. ACID says what a transaction must guarantee; isolation levels let you choose how strictly transactions are kept apart, because full separation is slow.
+Many requests read and write payments at the same moment. If the database ran them strictly one after another, nobody would ever see half-done work, but everyone would wait. If it kept them apart too little, a report could include a payment that is later rolled back. Isolation levels let you choose the trade-off per method: more safety and more waiting, or more speed and some read problems.
 
 ## How it works
 
-| Isolation level | Dirty read | Non-repeatable read | Phantom read |
-| --- | --- | --- | --- |
-| `READ_UNCOMMITTED` | Possible | Possible | Possible |
-| `READ_COMMITTED` | Stopped | Possible | Possible |
-| `REPEATABLE_READ` | Stopped | Stopped | Possible |
-| `SERIALIZABLE` | Stopped | Stopped | Stopped |
+| Read problem | What the transaction sees | First level that stops it |
+| --- | --- | --- |
+| Dirty read | A change another transaction has not committed yet | `READ_COMMITTED` |
+| Non-repeatable read | The same row read twice gives different values | `REPEATABLE_READ` |
+| Phantom read | The same WHERE query returns new rows the second time | `SERIALIZABLE` |
 
-- **A**tomicity: all steps or none. **C**onsistency: constraints hold at commit. **I**solation: others do not see uncommitted work. **D**urability: a commit survives a crash.
-- Databases may give more than the table: PostgreSQL's REPEATABLE READ also stops phantoms.
+`READ_UNCOMMITTED` stops none of them. Each level up stops one more. Here is a non-repeatable read, step by step:
+
+1. Transaction A, a monthly report, reads payment 42: amount 500.
+2. Transaction B changes payment 42 to 700, but has not committed yet. Under `READ_COMMITTED`, A still sees 500, because B's change is uncommitted. Seeing 700 now would be a dirty read.
+3. B commits.
+4. A reads payment 42 again. Under `READ_COMMITTED` it now sees 700, a non-repeatable read. Under `REPEATABLE_READ` it still sees 500.
+
+So each level is a promise about which of these surprises cannot happen inside your transaction.
 
 ## Example
 
+A settlement report runs two queries and needs them to agree with each other:
+
 ```java
-@Transactional(isolation = Isolation.REPEATABLE_READ)
-public Report monthlyReport(YearMonth month) {
-    // reading the same row twice gives the same values
-    return reports.build(month);
+@Transactional(isolation = Isolation.REPEATABLE_READ, readOnly = true)
+public SettlementReport settle(LocalDate day) {
+    BigDecimal total = payments.sumCompletedOn(day);      // query 1
+    List<Payment> rows = payments.findCompletedOn(day);   // query 2
+    return new SettlementReport(total, rows);             // total matches rows
 }
 ```
+
+What to notice:
+
+- With PostgreSQL's default, `READ COMMITTED`, each query sees what was committed before *that query* started. A payment completed between query 1 and query 2 would appear in `rows` but not in `total`.
+- `REPEATABLE_READ` makes both queries read the same snapshot, so the two always agree.
+- The isolation level is applied only when this method starts the transaction. If it [joins](card:transaction-propagation) a caller's transaction, the caller's level is used.
+
+## Rules and defaults
+
+- **Spring's default is `Isolation.DEFAULT`:** Spring sets nothing, and the database's own level applies.
+- **PostgreSQL 18:** `READ COMMITTED` by default. `READ UNCOMMITTED` behaves like `READ COMMITTED`, and its `REPEATABLE READ` also stops phantom reads.
+- **MySQL 9.7 InnoDB:** `REPEATABLE READ` by default. Plain reads in one transaction come from the snapshot taken at the first read.
+- **Retries:** in PostgreSQL, `REPEATABLE READ` and `SERIALIZABLE` transactions can fail with a serialization failure. The app must be ready to retry the whole transaction.
+- **Lost updates:** these levels are about what you *read*. Two transactions that both read and then overwrite the same row need [locking](card:locking), which you will see next.
 
 ## Interview Qs
 
 ### What do dirty, non-repeatable and phantom reads mean?
 
-Dirty: you read another transaction's uncommitted change. Non-repeatable: you read a row twice and it changed in between. Phantom: the same WHERE query returns new rows the second time.
+A dirty read is seeing another transaction's change before it commits. A non-repeatable read is reading the same row twice and getting different values, because someone committed a change in between. A phantom read is running the same WHERE query twice and getting new rows the second time.
 
 ### Which isolation level does Spring use?
 
-Isolation.DEFAULT, which means the database's own level: READ COMMITTED in PostgreSQL, REPEATABLE READ in MySQL InnoDB.
+Isolation.DEFAULT, which means Spring sets nothing and the database's own level applies: READ COMMITTED in PostgreSQL, REPEATABLE READ in MySQL InnoDB. So the same code can see different results on the two databases.
 
 ### Why not always use SERIALIZABLE?
 
-It is the safest but the slowest: transactions wait more, or fail and must be retried, so throughput drops. Use it only where correctness needs it.
+It is the safest level but the slowest. Transactions wait for each other more, or fail with serialization errors and must be retried, so throughput drops. Use it only where correctness really needs it, and keep those transactions short.

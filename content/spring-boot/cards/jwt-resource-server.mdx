@@ -5,27 +5,44 @@ title: JWT and Stateless APIs
 topic: security
 level: interview
 heat: 3
-hook: "Each request brings a signed JWT; Spring checks its signature, expiry and issuer, and keeps no login session."
+hook: "Each request brings a signed token, a JWT, that says who the caller is; Spring checks the signature and expiry every time and keeps no login session."
 points:
-  - { k: "Shape", v: "header.payload.signature, each part Base64url" }
-  - { k: "Signed, not encrypted", v: "anyone holding it can read the payload", kind: minus }
-  - { k: "Checked (Security 7.1)", v: "signature, exp, nbf; iss and aud when configured", kind: default }
-  - { k: "No session", v: "any instance can check a request alone", kind: plus }
-  - { k: "Logout", v: "a stolen token works until exp: keep it short-lived", kind: minus }
+  - { k: "Shape", v: "header.payload.signature: three Base64url parts joined by dots" }
+  - { k: "Signed, not encrypted", v: "anyone holding the token can decode and read the payload", kind: minus }
+  - { k: "Checked (Security 7.1)", v: "signature, exp and nbf, and iss when issuer-uri is set; aud only if you set audiences", kind: default }
+  - { k: "Scopes", v: "each scope, a permission the token grants such as payments.write, becomes authority SCOPE_<scope>" }
+  - { k: "No session", v: "any instance can check a request alone, so no shared session store is needed", kind: plus }
+  - { k: "Logout", v: "a stolen token works until it expires, so keep access tokens short-lived", kind: minus }
 trap:
   wrong: "The JWT payload is encrypted, so secrets in it are safe."
-  right: "A signed JWT is only Base64url-encoded. The signature stops changes, not reading; use JWE if it must be secret."
+  right: "A signed JWT is only Base64url-encoded. The signature stops changes, not reading; use an encrypted JWT (JWE) if the content must stay secret."
+  why: "The token looks like random characters, so people assume it is scrambled, and the word 'signed' sounds like 'protected'."
 sayIt: "My API is an OAuth2 resource server. With issuer-uri set, Spring checks each bearer JWT's signature with the issuer's public key, plus exp, nbf and iss, and maps scopes to SCOPE_ authorities. No session is kept."
+buildsOn: [security-filter-chain, authentication-flow, authorization-rules]
+scenarios:
+  - q: "A token's exp was 30 seconds ago, and the payment API still accepts it. Is something broken?"
+    a: "No. Spring Security allows 60 seconds of clock skew by default, because the clocks of the issuer and the API never agree exactly. After that minute the token gets 401."
+  - q: "A token issued for the orders API is sent to the payment API. Both trust the same issuer. Is it accepted?"
+    a: "Yes, unless you set spring.security.oauth2.resourceserver.jwt.audiences. The aud claim is checked only when audiences are configured, so set it to reject tokens meant for another API."
 confusedWith: [session-vs-jwt]
 tags: [security, jwt, oauth2, rest]
 visual: flow
 sources:
   - title: "OAuth 2.0 Resource Server JWT (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "OAuth 2.0 Resource Server: bearer token flow (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/index.html"
+    verifiedOn: "2026-10-21"
+  - title: "Build Systems: starters (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/using/build-systems.html"
+    verifiedOn: "2026-10-21"
   - title: "RFC 7519: JSON Web Token (JWT)"
     url: "https://www.rfc-editor.org/rfc/rfc7519"
     verifiedOn: "2026-10-19"
+  - title: "RFC 6749: The OAuth 2.0 Authorization Framework (access and refresh tokens)"
+    url: "https://www.rfc-editor.org/rfc/rfc6749"
+    verifiedOn: "2026-10-21"
   - title: "JSON Web Token Cheat Sheet (OWASP)"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_Cheat_Sheet.html"
     verifiedOn: "2026-10-19"
@@ -34,52 +51,90 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+A JWT (JSON Web Token) is a short string of three parts joined by dots: a header, a payload of claims such as the user id and expiry time, and a signature. The server that issues it signs it, so any change breaks the signature, but anyone can decode and read the payload. An API that accepts such tokens is called an OAuth2 resource server. It reads the token from the `Authorization: Bearer` header, checks it, and treats the request as that user, without a session.
+
 ## Why it exists
 
-Mobile apps, single-page apps and other services call APIs without a browser session. Each request carries a token instead, which the API checks locally without asking the issuer every time.
+With [session login](card:authentication-flow), the server remembers every logged-in user. Run three instances behind a load balancer and each needs that session, so you add sticky sessions or a shared session store. Mobile apps and other services also handle cookies poorly. A JWT carries the login itself. Any instance can verify it locally with the issuer's public key, with no shared state and no call to the issuer for each request.
 
 ## How it works
 
 <Mermaid
-  alt="JWT flow. 1: the client logs in at the authorization server. 2: it gets a signed JWT. 3: it calls your API with Authorization: Bearer and the JWT. 4: your API fetches the issuer's public keys. Then it checks the signature, exp, nbf and iss. If they pass, the controller runs; if not, the API answers 401."
+  alt="JWT flow. 1: the client logs in at the authorization server. 2: it gets a signed JWT. 3: it calls the payment API with Authorization: Bearer and the JWT. 4: the API gets the issuer's public keys. Then it checks the signature, exp, nbf and iss. If they pass, the controller runs; if not, the API answers 401."
   chart={`flowchart LR
   C([Client]) -- "1. log in" --> AS[Authorization server]
   AS -- "2. signed JWT" --> C
-  C -- "3. Bearer JWT" --> RS["Your API (resource server)"]
+  C -- "3. Bearer JWT" --> RS["Payment API (resource server)"]
   RS -.->|"4. public keys"| AS
   RS --> V{"signature, exp, nbf, iss OK?"}
   V -- yes --> RUN([Controller])
   V -- no --> DENY([401])`}
 />
 
-- Set `audiences` so a token issued for another API is rejected.
-- Never parse or check JWTs by hand; let the resource server do it.
+1. The client logs in at an authorization server, a separate service such as Keycloak that issues tokens, and receives a signed JWT.
+2. It calls the payment API with the header `Authorization: Bearer <token>`.
+3. In the filter chain, BearerTokenAuthenticationFilter takes the token and passes it to the AuthenticationManager, where JwtAuthenticationProvider asks a `JwtDecoder` to check it.
+4. The decoder verifies the signature with the issuer's public keys, which it finds through `issuer-uri` on the first token request. It then checks the times `exp` (expires at) and `nbf` (not before), and the issuer `iss`.
+5. On success, each scope, a permission the token grants, becomes an authority `SCOPE_<scope>`, and the authenticated user goes into the SecurityContextHolder, so the normal [authorization rules](card:authorization-rules) apply. On failure the answer is 401.
+6. Nothing is saved, so the next request repeats the check from step 2.
 
 ## Example
 
+The payment service accepts JWTs from the company's identity server, and only tokens with the `payments.write` scope may create payments:
+
 ```properties
 spring.security.oauth2.resourceserver.jwt.issuer-uri=https://idp.example.com/realms/shop
-spring.security.oauth2.resourceserver.jwt.audiences=orders-api
+spring.security.oauth2.resourceserver.jwt.audiences=payment-api
 ```
 
-## Defaults
+```java
+@Bean
+SecurityFilterChain api(HttpSecurity http) throws Exception {
+    http
+        .authorizeHttpRequests(auth -> auth
+            .requestMatchers(HttpMethod.POST, "/payments").hasAuthority("SCOPE_payments.write")
+            .anyRequest().authenticated())
+        .oauth2ResourceServer(oauth -> oauth.jwt(Customizer.withDefaults()))
+        .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS));
+    return http.build();
+}
+```
 
-| What | Default | Where |
-| --- | --- | --- |
-| Trusted algorithm | RS256 only | Spring Security 7.1 |
-| Clock skew for exp, nbf | 60 seconds | Spring Security 7.1 |
-| Scope authority prefix | `SCOPE_` | Spring Security 7.1 |
+What to notice:
+
+- `issuer-uri` is all Spring needs to find the public keys and to check `iss`. Discovery waits for the first token, so startup does not depend on the identity server being up.
+- `audiences` makes Spring reject tokens issued for another API. Without it, `aud` is not checked.
+- `hasAuthority("SCOPE_payments.write")` uses the exact authority name; `hasRole` would add `ROLE_` and never match (see [authorization rules](card:authorization-rules)).
+- `STATELESS` tells Spring not to keep the login in an HTTP session, so each request must bring its token.
+
+## Rules and defaults
+
+- **Starter (Boot 4.0 and later):** `spring-boot-starter-security-oauth2-resource-server`. The older `spring-boot-starter-oauth2-resource-server` name is deprecated.
+- **Algorithm (Security 7.1):** only `RS256` is trusted by default; with `issuer-uri`, Spring trusts the algorithms of the keys the issuer publishes.
+- **Clock skew:** 60 seconds for `exp` and `nbf`.
+- **Scope prefix:** `SCOPE_`, taken from the `scope` or `scp` claim.
+- **Never by hand:** do not parse or check JWTs in your own code; a missed check, such as skipping the signature, lets forged tokens in.
+
+## Not to be confused with
+
+OAuth2 is a framework for how a client gets an access token from an authorization server. JWT is one format that token can have. Rule: OAuth2 = how you get the token; JWT = what the token looks like.
 
 ## Interview Qs
 
 ### If session login works, why use JWT?
 
-A session keeps the login on the server, so every instance needs it. A JWT carries the login, so any instance can check it with no shared state. Neither is always better.
+A session keeps the login on the server, so every instance needs access to it. A JWT carries the login, so any instance can check it with no shared state, and non-browser clients just send a header. Neither is always better; sessions are simpler for one browser app.
 
 ### How do you log out a user with JWTs?
 
-There is no session to end. Keep access tokens short-lived; to cut access at once, keep a deny list of revoked token ids (`jti`), which brings back some server state.
+There is no session to end. Keep access tokens short-lived and use refresh tokens for new ones. To cut access at once, keep a deny list of revoked token ids (`jti`), which brings back some server state.
 
 ### Is a JWT encrypted?
 
-Usually not. A signed JWT (JWS) is readable by anyone; only an encrypted JWT (JWE) hides the claims. Never put passwords or secrets in the payload.
+Usually not. A signed JWT (JWS) is readable by anyone who holds it; only an encrypted JWT (JWE) hides the claims. Never put passwords or secrets in the payload.
+
+### What does Spring check on each JWT?
+
+The signature, using the issuer's public key, then the expiry `exp` and not-before `nbf` times with 60 seconds of skew, and the issuer `iss` when `issuer-uri` is set. The audience `aud` is checked only if you configure `audiences`.

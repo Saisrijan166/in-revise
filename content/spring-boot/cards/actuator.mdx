@@ -5,77 +5,126 @@ title: "Actuator and Health Checks"
 topic: testing-production
 level: beginner
 heat: 3
-hook: "Actuator adds ready-made endpoints under /actuator for health, info, metrics and more; only health is exposed by default."
+hook: "Actuator adds ready-made HTTP endpoints under /actuator that tell other tools if the app is healthy and how it is doing; only health is open by default."
 points:
-  - { k: "Add it", v: "spring-boot-starter-actuator" }
-  - { k: "Expose more", v: "management.endpoints.web.exposure.include=health,info" }
-  - { k: "Health", v: "UP gives 200; DOWN or OUT_OF_SERVICE gives 503" }
-  - { k: "Probes", v: "/actuator/health/liveness and /readiness, on by default", kind: default }
-  - { k: "Secure them", v: "env, beans and heapdump reveal internals", kind: minus }
+  - { k: "Add it", v: "add spring-boot-starter-actuator; the endpoints appear under /actuator" }
+  - { k: "Exposed by default", v: "only health is reachable over HTTP and JMX; list others in exposure.include", kind: default }
+  - { k: "Health status", v: "UP returns HTTP 200; DOWN or OUT_OF_SERVICE returns 503, so tools can read the code" }
+  - { k: "Probes", v: "the Kubernetes probe URLs /actuator/health/liveness and /readiness are on by default since Spring Boot 4.0", kind: default }
+  - { k: "Custom check", v: "a bean that implements HealthIndicator adds its own entry to /actuator/health" }
+  - { k: "Risky endpoints", v: "env, beans and heapdump show internals; expose them only behind security", kind: minus }
 trap:
-  wrong: "Add the database check to the liveness probe."
-  right: "Liveness checks only the app itself. A database outage would restart every instance. External checks belong, with care, in readiness."
-sayIt: "Actuator gives health, metrics, info and diagnostics endpoints. Only health is exposed by default; I expose only what I need, secure the rest, and point Kubernetes probes at liveness and readiness."
+  wrong: "Add the database check to the liveness probe, so a broken database restarts the app."
+  right: "Liveness checks only the app itself. If the database is down, a restart does not fix it, and every instance would restart at once."
+  why: "'Is the app healthy?' sounds like one question, so people put every check into every probe."
+sayIt: "Actuator gives health, metrics, info and diagnostic endpoints. Only health is exposed by default; I expose just what I need, secure the rest, and point Kubernetes at the liveness and readiness probes."
+buildsOn: [starters, application-startup, security-filter-chain]
+scenarios:
+  - q: "You open /actuator/metrics on a fresh app and get 404, though /actuator/health works. Why?"
+    a: "Only health is exposed over HTTP by default. Add metrics to management.endpoints.web.exposure.include, and secure it: without Spring Security, an exposed endpoint is open to anyone who can reach the app."
+  - q: "The fraud-check API is down. Your custom FraudCheckHealthIndicator reports DOWN. What do /actuator/health and the liveness probe return?"
+    a: "/actuator/health returns DOWN with HTTP 503, because the overall status takes the worst status of all checks. The liveness probe still returns UP: Spring Boot adds no other indicators to the probe groups, so Kubernetes does not restart the app."
 confusedWith: [liveness-vs-readiness]
 tags: [actuator, production, kubernetes]
 visual: flow
 sources:
-  - title: "Endpoints (Spring Boot 4.1.1 Actuator reference)"
+  - title: "Endpoints: exposure, security, health, Kubernetes probes (Spring Boot 4.1.1 Actuator reference)"
     url: "https://docs.spring.io/spring-boot/reference/actuator/endpoints.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Application Availability (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/features/spring-application.html"
+    verifiedOn: "2026-10-21"
+  - title: "Customizing the Management Server Port (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/actuator/monitoring.html"
+    verifiedOn: "2026-10-21"
   - title: "Spring Boot 4.0 Migration Guide: probes enabled by default"
     url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Boot Interview Questions: Actuator (Baeldung)"
     url: "https://www.baeldung.com/spring-boot-interview-questions"
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+Spring Boot Actuator is a module that adds production endpoints to your app. An endpoint is a URL, such as `/actuator/health`, that returns facts about the running app: whether it is healthy, its metrics, its configuration, its log levels. You add one [starter](card:starters) and the endpoints appear, with no code of your own.
+
 ## Why it exists
 
-Load balancers, Kubernetes and monitoring tools need to ask a running app: are you healthy, and what are your numbers? Actuator answers over HTTP or JMX with no custom code.
+Once the payment service runs on servers, other tools need to ask it questions. A load balancer asks "can you take requests?", Kubernetes asks "are you stuck?", and monitoring asks "how many requests per second?". Without Actuator you would write and secure these URLs yourself in every service. Actuator gives every Boot app the same, ready answers.
 
 ## How it works
 
 <Mermaid
-  alt="Health aggregation. The db, diskspace and ping health indicators each report a status. Actuator combines them. If all are UP, /actuator/health returns UP with HTTP 200. If any is DOWN, it returns DOWN with HTTP 503."
+  alt="Health aggregation. The db, diskSpace and ping health indicators each report a status. Actuator combines them into one status. If all are UP, /actuator/health returns UP with HTTP 200. If any is DOWN, it returns DOWN with HTTP 503."
   chart={`flowchart LR
   DB[db indicator] --> A{Combine}
-  DS[diskspace indicator] --> A
+  DS[diskSpace indicator] --> A
   P[ping indicator] --> A
   A -- "all UP" --> U["UP: HTTP 200"]
   A -- "any DOWN" --> D["DOWN: HTTP 503"]`}
 />
 
-- An endpoint must be exposed to be reachable; `exclude` wins over `include`.
-- With Spring Security and no chain of your own, Boot secures every endpoint except health.
+1. At startup, Boot creates a health indicator for each thing it can check, such as `db` when a `DataSource` exists.
+2. A tool calls `/actuator/health`. Actuator asks every indicator for its status.
+3. It combines them: one `DOWN` makes the whole result `DOWN`.
+4. It maps the status to an HTTP code: `UP` gives 200, `DOWN` gives 503. A load balancer or Kubernetes reads only that code.
+
+Kubernetes calls two more URLs as probes: `/actuator/health/liveness` to decide whether to restart the app, and `/actuator/health/readiness` to decide whether to send it traffic. They work the same way, but each has its own small set of checks.
 
 ## Example
 
-```properties
-management.endpoints.web.exposure.include=health,info,prometheus
-management.endpoint.health.show-details=when-authorized
+This custom check tells Actuator whether the payment service can reach its fraud-check API.
+
+```java
+@Component
+class FraudCheckHealthIndicator implements HealthIndicator {
+    private final FraudCheckClient fraud;
+
+    FraudCheckHealthIndicator(FraudCheckClient fraud) { this.fraud = fraud; }
+
+    @Override
+    public Health health() {
+        return fraud.ping()
+                ? Health.up().build()
+                : Health.down().withDetail("fraudApi", "not reachable").build();
+    }
+}
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Exposed over HTTP and JMX | `health` only | Spring Boot 4.1 |
-| `management.endpoint.health.show-details` | `never` | Spring Boot 4.1 |
-| `shutdown` endpoint | Disabled | Spring Boot 4.1 |
-| Liveness and readiness groups | Enabled | Spring Boot 4.0+ |
+- The entry is named after the bean without the `HealthIndicator` suffix, so it shows as `fraudCheck`.
+- When it returns `down()`, the whole `/actuator/health` turns `DOWN` and returns 503.
+- It is not part of the liveness or readiness group unless you add it, for example with `management.endpoint.health.group.readiness.include=readinessState,fraudCheck`.
+
+## Rules and defaults
+
+- **Exposure:** only `health` is exposed over HTTP and over JMX, Java's built-in management interface. Add more with `management.endpoints.web.exposure.include=health,info,prometheus`; `exclude` wins over `include`.
+- **Security:** with Spring Security and no `SecurityFilterChain` of your own, Boot secures every actuator endpoint except health. With your own chain, the rules are yours to write.
+- **Details:** `management.endpoint.health.show-details` is `never` by default; `when-authorized` shows them to authorised users, `always` to everyone.
+- **Probe timing:** liveness turns `CORRECT` once the context is refreshed; readiness turns `ACCEPTING_TRAFFIC` only after the [runners](card:application-startup) have run. During graceful shutdown, readiness switches to `REFUSING_TRAFFIC`.
+- **Probe groups:** Spring Boot adds no other checks, such as `db`, to liveness or readiness. You add them deliberately.
+- **Shutdown endpoint:** off by default. Access to `shutdown` and `heapdump` is restricted unless you open it.
+
+## Not to be confused with
+
+**Exposing** an endpoint makes it reachable over HTTP or JMX. **Securing** it decides who may call it. Rule: exposure = is the URL there at all; security = who gets in. An exposed but unsecured `env` endpoint is open to anyone.
 
 ## Interview Qs
 
 ### Which endpoints are exposed by default, and how do you expose more?
 
-Only `health`. List others in `management.endpoints.web.exposure.include`; `exclude` wins over `include`. Do not expose `*` on a public app without security.
+Only `health`, over both HTTP and JMX. List others in `management.endpoints.web.exposure.include`; anything in `exclude` stays hidden even if included. Never expose `*` on a public app without security, because `env`, `beans` and `heapdump` reveal internals.
 
 ### Liveness vs readiness?
 
-Liveness: can the app still work? If it keeps failing, Kubernetes restarts it. Readiness: can it take traffic now? If not, Kubernetes stops sending requests but does not restart it.
+Liveness asks "is the app broken beyond repair?"; if it keeps failing, Kubernetes restarts the container. Readiness asks "can it take requests right now?"; if not, Kubernetes stops sending traffic but does not restart it. Readiness is down during startup and graceful shutdown.
+
+### How do you write a custom health check?
+
+Create a bean that implements `HealthIndicator` and return `Health.up()` or `Health.down()` with optional details. Actuator adds it to `/actuator/health` under the bean name without the `HealthIndicator` suffix. Add it to a probe group only if failing it should change that probe.
 
 ### How do you secure Actuator?
 
-Expose only what you need, add a `SecurityFilterChain` rule for `EndpointRequest.toAnyEndpoint()` with an admin role, and keep `env` and `heapdump` closed.
+Expose only the endpoints you need, then add a `SecurityFilterChain` rule for `EndpointRequest.toAnyEndpoint()` that requires an admin role. Keep `env` and `heapdump` closed, or on a separate management port that only the internal network can reach.

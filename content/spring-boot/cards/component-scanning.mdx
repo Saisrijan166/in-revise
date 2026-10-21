@@ -5,69 +5,120 @@ title: Component Scanning
 topic: beans-di
 level: beginner
 heat: 2
-hook: "Spring Boot scans the main class's package and every package below it for @Component classes. A class outside is never found."
+hook: "At startup Spring Boot searches the main class's package and every package below it for @Component classes. A class anywhere else is never found."
 points:
-  - { k: "Starts at", v: "the package of the @SpringBootApplication class, then sub-packages" }
-  - { k: "Finds", v: "@Component and annotations built on it, like @Service" }
-  - { k: "Class outside", v: "not registered; injecting it fails at startup", kind: minus }
-  - { k: "Fix", v: "move the class under the main package, or set scanBasePackages" }
-  - { k: "Default package", v: "never put classes there: every class of every jar is read", kind: minus }
+  - { k: "Starts at", v: "the package of the @SpringBootApplication class, then every sub-package below it" }
+  - { k: "Finds", v: "classes marked @Component, or with an annotation built on it such as @Service" }
+  - { k: "Class outside", v: "is never registered, so a bean that needs it makes startup fail", kind: minus }
+  - { k: "Fix", v: "move the main class up to the root package, or list extra packages in scanBasePackages" }
+  - { k: "scanBasePackages", v: "replaces the default package, so list the main class's own package too", kind: minus }
 trap:
   wrong: "Spring scans the whole classpath for @Component classes."
-  right: "It scans only the base packages and their sub-packages. In Spring Boot that is the main class's package unless you set others."
-sayIt: "@SpringBootApplication includes @ComponentScan, which starts at the main class's package and goes down. So I keep the main class in the root package; for code elsewhere I set scanBasePackages."
+  right: "It scans only the base packages and their sub-packages. In Spring Boot that is the main class's package, unless you set others."
+  why: "The word \"scanning\" suggests a search of everything, and in small demos every class sits under the main package, so nothing is ever missed."
+sayIt: "@SpringBootApplication includes @ComponentScan, which starts at the main class's package and goes down through every sub-package. So I keep the main class in the root package; for code elsewhere I add its package with scanBasePackages."
+buildsOn: [component-vs-bean]
+scenarios:
+  - q: "The main class is in com.example.payments.app and the services are in com.example.payments.service. Does scanning find the services?"
+    a: "No. com.example.payments.service is not below com.example.payments.app; the two are siblings. Move the main class up to com.example.payments so both packages sit below it."
+  - q: "You add scanBasePackages = \"com.example.audit\" and now your controllers are not found. Why?"
+    a: "Setting scanBasePackages replaces the default base package, so only com.example.audit is scanned. List both packages, or move the main class to a package above both."
 confusedWith: []
 tags: [component-scan, packages, startup]
 visual: flow
 sources:
   - title: "Structuring Your Code (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/using/structuring-your-code.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "SpringBootApplication: scanBasePackages (Spring Boot 4.1 API)"
     url: "https://docs.spring.io/spring-boot/api/java/org/springframework/boot/autoconfigure/SpringBootApplication.html"
     verifiedOn: "2026-10-19"
   - title: "ComponentScan: default base package (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/context/annotation/ComponentScan.html"
     verifiedOn: "2026-10-19"
+  - title: "NoSuchBeanDefinitionFailureAnalyzer: startup failure message (Spring Boot source)"
+    url: "https://github.com/spring-projects/spring-boot/blob/main/core/spring-boot-autoconfigure/src/main/java/org/springframework/boot/autoconfigure/diagnostics/analyzer/NoSuchBeanDefinitionFailureAnalyzer.java"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+[@Component](card:component-vs-bean) marks a class as a bean; component scanning is how Spring finds those marked classes. At startup Spring reads the classes in a set of packages, called the base packages, and registers every class marked `@Component` or a stereotype such as `@Service`. In Spring Boot the base package is the package of your main class, the one with `@SpringBootApplication`, together with every package below it.
 
 ## Why it exists
 
-Spring needs to know which of your classes to turn into beans. Scanning a known package tree finds them without listing each one.
+Without scanning, you would list every bean class by hand, as the container example did with `new AnnotationConfigApplicationContext(PaymentService.class)`. A real app has dozens of beans, and forgetting one means a startup failure. Scanning a known package tree finds them all, so a new `@Service` works as soon as you create it in the right package.
 
 ## How it works
 
 <Mermaid
-  alt="The main class sits in com.example. Scanning covers com.example and its sub-packages com.example.service and com.example.web, so PaymentService and PaymentController become beans. A class in com.other.audit is outside, so it is not scanned and is not a bean."
+  alt="The main class sits in com.example.payments. Scanning covers com.example.payments and its sub-packages web and service, so PaymentController and PaymentService become beans. AuditService in com.example.audit is outside that tree, so it is not scanned and does not become a bean."
   chart={`flowchart TD
-  M["com.example: @SpringBootApplication"] --> S["com.example.service: PaymentService"]
-  M --> W["com.example.web: PaymentController"]
-  O["com.other.audit: AuditService"]
-  S --> OK([Beans])
-  W --> OK
-  O -. not scanned .-> X([No bean])`}
+  M["com.example.payments: PaymentApplication"] --> W["com.example.payments.web: PaymentController"]
+  M --> S["com.example.payments.service: PaymentService"]
+  A["com.example.audit: AuditService"]
+  W --> OK([Beans])
+  S --> OK
+  A -. not scanned .-> X([No bean])`}
 />
 
-- Setting `scanBasePackages` replaces the default, so list the main package too.
-- It affects only component scanning, not `@Entity` or Spring Data repository scanning.
+1. `@SpringBootApplication` includes `@ComponentScan` with no packages given, so the base package is the main class's own package.
+2. At startup Spring reads the classes in that package and in all its sub-packages, looking for `@Component`, either directly or through a stereotype.
+3. Each class it finds gets a bean definition, named after the class.
+4. A class in any other package is never read, so it never becomes a bean. If another bean needs it, startup fails.
+
+So the position of the main class decides what Spring can see.
 
 ## Example
 
+The payment service has one class outside the main package tree:
+
+```text
+com.example.payments           PaymentApplication (@SpringBootApplication)
+com.example.payments.web       PaymentController   found
+com.example.payments.service   PaymentService      found
+com.example.audit              AuditService        NOT found
+```
+
+One fix is to name both packages:
+
 ```java
-@SpringBootApplication(scanBasePackages = {"com.example", "com.other.audit"})
-public class ShopApplication {
+@SpringBootApplication(scanBasePackages = {"com.example.payments", "com.example.audit"})
+public class PaymentApplication {
     public static void main(String[] args) {
-        SpringApplication.run(ShopApplication.class, args);
+        SpringApplication.run(PaymentApplication.class, args);
     }
 }
 ```
+
+What to notice:
+
+- `com.example.audit` is a sibling of `com.example.payments`, not a sub-package. Without the fix, a bean that injects `AuditService` stops startup, and Boot reports that a bean of type `AuditService` "could not be found".
+- `scanBasePackages` replaces the default, which is why `com.example.payments` is listed again.
+- The cleaner fix is to move `PaymentApplication` up to `com.example`, so both trees sit below it.
+
+## Rules and defaults
+
+- **Default base package:** the package of the `@SpringBootApplication` class and all its sub-packages.
+- **Main class placement:** the Spring Boot docs recommend a root package above all your other classes.
+- **Default package:** never leave classes without a `package` line. Boot would then read every class of every jar on the classpath.
+- **Only components:** `scanBasePackages` changes component scanning only. JPA `@Entity` classes are found through the main class's package by a separate mechanism.
+- **Other ways in:** `@ComponentScan("com.example.audit")` on any `@Configuration` class also adds a package.
+
+## Not to be confused with
+
+[Auto-configuration](card:auto-configuration) also adds beans at startup, but it is not found by scanning. Boot reads its auto-configuration classes from a list inside its own jars. Rule: scanning finds your classes in your packages; auto-configuration adds Boot's classes from its jars.
 
 ## Interview Qs
 
 ### My @Service is not found at startup. Why?
 
-Most often it sits outside the main class's package tree, so scanning never sees it. Move it under the main package, or add its package with scanBasePackages or @ComponentScan.
+Most often it sits outside the main class's package tree, so scanning never reads it. Check that its package starts with the main class's package. Then move the class, move the main class up, or add the package with `scanBasePackages` or `@ComponentScan`.
 
 ### Where should the main class go?
 
-In the root package, above all other classes. Then the default scan covers the whole project and nothing from other libraries.
+In the root package, above all other classes of the project. Then the default scan covers the whole project and nothing from other libraries.
+
+### Does Spring scan every jar for components?
+
+No. It reads only the base packages and their sub-packages. Library classes become beans in other ways: through your `@Bean` methods or through Boot's auto-configuration.

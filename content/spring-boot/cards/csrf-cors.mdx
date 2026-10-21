@@ -5,65 +5,117 @@ title: CSRF vs CORS
 topic: security
 level: interview
 heat: 3
-hook: "CSRF protection blocks other sites from riding on your user's cookies. CORS lets chosen other sites call your API. One blocks, one allows."
+hook: "CSRF protection blocks other sites from sending requests that ride on your user's cookies. CORS lets chosen sites call your API from a browser."
 points:
-  - { k: "CSRF (Security 7.1)", v: "on by default; unsafe methods such as POST need a token", kind: default }
-  - { k: "Disable CSRF", v: "only for non-browser or bearer-token-only APIs", kind: minus }
-  - { k: "CORS", v: "a browser rule; your server only sends the headers" }
-  - { k: "Preflight", v: "an OPTIONS call, no cookies, before a non-simple cross-origin call" }
-  - { k: "With credentials", v: "list exact origins; \"*\" is not allowed", kind: minus }
+  - { k: "CSRF (Security 7.1)", v: "on by default: every POST, PUT, PATCH or DELETE must carry a token another site cannot read", kind: default }
+  - { k: "Why cookies matter", v: "the browser adds your cookies to every request to your site, even one started by another site" }
+  - { k: "Disable CSRF", v: "only when no browser sends credentials automatically, such as a bearer-token-only API", kind: minus }
+  - { k: "CORS", v: "a browser rule: your server only sends headers saying which other origins may call it" }
+  - { k: "Preflight", v: "an OPTIONS request, without cookies, sent first for some cross-origin calls such as a JSON POST" }
+  - { k: "With credentials", v: "list exact origins; \"*\" is rejected when cookies are allowed", kind: minus }
 trap:
   wrong: "CORS protects my API from cross-site attacks such as CSRF."
-  right: "CORS only decides which origins may read responses. A forged form POST is still sent, so keep CSRF protection for cookie logins."
+  right: "CORS only decides which origins may read responses in a browser. A forged form POST is still sent, so keep CSRF protection for cookie logins."
+  why: "Both names start with 'cross' and both involve browsers and other sites, so people treat CORS as the general guard against other sites."
 sayIt: "CSRF protection makes each state-changing request carry a token another site cannot read, because browsers add cookies by themselves. CORS is the browser asking my server whether another origin may call it; I allow only known origins."
+buildsOn: [security-filter-chain, authentication-flow, jwt-resource-server]
+scenarios:
+  - q: "A customer is logged in to the payment site. They open evil.example, which auto-submits a hidden form POST to /payments. With CSRF protection off, what happens?"
+    a: "The browser sends the payment site's session cookie with the POST, so the request looks logged in and the payment is created. With CSRF on, the form has no valid CSRF token, because evil.example cannot read your pages, and CsrfFilter rejects it with 403."
+  - q: "The React app at app.example.com calls POST api.example.com/payments and gets a CORS error in the browser. The same call works in Postman. Why?"
+    a: "CORS is enforced only by browsers. Postman ignores it. The browser's preflight got no Access-Control-Allow-Origin for app.example.com, so it blocked the call. Allow that origin in a CorsConfigurationSource and enable http.cors()."
 confusedWith: []
 tags: [security, csrf, cors, browser]
 visual: table
 sources:
   - title: "Cross Site Request Forgery (CSRF) (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/exploits/csrf.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "CsrfConfigurer.spa() (Spring Security 7.1 API)"
+    url: "https://docs.spring.io/spring-security/reference/api/java/org/springframework/security/config/annotation/web/configurers/CsrfConfigurer.html"
+    verifiedOn: "2026-10-21"
+  - title: "OAuth2ResourceServerConfigurer: CSRF ignored for bearer-token requests (Spring Security source)"
+    url: "https://github.com/spring-projects/spring-security/blob/main/config/src/main/java/org/springframework/security/config/annotation/web/configurers/oauth2/server/resource/OAuth2ResourceServerConfigurer.java"
+    verifiedOn: "2026-10-21"
   - title: "CORS (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/integrations/cors.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "CorsConfiguration (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/cors/CorsConfiguration.html"
+    verifiedOn: "2026-10-21"
   - title: "Cross-Origin Resource Sharing (CORS) (MDN)"
     url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Security interview questions (InterviewBit)"
     url: "https://www.interviewbit.com/spring-security-interview-questions/"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+These are two browser topics with similar names. CSRF (cross-site request forgery) is an attack: a page on another site makes the user's browser send a request to your app, and the browser attaches your app's cookies, so the request looks logged in. CORS (cross-origin resource sharing) is a permission system: browsers stop a page from reading responses from another origin (scheme, host and port), and from sending some requests at all, unless that server's headers allow it.
+
 ## Why it exists
 
-Browsers send a site's cookies with every request to it, even one started by another site: that makes CSRF possible. Browsers also block cross-origin calls unless the server agrees: CORS is how it agrees.
+Browsers send a site's cookies with every request to it, whoever started the request. Without CSRF protection, evil.example could submit a hidden form to `/payments` with your user's [session cookie](card:authentication-flow), and the payment would go through. Separately, the browser's same-origin rule blocks your own front end at `app.example.com` from calling `api.example.com`. CORS lets you allow exactly that origin, without turning the rule off for everyone.
 
 ## How it works
 
 <Compare id="csrf-vs-cors" />
 
-- Turn on CORS in Spring Security with `http.cors(...)`, so preflights are answered before login checks.
-- Disabling CORS does not open your API: the browser still blocks other origins.
+1. **CSRF:** Spring Security creates a random CSRF token for the user's session and puts it into your pages, as a hidden `_csrf` form field or a value JavaScript can read.
+2. **CSRF:** on every unsafe request (POST, PUT, PATCH, DELETE), CsrfFilter compares the token sent in the `X-CSRF-TOKEN` header or `_csrf` field with the stored one.
+3. **CSRF:** a forged request from another site carries the cookie but not the token, because that site cannot read your pages. CsrfFilter rejects it with 403.
+4. **CORS:** before a non-simple cross-origin call, such as a JSON POST, the browser sends an OPTIONS preflight with the page's `Origin`. It carries no cookies.
+5. **CORS:** with `http.cors()`, Spring Security answers the preflight from your CORS settings before any login check, and adds `Access-Control-Allow-Origin` when the origin is allowed.
+6. **CORS:** if the headers allow the origin, the browser sends the real request and lets the page read the answer. If not, the page only sees an error.
 
 ## Example
+
+The payment front end at `app.example.com` calls the API with its session cookie:
 
 ```java
 @Bean
 UrlBasedCorsConfigurationSource corsConfigurationSource() {
     CorsConfiguration config = new CorsConfiguration();
     config.setAllowedOrigins(List.of("https://app.example.com"));
-    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE"));
+    config.setAllowedMethods(List.of("GET", "POST"));
+    config.setAllowedHeaders(List.of("Content-Type", "X-XSRF-TOKEN"));
+    config.setAllowCredentials(true);               // the page sends its session cookie
     UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-    source.registerCorsConfiguration("/api/**", config);
+    source.registerCorsConfiguration("/payments/**", config);
     return source;
 }
+// In the SecurityFilterChain bean:
+http.cors(Customizer.withDefaults())                // answer preflights before login checks
+    .csrf(csrf -> csrf.spa());                      // token in the XSRF-TOKEN cookie
 ```
+
+What to notice:
+
+- The origin is exact. With `setAllowCredentials(true)`, Spring rejects `"*"` in allowed origins, because browsers refuse it with cookies. Use `allowedOriginPatterns` if you need a wildcard.
+- `http.cors(...)` puts CORS handling in front of the login checks. If Spring Security does not handle CORS, the preflight, which has no cookies, looks like an unknown caller and is rejected.
+- `csrf.spa()` (added in Spring Security 7.0) stores the token in an `XSRF-TOKEN` cookie that JavaScript can read; the app sends it back in the `X-XSRF-TOKEN` header. Another site cannot read your cookies, so it cannot copy the token.
+
+## Rules and defaults
+
+- **CSRF on (Security 7.1):** checked for unsafe methods. GET, HEAD, OPTIONS and TRACE are not checked, so a GET must never change data.
+- **Token storage:** in the HTTP session by default, read from the `X-CSRF-TOKEN` header or the `_csrf` parameter.
+- **Logout:** with CSRF on, logout works only as a POST, so another site cannot log your users out.
+- **Bearer tokens:** with `oauth2ResourceServer`, requests that carry a bearer token skip the CSRF check, because no browser adds that header by itself.
+- **Disabling CSRF:** fine for an API that no browser calls with cookies or HTTP Basic. Prefer ignoring only specific endpoints over turning it off everywhere.
+- **CORS:** off until you call `http.cors()` or define one `UrlBasedCorsConfigurationSource` bean. With no source, `cors()` reuses Spring MVC's settings, such as `@CrossOrigin`. With two or more source beans, Spring Security cannot choose one and configures none, so pass one with `cors.configurationSource(...)`.
+
+## Common mistakes
+
+- **"My API returns JSON, so CSRF does not apply."** What matters is how credentials travel. If a browser sends a cookie automatically, the endpoint needs CSRF protection.
+- **"CORS keeps other programs away from my API."** Only browsers enforce CORS; curl and other servers ignore it. Authentication protects the API.
 
 ## Interview Qs
 
 ### Both are browser security problems. Why do we need both?
 
-They solve different problems. CORS decides which other origins may call your API from a browser. CSRF protection stops another site from tricking the browser into sending a request with your user's cookies.
+They solve different problems. CORS decides which other origins may call your API from a browser and read the answer. CSRF protection stops another site from tricking the browser into sending a request with your user's cookies. One allows chosen callers; the other blocks forged requests.
 
 ### When can you disable CSRF?
 
@@ -71,4 +123,4 @@ When no browser sends credentials automatically: an API used only by other servi
 
 ### CORS still fails after adding @CrossOrigin. Why?
 
-The preflight carries no cookies, so Spring Security rejects it before it reaches Spring MVC. Enable `http.cors()` so CORS runs first; with no other source it reuses Spring MVC's CORS settings.
+The preflight carries no cookies, so Spring Security rejects it before it reaches Spring MVC. Enable `http.cors()` so CORS is handled first; with no other source, it reuses the `@CrossOrigin` settings.

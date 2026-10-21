@@ -5,17 +5,25 @@ title: Spring Data Repositories
 topic: data
 level: beginner
 heat: 3
-hook: "Extend JpaRepository and Spring Data writes the class: CRUD, paging, and queries built from method names."
+hook: "Declare an interface that extends JpaRepository, and Spring Data writes the class: CRUD, paging, and queries built from method names."
 points:
-  - { k: "JpaRepository<T, ID>", v: "CRUD and paging returning List, plus flush and batch deletes" }
-  - { k: "Derived query", v: "findByEmailAndStatus: the query comes from the method name" }
-  - { k: "@Query", v: "your own JPQL; nativeQuery = true for plain SQL" }
-  - { k: "Pageable", v: "PageRequest.of(0, 20): page numbers start at 0", kind: default }
-  - { k: "Page", v: "runs an extra count query for the total", kind: minus }
+  - { k: "JpaRepository<T, ID>", v: "T is the entity, ID its id type; you get CRUD, paging, sorting and flush methods" }
+  - { k: "Derived query", v: "a method such as findByStatus gets its query from the method name, with no query text" }
+  - { k: "@Query", v: "your own JPQL over entities and fields; nativeQuery = true runs plain SQL instead" }
+  - { k: "Pageable (Spring Data)", v: "PageRequest.of(0, 20) asks for the first page of 20 rows; page numbers start at 0", kind: default }
+  - { k: "Page vs Slice", v: "Page runs an extra count query for totals; Slice only knows if a next page exists", kind: minus }
+  - { k: "findById", v: "returns Optional, so the caller must decide what happens when the row is missing" }
 trap:
   wrong: "JpaRepository extends PagingAndSortingRepository, which extends CrudRepository."
-  right: "Since Spring Data 3, PagingAndSortingRepository extends only Repository. JpaRepository extends the List CRUD and List paging interfaces."
-sayIt: "I extend JpaRepository<Entity, Id>. Spring Data implements it at runtime: CRUD and paging for free, simple queries from names like findByEmail, and @Query for the rest. findById returns Optional, so I use orElseThrow."
+  right: "Since Spring Data 3.0, PagingAndSortingRepository extends only Repository. JpaRepository extends the List versions of the CRUD and paging interfaces."
+  why: "Older tutorials and Spring Data 2.x showed one straight chain from CrudRepository to JpaRepository, and many cheat sheets still copy it."
+sayIt: "I extend JpaRepository<Entity, Id>. Spring Data implements it at startup: CRUD and paging for free, simple queries from names such as findByStatus, and @Query for the rest. findById returns Optional, so I use orElseThrow."
+buildsOn: [jpa-hibernate-spring-data, jpa-entities]
+scenarios:
+  - q: "A dashboard shows the 20 largest PAID payments with a Next button, but never a total count. Should the method return Page or Slice?"
+    a: "Slice. A Page always runs a second count query to work out the totals, which costs time on a large table. A Slice fetches one extra row to know whether a next page exists, which is all a Next button needs."
+  - q: "A service calls payments.findById(99L).get() and payment 99 does not exist. What happens, and what should the code do?"
+    a: "get() on an empty Optional throws NoSuchElementException, and without a handler the client sees a 500 error. Use orElseThrow(() -> new PaymentNotFoundException(id)) and map that exception to 404 in the global exception handler."
 confusedWith: [crud-vs-jpa-repository]
 tags: [spring-data, repository, queries]
 visual: code
@@ -23,17 +31,30 @@ sources:
   - title: "Spring Data JPA 4.1: Core concepts (repository interfaces)"
     url: "https://docs.spring.io/spring-data/jpa/reference/repositories/core-concepts.html"
     verifiedOn: "2026-10-19"
-  - title: "Spring Data JPA 4.1: Defining query methods (Page, Slice, count query)"
+  - title: "Spring Data JPA 4.1: Defining query methods (lookup strategy, Page, Slice, count query)"
     url: "https://docs.spring.io/spring-data/jpa/reference/repositories/query-methods-details.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Data JPA 4.1: JPA query methods (@Modifying, derived delete, @NativeQuery)"
+    url: "https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Data JPA 4.1: Transactionality (CRUD methods read-only, declared queries none)"
+    url: "https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html"
+    verifiedOn: "2026-10-21"
+  - title: "CrudRepository: findById returns Optional (Spring Data Commons 4.1 API)"
+    url: "https://docs.spring.io/spring-data/commons/docs/current/api/org/springframework/data/repository/CrudRepository.html"
+    verifiedOn: "2026-10-21"
   - title: "PageRequest: zero-based page number (Spring Data Commons 4.1 API)"
     url: "https://docs.spring.io/spring-data/commons/docs/current/api/org/springframework/data/domain/PageRequest.html"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+A Spring Data repository is an interface you declare for one entity, such as `PaymentRepository extends JpaRepository<Payment, Long>`. The two type arguments are the entity class and the type of its id. At startup Spring Data creates a bean that implements the interface, so you inject it into `PaymentService` like any other bean. You add only the method signatures for the queries you need, and Spring Data writes their bodies.
+
 ## Why it exists
 
-Every entity needs the same data access code: save, find by id, page through, filter by a few fields. Spring Data lets you declare an interface and generates that code.
+Without it, each entity needs a data access class: an `EntityManager` field, a `findById` that calls `find`, a `save` that picks the right JPA call, and paging code with a separate count query. That code is almost the same for every entity, and it is easy to get slightly wrong. Spring Data writes it once, inside the framework. Your interface lists only what is special about this entity.
 
 ## How it works
 
@@ -48,10 +69,16 @@ Every entity needs the same data access code: save, find by id, page through, fi
   JR --> LP`}
 />
 
-- A method with `@Query` uses that query; otherwise the query is derived from the name.
-- JPQL names entities and fields; native SQL names tables and columns.
+1. At startup, Spring Data finds the interfaces that extend `Repository` and creates one bean for each.
+2. When you call an inherited method such as `save` or `findById`, the bean passes it to Spring Data's ready-made implementation, which uses the `EntityManager`.
+3. When you call a method that has `@Query`, it runs that query.
+4. When you call any other declared method, it uses a query built from the name: `findByStatusAndAmountGreaterThan` becomes "where status = ? and amount > ?".
+
+So an inherited method needs no code, a name builds a simple query, and `@Query` handles the rest.
 
 ## Example
+
+The payment service needs a filter, a paged list and a safe lookup by id:
 
 ```java
 public interface PaymentRepository extends JpaRepository<Payment, Long> {
@@ -60,20 +87,47 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
     @Query("select p from Payment p where p.status = :status")
     Page<Payment> findByStatusPaged(@Param("status") String status, Pageable page);
 }
-// payments.findByStatusPaged("PAID", PageRequest.of(0, 20, Sort.by("amount").descending()));
-// payments.findById(id).orElseThrow(() -> new PaymentNotFound(id));
+
+// in PaymentService
+Payment p = payments.findById(id)
+        .orElseThrow(() -> new PaymentNotFoundException(id));
+Page<Payment> firstPage = payments.findByStatusPaged("PAID",
+        PageRequest.of(0, 20, Sort.by("amount").descending()));
 ```
+
+What to notice:
+
+- The first method has no query text. `Status` and `Amount` must be fields of `Payment`, and `GreaterThan` becomes `>`.
+- The `@Query` text is JPQL: `Payment` and `p.status` are the entity and its field, not the table and column.
+- `orElseThrow` turns a missing row into your own exception, which the [global exception handler](card:exception-handling) can map to 404.
+- `PageRequest.of(0, 20, ...)` asks for the first 20 rows, largest first. Because the method returns `Page`, Spring Data also runs a count query.
+
+## Rules and defaults
+
+- **Query lookup (default):** Spring Data first looks for a declared query such as `@Query`, and only builds one from the method name if there is none.
+- **Update and delete queries:** an `@Query` that changes data needs `@Modifying`. Afterwards the persistence context can still hold entities with old values; `clearAutomatically = true` clears it so later reads load fresh rows.
+- **Transactions:** inherited CRUD methods already run in a transaction, read-only for reads. Methods you declare get none by default, so put `@Transactional` on the service method that calls them.
+- **Native SQL:** `@Query(nativeQuery = true)` or `@NativeQuery` runs plain SQL over tables and columns, which ties the query to one database.
+
+## Not to be confused with
+
+`CrudRepository` is the basic interface for any Spring Data store, `PagingAndSortingRepository` adds only sorted and paged `findAll`, and `JpaRepository` combines both and adds JPA extras such as `flush`. Rule: CrudRepository = the minimum; JpaRepository = everything a JPA app usually needs.
+
+## Common mistakes
+
+- **"Calling Optional.get() is fine, because the id comes from a real link."** A wrong or old id still arrives. `get()` then throws `NoSuchElementException`, which becomes a 500 error. Use `orElseThrow` with your own exception.
+- **"A derived deleteByStatus runs one DELETE statement."** It first loads the matching entities, then deletes them one by one, so `@PreRemove` callbacks run. For a bulk delete, write a `@Modifying` `@Query`.
 
 ## Interview Qs
 
-### If CrudRepository has CRUD, why JpaRepository?
+### If CrudRepository has CRUD, why do we need JpaRepository?
 
-JpaRepository adds JPA extras: List return types, paging and sorting, flush, saveAndFlush, batch deletes and getReferenceById. Use CrudRepository to expose fewer methods or stay store-neutral.
+JpaRepository adds JPA extras on top of CRUD: methods that return List instead of Iterable, paging and sorting, flush and saveAndFlush, batch deletes and getReferenceById. Use CrudRepository when you want to expose fewer methods or keep the interface independent of the store.
 
-### JPQL vs native SQL in @Query?
+### JPQL or native SQL in @Query?
 
-JPQL queries entities and their fields, so it is checked against the mapping and stays database-neutral. Native SQL (nativeQuery = true) queries tables and columns directly; use it for database-specific features.
+JPQL queries entities and their fields, so Hibernate checks it against the mapping and it works on any database. Native SQL, with nativeQuery = true, queries tables and columns directly. Use it for database-specific features that JPQL cannot express, and accept that it ties the query to one database.
 
-### Why does findById return Optional?
+### How does Spring Data implement an interface you never implemented?
 
-The row may not exist. Optional makes the caller handle that case, usually with orElseThrow, instead of getting a null or calling get() blindly.
+At startup it creates a proxy bean for each repository interface. Calls to inherited methods go to a ready-made implementation, SimpleJpaRepository for JPA. Calls to declared methods run the @Query text or a query built from the method name. Your code only sees the interface.

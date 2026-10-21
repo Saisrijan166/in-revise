@@ -5,86 +5,126 @@ title: Messaging with Spring Kafka
 topic: spring-cloud
 level: intermediate
 heat: 2
-hook: "KafkaTemplate sends to a topic; @KafkaListener methods in a consumer group share its partitions. Expect repeats, so make listeners idempotent."
+hook: "KafkaTemplate sends events to a topic; @KafkaListener methods in one consumer group share the work. An event can arrive twice, so listeners must be safe to repeat."
 points:
-  - { k: "KafkaTemplate", v: "send() is async: it returns a CompletableFuture" }
-  - { k: "Consumer group", v: "each partition goes to exactly one consumer of the group" }
-  - { k: "Same key", v: "same partition, so order holds per key" }
-  - { k: "At least once", v: "the default: a record can arrive twice", kind: minus }
-  - { k: "Keeps failing", v: "retry, then send it to a dead-letter topic" }
+  - { k: "KafkaTemplate", v: "send() does not wait: it returns a CompletableFuture that completes when Kafka confirms" }
+  - { k: "Consumer group", v: "listeners with the same group id share a topic; each partition goes to one of them" }
+  - { k: "Same key", v: "events with the same key go to the same partition, so their order is kept" }
+  - { k: "At least once", v: "the default: after a crash a record can be delivered again, so expect duplicates", kind: minus }
+  - { k: "Error handler", v: "by default a failing record is tried 10 times with no wait, then only logged", kind: default }
+  - { k: "Dead-letter topic", v: "with a DeadLetterPublishingRecoverer the failing record goes to <topic>-dlt instead" }
 trap:
   wrong: "Kafka delivers each message exactly once by default."
-  right: "The default is at least once: a crash after processing but before the offset commit redelivers. Exactly-once needs Kafka transactions."
+  right: "The default is at least once: a crash after processing but before the offset commit redelivers the record. Exactly-once needs Kafka transactions."
+  why: "Kafka does advertise exactly-once semantics, but it is an opt-in feature, not the default behaviour."
 sayIt: "I send with KafkaTemplate and consume with @KafkaListener in a consumer group. Offsets are committed after processing, so delivery is at least once and listeners must be idempotent. Failing records retry, then go to a dead-letter topic."
+buildsOn: [application-events, rest-api-design]
+scenarios:
+  - q: "The notification service crashes right after emailing a receipt for payment 42, before the offset is committed. It restarts. What happens, and how do you stop a second email?"
+    a: "The record is delivered again, because its offset was not committed: that is at-least-once delivery. Make the listener idempotent, for example store the payment id of each receipt sent and skip ids already in the table."
+  - q: "The payments topic has 3 partitions. You run 5 notification-service instances in the same group. How many do work?"
+    a: "Three. Each partition goes to exactly one consumer in a group, so two instances sit idle. To use more consumers, the topic needs more partitions."
 confusedWith: []
 tags: [spring-cloud, kafka]
 visual: flow
 sources:
-  - title: "Messaging with Kafka (Spring Boot 4.1.1 reference)"
+  - title: "Messaging with Kafka: auto-configured template and listener factory (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/messaging/kafka.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Handling exceptions: DefaultErrorHandler, dead-letter topic (Spring for Apache Kafka 4.1.1)"
     url: "https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Sending messages: send() returns a CompletableFuture (Spring for Apache Kafka 4.1.1)"
+    url: "https://docs.spring.io/spring-kafka/reference/kafka/sending-messages.html"
+    verifiedOn: "2026-10-21"
+  - title: "KafkaProducer.send: asynchronous, completes when the send is acknowledged (Apache Kafka 4.2 Javadoc)"
+    url: "https://kafka.apache.org/42/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html"
+    verifiedOn: "2026-10-21"
   - title: "Message listener containers: AckMode (Spring for Apache Kafka 4.1.1)"
     url: "https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/message-listener-container.html"
     verifiedOn: "2026-10-19"
   - title: "Design: delivery semantics, consumer groups (Apache Kafka 4.2 docs)"
     url: "https://kafka.apache.org/42/design/design/"
     verifiedOn: "2026-10-19"
+  - title: "Pattern: Transactional outbox (microservices.io)"
+    url: "https://microservices.io/patterns/data/transactional-outbox.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Apache Kafka is a message broker: services write **events** (records) to named **topics**, and other services read them later. A topic is split into **partitions** so that many consumers can read it in parallel. Spring for Apache Kafka gives you `KafkaTemplate` to send records and `@KafkaListener` to receive them, and Spring Boot configures both from `spring.kafka.*` properties. [Application events](card:application-events) stay inside one app; Kafka events travel between services.
 
 ## Why it exists
 
-A direct call makes a service wait for, and fail with, the service it calls. Events through Kafka decouple them: the producer does not wait.
+When a payment completes, the notification service must send a receipt. If the payment service calls it over HTTP, the payment waits for the email, and fails when the notification service is down. With Kafka, the payment service writes a `PaymentCompleted` event and moves on. The notification service reads it when it can; if it is down, the event waits in the topic. Neither service needs the other to be running.
 
 ## How it works
 
 <Mermaid
-  alt="KafkaTemplate sends records keyed by orderId to topic orders with 3 partitions. In group billing, listener 1 reads partitions 0 and 1, listener 2 reads partition 2. A record still failing goes to orders-dlt."
+  alt="The payment service's KafkaTemplate sends records keyed by paymentId to topic payments with 3 partitions. In group notifications, listener 1 reads partitions 0 and 1, listener 2 reads partition 2. A record that keeps failing goes to payments-dlt."
   chart={`flowchart LR
-  P["orders: KafkaTemplate"] -- "key = orderId" --> T[("topic orders, 3 partitions")]
-  T -- "partitions 0, 1" --> C1["billing listener 1"]
-  T -- "partition 2" --> C2["billing listener 2"]
-  C2 -. "still failing" .-> D[("orders-dlt")]`}
+  P["payment service: KafkaTemplate"] -- "key = paymentId" --> T[("topic payments, 3 partitions")]
+  T -- "partitions 0, 1" --> C1["notifications listener 1"]
+  T -- "partition 2" --> C2["notifications listener 2"]
+  C2 -. "still failing" .-> D[("payments-dlt")]`}
 />
 
-- Spring commits offsets after processing, so a crash can redeliver records.
+1. The payment service calls `send("payments", key, event)`. Kafka hashes the key to pick a partition, so one payment's events always land in the same partition, in order.
+2. All listeners with group id `notifications` share the topic: Kafka gives each partition to exactly one of them.
+3. Each listener reads records in order from its partitions and runs your method for each.
+4. After the records are processed, Spring commits the **offset**: the position the group has reached in that partition.
+5. If the app crashes before that commit, the records are delivered again after restart. This is **at-least-once** delivery.
 
 ## Example
 
+The notification service listens for completed payments and moves a record that keeps failing to a dead-letter topic.
+
 ```java
-@KafkaListener(topics = "orders", groupId = "billing")
-public void onOrder(OrderPlaced event) {
-    billing.chargeOnce(event);   // idempotent: safe if redelivered
+@KafkaListener(topics = "payments", groupId = "notifications")
+public void onPaymentCompleted(PaymentCompleted event) {
+    receipts.sendOnce(event);   // idempotent: skips payments already handled
 }
 
 @Bean
 DefaultErrorHandler errorHandler(KafkaTemplate<?, ?> template) {
-    var toDlt = new DeadLetterPublishingRecoverer(template);   // orders-dlt
+    var toDlt = new DeadLetterPublishingRecoverer(template);   // sends to payments-dlt
     return new DefaultErrorHandler(toDlt, new FixedBackOff(1000L, 2));
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Offset commit | AckMode `BATCH`, after a poll's records are processed | Spring Kafka 4.1 |
-| Error handler | 10 attempts, no delay, then the record is logged | Spring Kafka 4.1 |
-| Dead-letter topic | `<topic>-dlt`, same partition | Spring Kafka 4.1 |
-| Delivery | At least once | Apache Kafka 4.2 |
+- `sendOnce` must be safe to call twice for the same payment, because at-least-once delivery allows repeats.
+- `FixedBackOff(1000L, 2)` means 2 retries, 1 second apart: 3 tries in total, then the record goes to `payments-dlt`.
+- Boot attaches this error handler bean to the listener container factory it auto-configures. Without it, a failing record is tried 10 times and only logged.
+
+## Rules and defaults
+
+- **Offset commit (Spring Kafka 4.1):** `AckMode.BATCH` by default: offsets are committed after all records from one poll, the batch a consumer fetches at a time, are processed.
+- **Partitions and consumers:** a group can use at most one consumer per partition; extra consumers stay idle.
+- **Order:** Kafka keeps order only within one partition, never across a whole topic.
+- **Dead-letter topic:** by default `<topic>-dlt`, same partition as the original record, so it needs at least as many partitions.
+- **Exactly once:** needs Kafka transactions, and even then only for Kafka reads and writes, not for an email or a database outside Kafka.
+
+## Not to be confused with
+
+A **topic** is a named stream of events. A **consumer group** is a set of listeners that share the work of reading it. Rule: every group gets every event once; inside a group, each event is handled by one member. Two different services use two different group ids, so both get all events.
+
+## Common mistakes
+
+- **"Send the event inside the database transaction."** If the commit then fails, consumers get an event for a payment that was never saved. Send after commit, or use the [outbox pattern](https://microservices.io/patterns/data/transactional-outbox.html): save the event in the same transaction, and publish it from there.
 
 ## Interview Qs
 
 ### What is a consumer group?
 
-Consumers sharing a group id split a topic's partitions, one consumer per partition. Every group gets all messages; consumers beyond the partition count sit idle.
+A set of consumers that share one group id. They split a topic's partitions between them, one consumer per partition, so each record is processed once per group. Every group receives all records, so two services with different group ids both see every event. Consumers beyond the partition count sit idle.
 
 ### How do you keep messages in order?
 
-Kafka keeps order only within a partition. Give related events the same key, such as the order id, so they land in one partition.
+Kafka keeps order only within a partition. Give related events the same key, such as the payment id, so they land in one partition and are read in the order they were written.
 
 ### What happens when a listener keeps failing on a record?
 
-DefaultErrorHandler retries it, then logs it. With a DeadLetterPublishingRecoverer it goes to `<topic>-dlt`, so the partition moves on and the record is kept.
+The `DefaultErrorHandler` retries it, by default 10 times with no wait, then logs it and moves on. With a `DeadLetterPublishingRecoverer` it is published to `<topic>-dlt` instead, so the record is kept for later inspection or replay, not only written to the log.

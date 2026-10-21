@@ -5,16 +5,25 @@ title: "API Gateway: Spring Cloud Gateway"
 topic: spring-cloud
 level: intermediate
 heat: 2
-hook: "One front door: predicates decide which route a request takes, filters change it, and the route forwards it to a service."
+hook: "One front door for all services: predicates decide which route a request matches, filters change it on the way, and the route forwards it to a service."
 points:
-  - { k: "Route", v: "an id, a destination URI, predicates and filters" }
-  - { k: "Predicate", v: "decides IF a route matches: path, header, method..." }
-  - { k: "Filter", v: "changes the request before, or the response after, the call" }
-  - { k: "lb://orders", v: "Spring Cloud LoadBalancer picks a live orders instance" }
+  - { k: "Route", v: "one rule: an id, a destination URI, the predicates that must match, and the filters to apply" }
+  - { k: "Predicate", v: "a condition on the request, such as Path=/api/payments/**; it decides IF the route matches" }
+  - { k: "Filter", v: "changes the request before it is forwarded, or the response after it comes back" }
+  - { k: "lb://payment-service", v: "the destination is a service name; Spring Cloud LoadBalancer picks a live instance" }
+  - { k: "Shared work once", v: "rate limits, auth checks and circuit breakers live at the edge, not in every service", kind: plus }
+  - { k: "Extra hop", v: "every request passes the gateway, so it adds latency and must itself scale", kind: minus }
 trap:
   wrong: "The WebFlux gateway can be deployed as a war in Tomcat."
   right: "Gateway Server WebFlux needs Netty and does not run in a servlet container or as a war. Use Gateway Server Web MVC for a servlet stack."
-sayIt: "Spring Cloud Gateway is the API gateway at the edge. Predicates like Path=/orders/** pick the route, filters handle shared work such as rate limiting, and lb://orders balances across instances."
+  why: "Most Spring Boot web apps are servlet apps, so people assume every Spring web project can run in Tomcat."
+sayIt: "Spring Cloud Gateway is the API gateway at the edge. Predicates like Path=/payments/** pick the route, filters handle shared work such as rate limiting, and lb://payment-service balances across instances."
+buildsOn: [service-discovery-eureka, mvc-vs-webflux]
+scenarios:
+  - q: "A mobile app calls GET /api/payments/42 on the gateway. The payment service only knows /payments/42. How do you route it?"
+    a: "Add a route with predicate Path=/api/payments/**, the filter StripPrefix=1 to remove /api, and uri lb://payment-service. The predicate picks the route, the filter rewrites the path, and LoadBalancer picks an instance."
+  - q: "One client sends 1,000 requests per second and slows everyone down. Where do you stop it, and what does the client get?"
+    a: "At the gateway, with the RequestRateLimiter filter and its Redis rate limiter, keyed per user. Requests over the limit are answered with 429 Too Many Requests, and the payment service never sees them."
 confusedWith: []
 tags: [spring-cloud, api-gateway]
 visual: flow
@@ -22,6 +31,15 @@ sources:
   - title: "Spring Cloud Gateway 5.0.3: glossary and variants"
     url: "https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/glossary.html"
     verifiedOn: "2026-10-19"
+  - title: "Spring Cloud Gateway 5.0.3: How It Works (handler mapping, pre and post filters)"
+    url: "https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/how-it-works.html"
+    verifiedOn: "2026-10-21"
+  - title: "RoutePredicateHandlerMapping.lookupRoute: the first matching route is used (Spring Cloud Gateway 5.0.3 source, GitHub)"
+    url: "https://github.com/spring-cloud/spring-cloud-gateway/blob/v5.0.3/spring-cloud-gateway-server-webflux/src/main/java/org/springframework/cloud/gateway/handler/RoutePredicateHandlerMapping.java"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Cloud Gateway 5.0.3: StripPrefix filter"
+    url: "https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories/stripprefix-factory.html"
+    verifiedOn: "2026-10-21"
   - title: "Spring Cloud Gateway 5.0.3: How to include Server WebFlux"
     url: "https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/starter.html"
     verifiedOn: "2026-10-19"
@@ -33,26 +51,35 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+An API gateway is the single entry point that sits in front of all your services. Clients call only the gateway, and it forwards each request to the right service. Spring Cloud Gateway is Spring's gateway, built on Spring Boot. You describe **routes** in configuration: each route says which requests it accepts (its **predicates**), what to change on the way (its **filters**) and where to send them (its URI).
+
 ## Why it exists
 
-Clients should not need every service's address, and each service should not repeat routing, rate limiting and resilience code. A gateway does this once, at the edge.
+Without a gateway, the mobile app must know the address of the payment service, the order service and every other one, and each service repeats the same work: checking tokens, limiting request rates, adding headers. Changing a service's address breaks clients. A gateway hides the services behind one address and does the shared work once, at the edge. It also finds instances through [service discovery](card:service-discovery-eureka).
 
 ## How it works
 
 <Mermaid
-  alt="Gateway flow. A client sends GET /orders/42. The route with predicate Path=/orders/** matches. Pre filters such as the rate limiter run. The request goes to an orders instance through lb://orders. Post filters change the response, which goes back to the client."
+  alt="Gateway flow. A client sends GET /api/payments/42. The route with predicate Path=/api/payments/** matches. Pre filters run, such as the rate limiter and StripPrefix, which turns the path into /payments/42. The request goes to a payment-service instance through lb://payment-service. Post filters change the response, which goes back to the client."
   chart={`flowchart LR
-  C([Client]) -- "GET /orders/42" --> M{"Predicate: Path=/orders/**"}
-  M -- match --> PRE["Pre filters: rate limit"]
-  PRE -- "lb://orders" --> S[orders instance]
+  C([Client]) -- "GET /api/payments/42" --> M{"Predicate: Path=/api/payments/**"}
+  M -- match --> PRE["Pre filters: rate limit, StripPrefix"]
+  PRE -- "lb://payment-service" --> S[payment instance]
   S --> POST["Post filters"]
   POST --> C`}
 />
 
-- Route filters apply to one route; global filters to every route.
-- Rate limiting keeps a token bucket per key in Redis and answers 429 when it is empty.
+1. A request arrives. The gateway checks each route's predicates; the first route whose predicates all match is chosen.
+2. The route's filters run their "pre" part: for example, rate limiting and rewriting the path.
+3. The gateway forwards the request to the route's URI. With `lb://`, Spring Cloud LoadBalancer first picks a live instance from the discovery registry.
+4. When the response comes back, the filters run their "post" part, such as adding a header.
+5. The gateway returns the response to the client.
 
 ## Example
+
+The gateway's `application.yml` sends `/api/payments/**` to the payment service:
 
 ```yaml
 spring:
@@ -61,30 +88,42 @@ spring:
       server:
         webflux:
           routes:
-            - id: orders
-              uri: lb://orders
+            - id: payments
+              uri: lb://payment-service
               predicates:
-                - Path=/orders/**
+                - Path=/api/payments/**
+              filters:
+                - StripPrefix=1
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| `lb://` and no instance found | 503 (404 with `use404=true`) | Spring Cloud Gateway 5.0 |
-| Over the rate limit | 429 Too Many Requests | Spring Cloud Gateway 5.0 |
-| Rate-limit key | The user's principal name; no key is denied | Spring Cloud Gateway 5.0 |
+- The predicate `Path=/api/payments/**` is the "if": only matching requests use this route.
+- `StripPrefix=1` removes the first path part, so `/api/payments/42` reaches the service as `/payments/42`.
+- `lb://payment-service` is a service name, resolved by LoadBalancer. With `http://host:port` instead, every request would go to one fixed address.
+
+## Rules and defaults
+
+- **Two variants:** Gateway Server WebFlux runs on Netty and cannot run in a servlet container or as a war. Gateway Server Web MVC runs on the servlet stack.
+- **Property prefix (Gateway 5.0):** WebFlux routes live under `spring.cloud.gateway.server.webflux.routes`.
+- **Route vs global filters:** a route filter applies to one route; a global filter applies to every route.
+- **No instance for `lb://`:** the gateway answers 503 by default.
+- **Rate limiting:** `RequestRateLimiter` with the Redis rate limiter keeps a token bucket per key, by default the user's principal name. Over the limit it returns 429; a request with no key is denied.
+
+## Not to be confused with
+
+A **predicate** is a yes or no question about the request: does the path, header or method match? A **filter** is an action on the request or response. Rule: predicates choose the route; filters change the traffic.
 
 ## Interview Qs
 
 ### What does an API gateway do?
 
-It is the single entry point: it routes each request to the right service and does shared work once, such as rate limiting and circuit breaking.
+It is the single entry point for clients. It routes each request to the right service, often found through discovery, and does shared work once, such as authentication checks, rate limiting, circuit breaking and adding headers. Clients see one address, and services can move behind it.
 
 ### Predicates vs filters?
 
-A predicate is a condition on the request, such as `Path=/orders/**`; the route matches when its predicates are true. A filter changes the request before it is forwarded, or the response after.
+A predicate is a condition on the request, such as `Path=/payments/**` or a header check; a route is chosen when all its predicates are true. A filter changes the request before it is forwarded, or the response after, for example removing a path prefix or adding a header.
 
 ### How do you rate limit in Spring Cloud Gateway?
 
-Add the RequestRateLimiter filter with the Redis rate limiter. It keeps a token bucket per key: `replenishRate` is the steady rate, `burstCapacity` the bucket size. Over the limit it returns 429.
+Add the `RequestRateLimiter` filter with the Redis rate limiter. It keeps a token bucket per key, such as each user: `replenishRate` is the steady rate per second and `burstCapacity` the bucket size. Requests over the limit get 429 Too Many Requests.

@@ -5,88 +5,124 @@ title: Service Discovery with Eureka
 topic: spring-cloud
 level: intermediate
 heat: 2
-hook: "Services register with Eureka and send heartbeats; callers look up a name, and a client-side load balancer picks a live instance."
+hook: "Services register their address with Eureka and keep sending heartbeats; a caller looks up a service by name and picks one live instance itself."
 points:
-  - { k: "Eureka server", v: "the registry: @EnableEurekaServer" }
-  - { k: "Eureka client", v: "the starter registers the app; no annotation needed" }
-  - { k: "Caller side", v: "caches the registry; LoadBalancer picks one instance per call" }
-  - { k: "Self-preservation", v: "too few heartbeats: stop evicting, it may be a network fault" }
-  - { k: "Slow to notice", v: "a new instance can take about 3 heartbeats to be found", kind: minus }
+  - { k: "Eureka server", v: "the registry, a Boot app with @EnableEurekaServer that lists the live instances" }
+  - { k: "Eureka client", v: "adding the client starter registers the app under spring.application.name; no annotation" }
+  - { k: "Heartbeat", v: "each instance renews every 30 s; after 90 s with no renewal the server drops it", kind: default }
+  - { k: "Caller side", v: "the caller caches the registry, and Spring Cloud LoadBalancer picks one instance per call" }
+  - { k: "Self-preservation", v: "if too many heartbeats stop at once, the server stops dropping instances" }
+  - { k: "Slow to notice", v: "a new or dead instance can take a few heartbeats to show up in callers", kind: minus }
 trap:
   wrong: "Eureka is a load balancer that every request passes through."
-  right: "Eureka only keeps the list of live instances. The caller fetches it and picks one itself: client-side load balancing."
-sayIt: "Each service registers with Eureka and renews every 30 seconds; after 90 seconds of silence it is dropped. Callers cache the registry, and Spring Cloud LoadBalancer picks an instance per call."
+  right: "Eureka only keeps the list of live instances. The caller fetches the list and picks one itself, which is client-side load balancing."
+  why: "In diagrams Eureka sits in the middle of all services, so it looks like traffic flows through it."
+sayIt: "Each service registers with Eureka and renews every 30 seconds; after 90 seconds of silence it is dropped. Callers cache the registry, and Spring Cloud LoadBalancer picks an instance per call, so traffic never passes through Eureka."
+buildsOn: [spring-cloud-overview, http-clients]
+scenarios:
+  - q: "The payment service calls http://fraud-check/checks. Three fraud-check instances are registered. Which one gets the call, and who decides?"
+    a: "The payment service decides, inside its own process. Its @LoadBalanced client asks Spring Cloud LoadBalancer, which picks one of the three from the cached registry, round robin by default. Eureka is not on the request path."
+  - q: "A fraud-check instance's database is down and its /actuator/health says DOWN, but callers keep sending it requests. Why?"
+    a: "By default Eureka judges an instance only by its heartbeat, and the heartbeat still arrives, so it stays UP in the registry. Set eureka.client.healthcheck.enabled=true so the instance reports its Actuator health status to Eureka."
 confusedWith: []
 tags: [spring-cloud, service-discovery]
 visual: flow
 sources:
-  - title: "Spring Cloud Netflix 5.0.2: Eureka client and server"
+  - title: "Spring Cloud Netflix 5.0.2: Eureka client and server (registration, heartbeats, health checks)"
     url: "https://docs.spring.io/spring-cloud-netflix/reference/spring-cloud-netflix.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Cloud Netflix 5.0.2: configuration properties"
     url: "https://docs.spring.io/spring-cloud-netflix/reference/configprops.html"
     verifiedOn: "2026-10-19"
   - title: "Spring Cloud Commons 5.0.3: @LoadBalanced RestClient, LoadBalancer"
     url: "https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/common-abstractions.html"
     verifiedOn: "2026-10-19"
+  - title: "DNS for Services and Pods (Kubernetes docs)"
+    url: "https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Cloud Commons 5.0.3: Spring Cloud LoadBalancer (RoundRobinLoadBalancer default)"
+    url: "https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/loadbalancer.html"
+    verifiedOn: "2026-10-21"
   - title: "Server Self Preservation Mode (Netflix Eureka wiki)"
     url: "https://github.com/Netflix/eureka/wiki/Server-Self-Preservation-Mode"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Service discovery is how one service finds the current address of another by its name. Eureka is Netflix's discovery server, which Spring Cloud Netflix packages for Boot apps. It keeps a **registry**: a list of every running instance of every service, with its host and port. Each service is a **Eureka client**: it registers itself, and it reads the registry to find others.
+
 ## Why it exists
 
-Instances start, stop and move, so addresses keep changing. Services need a live directory to register in and look up by name.
+You could write `http://10.0.4.17:8080` for the fraud-check service in the payment service's config. But instances start, stop, crash and move, and there may be three of them today and six tomorrow, so a fixed address breaks. Discovery replaces fixed addresses with names: the payment service asks for `fraud-check`, and gets whatever instances are alive right now.
 
 ## How it works
 
 <Mermaid
-  alt="Eureka flow. Two orders instances register with the Eureka server and send heartbeats. The checkout service fetches the registry. When checkout calls http://orders, Spring Cloud LoadBalancer picks orders instance 2."
+  alt="Eureka flow. Two fraud-check instances register with the Eureka server and send heartbeats. The payment service fetches the registry. When the payment service calls http://fraud-check, Spring Cloud LoadBalancer, inside the payment service, picks fraud-check instance 2 and the call goes directly to it."
   chart={`flowchart LR
-  O1[orders 1] -- "register, heartbeat" --> E[(Eureka server)]
-  O2[orders 2] -- "register, heartbeat" --> E
-  C[checkout] -- "fetch registry" --> E
-  C -- "http://orders: LoadBalancer picks one" --> O2`}
+  F1[fraud-check 1] -- "register, heartbeat" --> E[(Eureka server)]
+  F2[fraud-check 2] -- "register, heartbeat" --> E
+  P[payment service] -- "fetch registry" --> E
+  P -- "http://fraud-check: LoadBalancer picks one" --> F2`}
 />
 
-- Silent instances are dropped; self-preservation pauses this when many go silent together.
-- Spring Cloud LoadBalancer uses round robin by default.
-- On Kubernetes, a Service with a DNS name often replaces Eureka.
+1. Each fraud-check instance starts and registers with Eureka under its `spring.application.name`.
+2. Every 30 seconds it sends a heartbeat. If none arrives for 90 seconds, Eureka drops the instance.
+3. The payment service fetches the registry and caches it, refreshing it every 30 seconds.
+4. When it calls `http://fraud-check/...`, Spring Cloud LoadBalancer replaces the name with one live instance from the cache.
+5. The request goes straight to that instance. Eureka never sees it.
+
+So the key idea: Eureka is a phone book, not a switchboard.
 
 ## Example
 
+The payment service's `FraudCheckClient`, a [RestClient](card:http-clients), resolves the fraud-check service by name:
+
 ```java
 @Bean
-@LoadBalanced
-RestClient.Builder restClientBuilder() {
+@LoadBalanced                       // service names in URLs go through LoadBalancer
+RestClient.Builder loadBalancedBuilder() {
     return RestClient.builder();
 }
 
-// builder: the injected @LoadBalanced RestClient.Builder
-// "orders" is a service name, resolved through Eureka
-Order order = builder.build().get().uri("http://orders/orders/{id}", 42)
-        .retrieve().body(Order.class);
+// in FraudCheckClient, whose RestClient http is built from that builder:
+FraudResult check(PaymentRequest request) {
+    return http.post().uri("http://fraud-check/checks")   // a service name, not a host
+            .body(request)
+            .retrieve().body(FraudResult.class);
+}
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Heartbeat (lease renewal) | Every 30 s | Spring Cloud Netflix 5.0 |
-| Instance dropped after | 90 s without a heartbeat | Spring Cloud Netflix 5.0 |
-| Client registry fetch | Every 30 s | Spring Cloud Netflix 5.0 |
-| Self-preservation | On, renewal threshold 0.85 | Spring Cloud Netflix 5.0 |
+- `fraud-check` is the other service's `spring.application.name`, not a DNS host name.
+- `@LoadBalanced` marks the builder, so every client built from it asks LoadBalancer to pick an instance per call.
+- Remove `@LoadBalanced` and the call fails, because the client tries to find a real host called `fraud-check`.
+
+## Rules and defaults
+
+- **Registration:** having `spring-cloud-starter-netflix-eureka-client` on the classpath is enough; you only set the server URL in `eureka.client.serviceUrl.defaultZone`.
+- **Timing (Spring Cloud Netflix 5.0):** heartbeat every 30 s, instance dropped after 90 s without one, client registry fetch every 30 s.
+- **Self-preservation:** on by default. When far fewer heartbeats arrive than expected, the server stops dropping instances, because the cause may be a network fault, not dead services.
+- **Health:** by default Eureka shows an instance as UP while heartbeats arrive. `eureka.client.healthcheck.enabled=true` sends its [Actuator](card:actuator) health status instead.
+- **Load balancing:** Spring Cloud LoadBalancer uses round robin by default.
+- **Kubernetes:** a Kubernetes Service already gives a stable DNS name and tracks its Pods, so many teams use that instead of Eureka.
+
+## Not to be confused with
+
+A **service registry** (Eureka) stores which instances exist. A **load balancer** chooses one instance for each call. Rule: Eureka answers "who is alive?"; LoadBalancer answers "which one now?". Here the load balancer runs inside the caller, which is called client-side load balancing.
 
 ## Interview Qs
 
 ### How does Eureka work?
 
-Each instance registers on startup and sends a heartbeat every 30 s; the server drops it after 90 s of silence. Callers fetch and cache the registry, and a client-side load balancer picks an instance per call.
+Each instance registers on startup and sends a heartbeat every 30 seconds; the server drops it after 90 seconds of silence. Callers fetch and cache the registry, and a client-side load balancer picks an instance for each call. Requests go directly between services.
 
 ### What is self-preservation mode?
 
-When far more instances go silent than expected, the server stops evicting them, so a network fault does not wipe out a healthy registry. The cost: dead instances may stay listed for a while.
+When far more instances stop renewing than expected, the Eureka server stops evicting them. A network problem between Eureka and the services should not wipe out a registry of healthy instances. The cost is that really dead instances may stay listed for a while, so callers need retries.
 
 ### Do you need Eureka on Kubernetes?
 
-Often not. Kubernetes gives each Service a DNS name and tracks the Pods behind it.
+Often not. Kubernetes gives each Service a DNS name and keeps the list of healthy Pods behind it, so callers use the Service name directly. Eureka still helps when services run outside Kubernetes, or across several platforms.

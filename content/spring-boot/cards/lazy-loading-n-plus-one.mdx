@@ -5,17 +5,25 @@ title: Lazy Loading and the N+1 Problem
 topic: data
 level: interview
 heat: 3
-hook: "Touch a lazy association once per row and 1 query becomes 1 + N; fetch what the use case needs in the first query."
+hook: "A lazy link loads on first use, so reading it once per row turns 1 query into 1 + N; load what the use case needs in the first query instead."
 points:
-  - { k: "N+1", v: "1 query for 100 orders + 100 for their customers = 101" }
-  - { k: "Fix", v: "JOIN FETCH or @EntityGraph: parents and children in one query", kind: plus }
-  - { k: "Batch fetching", v: "one IN query per batch of parents: fewer queries, not one" }
-  - { k: "LazyInitializationException", v: "lazy data touched after the persistence context closed", kind: minus }
-  - { k: "open-in-view (Boot 4.1)", v: "on by default in web apps; logs a startup warning", kind: default }
+  - { k: "Lazy loading", v: "the linked entity loads on first use through a stand-in object, not together with its owner" }
+  - { k: "N+1", v: "1 query for 100 payments, then 1 per customer as the loop reads it: up to 101 queries", kind: minus }
+  - { k: "Fix per query", v: "JOIN FETCH or @EntityGraph loads payments and their customers in one SQL query", kind: plus }
+  - { k: "Batch fetching", v: "loads waiting stand-ins with one query per batch: fewer queries than N+1, but more than one" }
+  - { k: "LazyInitializationException", v: "a lazy link was read after its persistence context had closed", kind: minus }
+  - { k: "open-in-view (Boot 4.1)", v: "on by default in web apps, with a startup warning; lazy loads can then run during JSON writing", kind: default }
 trap:
   wrong: "Make the association EAGER to fix N+1."
-  right: "In JPQL queries, EAGER still runs a select per row. Keep it LAZY and fetch per query with JOIN FETCH or @EntityGraph."
+  right: "In a JPQL query, EAGER still loads the links with extra selects. Keep it LAZY and fetch per query with JOIN FETCH or @EntityGraph."
+  why: "EAGER sounds like \"load everything in the first query\", and loading one entity by id often does use a join, so people expect the same for every query."
 sayIt: "N+1 is one query for the parents plus one per parent when a lazy association is touched in a loop. I keep associations LAZY and fetch what each use case needs with JOIN FETCH or @EntityGraph, then map to DTOs."
+buildsOn: [jpa-entities, persistence-context, dto]
+scenarios:
+  - q: "The /payments page is fast on your laptop and slow in production. The SQL log shows select ... from customer where id = ? hundreds of times per request. What is happening, and how do you fix it?"
+    a: "It is N+1: one query loads the payments, then each payment's lazy customer runs its own query when the page reads the name. With 10 test rows nobody notices. Add @EntityGraph(attributePaths = \"customer\") or a JOIN FETCH query for this page, so customers come in the first query."
+  - q: "You set spring.jpa.open-in-view=false. A controller returns a Payment entity, and the request now fails with LazyInitializationException. Why, and what is the right fix?"
+    a: "Jackson reads payment.customer while writing the JSON, after the service's transaction ended, so the persistence context is closed and the stand-in cannot load. Fetch the customer in the service query and return a PaymentResponse DTO instead of the entity."
 confusedWith: [lazy-vs-eager-fetch]
 tags: [jpa, hibernate, performance]
 visual: flow
@@ -23,64 +31,106 @@ sources:
   - title: "Hibernate ORM 7.4 User Guide: fetching, EAGER secondary selects, batch fetching"
     url: "https://docs.hibernate.org/orm/7.4/userguide/html_single/"
     verifiedOn: "2026-10-19"
-  - title: "Spring Data JPA 4.1: JPA query methods (@EntityGraph)"
+  - title: "Spring Data JPA 4.1: JPA query methods (@EntityGraph attributePaths)"
     url: "https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "SQL Databases: Open EntityManager in View (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/data/sql.html"
+    verifiedOn: "2026-10-21"
   - title: "JpaBaseConfiguration: open-in-view default and warning (Spring Boot v4.1.1 source)"
     url: "https://github.com/spring-projects/spring-boot/blob/v4.1.1/module/spring-boot-jpa/src/main/java/org/springframework/boot/jpa/autoconfigure/JpaBaseConfiguration.java"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "A Short Guide to Hibernate 7 (7.4): 8.5 batch fetching (an SQL ARRAY of keys on PostgreSQL)"
+    url: "https://docs.hibernate.org/orm/7.4/introduction/html_single/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Lazy loading means a linked entity, such as a payment's customer, is not read when the payment loads. Hibernate puts a stand-in object, called a proxy, in the `customer` field and runs a query the first time you use it. The N+1 problem is the cost of this in a loop: 1 query loads N payments, then the first use of each payment's customer runs 1 more query, N more in total.
 
 ## Why it exists
 
-Collections load lazily to save work. But reading a lazy association for each item in a list quietly runs one extra query per item.
+If every link loaded at once, one payment would pull in its customer, the customer's other payments, and so on, even for a screen that shows only amounts. Lazy loading avoids that by loading on demand. The price is hidden queries. A page that lists 100 payments with customer names can quietly run 101 queries: fast on a laptop with 10 rows, slow in production. Knowing the pattern lets you load exactly what each screen needs in one query.
 
 ## How it works
 
 <Mermaid
-  alt="Showing 3 orders with their customers. N+1: one query selects the orders, then reading each order's customer runs one more query, 4 in total. JOIN FETCH: one query selects orders joined with customers."
+  alt="Listing 3 payments with their customers. N+1: one query selects the payments, then reading each payment's customer runs one more query, 4 in total. JOIN FETCH: one query selects payments joined with customers."
   chart={`flowchart TD
   subgraph NP ["N+1: 1 + N queries"]
-    A["select orders (3 rows)"] --> L{"for each order: getCustomer()"}
+    A["select payments (3 rows)"] --> L{"for each payment: getCustomer().getName()"}
     L --> B1["select customer 1"]
     L --> B2["select customer 2"]
     L --> B3["select customer 3"]
   end
   subgraph JF ["JOIN FETCH: 1 query"]
-    J["select orders join fetch customer"]
+    J["select payments join fetch customer"]
   end`}
 />
 
-- Returning an entity from a controller lets the JSON serialiser touch lazy fields; return a DTO instead.
-- With `spring.jpa.open-in-view=false`, lazy access outside the service fails fast with LazyInitializationException.
+1. `findByStatus("PAID")` runs one SELECT on the payment table. Each `customer` field holds a proxy whose data is not loaded yet.
+2. The loop calls `getCustomer().getName()`. The proxy has no name yet, so Hibernate runs a SELECT for that customer.
+3. This repeats for every payment. A customer already loaded in this persistence context is reused, so the extra queries are one per distinct customer.
+4. The fix is to tell JPA up front. `JOIN FETCH` in JPQL, or `@EntityGraph` on the repository method, makes the first SELECT join the customer table, and the loop runs no more queries.
+5. If a proxy is first used after the persistence context closed, Hibernate cannot query any more and throws `LazyInitializationException`.
 
 ## Example
 
-```java
-public interface OrderRepository extends JpaRepository<Order, Long> {
-    @Query("select o from Order o join fetch o.customer")
-    List<Order> findAllWithCustomer();               // 1 query
+This service method looks harmless, but it runs 1 + N queries:
 
-    @EntityGraph(attributePaths = "customer")
-    List<Order> findByStatus(String status);         // 1 query
+```java
+@Transactional(readOnly = true)
+public List<String> customerNames() {
+    List<Payment> paid = payments.findByStatus("PAID");       // 1 query: N payments
+    return paid.stream()
+            .map(p -> p.getCustomer().getName())            // 1 more query per customer
+            .toList();
 }
 ```
 
-```properties
-spring.jpa.open-in-view=false
-spring.jpa.properties.hibernate.default_batch_fetch_size=16
+The fix is in the repository, chosen per query:
+
+```java
+public interface PaymentRepository extends JpaRepository<Payment, Long> {
+    @EntityGraph(attributePaths = "customer")
+    List<Payment> findByStatus(String status);                 // payments and customers: 1 query
+
+    @Query("select p from Payment p join fetch p.customer where p.amount > :min")
+    List<Payment> findLargeWithCustomer(@Param("min") BigDecimal min);
+}
 ```
+
+What to notice:
+
+- `@EntityGraph` keeps the derived query and adds a join for `customer`. `JOIN FETCH` does the same inside your own JPQL.
+- The mapping stays `LAZY`, so other screens that never show customers stay cheap.
+- With `@EntityGraph` added, `customerNames()` runs one query with the same code, because every customer is already loaded.
+
+## Rules and defaults
+
+- **open-in-view (Boot 4.1):** `spring.jpa.open-in-view` is on by default in web apps, and Boot logs a warning at startup until you set it. It keeps the `EntityManager` open for the whole request, so lazy loads work in controllers and during JSON writing, out of sight of your service.
+- **Turning it off:** with `spring.jpa.open-in-view=false`, lazy access outside the transaction fails at once with `LazyInitializationException`, which shows you where data is missing.
+- **Batch fetching:** `spring.jpa.properties.hibernate.default_batch_fetch_size=16` loads up to 16 waiting proxies with one query (an IN list, or an array on PostgreSQL). It cuts 100 extra queries to about 7, not to zero.
+
+## Not to be confused with
+
+The fetch type, LAZY or EAGER, is set on the mapping and decides when a link loads in every query. `JOIN FETCH` and `@EntityGraph` are set on one query and load the link for that query only. Rule: mapping = the default for all queries; fetch join = what this use case needs.
+
+## Common mistakes
+
+- **"Turn on open-in-view to fix LazyInitializationException."** It hides the error by keeping the `EntityManager` open, but the lazy queries still run, now while the JSON is written, often as N+1. Load what you need in the service and return a [DTO](card:dto).
 
 ## Interview Qs
 
 ### What is the N+1 problem, and how do you fix it?
 
-One query loads N parents, then a lazy association runs one query per parent. Fetch per use case with JOIN FETCH or @EntityGraph; batch fetching only reduces the count.
+One query loads N parents, then reading a lazy association runs one query per parent. Fix it per use case: JOIN FETCH in JPQL or @EntityGraph on the repository method loads parents and children in one query. Batch fetching only reduces the number of queries.
 
 ### If EAGER loads the data, why use LAZY?
 
-EAGER loads the association whenever the entity loads, even unused, and JPQL queries still add a select per row. LAZY loads only on use; you then fetch eagerly per query where needed.
+EAGER loads the association every time the entity loads, even when nobody uses it, and in JPQL queries it still adds a select per row. LAZY loads only on use. You then load eagerly per query, with JOIN FETCH or @EntityGraph, where a use case needs the data.
 
 ### Why do you get LazyInitializationException?
 
-A lazy association is read after its persistence context closed, often by a controller or the JSON serialiser. Load the data inside the transactional service, or return a DTO.
+A lazy association is read after its persistence context closed, often in a controller or while Jackson writes the JSON. Load the data inside the transactional service method, with a fetch join if needed, and return a DTO instead of the entity.

@@ -5,70 +5,121 @@ title: Filters, Interceptors and AOP
 topic: web
 level: intermediate
 heat: 2
-hook: "Filter wraps the HTTP request, interceptor wraps the controller call, AOP wraps any bean method: outside to inside."
+hook: "A filter wraps the whole HTTP request, an interceptor wraps the controller call, and AOP wraps any bean method: three layers, from the outside in."
 points:
-  - { k: "Servlet filter", v: "Servlet API; every request, before DispatcherServlet" }
-  - { k: "HandlerInterceptor", v: "Spring MVC; knows the handler: preHandle, postHandle, afterCompletion" }
-  - { k: "AOP", v: "any Spring bean method, e.g. @Transactional on a service" }
-  - { k: "Filter beans", v: "Boot registers each one, mapped to /*", kind: default }
-  - { k: "Error in a filter", v: "happens before DispatcherServlet: @ControllerAdvice never sees it", kind: minus }
+  - { k: "Servlet filter", v: "part of the Servlet API; runs for every request, before and after DispatcherServlet" }
+  - { k: "HandlerInterceptor", v: "part of Spring MVC; runs inside DispatcherServlet and knows which controller method was chosen" }
+  - { k: "AOP", v: "wraps calls to Spring bean methods, for example @Transactional around a service method" }
+  - { k: "Filter beans", v: "Spring Boot registers every Filter bean with the server, mapped to all URLs (/*)", kind: default }
+  - { k: "Error in a filter", v: "it happens before DispatcherServlet, so @RestControllerAdvice never sees it", kind: minus }
 trap:
-  wrong: "Add a response header in an interceptor's postHandle."
-  right: "For @ResponseBody methods the response is already written before postHandle. Use a filter or a ResponseBodyAdvice."
-sayIt: "Filters are Servlet components around every request: logging, request IDs, security. Interceptors are Spring MVC hooks around the matched handler. AOP wraps bean methods, like transactions on services."
+  wrong: "Add a response header in an interceptor's postHandle method."
+  right: "For @ResponseBody and ResponseEntity methods the response is already written before postHandle runs. Use a filter or a ResponseBodyAdvice."
+  why: "The name postHandle suggests 'after the controller, before the response is sent', which is only true for apps that render HTML views."
+sayIt: "Filters are Servlet components around every request: request IDs, logging, security. Interceptors are Spring MVC hooks around the matched controller method. AOP wraps bean method calls, such as transactions on services."
+buildsOn: [dispatcher-servlet, spring-aop, exception-handling]
+scenarios:
+  - q: "Every request to the payment service must be logged with its URL, final status and time taken, including requests that no controller handles. Filter, interceptor or AOP?"
+    a: "A filter. It wraps every request that reaches the server, so after chain.doFilter returns it can log the final status and time. An interceptor depends on DispatcherServlet choosing a handler, and AOP knows nothing about HTTP requests."
+  - q: "A filter that checks an API key throws an exception. Your @RestControllerAdvice has a handler for that exception, but it never runs. Why?"
+    a: "Filters run before DispatcherServlet, and advice handlers are called by DispatcherServlet's exception resolvers. The exception goes to the server's error handling instead, so the filter itself must write the error response."
 confusedWith: []
 tags: [web, filters, interceptors, cross-cutting]
 visual: table
 sources:
-  - title: "Interception (Spring Framework 7.0 reference)"
+  - title: "Interception: preHandle, postHandle, afterCompletion (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/handlermapping-interceptor.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Filters (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/filters.html"
     verifiedOn: "2026-10-19"
-  - title: "Servlet Web Applications: registering Filters (Spring Boot 4.1 reference)"
+  - title: "Servlet Web Applications: registering Filters, order (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/web/servlet.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "OncePerRequestFilter and HandlerInterceptor (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/7.0.x/javadoc-api/org/springframework/web/servlet/HandlerInterceptor.html"
+    verifiedOn: "2026-10-21"
   - title: "Exceptions: resolvers handle errors from handler mapping or execution (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/exceptionhandlers.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Filters, interceptors and AOP are three ways to run the same code around many requests or calls without writing it in each controller. A servlet filter belongs to the Servlet API and wraps the whole HTTP request. A HandlerInterceptor belongs to Spring MVC and wraps the call to the chosen controller method. [AOP](card:spring-aop), which you met earlier, wraps calls to Spring bean methods, such as a service method.
 
 ## Why it exists
 
-Some logic must run for many requests: logging, request IDs, auth checks, timing. Writing it in every controller repeats code; these three hooks run it once, at three different depths.
+Some work must happen for many requests: adding a request ID, logging, timing, checking an API key. Copying it into every controller method repeats code and is easy to forget on a new endpoint. These hooks run it once, at a chosen depth. The depth decides what the code can see: raw HTTP for a filter, the chosen handler for an interceptor, the method and its arguments for AOP.
 
 ## How it works
 
 <Compare id="filter-vs-interceptor-vs-aop" />
 
-- Order: filters, DispatcherServlet, `preHandle`, controller, service (through an AOP proxy), `postHandle`, `afterCompletion`, then filters unwind.
-- `preHandle` returning false stops the request; the controller never runs.
-- Extend `OncePerRequestFilter` so the filter runs once per request.
+For `GET /payments/42`, the order is:
+
+1. Each filter runs its code and calls `chain.doFilter(...)` to pass the request on. A filter that does not call it stops the request.
+2. DispatcherServlet picks the controller method, then calls each interceptor's `preHandle`. If one returns `false`, the controller is never called.
+3. The controller runs and calls `PaymentService` through its AOP proxy, so advice such as a transaction wraps the service method.
+4. The interceptors' `postHandle` runs, then `afterCompletion` once the request is complete, even after an error, for every interceptor whose `preHandle` returned `true`.
+5. Control returns to the filters in reverse order, so each can act after the response, for example to log the time taken.
 
 ## Example
 
+A filter that gives every response a request ID, and an interceptor registered only for payment URLs:
+
 ```java
-@Component                                         // a filter for every request
+@Component                                          // Boot registers it for every URL (/*)
 class RequestIdFilter extends OncePerRequestFilter {
+    @Override
     protected void doFilterInternal(HttpServletRequest req, HttpServletResponse res,
             FilterChain chain) throws ServletException, IOException {
         res.setHeader("X-Request-Id", UUID.randomUUID().toString());
-        chain.doFilter(req, res);                  // pass it on, or stop here
+        chain.doFilter(req, res);                   // pass it on; skip this and nothing else runs
     }
 }
 ```
 
+```java
+@Component
+class PaymentTimingInterceptor implements HandlerInterceptor {
+    public boolean preHandle(HttpServletRequest req, HttpServletResponse res, Object handler) {
+        req.setAttribute("start", System.nanoTime());
+        return true;                                // false: the controller is never called
+    }
+}
+@Configuration
+class WebConfig implements WebMvcConfigurer {
+    private final PaymentTimingInterceptor timing;
+    WebConfig(PaymentTimingInterceptor timing) { this.timing = timing; }
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(timing).addPathPatterns("/payments/**");
+    }
+}
+```
+
+What to notice:
+
+- The filter is a bean, so Spring Boot registers it with Tomcat on its own. The interceptor is also a bean, but it runs only after you add it in a `WebMvcConfigurer`.
+- `OncePerRequestFilter` is Spring's base class for filters: it aims for exactly one run per request dispatch and hands you typed `HttpServletRequest` and `HttpServletResponse` objects.
+- The header is set before `chain.doFilter`, while the response is not yet written. Setting it after the chain could be too late.
+
+## Rules and defaults
+
+- **Filter order:** usually safe to leave unordered. If order matters, put `@Order` on the filter class or use a `FilterRegistrationBean`; `@Order` on a `@Bean` method does not work.
+- **Interceptor scope:** `addPathPatterns` and `excludePathPatterns` choose the URLs. Interceptors run only for requests that matched a handler.
+- **Security:** the Spring docs advise against interceptors as a security layer, because their path matching can differ from the controllers'. Use Spring Security, which is a filter, as you will see in [Spring Security and the Filter Chain](card:security-filter-chain).
+
 ## Interview Qs
 
-### Both can intercept requests: why filters and interceptors?
+### Both can intercept requests: why do we need filters and interceptors?
 
-Different layers. A filter belongs to the Servlet API and sees every request before Spring MVC. An interceptor belongs to Spring MVC, runs inside DispatcherServlet, and knows which controller method was chosen.
+They work at different layers. A filter belongs to the Servlet API and sees every request before Spring MVC, even ones no controller handles. An interceptor belongs to Spring MVC, runs inside DispatcherServlet, and knows which controller method was chosen, so it suits handler-aware logic.
 
 ### If AOP can intercept methods, why do we need filters?
 
-AOP wraps calls to Spring bean methods; it knows nothing about the HTTP request as a whole. Filters work on the raw request and response, for example headers or compression.
+AOP wraps calls to Spring bean methods; it does not see the HTTP request as a whole. Filters work on the raw request and response, for example headers, compression or authentication before any controller is chosen. So a filter guards the request and AOP guards the business method.
 
 ### Explain preHandle, postHandle and afterCompletion.
 
-preHandle runs before the handler; false stops the request. postHandle runs after the handler, before the view renders. afterCompletion runs after the complete request has finished and suits cleanup.
+preHandle runs before the handler and can stop the request by returning false. postHandle runs after the handler, before a view renders; for JSON responses the body is already written. afterCompletion runs after the complete request, even after an exception, so it suits cleanup and timing.

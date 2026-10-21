@@ -5,76 +5,118 @@ title: JPA Entities and Relationships
 topic: data
 level: intermediate
 heat: 3
-hook: "An entity is a class mapped to a table; in a relationship, the side with the foreign key is the owner."
+hook: "An entity is a class stored as rows in a table; when two entities are linked, the side whose table holds the foreign key is the owner."
 points:
-  - { k: "Entity rules", v: "@Entity, an @Id, a no-arg constructor; not a record" }
-  - { k: "Fetch defaults (JPA 3.2)", v: "...ToOne: EAGER; ...ToMany: LAZY", kind: default }
-  - { k: "Owning side", v: "@ManyToOne holds the foreign key; the other side says mappedBy" }
-  - { k: "Cascade", v: "none by default; ALL = PERSIST, MERGE, REMOVE, REFRESH, DETACH", kind: default }
-  - { k: "CascadeType.REMOVE", v: "deletes children with the parent; wrong for shared data", kind: minus }
+  - { k: "Entity", v: "a class stored as table rows; it needs @Entity, an @Id field and a no-arg constructor" }
+  - { k: "Foreign key", v: "a column that holds the id of a row in another table, such as payment.customer_id" }
+  - { k: "Owning side", v: "in a two-way one-to-many, the @ManyToOne field; only its value fills the foreign key column" }
+  - { k: "mappedBy", v: "goes on the inverse side (the list); it names the owner's field and stores nothing itself" }
+  - { k: "Fetch defaults (JPA 3.2)", v: "@ManyToOne and @OneToOne load EAGER; @OneToMany and @ManyToMany load LAZY", kind: default }
+  - { k: "Cascade (JPA 3.2)", v: "no operation cascades by default; you list the ones the children should follow", kind: default }
 trap:
-  wrong: "Adding a child to parent.getChildren() saves the link."
-  right: "Only the owning side is written. Also call child.setParent(parent), ideally in one helper that sets both sides."
-sayIt: "An entity is a class mapped to a table with @Entity and @Id. In one-to-many, the @ManyToOne side owns the foreign key and the parent uses mappedBy. Cascade passes operations to children; orphanRemoval deletes unlinked ones."
+  wrong: "Adding a payment to customer.getPayments() saves the link."
+  right: "Only the owning side is written. Also call payment.setCustomer(customer), ideally in one helper that sets both sides."
+  why: "In Java the list is the obvious place to add a child, and the objects in memory look correct, so it seems the database must match."
+sayIt: "An entity is a class mapped to a table with @Entity and @Id. In a one-to-many link, the @ManyToOne side owns the foreign key and the parent's list uses mappedBy. Cascade passes operations to children, and orphanRemoval deletes children that are taken out of the list."
+buildsOn: [jpa-hibernate-spring-data]
+scenarios:
+  - q: "Inside a transaction you call customer.getPayments().add(newPayment) and save the customer, which cascades PERSIST. What is in the new row's customer_id column?"
+    a: "It is null. Customer.payments is the inverse side (mappedBy), so Hibernate ignores it when writing the foreign key. The column is filled only from Payment.customer, which was never set. The addPayment helper fixes this by setting both sides."
+  - q: "Should Customer.payments use CascadeType.REMOVE and orphanRemoval = true?"
+    a: "Usually no. Payments are financial records that must stay even if the customer link changes, and REMOVE would delete them with the customer. Use REMOVE and orphanRemoval only for children that cannot exist without one parent, such as the lines of an order."
 confusedWith: [lazy-vs-eager-fetch]
 tags: [jpa, entity, mapping]
 visual: code
 sources:
-  - title: "Jakarta Persistence 3.2 specification: 2.1 entity class, 2.11 relationships, 3.3 cascade and orphanRemoval"
+  - title: "Jakarta Persistence 3.2 specification: 2.1 entity class, 2.11 relationships, 2.12 mapping defaults, 3.3 cascade and orphanRemoval"
     url: "https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "OneToMany: fetch, cascade, orphanRemoval defaults (Jakarta Persistence 3.2 API)"
     url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/OneToMany.html"
+    verifiedOn: "2026-10-19"
+  - title: "ManyToOne: fetch defaults to EAGER (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/ManyToOne.html"
     verifiedOn: "2026-10-19"
   - title: "CascadeType (Jakarta Persistence 3.2 API)"
     url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/CascadeType.html"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+A JPA entity is a Java class whose objects are stored as rows in a database table, such as `Payment` stored in the `payment` table. You mark the class with `@Entity` and its primary key field with `@Id`. Relationship annotations, such as `@ManyToOne`, describe how entities point to each other. In the database that link is a foreign key: a column, such as `payment.customer_id`, that holds the id of a row in another table.
+
 ## Why it exists
 
-Code works with objects; the database stores rows linked by foreign keys. Entity mappings tell JPA which class is which table and which field is which foreign key.
+Java objects link through references: `payment.getCustomer()`. Tables link through foreign key columns. Without a mapping you would write the join yourself, copy the columns into two objects, and on save pull the customer's id out and put it in the right column. Entity annotations state once which field is which column and which reference is which foreign key, so Hibernate writes the joins and fills the foreign key for you.
 
 ## How it works
 
-| Annotation | Means | Default fetch |
+| Annotation | Means | Default fetch (JPA 3.2) |
 | --- | --- | --- |
-| `@ManyToOne` | Many children point to one parent; holds the foreign key | EAGER |
-| `@OneToMany` | The parent's list of children | LAZY |
-| `@OneToOne` | One row to one row | EAGER |
-| `@ManyToMany` | Linked through a join table | LAZY |
+| `@ManyToOne` | Many payments point to one customer; this field holds the foreign key | EAGER |
+| `@OneToMany` | The customer's list of payments | LAZY |
+| `@OneToOne` | One row is linked to exactly one row | EAGER |
+| `@ManyToMany` | Rows on both sides are linked through a join table | LAZY |
 
-- The [owning side](card:owning-side) decides what is written; `mappedBy` marks the inverse side.
-- `@JoinColumn` names the foreign key column on the owning side.
-- `orphanRemoval = true` deletes a child removed from the parent's collection, at flush.
+1. At startup, Hibernate reads every `@Entity` class and maps the class to a table and each field to a column.
+2. For each relationship it finds the owning side, the field that becomes the foreign key column. In a two-way one-to-many link, JPA requires this to be the `@ManyToOne` field, here `Payment.customer`.
+3. The other side, `Customer.payments`, says `mappedBy = "customer"`. This marks it as a mirror of the owner's field, so Hibernate writes nothing for it.
+4. When Hibernate writes a payment, it fills `customer_id` from `Payment.customer`. A change made only to the list never reaches the database.
+
+So there is one foreign key in the database, and only one side of the Java pair controls it.
 
 ## Example
+
+A customer has many payments. The payment row holds the link:
 
 ```java
 @Entity
 public class Customer {
     @Id @GeneratedValue private Long id;
-    @OneToMany(mappedBy = "customer", cascade = CascadeType.ALL, orphanRemoval = true)
-    private List<Order> orders = new ArrayList<>();
-    public void addOrder(Order o) { orders.add(o); o.setCustomer(this); }
+    @OneToMany(mappedBy = "customer", cascade = CascadeType.PERSIST)
+    private List<Payment> payments = new ArrayList<>();
+    public void addPayment(Payment p) { payments.add(p); p.setCustomer(this); }
 }
-@Entity public class Order {
+@Entity
+public class Payment {
     @Id @GeneratedValue private Long id;
+    private BigDecimal amount;  private String status;
     @ManyToOne(fetch = FetchType.LAZY) @JoinColumn(name = "customer_id")
-    private Customer customer;   // owning side
+    private Customer customer;                     // owning side: holds the foreign key
+    void setCustomer(Customer c) { customer = c; }
 }
 ```
+
+What to notice:
+
+- `mappedBy = "customer"` names the field in `Payment`. Without it, Hibernate would treat the list as a second, separate relationship and expect a join table.
+- `addPayment` sets both sides. If it only called `payments.add(p)`, the objects would look linked in memory, but `customer_id` would stay empty.
+- `cascade = CascadeType.PERSIST` means saving a new customer also saves the new payments in its list.
+- `fetch = FetchType.LAZY` overrides the EAGER default of `@ManyToOne`. You will see why in [lazy loading](card:lazy-loading-n-plus-one).
+
+## Rules and defaults
+
+- **Entity class (JPA 3.2):** it needs `@Entity`, an `@Id`, and a public or protected constructor with no parameters. It must be a top-level or static nested class and must not be final. A record, enum or interface cannot be an entity.
+- **Id generation:** `@GeneratedValue` lets the database or Hibernate create the id. Its default strategy is `AUTO`, where the provider picks one for your database.
+- **Cascade types:** `CascadeType.ALL` means PERSIST, MERGE, REMOVE, REFRESH and DETACH together.
+- **orphanRemoval:** `false` by default. With `true`, a child taken out of the parent's list is deleted.
+
+## Not to be confused with
+
+- **Owning side and parent:** the parent in business terms (`Customer`) is not the owning side. The owner is the entity whose table holds the foreign key column (`Payment`). Rule: owning side = the table with the foreign key.
+- **Fetch type and ownership:** LAZY or EAGER says *when* an association is loaded. It has nothing to do with which side writes the foreign key.
 
 ## Interview Qs
 
 ### What is the owning side, and what does mappedBy do?
 
-The owning side's field is what JPA writes to the foreign key. In one-to-many it must be the @ManyToOne side. The other side sets mappedBy to the owner's field name; changes made only there are not saved.
+The owning side is the field JPA reads to write the foreign key. In a bidirectional one-to-many, the spec requires it to be the @ManyToOne side. The other side sets mappedBy to the owner's field name. Changes made only on the mappedBy side are not saved.
 
-### Cascade REMOVE vs orphanRemoval?
+### CascadeType.REMOVE or orphanRemoval?
 
-CascadeType.REMOVE deletes children when the parent is deleted. orphanRemoval also deletes a child that is just removed from the parent's collection. Use both only for children owned by one parent, like order lines.
+CascadeType.REMOVE deletes the children when the parent itself is deleted. orphanRemoval = true also deletes a child that is only removed from the parent's collection while the parent stays. Use either only for children owned by one parent, such as order lines, never for shared data.
 
 ### Can a Java record be an entity?
 
-No. The spec forbids records, enums and interfaces as entities, and needs a public or protected no-arg constructor. Records work well as DTOs or query projections.
+No. The JPA spec forbids records, enums and interfaces as entities, because an entity class and its fields must not be final, and a record is final with final fields. Records work well as DTOs or as query results.

@@ -5,69 +5,105 @@ title: "Observability: Logs, Metrics, Traces"
 topic: testing-production
 level: intermediate
 heat: 2
-hook: "Metrics say something is wrong, traces say where, logs say why; Micrometer records metrics and traces from one observation."
+hook: "Metrics tell you something is wrong, a trace shows where a request got slow, and logs explain why; Micrometer records the first two from one observation."
 points:
-  - { k: "Metrics", v: "Micrometer; Prometheus scrapes /actuator/prometheus" }
-  - { k: "Traces", v: "Micrometer Tracing with OpenTelemetry or Brave" }
-  - { k: "Sampling", v: "10% of requests traced by default", kind: default }
-  - { k: "Logs", v: "traceId and spanId are added to each log line", kind: plus }
-  - { k: "Propagation", v: "only clients built from Boot's builders pass the trace on", kind: minus }
+  - { k: "Metrics", v: "numbers over time, such as requests per second; Micrometer records them, Prometheus collects them" }
+  - { k: "Traces", v: "one request followed across services as timed steps (spans), via Micrometer Tracing" }
+  - { k: "Logs", v: "each log line gets the request's traceId and spanId, so logs link to the trace", kind: plus }
+  - { k: "Sampling", v: "only 10% of requests are traced by default (Spring Boot 4.1)", kind: default }
+  - { k: "Propagation", v: "only HTTP clients built from Boot's auto-configured builders pass the trace on", kind: minus }
+  - { k: "Tag cardinality", v: "metric tags need few possible values; a user id as a tag creates millions of series", kind: minus }
 trap:
   wrong: "Tag a metric with the user ID to see each user's latency."
-  right: "Each tag value makes a new time series. Keep metric tags low-cardinality; put user IDs on traces."
+  right: "Each tag value makes a new time series, so metric tags must have few values. Put user IDs on traces as high-cardinality values."
+  why: "Tags look like free labels, and on a test machine with three users nothing breaks."
 sayIt: "Spring Boot uses Micrometer Observations for metrics and traces. Prometheus scrapes the metrics, traces go out over OTLP, and the trace ID lands in every log line, so I can go from an alert to the slow call to its logs."
+buildsOn: [actuator, logging, http-clients]
+scenarios:
+  - q: "A checkout takes 4 seconds. It passes through the gateway, the payment service and the fraud-check service. Which signal tells you which service was slow?"
+    a: "The trace. It records one span per step with its duration, across all three services, so you see which span took most of the 4 seconds. Metrics show that latency rose; the logs of that span, found by its trace ID, explain why."
+  - q: "The payment service calls fraud-check with a RestClient built as RestClient.create(). The fraud-check spans appear in a separate trace. Why?"
+    a: "A client built by hand does not add the trace headers to the request, so fraud-check starts a new trace. Build the client from the injected RestClient.Builder that Boot configures; it passes the trace context on."
 confusedWith: []
 tags: [observability, micrometer, prometheus, tracing]
 visual: table
 sources:
-  - title: "Observability (Spring Boot 4.1.1 reference)"
+  - title: "Observability: observations, low and high cardinality (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/actuator/observability.html"
-    verifiedOn: "2026-10-19"
-  - title: "Tracing (Spring Boot 4.1.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Tracing: sampling, log correlation, propagation (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/actuator/tracing.html"
-    verifiedOn: "2026-10-19"
-  - title: "Metrics (Spring Boot 4.1.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Metrics: Prometheus endpoint, http.server.requests (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/actuator/metrics.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Naming Meters: tag cardinality (Micrometer docs)"
+    url: "https://docs.micrometer.io/micrometer/reference/concepts/naming.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Observability is being able to tell what a running system is doing from what it reports, without attaching a debugger. It rests on three signals. **Metrics** are numbers over time, such as error rate. A **trace** follows one request through every service as a chain of timed steps called **spans**. **Logs** are the detailed text events you already write with [SLF4J](card:logging). Spring Boot records metrics and traces with Micrometer, a vendor-neutral library.
 
 ## Why it exists
 
-In production you cannot attach a debugger. Logs, metrics and traces let you see what a running system is doing, and why it is slow or failing.
+In production the payment service runs as many instances behind a gateway, and a request may pass through three services. When customers say "checkout is slow", logs alone do not say which service or which call. Metrics raise the alert, a trace shows the slow span, and the trace ID in the log lines finds the exact error. Without them you guess and add logging after the incident.
 
 ## How it works
 
 | Signal | Answers | In Spring Boot |
 | --- | --- | --- |
-| Metrics | Is something wrong? (numbers over time) | Micrometer `MeterRegistry`, e.g. Prometheus |
-| Traces | Where is it slow? (one request across services) | Micrometer Tracing, OpenTelemetry or Brave |
-| Logs | Why did it fail? (detailed events) | SLF4J and Logback, with traceId and spanId |
+| Metrics | Is something wrong? | Micrometer `MeterRegistry`; Prometheus scrapes `/actuator/prometheus` |
+| Traces | Where is it slow? | Micrometer Tracing with OpenTelemetry or Brave |
+| Logs | Why did it fail? | SLF4J and Logback, with `traceId` and `spanId` in each line |
 
-- One `Observation` (an HTTP request, say) produces both a timer metric and a span.
-- Low-cardinality tags go to metrics and traces; high-cardinality ones go to traces only.
+1. A request arrives, and Boot starts an **observation** for it: a timed piece of work with a name and tags.
+2. When the observation ends, Micrometer turns it into a timer metric, such as `http.server.requests`, and into a span of the trace.
+3. While it runs, the trace ID sits in the logging context, so every log line written during the request carries it.
+4. When the service calls another one through an [auto-configured client builder](card:http-clients), the trace ID travels in the request headers, and the next service adds its spans to the same trace.
 
 ## Example
 
-```properties
-management.endpoints.web.exposure.include=health,prometheus
-# trace every request while developing (default 0.1)
-management.tracing.sampling.probability=1.0
+The payment service wraps its own work in an observation, so it gets a metric and a span with no extra code for each.
+
+```java
+PaymentResponse pay(PaymentRequest request) {
+    return Observation.createNotStarted("payment.process", observations)
+            .lowCardinalityKeyValue("method", request.method())          // card or upi
+            .highCardinalityKeyValue("customerId", request.customerId()) // traces only
+            .observe(() -> process(request));
+}
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Trace sampling | 10% (`0.1`) | Spring Boot 4.1 |
-| `/actuator/prometheus` | Not exposed until you include it | Spring Boot 4.1 |
-| HTTP server metric | `http.server.requests` | Spring Boot 4.1 |
+- `observations` is the `ObservationRegistry` bean that Boot creates and you inject.
+- The low-cardinality value `method` has only a few possible values, so it goes on both the metric and the span.
+- The high-cardinality value `customerId` goes only on the span. As a metric tag it would create one time series per customer.
+
+## Rules and defaults
+
+- **Sampling:** `management.tracing.sampling.probability` is `0.1` (10%) by default. Set `1.0` while developing to trace every request.
+- **Tracer:** add `spring-boot-starter-opentelemetry` for OpenTelemetry, which sends traces over OTLP (OpenTelemetry's own protocol), or `spring-boot-starter-zipkin` for Brave with Zipkin.
+- **Prometheus:** the `/actuator/prometheus` endpoint needs `micrometer-registry-prometheus` and must be listed in `management.endpoints.web.exposure.include`.
+- **Propagation:** only clients built from the auto-configured `RestClient.Builder`, `WebClient.Builder` or `RestTemplateBuilder` pass the trace on.
+- **Log correlation:** with Micrometer Tracing, Boot adds the trace and span IDs to log lines by default; `logging.pattern.correlation` changes the format.
+
+## Not to be confused with
+
+[Actuator](card:actuator) is the set of endpoints that **expose** data, such as `/actuator/prometheus`. Micrometer is the library that **records** metrics and spans inside the app. Rule: Micrometer measures; Actuator shows the measurements to the outside.
 
 ## Interview Qs
 
 ### Metrics vs traces vs logs?
 
-Metrics are cheap numbers over time, for dashboards and alerts. A trace follows one request across services as timed spans. Logs are detailed events; the trace ID in each line links them to the request.
+Metrics are cheap numbers over time, good for dashboards and alerts. A trace follows one request across services as timed spans and shows where time was spent. Logs are detailed events that explain what happened; the trace ID in each line links them to the request that wrote them.
 
 ### How do you trace a request across microservices?
 
-Add Micrometer Tracing with OpenTelemetry (`spring-boot-starter-opentelemetry`). Calls made with the auto-configured `RestClient` or `WebClient` builders pass the trace headers on, so every service shares one trace ID.
+Add Micrometer Tracing with OpenTelemetry through `spring-boot-starter-opentelemetry`. Build HTTP clients from the auto-configured builders, so every outgoing call carries the trace headers. Every service then adds its spans to one trace, which the tracing backend shows as one timeline.
+
+### Why not trace 100% of requests in production?
+
+Sending every trace can overwhelm the trace backend, so Spring Boot samples 10% by default. That share is usually enough to see where time goes. Raise it while debugging, or for low-traffic services, and keep it lower for busy ones.

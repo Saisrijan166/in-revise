@@ -5,24 +5,37 @@ title: "@Value vs @ConfigurationProperties"
 topic: configuration
 level: intermediate
 heat: 2
-hook: "@Value injects one key; @ConfigurationProperties binds a whole prefix to one typed, validated class."
+hook: "@Value injects one setting into one field. @ConfigurationProperties binds every setting under a prefix to one typed, validated class."
 points:
-  - { k: "@Value", v: "one key per field: ${app.timeout:30}; can also run SpEL #{...}" }
-  - { k: "@ConfigurationProperties", v: "every key under a prefix, bound to one bean" }
-  - { k: "Records", v: "constructor binding: immutable; @DefaultValue sets defaults", kind: plus }
-  - { k: "@Validated", v: "Jakarta constraints checked at start-up; a bad value stops the app", kind: plus }
-  - { k: "Register it", v: "@ConfigurationPropertiesScan or @EnableConfigurationProperties", kind: minus }
+  - { k: "@Value", v: "reads one key into a field or parameter, e.g. ${app.name:payment}; it can also run SpEL #{...}" }
+  - { k: "@ConfigurationProperties", v: "binds every key under a prefix, such as app.payment, to the fields of one bean" }
+  - { k: "Records", v: "a record binds through its constructor, so the settings cannot change; @DefaultValue fills gaps", kind: plus }
+  - { k: "@Validated", v: "Jakarta constraints are checked at startup; a bad value stops the app with the property's name", kind: plus }
+  - { k: "Relaxed binding", v: "max-retries, maxRetries and APP_PAYMENT_MAXRETRIES all fill the same maxRetries field", kind: plus }
+  - { k: "Register it", v: "a properties record becomes a bean only through @ConfigurationPropertiesScan or @EnableConfigurationProperties", kind: minus }
 trap:
   wrong: "@Value(\"${app.itemPrice}\") also reads app.item-price."
   right: "@Value has only limited relaxed binding. Write the key in kebab-case, ${app.item-price}, or use @ConfigurationProperties."
-sayIt: "For one value I use @Value with a default. For my own settings I bind a prefix to a record with @ConfigurationProperties: typed, validated at start-up, with relaxed binding and IDE completion."
+  why: "@ConfigurationProperties accepts every spelling of a key, so people expect @Value to do the same."
+sayIt: "For one value I use @Value with a default. For my own group of settings I bind a prefix to a record with @ConfigurationProperties: typed, validated at startup, with relaxed binding and IDE completion."
+buildsOn: [externalized-configuration, dependency-injection]
+scenarios:
+  - q: "PaymentProperties has @NotBlank on currency, and production starts with app.payment.currency set to an empty value. What happens?"
+    a: "Startup fails. Binding runs the constraint, and Boot prints the property, its value, where it came from and the reason \"must not be blank\". You find the mistake at deploy time, not at the first payment."
+  - q: "A teammate writes @Value(\"${app.payment.timeout}\") in five classes. Production renames the key. What goes wrong, and what would you suggest?"
+    a: "Each class has its own copy of the key as a string, so all five must change, and a missed one fails startup or reads the wrong value. Bind app.payment to one PaymentProperties record and inject it; the key then lives in one place, with a type and validation."
+  - q: "app.payment.timeout=500 binds to a Duration field. Is that 500 seconds?"
+    a: "No, 500 milliseconds. A Duration with no unit is read as milliseconds unless the field has @DurationUnit. Write 500s or 30s to be clear."
 confusedWith: []
 tags: [configuration, properties, binding]
 visual: table
 sources:
   - title: "Externalized Configuration: Type-safe Configuration Properties (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/features/external-config.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Configuration Metadata: the annotation processor (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/specification/configuration-metadata/annotation-processor.html"
+    verifiedOn: "2026-10-21"
   - title: "Using @Value (Spring Framework 7.0.9 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/value-annotations.html"
     verifiedOn: "2026-10-19"
@@ -34,52 +47,85 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+These are the two main ways to get a value from the [Environment](card:externalized-configuration) into a bean. `@Value("${app.name}")` injects **one** key into one field or constructor parameter. `@ConfigurationProperties("app.payment")` goes on a class or record and fills its fields from **every** key that starts with `app.payment`. That class then becomes a normal bean that you inject wherever the settings are needed, through [dependency injection](card:dependency-injection).
+
 ## Why it exists
 
-Many `@Value("${...}")` strings spread over classes are easy to mistype and hard to validate. Binding a whole prefix to one class gives types, defaults, validation and IDE completion in one place.
+The payment service has a currency, a timeout and a retry count. With `@Value`, each class that needs them repeats the key as a string, such as `"${app.payment.timeout}"`. A typo or a renamed key is found only at runtime, and nothing checks that the timeout is valid. `@ConfigurationProperties` puts the whole group in one typed class: one place for keys, defaults and checks, and your IDE can complete the keys in `application.properties`.
 
 ## How it works
 
 <Compare id="value-vs-configuration-properties-vs-environment" />
 
-- Register the class with `@ConfigurationPropertiesScan` on the main class, or list it in `@EnableConfigurationProperties`.
-- A record cannot be a `@Component`: constructor binding needs one of those two.
-- `30s` binds to a `Duration`; a bare number means milliseconds.
+1. At startup, `@ConfigurationPropertiesScan` (or `@EnableConfigurationProperties`) finds the class and registers it as a bean.
+2. Boot collects every key under the prefix from the Environment, whichever source it came from.
+3. It matches each key to a field with relaxed binding, so `max-retries` fills `maxRetries`.
+4. It converts the text to the field's type: `30s` becomes a `Duration`, `5` an `int`. A missing key gets the `@DefaultValue`.
+5. If the class has `@Validated`, Boot checks its constraints, and a failure stops startup.
 
 ## Example
+
+The payment settings, then the record that holds them and a service that uses them:
+
+```properties
+app.payment.currency=INR
+app.payment.max-retries=5
+```
 
 ```java
 @ConfigurationProperties("app.payment")
 @Validated
 public record PaymentProperties(
         @NotBlank String currency,
-        @DefaultValue("30s") Duration timeout) { }
+        @DefaultValue("30s") Duration timeout,
+        @DefaultValue("3") int maxRetries) { }
 
 @Service
 class PaymentService {
     PaymentService(PaymentProperties props,
-                   @Value("${app.name:shop}") String appName) { }
+                   @Value("${app.name:payment-service}") String appName) {
+        // props: currency=INR, timeout=PT30S, maxRetries=5
+    }
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| `@Value` key missing, no `:default` | start-up fails | Spring Boot 4.1 |
-| `Duration` with no unit | milliseconds | Spring Boot 4.1 |
-| Nested object validated | only if its field has `@Valid` | Spring Boot 3.4 and later |
+- `max-retries=5` filled `maxRetries`, and the missing timeout took its default of 30 seconds. The comment shows the values a real run printed.
+- Starting with an empty `app.payment.currency` fails startup with "Reason: must not be blank", naming the property and its source.
+- `@Value` with `:payment-service` has a fallback. Without it, a missing `app.name` stops startup.
+- The main class needs `@ConfigurationPropertiesScan`; without it, `PaymentService` fails because no `PaymentProperties` bean exists.
+
+## Rules and defaults
+
+- **Recommended:** Spring Boot's docs recommend `@ConfigurationProperties` for groups of your own settings.
+- **Records and constructor binding:** a class with one constructor, or a record, binds through that constructor. It cannot be a `@Component` or `@Bean`; register it by scanning or `@EnableConfigurationProperties`.
+- **JavaBean style:** a class with a no-argument constructor binds through setters, so it needs getters and setters.
+- **Library classes:** put `@ConfigurationProperties("prefix")` on a public `@Bean` method to bind settings onto an object you did not write.
+- **Units:** a `Duration` with no unit means milliseconds, unless the field has `@DurationUnit`.
+- **Validation:** needs a Bean Validation implementation, such as `spring-boot-starter-validation`. Nested objects are checked only if their field has `@Valid` (since Boot 3.4).
+- **IDE completion:** add `spring-boot-configuration-processor` as an annotation processor; it writes `spring-configuration-metadata.json` from your classes.
+
+## Not to be confused with
+
+`Environment.getProperty("key")` also reads settings, but in code, at the moment you call it, which suits keys chosen at runtime. `@Value` and `@ConfigurationProperties` inject values once, when the bean is created. Rule: one value = `@Value`; a group = `@ConfigurationProperties`; a key known only at runtime = `Environment`.
+
+## Common mistakes
+
+- **"Adding @Component to the properties record."** A record binds through its constructor, and constructor binding does not work for `@Component` beans. Use `@ConfigurationPropertiesScan` instead.
 
 ## Interview Qs
 
 ### If @Value can read configuration, why do we need @ConfigurationProperties?
 
-`@Value` suits one or two values. For a group of related settings, `@ConfigurationProperties` gives one typed class with defaults, start-up validation, full relaxed binding and IDE completion. Spring Boot's docs recommend it for your own settings.
+`@Value` suits one or two values. For a group of related settings, `@ConfigurationProperties` gives one typed class with defaults, startup validation, full relaxed binding and IDE completion. The key lives in one place instead of being repeated as strings across classes, and Spring Boot's docs recommend it for your own settings.
 
 ### @Value or Environment: when do you use which?
 
-`@Value` is declarative: the value is injected when the bean is created. `Environment.getProperty()` reads a key in code whenever you call it, which helps when the key name is known only at runtime.
+`@Value` is declarative: the value is injected once, when the bean is created. `Environment.getProperty()` reads a key in code whenever you call it, which helps when the key name is known only at runtime. It returns `null`, or the default you pass, when the key is missing.
 
 ### How do you validate configuration properties?
 
-Add `@Validated` to the class and Jakarta constraints such as `@NotBlank` to its fields. Values are checked at binding, and a failure stops start-up. Nested objects need `@Valid` on the field.
+Put `@Validated` on the class and Jakarta constraints such as `@NotBlank` or `@Min` on its fields, with a validator such as Hibernate Validator on the classpath. Values are checked while binding at startup, and a failure stops the app. Nested objects need `@Valid` on their field.

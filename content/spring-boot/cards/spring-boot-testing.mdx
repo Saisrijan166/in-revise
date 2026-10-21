@@ -5,77 +5,122 @@ title: "Testing: @SpringBootTest and Slices"
 topic: testing-production
 level: intermediate
 heat: 3
-hook: "Unit test one class with no Spring, slice-test one layer, and use @SpringBootTest only when you need the whole app."
+hook: "Test one class with no Spring at all, one layer with a slice test, and the whole app with @SpringBootTest, which is the slowest."
 points:
-  - { k: "@SpringBootTest", v: "the full app context; no real server by default (MOCK)" }
-  - { k: "@WebMvcTest", v: "web layer and MockMvc only; services must be mocked" }
-  - { k: "@DataJpaTest", v: "entities and repositories; each test rolls back", kind: default }
-  - { k: "Context caching", v: "tests with the same configuration share one context", kind: plus }
+  - { k: "Unit test", v: "plain JUnit: you create the class with new and pass fakes in; no Spring starts" }
+  - { k: "@WebMvcTest", v: "starts only the web layer (controllers, advice, filters); your @Service beans must be mocked" }
+  - { k: "@DataJpaTest", v: "starts only entities and repositories; each test runs in a transaction that is rolled back", kind: default }
+  - { k: "@SpringBootTest", v: "starts every bean; by default no real server runs (MOCK web environment, Spring Boot 4.1)", kind: default }
+  - { k: "Context caching", v: "tests with the same configuration reuse one started context, so only the first one pays", kind: plus }
+  - { k: "Changed in 4.0", v: "@SpringBootTest no longer sets up MockMvc; add @AutoConfigureMockMvc yourself" }
 trap:
   wrong: "@WebMvcTest also loads my services and repositories."
-  right: "It loads only web beans such as controllers and advice. Mock the services with @MockitoBean."
-sayIt: "I test logic with plain JUnit and Mockito, controllers with @WebMvcTest, repositories with @DataJpaTest, and a few whole flows with @SpringBootTest, since it is the slowest."
+  right: "It loads only web beans such as controllers and @ControllerAdvice. Replace each service the controller needs with @MockitoBean."
+  why: "The test starts Spring, so people expect the whole app, like when it runs for real."
+sayIt: "I test logic with plain JUnit and Mockito, controllers with @WebMvcTest, repositories with @DataJpaTest, and a few full flows with @SpringBootTest, because it starts every bean and is the slowest."
+buildsOn: [ioc-container, auto-configuration, rest-controller]
+scenarios:
+  - q: "A @WebMvcTest for PaymentController fails at startup with 'No qualifying bean of type PaymentService'. Why, and what is the fix?"
+    a: "The web slice does not scan @Service classes, so the PaymentService the controller needs does not exist. Add a @MockitoBean PaymentService field: the slice then has a fake to inject, and the test controls what it returns."
+  - q: "A @SpringBootTest with RANDOM_PORT and @Transactional saves a payment through a real HTTP call. The next test finds that payment in the database. Why?"
+    a: "With a real server, the request runs on a server thread in its own transaction, which commits. The test's transaction is a different one, so its rollback does not undo the saved row. Delete the data yourself."
 confusedWith: []
 tags: [testing, junit, mockmvc]
 visual: table
 sources:
   - title: "Testing Spring Boot Applications (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html"
-    verifiedOn: "2026-10-19"
-  - title: "Spring Boot 4.0 Migration Guide: MockMvc and @SpringBootTest"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Boot 4.0 Migration Guide: MockMvc and @SpringBootTest, test modules"
     url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Context Caching: what makes up the cache key (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/testing/testcontext-framework/ctx-management/caching.html"
+    verifiedOn: "2026-10-21"
   - title: "Spring Boot Interview Questions (Baeldung)"
     url: "https://www.baeldung.com/spring-boot-interview-questions"
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+Spring Boot's test support lets each test start only as much of the app as it checks. A **unit test** starts no Spring at all: you create one class yourself. A **slice test**, such as `@WebMvcTest`, starts the beans of one layer. `@SpringBootTest` starts the whole [application context](card:ioc-container), the container that holds every bean.
+
 ## Why it exists
 
-Starting the whole app for every test is slow. Spring Boot lets each test load only what it checks: nothing, one layer, or everything.
+If every test started the whole payment service, with its database, security and every bean, a test suite of hundreds of tests would take minutes. Most tests check one thing: a calculation, a URL mapping, a query. Slices give each kind of test only the beans it needs, so it starts fast and fails for one clear reason.
 
 ## How it works
 
 <Compare id="unit-vs-slice-vs-springboottest" />
 
-- A slice loads one layer's beans and a small set of auto-configuration.
-- Only one slice annotation per test class; combining slices is not supported.
-- Spring caches each test context; the same configuration reuses it.
+1. You pick one test annotation for the class, such as `@WebMvcTest` for a controller.
+2. The annotation turns on only the [auto-configuration](card:auto-configuration) for that layer, and scans only that layer's beans.
+3. Any bean the tested class needs from outside the slice must be supplied as a mock, or the context fails to start.
+4. Spring caches the started context. The next test class with the same configuration reuses it instead of starting again.
+
+So the rule is: load the least that still tests something real.
 
 ## Example
 
+This test checks that `GET /payments/1` returns the payment as JSON. The real `PaymentService` is not started; a fake stands in for it.
+
 ```java
-@WebMvcTest(OrderController.class)
-class OrderControllerTests {
+@WebMvcTest(PaymentController.class)
+class PaymentControllerTests {
+
     @Autowired MockMvcTester mvc;
-    @MockitoBean OrderService orders;   // not loaded by the slice
+    @MockitoBean PaymentService payments;   // the web slice does not load @Service beans
 
     @Test
-    void returnsOrder() {
-        when(orders.find(1L)).thenReturn(new Order(1L, "NEW"));
-        assertThat(mvc.get().uri("/orders/1")).hasStatusOk();
+    void returnsPayment() {
+        when(payments.find(1L)).thenReturn(new PaymentResponse(1L, new BigDecimal("500.00"), "PAID"));
+
+        assertThat(mvc.get().uri("/payments/1"))
+                .hasStatusOk()
+                .bodyJson().extractingPath("$.status").isEqualTo("PAID");
     }
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| `@SpringBootTest` web environment | `MOCK`: no server starts | Spring Boot 4.1 |
-| `@DataJpaTest` | Transactional, rolled back; embedded DB if on the classpath | Spring Boot 4.1 |
-| MockMvc in `@SpringBootTest` | Needs `@AutoConfigureMockMvc` | Spring Boot 4.0+ |
+- `@WebMvcTest(PaymentController.class)` starts only this controller and the web setup: mapping, JSON, validation, `@ControllerAdvice`.
+- `MockMvcTester` sends the request through the real [DispatcherServlet](card:dispatcher-servlet) without opening a port.
+- `@MockitoBean` puts a fake `PaymentService` in the context; [Mockito](card:mockito) explains how fakes work. Remove that line and the context fails to start, because the controller has nothing to inject.
+
+## Rules and defaults
+
+- **One slice per class:** using two `@…Test` slice annotations together is not supported. Pick one and add the other layer's `@AutoConfigure…` annotations by hand.
+- **`@SpringBootTest` web environment:** `MOCK` by default (no server). `RANDOM_PORT` and `DEFINED_PORT` start a real server; `NONE` starts no web layer at all.
+- **MockMvc in a full test:** add `@AutoConfigureMockMvc`. Since Spring Boot 4.0, `@SpringBootTest` alone gives no MockMvc.
+- **`@DataJpaTest`:** scans `@Entity` classes and repositories, uses an embedded database if one is on the classpath, and logs SQL. Add `@AutoConfigureTestDatabase(replace = Replace.NONE)` to keep your real database.
+- **Rollback:** a `@Transactional` test is rolled back after each method, but not the work a real server did on its own thread (`RANDOM_PORT`, `DEFINED_PORT`).
+- **Test modules (Boot 4.0+):** test support is split into modules named `spring-boot-<technology>-test`, such as `spring-boot-webmvc-test` for `@WebMvcTest`.
+
+## Not to be confused with
+
+A **unit test** checks one class's logic and starts no Spring. An **integration test** checks that real parts work together, such as beans, configuration and a database. Rule: no Spring context means unit test; any context, a slice or the full one, means integration test.
+
+## Common mistakes
+
+- **"Every test should be a @SpringBootTest, to be realistic."** It is the slowest kind and its failures are hard to place. Keep it for a few end-to-end flows.
+- **Giving each test class a different set of mocks or properties.** Each new combination starts a new context, so the cache cannot help and the suite slows down.
 
 ## Interview Qs
 
 ### If JUnit and Mockito can test a service, why use @SpringBootTest?
 
-They test different things. A unit test checks one class in isolation and runs fast. `@SpringBootTest` checks that the real beans, configuration and database work together, so it is slower and used less.
+They test different things. A unit test checks one class in isolation and runs in milliseconds. `@SpringBootTest` checks that the real beans, configuration, transactions and database work together, which a unit test cannot see. So you write many unit tests and a few full-context tests.
 
 ### If @SpringBootTest loads everything, why use @WebMvcTest?
 
-Loading everything is wasted time for a controller test. `@WebMvcTest` loads only the web layer, so it checks mappings, validation, JSON and status codes quickly.
+Loading the database and every service is wasted time for a controller test. `@WebMvcTest` starts only the web layer, so it checks mappings, validation, JSON and status codes quickly, and a failure points straight at the controller.
 
-### Is a RANDOM_PORT test rolled back by @Transactional?
+### Is data saved in a RANDOM_PORT test rolled back by @Transactional?
 
-No. The real server handles the request on another thread, in its own transaction, which commits. Clean up the data yourself.
+No. The real server handles the request on its own thread, in its own transaction, and that transaction commits. Only the test method's transaction rolls back. Clean up the data yourself, for example in an `@AfterEach` method.
+
+### How do you keep a large Spring test suite fast?
+
+Prefer unit tests and slices, and keep test configuration the same across classes so the context cache is reused. Every different set of `@MockitoBean` fields, properties or profiles starts a new context.

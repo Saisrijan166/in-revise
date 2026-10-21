@@ -5,87 +5,125 @@ title: Spring Security and the Filter Chain
 topic: security
 level: intermediate
 heat: 3
-hook: "Spring Security is a chain of servlet filters in front of your app: every request is checked before any controller runs."
+hook: "Spring Security is a chain of servlet filters that checks every request before any controller runs; you describe that chain in a SecurityFilterChain bean."
 points:
-  - { k: "DelegatingFilterProxy", v: "the one servlet filter; hands each request to a Spring bean" }
-  - { k: "FilterChainProxy", v: "runs only the first SecurityFilterChain that matches" }
-  - { k: "Your config", v: "a SecurityFilterChain @Bean built from HttpSecurity" }
-  - { k: "Starter added (Boot 4.1)", v: "every URL needs login; user 'user', password in the log", kind: default }
-  - { k: "Changed in 7.0", v: "and() removed from HttpSecurity: use the lambda DSL", kind: minus }
+  - { k: "Filters first", v: "security filters run before DispatcherServlet, so a rejected request never reaches a controller" }
+  - { k: "DelegatingFilterProxy", v: "the servlet filter Boot registers; it hands each request to the FilterChainProxy bean" }
+  - { k: "First match wins", v: "FilterChainProxy runs only the first SecurityFilterChain whose request matcher fits" }
+  - { k: "Your config", v: "a SecurityFilterChain @Bean built from HttpSecurity; Boot's default chain then backs off" }
+  - { k: "Starter only (Boot 4.1)", v: "every URL needs login; user 'user' gets a random password printed at WARN", kind: default }
+  - { k: "Old style gone", v: "WebSecurityConfigurerAdapter was removed in 6.0 and and() in 7.0; use the lambda DSL", kind: minus }
 trap:
   wrong: "Extend WebSecurityConfigurerAdapter and override configure(HttpSecurity)."
-  right: "It was removed in Spring Security 6.0. Declare a SecurityFilterChain @Bean that configures HttpSecurity."
-sayIt: "Spring Security plugs in as one servlet filter, DelegatingFilterProxy, which calls FilterChainProxy. That picks the first matching SecurityFilterChain and runs its filters: CSRF, login, then authorization."
+  right: "That class was removed in Spring Security 6.0. Declare a SecurityFilterChain @Bean that configures HttpSecurity and returns http.build()."
+  why: "Many tutorials and older Spring Boot 2 projects still show the adapter, so it looks like the standard way to configure security."
+sayIt: "Spring Security is a chain of servlet filters in front of DispatcherServlet. Boot registers DelegatingFilterProxy, which hands the request to FilterChainProxy; that runs the first matching SecurityFilterChain, which I declare as a bean built from HttpSecurity."
+buildsOn: [auto-configuration, dispatcher-servlet, filters-interceptors]
+scenarios:
+  - q: "You add spring-boot-starter-security to the payment service and write no security code. The browser now shows a login page for /payments. Which username and password work?"
+    a: "Boot created one in-memory user named 'user' and printed a random password at WARN level in the startup log. It is meant for development only; once you define your own users, it disappears."
+  - q: "Two SecurityFilterChain beans exist. The first matches /api/** and requires login. The second matches /api/public/** and permits everyone. A request to /api/public/rates gets 401. Why?"
+    a: "FilterChainProxy runs only the first chain that matches. /api/public/rates already matches /api/**, so the second chain never runs. Order the more specific chain first."
 confusedWith: []
 tags: [security, spring-security, filters]
 visual: flow
 sources:
   - title: "Spring Security architecture (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/architecture.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Security (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/web/spring-security.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "What's New in Spring Security 7.0"
     url: "https://docs.spring.io/spring-security/reference/7.0/whats-new.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Security interview questions (InterviewBit)"
     url: "https://www.interviewbit.com/spring-security-interview-questions/"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Spring Security is the Spring project for login, permission checks and protection against common web attacks. In a Spring MVC app it works as a group of [servlet filters](card:filters-interceptors) that run before [DispatcherServlet](card:dispatcher-servlet). A **SecurityFilterChain** is one ordered list of those filters, plus a rule saying which requests it handles. You describe it in a bean, and Spring Security builds the filters from your description.
+
 ## Why it exists
 
-Every request must be checked before it reaches a controller. Servlet filters run first, so Spring Security puts its checks there.
+Without it, each controller would read the session or token and check permissions itself. The same check is copied into dozens of places, and one forgotten copy leaves an endpoint open. A filter sees every request before any controller, so one place can protect the whole app. The same filters also add defences you would otherwise write by hand, such as blocking requests forged by other sites ([CSRF](card:csrf-cors), covered later).
 
 ## How it works
 
 <Mermaid
-  alt="Request path through Spring Security. The servlet container calls DelegatingFilterProxy, which calls the FilterChainProxy bean. FilterChainProxy picks the first SecurityFilterChain that matches and runs its filters in order: CsrfFilter, login filters, ExceptionTranslationFilter, AuthorizationFilter. Then the request reaches the DispatcherServlet."
+  alt="Request path through Spring Security. The servlet container calls DelegatingFilterProxy, which calls the FilterChainProxy bean. FilterChainProxy picks the first SecurityFilterChain that matches and runs its filters in order: CsrfFilter, login filters, ExceptionTranslationFilter, AuthorizationFilter. Then the request reaches DispatcherServlet."
   chart={`flowchart TD
-  R([Request]) --> D["DelegatingFilterProxy (servlet filter)"]
-  D --> F["FilterChainProxy (Spring bean)"]
-  F -- "first matching chain" --> C1[CsrfFilter]
+  R([Request]) --> D["1. DelegatingFilterProxy (servlet filter)"]
+  D --> F["2. FilterChainProxy (Spring bean)"]
+  F -- "3. first matching chain" --> C1["4. CsrfFilter"]
   C1 --> C2["Login filters: form, Basic, bearer"]
   C2 --> C3[ExceptionTranslationFilter]
   C3 --> C4[AuthorizationFilter]
-  C4 --> S([DispatcherServlet])`}
+  C4 -- "5. all passed" --> S([DispatcherServlet])`}
 />
 
-- Several chains are allowed; only the first match runs, so keep the catch-all chain last.
-- Add your own filter with `addFilterBefore`, `addFilterAfter` or `addFilterAt`.
+1. The servlet container (Tomcat) runs its filters for the request. One of them is DelegatingFilterProxy, which Boot registers for you.
+2. DelegatingFilterProxy is a plain servlet filter that passes the request to a Spring bean, FilterChainProxy. The split exists because the container starts its filters before Spring has created its beans.
+3. FilterChainProxy finds the first SecurityFilterChain whose matcher fits the request, and runs only that chain.
+4. The chain's filters run in a fixed order: CsrfFilter checks for forged requests, the login filters read credentials, ExceptionTranslationFilter turns security errors into responses, and AuthorizationFilter applies the access rules.
+5. If every filter lets the request through, it reaches DispatcherServlet and your controller. If one rejects it, the response goes back at once and the controller never runs.
 
 ## Example
 
+The payment service keeps its health check public and asks for HTTP Basic login everywhere else:
+
 ```java
-@Bean
-SecurityFilterChain api(HttpSecurity http) throws Exception {
-    http.authorizeHttpRequests(auth -> auth
-            .requestMatchers("/public/**").permitAll()
-            .anyRequest().authenticated())
-        .httpBasic(Customizer.withDefaults());
-    return http.build();
+@Configuration
+class SecurityConfig {
+
+    @Bean
+    SecurityFilterChain paymentSecurity(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/actuator/health").permitAll()
+                .anyRequest().authenticated())
+            .httpBasic(Customizer.withDefaults());
+        return http.build();
+    }
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| User | `user`, random password logged at WARN | Spring Boot 4.1 |
-| Default chain | Whole app needs login; form login or HTTP Basic | Spring Boot 4.1 |
-| Your own `SecurityFilterChain` | Replaces the rules; the default user stays | Spring Boot 4.1 |
+- Each lambda configures one part of the chain: `authorizeHttpRequests` adds AuthorizationFilter, and `httpBasic` adds the Basic login filter.
+- Because this bean exists, Boot's default chain backs off, the same way any [auto-configuration](card:auto-configuration) does.
+- Remove `.httpBasic(...)` and the chain has no way to log anyone in, so every request except the health check is rejected.
+
+## Rules and defaults
+
+- **Starter only (Boot 4.1):** every URL is secured, including `/error` and Actuator endpoints. Login is form login or HTTP Basic, depending on the request's `Accept` header.
+- **Default user:** the name is `user`, and a random password is printed at WARN level at startup. It is for development only.
+- **Your own chain:** a `SecurityFilterChain` bean replaces Boot's rules, but the default user stays until you define a `UserDetailsService`, `AuthenticationProvider` or `AuthenticationManager` bean.
+- **Several chains:** only the first match runs, so put specific chains first and the catch-all chain last.
+- **Your own filter:** place it with `addFilterBefore`, `addFilterAfter` or `addFilterAt` next to a built-in filter.
+- **Changed in 6.0 and 7.0:** `WebSecurityConfigurerAdapter` was removed in 6.0, and `and()` was removed from the DSL in 7.0.
+- **Debugging:** the response never says why a request was rejected. Set `logging.level.org.springframework.security=TRACE` to log each filter and the reason.
+
+## Common mistakes
+
+- **"I annotate my security filter with @Component and also add it with addFilterBefore."** Boot registers every `Filter` bean with the container too, so it runs twice, once outside the chain. Do not make it a bean, or disable its `FilterRegistrationBean`.
 
 ## Interview Qs
 
 ### What happens when you add spring-boot-starter-security?
 
-The whole app, Actuator included, needs login. Boot creates the user `user` with a random password printed in the log, and uses form login or HTTP Basic depending on the request.
+The whole app, Actuator included, needs login. Boot creates the user `user` with a random password printed in the log, and offers form login or HTTP Basic, depending on the request's `Accept` header. Defining a `SecurityFilterChain` bean replaces these rules.
 
-### DelegatingFilterProxy vs FilterChainProxy?
+### What is the difference between DelegatingFilterProxy and FilterChainProxy?
 
-DelegatingFilterProxy is a plain servlet filter registered with the container; it looks up a Spring bean lazily. That bean is FilterChainProxy, which picks the first matching SecurityFilterChain and runs its filters.
+DelegatingFilterProxy is a plain servlet filter registered with the container. It looks up a Spring bean lazily, because the container starts before the beans exist. That bean is FilterChainProxy, which picks the first matching SecurityFilterChain and runs its filters.
 
 ### How do you configure security without WebSecurityConfigurerAdapter?
 
-Declare a `SecurityFilterChain` bean that configures `HttpSecurity` with lambdas and returns `http.build()`. The adapter was deprecated in 5.7 and removed in 6.0.
+Declare a `SecurityFilterChain` bean that takes `HttpSecurity`, configures it with lambdas and returns `http.build()`. The adapter was deprecated in 5.7 and removed in 6.0.
+
+### Why is Spring Security built on filters and not inside controllers?
+
+Filters run for every request before Spring MVC chooses a controller, so nothing can skip them by accident. They also cover requests that no controller handles, such as static files.

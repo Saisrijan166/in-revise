@@ -5,85 +5,134 @@ title: "@Transactional"
 topic: data
 level: interview
 heat: 3
-hook: "A proxy opens a transaction before the method and commits after it; a RuntimeException or Error rolls it back."
+hook: "Put @Transactional on a method and Spring runs it as one database transaction: commit if it returns, roll back if it throws a RuntimeException."
 points:
-  - { k: "Rolls back on", v: "RuntimeException and Error; checked exceptions commit", kind: default }
-  - { k: "rollbackFor", v: "add types, e.g. rollbackFor = Exception.class" }
-  - { k: "Proxy based", v: "only calls that pass through the proxy get a transaction", kind: minus }
-  - { k: "readOnly = true", v: "a hint, not a guard; Hibernate skips dirty checks", kind: plus }
-  - { k: "Where", v: "on service methods: one business action, one transaction" }
+  - { k: "Who does the work", v: "a Spring proxy starts the transaction before your method and ends it after", kind: key }
+  - { k: "Rolls back on", v: "RuntimeException and Error; a checked exception still commits (Spring Framework 7.0)", kind: default }
+  - { k: "rollbackFor", v: "add checked exception types that must also roll back, e.g. rollbackFor = Exception.class" }
+  - { k: "Proxy only", v: "a this-call inside the same bean skips the proxy, so no transaction starts", kind: minus }
+  - { k: "readOnly = true", v: "a hint: Hibernate skips dirty checking; it does not stop writes by itself", kind: plus }
+  - { k: "Where", v: "on service methods, so one business action is one transaction" }
 trap:
   wrong: "@Transactional rolls back on any exception."
-  right: "Only on RuntimeException and Error. A checked exception commits unless you set rollbackFor."
-sayIt: "@Transactional is declarative: a Spring proxy begins the transaction, calls my method, then commits, or rolls back on a RuntimeException or Error. I put it on service methods and add rollbackFor for checked exceptions."
+  right: "Only on RuntimeException and Error. A checked exception commits unless you name it in rollbackFor."
+  why: "The word rollback suggests any failure undoes the work, and Spring's own data access exceptions are all unchecked, so the checked case rarely shows up in tests."
+sayIt: "@Transactional is declarative: a Spring proxy begins the transaction, calls my method, then commits, or rolls back on a RuntimeException or Error. I put it on service methods and add rollbackFor for checked exceptions that must undo the work."
+buildsOn: [aop-proxies, persistence-context]
+scenarios:
+  - q: "pay() is @Transactional with no rollbackFor. It saves a PENDING payment, then accounts.debit() throws the checked InsufficientFundsException. What is in the database afterwards?"
+    a: "The PENDING payment row is committed. The exception is checked, so by default the proxy commits before passing the exception on. Add rollbackFor = InsufficientFundsException.class to roll the save back."
+  - q: "refundAll() has no @Transactional and loops over this.refund(id), which is @Transactional. The fourth refund fails. Are the first three undone?"
+    a: "No. this.refund() skips the proxy, so there is no shared transaction. Each repository save() ran in Spring Data's own short transaction and committed at once. Put @Transactional on refundAll(), or call refund() on another bean."
+  - q: "pay() catches a RuntimeException from the ledger update, logs it and returns normally. Does the transaction roll back?"
+    a: "No. The proxy only sees what leaves the method. A normal return means commit, so the half-done work is saved. Rethrow the exception, or mark the transaction rollback-only."
 confusedWith: [required-vs-requires-new]
 tags: [transactions, aop, rollback]
 visual: flow
 sources:
   - title: "Using @Transactional (Spring Framework 7.0.9 reference)"
     url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Rolling Back a Declarative Transaction (Spring Framework 7.0.9 reference)"
     url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/rolling-back.html"
-    verifiedOn: "2026-10-19"
-  - title: "Spring Data JPA 4.1: Transactionality (readOnly and service-layer boundaries)"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Data JPA 4.1: Transactionality (readOnly, CRUD defaults and service-layer boundaries)"
     url: "https://docs.spring.io/spring-data/jpa/reference/jpa/transactions.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "TransactionAutoConfiguration (Spring Boot 4.1.1 API)"
+    url: "https://docs.spring.io/spring-boot/api/java/org/springframework/boot/transaction/autoconfigure/TransactionAutoConfiguration.html"
+    verifiedOn: "2026-10-21"
+  - title: "JpaBaseConfiguration: transactionManager bean (Spring Boot 4.1.1 API)"
+    url: "https://docs.spring.io/spring-boot/api/java/org/springframework/boot/jpa/autoconfigure/JpaBaseConfiguration.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A transaction is a group of database steps that the database treats as one unit: either all of them are saved (commit) or none of them are (rollback). `@Transactional` is the annotation that tells Spring "run this method as one transaction". You write no begin or commit code. A [proxy](card:aop-proxies) around your bean starts the transaction before the method and ends it after.
 
 ## Why it exists
 
-One business action often makes several writes that must all succeed or all fail. Coding begin, commit and rollback by hand everywhere is repetitive and error-prone.
+`PaymentService.pay()` saves a payment and then debits the customer's account. If the debit fails after the save, you are left with a payment but no money moved. By hand you would take a connection, switch off auto-commit, and write try, commit, catch, rollback and finally blocks in every such method. `@Transactional` moves that code into one place, the proxy, and your method keeps only the business steps.
 
 ## How it works
 
 <Mermaid
-  alt="A caller calls the Spring proxy, which begins a transaction and calls your method. If the method returns, or throws a checked exception, the proxy commits. If it throws a RuntimeException or an Error, the proxy rolls back."
+  alt="The controller calls the Spring proxy. The proxy begins a transaction through the transaction manager, then calls your real method. If the method returns, or throws a checked exception, the proxy commits. If it throws a RuntimeException or an Error, the proxy rolls back."
   chart={`flowchart LR
-  C[Caller] --> P["Proxy: begin"]
+  C[Controller] --> P["Proxy: begin"]
   P --> M[Your method]
   M -- "returns, or checked exception" --> CM[Commit]
   M -- "RuntimeException or Error" --> RB[Roll back]`}
 />
 
-- A call from inside the same object skips the proxy, so no transaction starts (see [Spring proxies](card:aop-proxies)).
-- A caught exception never reaches the proxy, so it commits. Rethrow it to roll back.
-- The proxy hands the real work to a `PlatformTransactionManager`, such as `JpaTransactionManager`.
+1. `PaymentController` calls `paymentService.pay()`. What it holds is the proxy, not your object.
+2. The proxy reads the annotation's settings and asks the transaction manager to begin. With Spring Data JPA this is Boot's `JpaTransactionManager`, which takes a database connection from the pool of open connections Boot keeps ready.
+3. The proxy calls your real method. Every repository call inside it uses that same connection and transaction.
+4. If the method returns normally, the proxy commits. Hibernate first flushes your entity changes as SQL.
+5. If the method throws a `RuntimeException` or an `Error`, the proxy rolls back and passes the exception on to the caller.
+
+So the proxy decides only by what leaves your method: a normal return or a checked exception means commit, an unchecked exception means roll back.
 
 ## Example
+
+The payment service debits an account that may throw a checked exception. This shows how to make that exception roll back too:
 
 ```java
 @Service
 public class PaymentService {
-    // repositories injected through the constructor
+    private final PaymentRepository payments;
+    private final AccountService accounts;      // constructor omitted
 
-    @Transactional(rollbackFor = PaymentException.class)
-    public void pay(long orderId, BigDecimal amount) throws PaymentException {
-        payments.save(new Payment(orderId, amount));
-        accounts.debit(orderId, amount);   // throws: both writes roll back
+    @Transactional(rollbackFor = InsufficientFundsException.class)
+    public PaymentResponse pay(PaymentRequest request) throws InsufficientFundsException {
+        Payment payment = payments.save(new Payment(request.amount()));
+        accounts.debit(request.accountId(), request.amount()); // may throw
+        payment.setStatus(PaymentStatus.COMPLETED);   // no save() needed
+        return PaymentResponse.from(payment);
     }
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Propagation | `REQUIRED` | Spring Framework 7.0 |
-| Isolation | `DEFAULT`: the database's own level | Spring Framework 7.0 |
-| readOnly | `false` | Spring Framework 7.0 |
-| Rolls back on | `RuntimeException`, `Error` | Spring Framework 7.0 |
+- Without `rollbackFor`, an `InsufficientFundsException` would commit the payment row, because it is a checked exception.
+- A `RuntimeException` from `debit()` rolls back the save even without `rollbackFor`.
+- `setStatus()` is written at commit by [dirty checking](card:persistence-context), because the entity is managed inside the transaction.
+- If another method of `PaymentService` called `this.pay()`, the proxy would be skipped and no transaction would start.
+
+## Rules and defaults
+
+- **Switched on by Boot:** when a transaction manager bean exists, Spring Boot enables `@Transactional` support itself. With `spring-boot-starter-data-jpa` it registers a `JpaTransactionManager`. You do not add `@EnableTransactionManagement`.
+- **Defaults (Spring Framework 7.0):** propagation `REQUIRED`, isolation `DEFAULT` (the database's own level), read-write, the timeout of the underlying system, and rollback on `RuntimeException` and `Error` only.
+- **Changing rollback:** use `rollbackFor` and `noRollbackFor` per method. Since Spring Framework 6.2, `@EnableTransactionManagement(rollbackOn = ALL_EXCEPTIONS)` changes it for the whole app.
+- **Method visibility:** public methods work. Since Spring Framework 6.0, protected and package-private methods also work with class-based proxies, which Boot uses. Private methods never get a transaction.
+- **readOnly = true:** a hint to the JDBC driver. With Hibernate, Spring sets the flush mode to `MANUAL`, so dirty checking is skipped. Spring Data's built-in read methods already run read-only, as [repositories](card:spring-data-repositories) showed.
+- **Where to put it:** on methods of concrete classes, not on interfaces (the Spring team's advice). On a class, it applies to every method of that class.
+
+## Not to be confused with
+
+The **database transaction** is the real thing: the database keeps the steps together and undoes them on rollback. **`@Transactional`** only tells Spring where to begin and end that transaction. Rule: the database does the work; the annotation marks the boundary. What happens when one `@Transactional` method calls another is a separate setting, [propagation](card:transaction-propagation), which you will see next.
+
+## Common mistakes
+
+- **"Catching and logging the exception is harmless."** The proxy then sees a normal return and commits the half-done work. Rethrow the exception, or call `setRollbackOnly()` on the current transaction status.
+- **"readOnly = true makes the database refuse writes."** It is a hint. Some databases reject writes in a read-only transaction, but Spring does not guarantee it.
 
 ## Interview Qs
 
 ### How does @Transactional work if it is only an annotation?
 
-Spring wraps the bean in a proxy. The proxy asks the transaction manager to begin, calls your method, then commits or rolls back.
+Spring wraps the bean in a proxy. When a caller calls the method, the proxy reads the annotation, asks the transaction manager to begin a transaction, calls your method, then commits on a normal return or rolls back on a RuntimeException or Error.
 
 ### Why does @Transactional sometimes not work?
 
-The call skipped the proxy (self-invocation, a private method, an object made with new), or the exception was checked or caught inside the method, so the proxy committed.
+The call skipped the proxy: a this-call inside the same bean, a private method, or an object created with new. Or the exception was checked or was caught inside the method, so the proxy saw nothing to roll back and committed.
 
-### Why put it on the service layer?
+### Why put @Transactional on the service layer, not on the controller or repository?
 
-One business action may call several repositories. Starting the transaction there makes the whole action commit or roll back together.
+One business action, such as a payment, may call several repositories. A transaction started on the service method makes all of them commit or roll back together. On a repository, each call would commit on its own; on a controller, the transaction would also cover web work that does not need it.
+
+### What does readOnly = true really do?
+
+It marks the transaction as read-only. Spring passes it to the JDBC driver as a hint and, with Hibernate, sets the flush mode to MANUAL, so Hibernate skips dirty checking and saves time on large reads. It is not a guarantee that writes fail.

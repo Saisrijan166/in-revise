@@ -5,65 +5,107 @@ title: "Packaging: Executable Jar, War, Native Image"
 topic: testing-production
 level: intermediate
 heat: 2
-hook: "Spring Boot packs your code, its libraries and the web server into one jar that java -jar runs anywhere."
+hook: "Spring Boot packs your code, its libraries and the web server into one jar that java -jar runs anywhere Java is installed."
 points:
-  - { k: "Executable jar", v: "classes in BOOT-INF/classes, libraries in BOOT-INF/lib" }
-  - { k: "War", v: "extend SpringBootServletInitializer; Tomcat starter provided" }
-  - { k: "Container image", v: "spring-boot:build-image or bootBuildImage; no Dockerfile" }
-  - { k: "Native image", v: "fast start, low memory; classpath fixed at build time", kind: plus }
+  - { k: "Executable jar", v: "your classes sit in BOOT-INF/classes and every library jar, unchanged, in BOOT-INF/lib" }
+  - { k: "War", v: "for an existing Tomcat: extend SpringBootServletInitializer, mark the Tomcat starter provided" }
+  - { k: "Container image", v: "spring-boot:build-image (Maven) or bootBuildImage (Gradle) builds one with no Dockerfile" }
+  - { k: "Native image", v: "starts much faster and uses less memory; the classpath and beans are fixed at build time", kind: plus }
+  - { k: "No war for WebFlux", v: "WebFlux apps run on embedded Netty; war deployment is not supported for them", kind: minus }
   - { k: "Changed in 4.0", v: "native images need GraalVM 25 or later" }
 trap:
-  wrong: "A Spring Boot fat jar merges every library's classes into one jar."
-  right: "It nests each library jar unchanged in BOOT-INF/lib and loads them with its own launcher."
-sayIt: "I ship an executable jar and run it with java -jar; the server is inside. I build images with buildpacks, and choose a native image only when startup time and memory really matter."
-confusedWith: []
+  wrong: "A Spring Boot fat jar unpacks every library's classes and merges them into one jar."
+  right: "It nests each library jar unchanged inside BOOT-INF/lib, and Spring Boot's own loader reads those nested jars."
+  why: "Older 'uber-jar' tools, such as the Maven Shade plugin, really do merge classes, so people assume Boot does the same."
+sayIt: "I ship an executable jar and run it with java -jar, because the server is inside. I build container images with buildpacks, and choose a native image only when startup time and memory really matter."
+buildsOn: [embedded-server, starters]
+scenarios:
+  - q: "Your company runs one shared Tomcat and wants the payment service deployed into it. What do you change?"
+    a: "Build a war: set packaging to war, make the main class extend SpringBootServletInitializer, and mark spring-boot-starter-tomcat as provided, so the war does not carry its own Tomcat. The shared Tomcat then starts the app."
+  - q: "Your app starts in 4 seconds on the JVM, and runs as a function that is started on each burst of traffic. Would a native image help, and what does it cost?"
+    a: "Yes: a native image starts much faster and uses less memory, which matters when instances start often. The cost is a slow build, and a closed world: the classpath and beans are fixed at build time, so profiles and @ConditionalOnProperty cannot change beans at run time."
+confusedWith: [jar-vs-war-vs-native-image]
 tags: [packaging, deployment, docker, graalvm]
 visual: table
 sources:
-  - title: "Nested JARs (Spring Boot 4.1.1 executable jar format)"
+  - title: "Nested JARs: structure, why not shaded jars (Spring Boot 4.1.1 executable jar format)"
     url: "https://docs.spring.io/spring-boot/specification/executable-jar/nested-jars.html"
-    verifiedOn: "2026-10-19"
-  - title: "Introducing GraalVM Native Images (Spring Boot 4.1.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Launching Executable Jars: Main-Class and Start-Class (Spring Boot 4.1.1)"
+    url: "https://docs.spring.io/spring-boot/specification/executable-jar/launching.html"
+    verifiedOn: "2026-10-21"
+  - title: "Testing GraalVM Native Images: native-image compilation takes a while (Spring Boot 4.1.1 how-to)"
+    url: "https://docs.spring.io/spring-boot/how-to/native-image/testing-native-applications.html"
+    verifiedOn: "2026-10-21"
+  - title: "Introducing GraalVM Native Images: closed world, AOT (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/packaging/native-image/introducing-graalvm-native-images.html"
-    verifiedOn: "2026-10-19"
-  - title: "Traditional Deployment (Spring Boot 4.1.1 how-to)"
+    verifiedOn: "2026-10-21"
+  - title: "Traditional Deployment: war, WebFlux not supported (Spring Boot 4.1.1 how-to)"
     url: "https://docs.spring.io/spring-boot/how-to/deployment/traditional-deployment.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Packaging OCI Images (Spring Boot 4.1.1 Maven plugin)"
     url: "https://docs.spring.io/spring-boot/maven-plugin/build-image.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Boot 4.0 Migration Guide: GraalVM 25 required"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Packaging is how you turn the payment service into something a server can run. Spring Boot's default is an **executable jar**: one file holding your classes, every library, and the [embedded web server](card:embedded-server), started with `java -jar`. The other choices are a **war**, a file you deploy into an existing servlet container such as Tomcat, and a **native image**, a machine executable built by GraalVM that needs no JVM.
 
 ## Why it exists
 
-Installing a server and copying files onto it is slow and easy to get wrong. One self-contained file, or one image, runs the same way everywhere.
+The [embedded server](card:embedded-server) showed why one self-contained jar beats a Tomcat installed on every machine. The packaging problem is how to build that jar: plain Java cannot load a jar that sits inside another jar, and merging all libraries into one jar hides which libraries you ship and breaks when two jars hold a file with the same name. Boot's own jar format and loader solve this. The war and the native image cover the two cases the jar does not fit: a shared servlet container, and apps where JVM startup time and memory are the bottleneck.
 
 ## How it works
 
 <Compare id="jar-vs-war-vs-native-image" />
 
-- `java -jar app.jar` starts Spring Boot's launcher, which loads the nested jars, then your main class.
-- Buildpacks turn the jar into an OCI image; they need a running Docker daemon.
+1. `mvn package` compiles your code, and the Spring Boot plugin repackages the jar: classes go to `BOOT-INF/classes`, each dependency jar to `BOOT-INF/lib`, and Boot's loader classes to the root.
+2. `java -jar app.jar` starts Boot's launcher, `JarLauncher`, which the manifest names as `Main-Class`. It sets up a class loader that can read the nested jars.
+3. The launcher then calls the `main` method of your class, which the manifest names as `Start-Class`. That starts Spring and the embedded server.
+4. For a container image, buildpacks take that jar and wrap it with a suitable JVM into an OCI image, the standard container image format that Docker runs, with no Dockerfile.
 
 ## Example
 
+The payment service built four ways with Maven:
+
 ```bash
-./mvnw package                     # target/app.jar
-java -jar target/app.jar           # embedded server starts
+./mvnw package                     # target/payment-service.jar
+java -jar target/payment-service.jar
 ./mvnw spring-boot:build-image     # OCI image with buildpacks
 ./mvnw -Pnative native:compile     # GraalVM native executable
 ```
+
+What to notice:
+
+- The second line starts the app and its Tomcat on port 8080. No server is installed on the machine.
+- `build-image` needs a running Docker daemon, because buildpacks build the image inside Docker.
+- `native:compile` takes much longer than a normal build, and needs GraalVM 25 or later with Spring Boot 4.
+
+## Rules and defaults
+
+- **War deployment:** set packaging to `war`, make the main class extend `SpringBootServletInitializer`, and mark `spring-boot-starter-tomcat` as `provided`. The war can still run with `java -jar`.
+- **WebFlux:** war deployment is not supported, because WebFlux runs on embedded Reactor Netty, not on a servlet container.
+- **Native closed world:** the classpath is fixed at build time and code that cannot be reached is left out. Reflection, resources and proxies need hints.
+- **Spring AOT:** for a native image, Spring turns bean definitions into generated Java code and hint files at build time, so beans cannot change at run time. `@Profile` and `@ConditionalOnProperty` are therefore limited.
+
+## Common mistakes
+
+- **"A native image is always the better choice."** It builds slowly, and libraries that use reflection may need extra hints. For a long-running service, the normal JVM is usually fine.
 
 ## Interview Qs
 
 ### What is inside a Spring Boot fat jar?
 
-Your classes in `BOOT-INF/classes`, every dependency jar nested unchanged in `BOOT-INF/lib`, and Spring Boot's loader classes, which read those nested jars because plain Java cannot.
+Your classes in `BOOT-INF/classes`, every dependency jar nested unchanged in `BOOT-INF/lib`, and Spring Boot's loader classes at the root. The manifest points `java -jar` at the loader, which reads the nested jars, because plain Java cannot, and then calls your main class.
 
 ### How do you deploy a Spring Boot app as a war?
 
-Set packaging to `war`, extend `SpringBootServletInitializer`, mark `spring-boot-starter-tomcat` as `provided`, and deploy it to a servlet container. WebFlux apps cannot be deployed as a war.
+Set packaging to `war`, extend `SpringBootServletInitializer` and override `configure`, mark `spring-boot-starter-tomcat` as `provided`, and deploy the file to a servlet container. WebFlux applications cannot be deployed this way.
 
 ### When would you build a native image?
 
-When fast startup and low memory matter, such as containers and functions (FaaS). The cost is a closed world: reflection needs hints, and the classpath and beans are fixed at build time.
+When fast startup and low memory matter, such as in containers that scale up often and in functions (FaaS). The cost is a slow build and a closed world: reflection needs hints, and the classpath and beans are fixed at build time.

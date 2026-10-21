@@ -5,27 +5,43 @@ title: Bean Validation with @Valid
 topic: web
 level: intermediate
 heat: 2
-hook: "Put constraints like @NotBlank on the request DTO and @Valid on the @RequestBody: bad input gets a 400 before your code runs."
+hook: "Put rules like @NotBlank on the request DTO's fields and @Valid on the @RequestBody parameter: bad input is rejected with 400 before your method runs."
 points:
-  - { k: "Starter", v: "spring-boot-starter-validation, not in the web starter" }
-  - { k: "@Valid @RequestBody", v: "failure throws MethodArgumentNotValidException: 400" }
-  - { k: "@Validated", v: "Spring's variant: groups, and method checks on a bean" }
-  - { k: "Package", v: "jakarta.validation.constraints (Jakarta Validation 3.1)" }
-  - { k: "null passes", v: "@Size, @Email, @Min accept null: add @NotNull", kind: minus }
+  - { k: "Starter", v: "add spring-boot-starter-validation; the web starters do not include a validator" }
+  - { k: "Constraint", v: "an annotation such as @NotNull, @Positive or @Email that states one rule for a field" }
+  - { k: "@Valid on @RequestBody", v: "validates the object; a failure throws MethodArgumentNotValidException, which becomes 400" }
+  - { k: "Null passes most rules", v: "@Size, @Positive, @Email and @Pattern treat null as valid, so add @NotNull too", kind: minus }
+  - { k: "@Validated on a bean", v: "turns on method validation for a service: constraints on its method parameters are checked" }
+  - { k: "Package", v: "constraints live in jakarta.validation.constraints (Jakarta Validation 3.1)", kind: default }
 trap:
-  wrong: "@Valid works with just the web starter."
-  right: "Since Boot 2.3 the web starters leave validation out. Add spring-boot-starter-validation."
-sayIt: "I add the validation starter, put constraints such as @NotBlank and @Email on the request DTO, and mark the @RequestBody with @Valid. A failure throws MethodArgumentNotValidException, a 400, which my advice formats."
+  wrong: "@Valid works as soon as the web starter is on the classpath."
+  right: "Since Spring Boot 2.3 the web starters leave validation out. Add spring-boot-starter-validation, or @Valid has no effect."
+  why: "Before Boot 2.3 the web starter brought Hibernate Validator along, so older tutorials never mention a separate starter."
+sayIt: "I add the validation starter, put constraints such as @NotNull and @Positive on the request DTO, and mark the @RequestBody with @Valid. A failure throws MethodArgumentNotValidException, a 400, and my global handler formats the error body."
+buildsOn: [dto, request-mapping]
+scenarios:
+  - q: "PaymentRequest has @Positive BigDecimal amount. A client sends {\"currency\": \"INR\"} with no amount. Is the request rejected?"
+    a: "No. @Positive treats null as valid, so the missing amount passes and the service receives null. Add @NotNull next to @Positive to reject it."
+  - q: "You add @Valid to the @RequestBody and constraints to the DTO, but invalid requests still reach the service. What is the first thing to check?"
+    a: "Whether spring-boot-starter-validation, or another validator such as Hibernate Validator, is on the classpath. Without a validator implementation, Spring has nothing to run the constraints with."
+  - q: "A request DTO holds a nested BillingAddress object with @NotBlank fields, but blank address fields are accepted. Why?"
+    a: "Validation does not go into nested objects by itself. Mark the field @Valid BillingAddress address so the validator cascades into it."
 confusedWith: []
 tags: [web, validation, bean-validation]
 visual: table
 sources:
   - title: "Validation (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "@RequestBody: MethodArgumentNotValidException gives 400 (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-methods/requestbody.html"
     verifiedOn: "2026-10-19"
+  - title: "Validation: method validation with @Validated (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/io/validation.html"
+    verifiedOn: "2026-10-21"
+  - title: "DefaultHandlerExceptionResolver: exception to status table (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/7.0.x/javadoc-api/org/springframework/web/servlet/mvc/support/DefaultHandlerExceptionResolver.html"
+    verifiedOn: "2026-10-21"
   - title: "Jakarta Validation 3.1 specification: built-in constraints"
     url: "https://jakarta.ee/specifications/bean-validation/3.1/jakarta-validation-spec-3.1.html"
     verifiedOn: "2026-10-19"
@@ -34,47 +50,72 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Bean Validation is a Jakarta standard for checking an object's fields with annotations. Each annotation, called a constraint, states one rule, such as `@NotBlank` (text must not be empty) or `@Positive` (number must be above zero). You put constraints on the fields of a request [DTO](card:dto). When you mark the `@RequestBody` parameter with `@Valid`, Spring runs every rule before calling your controller method.
+
 ## Why it exists
 
-Every API must reject bad input: blank names, wrong emails, negative amounts. Declared constraints are checked the same way everywhere, before your code runs, instead of if-checks in each controller.
+Every API must reject bad input: a missing amount, a negative amount, a currency code of the wrong length. Without validation you would write `if` checks at the top of each method, and each endpoint would word its errors differently. Constraints state the rules once, on the DTO, and Spring checks them the same way for every request that uses it.
 
 ## How it works
 
-| Constraint | Rejects | `"   "` (spaces) passes? |
+| Constraint | Rejects | Does `"  "` (only spaces) pass? |
 | --- | --- | --- |
 | `@NotNull` | null | Yes |
-| `@NotEmpty` | null, empty string or collection | Yes |
-| `@NotBlank` | null, empty, whitespace only | No |
-| `@Size`, `@Min`, `@Email`, `@Pattern` | wrong length, value or format; null passes | Depends |
+| `@NotEmpty` | null, empty string or empty collection | Yes |
+| `@NotBlank` | null, empty, or only whitespace | No |
+| `@Size`, `@Positive`, `@Email`, `@Pattern` | wrong length, value or format; **null passes** | Depends on the rule |
 
-- `@Valid` on a field cascades into a nested object.
-- Constraints right on parameters, like `@Min(1)` on a `@RequestParam`, raise `HandlerMethodValidationException`; handle both exceptions.
+1. The message converter reads the JSON body into a `PaymentRequest`.
+2. Because the parameter has `@Valid`, Spring passes the object to the validator, Hibernate Validator, which the starter brings.
+3. The validator checks every constraint on every field and collects all failures, not just the first.
+4. If there is at least one failure, Spring throws `MethodArgumentNotValidException`, which becomes 400 Bad Request. Your method is never called.
+5. If all checks pass, your method runs with an object you can trust.
 
 ## Example
 
-```java
-record SignupRequest(
-        @NotBlank String name,
-        @NotNull @Email String email,
-        @NotNull @Size(min = 8) String password) { }
+The same `PaymentRequest` from DTOs, now with constraints, and the create endpoint that uses it:
 
-@PostMapping("/signup")
-ResponseEntity<Void> signup(@Valid @RequestBody SignupRequest request) {
-    accounts.create(request);                          // runs only when valid
-    return ResponseEntity.status(HttpStatus.CREATED).build();
+```java
+record PaymentRequest(
+        @NotNull @Positive BigDecimal amount,       // @Positive alone lets null through
+        @NotBlank @Size(min = 3, max = 3) String currency) { }
+
+@PostMapping("/payments")
+ResponseEntity<PaymentResponse> create(@Valid @RequestBody PaymentRequest request) {
+    PaymentResponse saved = service.create(request);   // runs only if every check passed
+    return ResponseEntity.created(URI.create("/payments/" + saved.id())).body(saved);
 }
 ```
+
+What to notice:
+
+- `{"amount": -5, "currency": ""}` fails three rules at once: `@Positive`, `@NotBlank` and `@Size`. The exception lists all of them.
+- `@NotNull` and `@Positive` work together: `@Positive` checks the value, `@NotNull` checks that a value exists.
+- Remove `@Valid` and nothing is checked: the constraints are only declarations until something asks the validator to run them.
+
+## Rules and defaults
+
+- **Setup:** add `spring-boot-starter-validation`. It brings Hibernate Validator, the reference implementation of the standard.
+- **Nested objects:** put `@Valid` on a field that holds another object so the validator checks that object too.
+- **Constraints directly on parameters:** for example `@Min(1)` on a `@RequestParam`. Spring Framework 6.1 and later then validate the whole method and throw `HandlerMethodValidationException`, also 400. Handle both exceptions.
+- **Services:** put `@Validated` on a service class to check constraints on its method parameters. A failure there throws `ConstraintViolationException`, which Spring MVC does not map to 400 by itself, so the client gets 500 unless you handle it.
+
+## Not to be confused with
+
+`@Valid` is the Jakarta annotation that says "validate this object, and cascade into nested objects". `@Validated` is Spring's annotation: it can name validation groups, and on a class it switches on method validation. Rule: `@Valid` on parameters and fields; `@Validated` on a bean class.
 
 ## Interview Qs
 
 ### How do you validate a request body in Spring Boot?
 
-Add spring-boot-starter-validation, put Jakarta constraints on the DTO fields, and mark the @RequestBody parameter with @Valid. Invalid input throws MethodArgumentNotValidException, which becomes 400 before the method body runs.
+Add spring-boot-starter-validation, put Jakarta constraints such as @NotNull and @Positive on the DTO fields, and mark the @RequestBody parameter with @Valid. Invalid input throws MethodArgumentNotValidException, which Spring answers with 400 before the method body runs. A global exception handler then shapes the error.
 
-### @NotNull vs @NotEmpty vs @NotBlank?
+### What is the difference between @NotNull, @NotEmpty and @NotBlank?
 
-@NotNull only rejects null. @NotEmpty also rejects an empty string or collection. @NotBlank is for text: it also rejects whitespace only, so "   " fails.
+@NotNull only rejects null. @NotEmpty also rejects an empty string or an empty collection. @NotBlank is for text and also rejects a string of only spaces. So "   " passes @NotNull and @NotEmpty but fails @NotBlank.
 
-### @Valid vs @Validated?
+### Should you validate in the controller or in the service?
 
-@Valid is the Jakarta annotation: validate this object and cascade into nested ones. @Validated is Spring's: it can name validation groups, and on a class it turns on method validation.
+Both have a place. Validate the shape of the input at the controller with @Valid, so bad requests stop early with 400. Business rules, such as "the amount must not exceed the customer's limit", need data from the database and belong in the service.

@@ -5,27 +5,41 @@ title: Authentication vs Authorization
 topic: security
 level: beginner
 heat: 3
-hook: "Authentication asks who you are; authorization asks what you may do. Who comes first, always."
+hook: "Authentication checks who is calling; authorization checks what that caller may do. Spring Security always does the first before the second."
 points:
-  - { k: "Login path", v: "filter → AuthenticationManager → provider → SecurityContext" }
-  - { k: "UserDetailsService", v: "loads the user, its password hash and authorities" }
-  - { k: "SecurityContextHolder", v: "holds the current user; per thread by default" }
-  - { k: "401 Unauthorized", v: "not logged in, or the credentials are bad" }
-  - { k: "403 Forbidden", v: "logged in, but not allowed" }
+  - { k: "Authentication", v: "proves who the caller is, for example with a username and password; failure gives 401" }
+  - { k: "Authorization", v: "decides if that known caller may do this action; failure gives 403" }
+  - { k: "Login path", v: "login filter, then AuthenticationManager, then an AuthenticationProvider for that credential type" }
+  - { k: "UserDetailsService", v: "your bean that loads a user by name, with the password hash and authorities" }
+  - { k: "SecurityContextHolder", v: "holds the logged-in user for the current request; one per thread by default" }
+  - { k: "Between requests", v: "form login keeps the user in the HTTP session; a stateless chain checks every request again" }
 trap:
   wrong: "401 means the user lacks permission for this page."
-  right: "401 means no valid login. A logged-in user without permission gets 403; logging in again changes nothing."
-sayIt: "Authentication checks who the caller is: a filter passes the credentials to the AuthenticationManager and stores the result in the SecurityContext. Authorization then checks the user's authorities. Failing the first is 401, the second 403."
-confusedWith: [session-vs-jwt]
+  right: "401 means no valid login. A logged-in user without permission gets 403, and logging in again changes nothing."
+  why: "The status is named 'Unauthorized', which sounds like 'not allowed', but HTTP uses it for missing or wrong credentials."
+sayIt: "Authentication checks who the caller is: a login filter passes the credentials to the AuthenticationManager and stores the result in the SecurityContext. Authorization then checks that user's authorities. Failing the first gives 401, failing the second 403."
+buildsOn: [security-filter-chain]
+scenarios:
+  - q: "A customer is logged in and opens /admin/refunds. The payment service answers 403. They log out and log in again. What changes?"
+    a: "Nothing. Authentication already worked: the service knows who they are. 403 means authorization failed, because their authorities do not include the admin role. Only a change to their authorities helps."
+  - q: "Inside an @Async method, SecurityContextHolder.getContext().getAuthentication() returns null, although the request was logged in. Why?"
+    a: "By default the SecurityContextHolder keeps the user in a ThreadLocal, so only the request's own thread sees it. The @Async method runs on another thread, whose context is empty, unless you pass the context on."
+confusedWith: [authentication-vs-authorization, session-vs-jwt]
 tags: [security, authentication, authorization]
-visual: table
+visual: flow
 sources:
   - title: "Servlet Authentication Architecture (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/authentication/architecture.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "DaoAuthenticationProvider (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/authentication/passwords/dao-authentication-provider.html"
     verifiedOn: "2026-10-19"
+  - title: "Authentication Persistence and Session Management (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/authentication/session-management.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Security (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/web/spring-security.html"
+    verifiedOn: "2026-10-21"
   - title: "403 Forbidden (MDN)"
     url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/403"
     verifiedOn: "2026-10-19"
@@ -34,41 +48,79 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Authentication is checking who is calling, for example by a username and password. Authorization is deciding whether that known caller may do a given action, such as refunding a payment. In the [filter chain](card:security-filter-chain), the login filters do authentication. Their result is an `Authentication` object: the user (called the principal) and their authorities, the permission strings such as `ROLE_ADMIN`. Authorization reads those authorities later; the rules are in [Authorization Rules](card:authorization-rules).
+
 ## Why it exists
 
-Knowing who is calling and deciding what they may do are two separate checks. Spring Security keeps them apart so each can change on its own.
+The two checks answer different questions and fail differently. An unknown caller should be asked to log in (401). A known caller without permission should be refused (403), because logging in again will not help. Keeping them apart also lets you change how people log in, from form login to tokens, without touching who may do what.
 
 ## How it works
 
-<Compare id="authentication-vs-authorization" />
+<Mermaid
+  alt="Password login flow. A login filter reads the username and password and passes them to the AuthenticationManager, usually ProviderManager. It asks DaoAuthenticationProvider, which loads the user through UserDetailsService and checks the password with the PasswordEncoder. On success the Authentication is stored in the SecurityContextHolder, where authorization and your code read it. On failure the answer is 401."
+  chart={`flowchart LR
+  F[Login filter] --> M["AuthenticationManager (ProviderManager)"]
+  M --> P[DaoAuthenticationProvider]
+  P --> U[UserDetailsService]
+  P --> E[PasswordEncoder]
+  P -- success --> H[(SecurityContextHolder)]
+  P -- failure --> X([401])
+  H --> A[Authorization and your code]`}
+/>
 
-- **Password login:** DaoAuthenticationProvider loads the user through UserDetailsService and checks the password with the PasswordEncoder.
-- **Between requests:** the login is kept in the HTTP session by default, unless the chain is stateless.
+1. A login filter, such as the HTTP Basic filter, reads the username and password from the request.
+2. It passes them to the AuthenticationManager. Its usual implementation, ProviderManager, asks each AuthenticationProvider in turn until one supports that kind of credential.
+3. For passwords, DaoAuthenticationProvider loads the user through your UserDetailsService, and checks the typed password against the stored hash with the PasswordEncoder ([Password Hashing](card:password-encoding) explains the hash).
+4. On success, the filter stores the authenticated `Authentication` in the SecurityContextHolder. ProviderManager has already erased the password from it. On failure nothing is stored: HTTP Basic answers 401, and form login redirects back to the login page.
+5. AuthorizationFilter, `@PreAuthorize` and your controller then read the current user from there. FilterChainProxy clears it when the request ends.
 
 ## Example
 
+The payment service loads users from its own table, and a controller reads the logged-in user:
+
 ```java
 @Bean
-UserDetailsService users(UserRepository repo) {
-    return username -> repo.findByEmail(username)
-        .map(u -> User.withUsername(u.email())
-            .password(u.passwordHash())   // e.g. {bcrypt}$2a$10$...
-            .roles(u.role())
+UserDetailsService userDetailsService(AppUserRepository users) {
+    return email -> users.findByEmail(email)
+        .map(u -> User.withUsername(u.getEmail())
+            .password(u.getPasswordHash())   // "{bcrypt}$2a$10$..."
+            .roles(u.getRole())              // "ADMIN" is stored as ROLE_ADMIN
             .build())
-        .orElseThrow(() -> new UsernameNotFoundException(username));
+        .orElseThrow(() -> new UsernameNotFoundException(email));
+}
+
+@GetMapping("/payments/mine")
+List<PaymentResponse> mine(Authentication auth) {   // the logged-in user
+    return paymentService.findFor(auth.getName());
 }
 ```
+
+What to notice:
+
+- Spring calls the lambda in step 3 with the username the caller typed. The lambda only loads the user; Spring compares the password itself.
+- `roles("ADMIN")` stores the authority `ROLE_ADMIN`, which authorization rules check later.
+- Because this bean exists, Boot no longer creates its default `user` with a generated password.
+- Spring MVC fills the `Authentication auth` parameter from the SecurityContextHolder, so the controller never parses credentials.
+
+## Rules and defaults
+
+- **One user per thread:** the SecurityContextHolder uses a `ThreadLocal` by default, so a thread you start yourself does not see the user.
+- **Session login (Security 7.1):** after a form login, the SecurityContext is saved in the HTTP session, and the session cookie finds it on the next request. A stateless chain saves nothing, so each request must authenticate again.
+- **Session fixation:** at login Spring changes the session id by default (`changeSessionId`), so an id an attacker planted before login stops working.
+- **No matching provider:** if no AuthenticationProvider supports the credential type, login fails with `ProviderNotFoundException`.
 
 ## Interview Qs
 
 ### Authentication checks the user. Why do we also need authorization?
 
-They answer different questions. A logged-in customer is known, but must still not open admin pages or another customer's orders. Authorization checks that, using the authorities found at login.
+They answer different questions. A logged-in customer is known, but must still not open admin pages or another customer's payments. Authorization checks that, using the authorities found at login.
 
 ### How do AuthenticationManager and AuthenticationProvider fit together?
 
-Login filters call the AuthenticationManager, usually a ProviderManager. It asks each AuthenticationProvider in turn; each handles one credential type, such as DaoAuthenticationProvider for passwords or JwtAuthenticationProvider for JWTs.
+Login filters call the AuthenticationManager, usually a ProviderManager. It asks each AuthenticationProvider in turn; each handles one credential type, such as DaoAuthenticationProvider for passwords or JwtAuthenticationProvider for JWTs. If none succeeds, login fails.
 
-### What is the SecurityContextHolder?
+### How do you get the current user in Spring?
 
-It holds the SecurityContext, which holds the current Authentication: principal, credentials and authorities. By default it is a ThreadLocal, cleared by FilterChainProxy after each request.
+In a controller, add an `Authentication` or `@AuthenticationPrincipal` parameter. Elsewhere, call `SecurityContextHolder.getContext().getAuthentication()`. It holds the principal, credentials and authorities, and is cleared after each request.

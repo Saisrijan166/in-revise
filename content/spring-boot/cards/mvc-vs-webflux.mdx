@@ -5,71 +5,117 @@ title: Spring MVC vs WebFlux
 topic: web
 level: interview
 heat: 2
-hook: "MVC gives each request a thread that may block; WebFlux serves many requests on a few threads, so its code must never block."
+hook: "Spring MVC gives each request its own thread, which may wait; WebFlux serves many requests on a few threads, so its code must never wait."
 points:
-  - { k: "Spring MVC", v: "Servlet stack, blocking code; a large thread pool absorbs waits" }
-  - { k: "WebFlux", v: "reactive stack, non-blocking; Reactor Netty by default" }
-  - { k: "Mono / Flux", v: "Reactor types for 0..1 and 0..N values" }
-  - { k: "Virtual threads", v: "spring.threads.virtual.enabled=true: MVC code, cheap threads (Java 21+)" }
-  - { k: "Both starters added", v: "Boot configures MVC, not WebFlux", kind: default }
+  - { k: "Spring MVC", v: "Servlet stack with blocking code; Tomcat keeps a pool of up to 200 request threads by default" }
+  - { k: "WebFlux", v: "reactive, non-blocking stack on a small, fixed set of event-loop threads; Reactor Netty by default" }
+  - { k: "Mono and Flux", v: "Reactor's types for a result that arrives later: Mono holds 0 or 1 value, Flux 0 to many" }
+  - { k: "Virtual threads", v: "spring.threads.virtual.enabled=true keeps MVC code but gives each request a cheap thread (Java 21+)" }
+  - { k: "Not faster per request", v: "WebFlux handles more waiting requests with fewer threads; a single request is not quicker", kind: minus }
+  - { k: "Both starters added", v: "with both web starters on the classpath, Spring Boot configures Spring MVC, not WebFlux", kind: default }
 trap:
   wrong: "WebFlux is faster, so new apps should use it."
-  right: "Reactive code does not run faster; it scales with fewer threads under slow I/O. With JPA or JDBC, MVC is the better fit."
-sayIt: "MVC is thread-per-request and fine for most apps, especially with JPA. WebFlux is non-blocking with Mono and Flux, for streaming or many slow connections. Virtual threads give MVC much of that scale with plain code."
+  right: "Reactive code does not run faster; it scales to many slow I/O calls with fewer threads. With JPA or JDBC, which block, Spring MVC is the better fit."
+  why: "Benchmarks with thousands of slow, concurrent connections show WebFlux handling more load, and that gets retold as 'faster'."
+sayIt: "Spring MVC is thread-per-request and fits most apps, especially with JPA. WebFlux is non-blocking with Mono and Flux, for streaming or very many slow connections. Virtual threads give MVC much of that scale while keeping plain code."
+buildsOn: [dispatcher-servlet, embedded-server, http-clients]
+scenarios:
+  - q: "A WebFlux controller calls a JPA repository's findById inside a map operator. Under load, the whole service stops responding. Why?"
+    a: "JPA blocks the thread until the database answers. In WebFlux that thread is one of a few event-loop threads serving many requests, so every request on it waits too. Use a reactive driver, move the call off the event loop, or use Spring MVC."
+  - q: "Your Spring MVC payment service spends most of each request waiting for the fraud service and the database, and it runs out of threads at peak. What is the smallest change to try first?"
+    a: "Turn on virtual threads with spring.threads.virtual.enabled=true on Java 21 or later. Each request then gets a cheap virtual thread, so waiting no longer uses up a limited pool, and the code stays the same."
 confusedWith: []
 tags: [web, webflux, reactive, virtual-threads]
 visual: table
 sources:
-  - title: "Spring WebFlux overview: concurrency, applicability (Spring Framework 7.0 reference)"
+  - title: "Spring WebFlux overview: concurrency model, applicability (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webflux/new-framework.html"
-    verifiedOn: "2026-10-19"
-  - title: "Reactive Web Applications (Spring Boot 4.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Reactive Web Applications: both starters give MVC (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/web/reactive.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Common Application Properties: spring.threads.virtual.enabled, server.tomcat.threads.max (Spring Boot 4.1 appendix)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
+  - title: "Build Systems: spring-boot-starter-webflux uses Reactor Netty (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/using/build-systems.html"
+    verifiedOn: "2026-10-21"
   - title: "SpringApplication: virtual threads (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/features/spring-application.html"
+    verifiedOn: "2026-10-19"
+  - title: "SQL Databases: Using R2DBC (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/data/sql.html"
+    verifiedOn: "2026-10-21"
+  - title: "JEP 444: Virtual Threads (OpenJDK)"
+    url: "https://openjdk.org/jeps/444"
     verifiedOn: "2026-10-19"
   - title: "Spring MVC Async vs Spring WebFlux (Baeldung)"
     url: "https://www.baeldung.com/spring-mvc-async-vs-webflux"
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+Spring has two web stacks. Spring MVC, which every earlier concept used, runs on the Servlet API: each request gets one thread, and the code may block, which means the thread waits while the database or another service answers. WebFlux is the reactive stack: a few threads serve all requests, and code must never block. Instead, a method returns a `Mono` or `Flux`, a promise of a result that arrives later.
+
 ## Why it exists
 
-A thread waiting on a database or remote call does nothing but still costs memory. With thousands of slow requests, thread-per-request servers run out. WebFlux avoids waiting threads; MVC keeps code simple.
+A thread that waits for a database or a remote call does nothing, but it still holds memory. Tomcat's pool has 200 request threads by default, so 200 slow calls at once fill it, and request 201 queues. WebFlux avoids waiting threads altogether: while a call is in flight, the thread serves other requests. The price is a different, harder style of code. Virtual threads, from Java 21, are a third answer: MVC code on threads so cheap that waiting no longer matters.
 
 ## How it works
 
 <Compare id="mvc-vs-webflux-vs-virtual-threads" />
 
-- Never block inside WebFlux; if you must, move the call to another thread with the `publishOn` operator, or choose MVC.
-- WebFlux supports annotated controllers, like MVC, and functional endpoints.
+Follow one call to the fraud service, which takes 300 ms:
+
+1. **Spring MVC:** a pool thread runs the controller, calls the fraud service and waits 300 ms, doing nothing else. Then it writes the response and returns to the pool.
+2. **WebFlux:** an event-loop thread starts the call and immediately moves on to other requests. When the answer arrives, a thread picks the work up again and writes the response.
+3. **MVC on virtual threads:** the code is the same as in step 1, but the waiting thread is a virtual thread. While it waits, the JVM frees the real operating-system thread underneath for other work.
+
+So the choice is about waiting: MVC waits on a thread, WebFlux never waits, and virtual threads make waiting cheap.
 
 ## Example
 
+The fraud check again, now in a WebFlux controller with WebClient:
+
 ```java
 @RestController
-class QuoteController {
+class FraudStatusController {
     private final WebClient web;
-    QuoteController(WebClient.Builder b) { web = b.baseUrl("https://quotes.example.com").build(); }
-
-    @GetMapping("/quotes/{id}")
-    Mono<Quote> one(@PathVariable String id) {              // 0..1 value; no thread waits
-        return web.get().uri("/{id}", id).retrieve().bodyToMono(Quote.class);
+    FraudStatusController(WebClient.Builder builder) {
+        this.web = builder.baseUrl("https://fraud.internal.example").build();
+    }
+    @GetMapping("/fraud-checks/{id}")
+    Mono<FraudResult> one(@PathVariable String id) {   // returns at once; the value comes later
+        return web.get().uri("/checks/{id}", id)
+                .retrieve().bodyToMono(FraudResult.class);
     }
 }
 ```
+
+What to notice:
+
+- The annotations are the same as in Spring MVC. Only the return type changes, to `Mono<FraudResult>`.
+- The method returns before the fraud service answers. WebFlux subscribes to the `Mono` and writes the JSON when the value arrives.
+- Add a blocking call inside, such as a JPA query, and an event-loop thread stops for its whole duration, slowing every request that shares it.
+
+## Rules and defaults
+
+- **Default server:** `spring-boot-starter-webflux` uses Reactor Netty; `spring-boot-starter-webmvc` uses Tomcat.
+- **Both on the classpath:** Spring Boot configures Spring MVC. That lets an MVC app use WebClient without becoming a WebFlux app.
+- **Virtual threads:** `spring.threads.virtual.enabled=true` needs Java 21 or later. Then `server.tomcat.threads.max` has no effect.
+- **Blocking in WebFlux:** if you must call a blocking library, move it to another thread with Reactor's `publishOn` operator, or choose MVC.
 
 ## Interview Qs
 
 ### If Spring MVC already handles HTTP, why do we need WebFlux?
 
-It is a different execution model: non-blocking, on a small fixed set of threads, with back pressure. It helps with streaming and many slow I/O calls. A working MVC app has no need to switch.
+It is a different execution model: non-blocking, on a small fixed set of threads, with back pressure, which lets a slow consumer tell a fast producer to slow down. It helps with streaming and very many slow I/O calls. The Spring docs say a working MVC app has no need to switch.
 
 ### What are Mono and Flux?
 
-Reactor's publisher types. Mono emits zero or one value, like a single response; Flux emits zero to many, like a list or a stream. Both come from Project Reactor, the library WebFlux is built on.
+They are Project Reactor's publisher types, the building blocks of WebFlux. A Mono emits zero or one value, like a single response. A Flux emits zero to many values, like a list or a live stream. Nothing runs until something subscribes to them.
 
-### Does using WebFlux make everything non-blocking?
+### Does using WebFlux make the whole app non-blocking?
 
-No. A blocking JDBC or HTTP call on the reactive path still blocks a thread, and that thread serves many requests. Use non-blocking drivers end to end, or stay with MVC.
+No. A blocking JDBC or HTTP call on the reactive path still blocks a thread, and in WebFlux that thread serves many requests. You need non-blocking drivers end to end, such as R2DBC for databases, or you should stay with Spring MVC.

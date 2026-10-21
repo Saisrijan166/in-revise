@@ -5,79 +5,129 @@ title: Transaction Propagation
 topic: data
 level: interview
 heat: 3
-hook: "Propagation answers one question: when a transaction already exists, does this method join it, start its own, or refuse?"
+hook: "Propagation answers one question: when a transaction is already running, does this method join it, start its own, or refuse to run?"
 points:
-  - { k: "REQUIRED (default)", v: "join the current transaction, or start one", kind: default }
-  - { k: "REQUIRES_NEW", v: "suspend the current one; commit or roll back on its own" }
-  - { k: "NESTED", v: "a savepoint in the same transaction; JDBC savepoints, not JPA" }
-  - { k: "Joining method", v: "its own isolation, timeout and readOnly are ignored", kind: minus }
-  - { k: "REQUIRES_NEW cost", v: "two connections at once; a small pool can deadlock", kind: minus }
+  - { k: "REQUIRED (default)", v: "join the caller's transaction if there is one; otherwise start a new one", kind: default }
+  - { k: "REQUIRES_NEW", v: "pause the caller's transaction, run in a new one, and commit or roll back on its own" }
+  - { k: "NESTED", v: "a savepoint inside the same transaction; works with JDBC savepoints only", kind: minus }
+  - { k: "Joining method", v: "its own isolation, timeout and readOnly settings are ignored; the caller's apply", kind: minus }
+  - { k: "REQUIRES_NEW cost", v: "holds two connections at once; with a small pool, threads block each other until timeouts fail them", kind: minus }
 trap:
   wrong: "With REQUIRED, an inner failure rolls back only the inner method."
-  right: "Both share one transaction. It is marked rollback-only, so the outer commit throws UnexpectedRollbackException."
-sayIt: "REQUIRED, the default, joins the current transaction or starts one. REQUIRES_NEW suspends it and runs its own, so an audit log can commit even if the main work rolls back."
+  right: "Both share one transaction, so the inner failure marks all of it rollback-only. If the outer method catches it, its commit throws UnexpectedRollbackException."
+  why: "The inner method has its own @Transactional, so it looks like its own unit of work. Under REQUIRED it only joins the caller's transaction."
+sayIt: "Propagation decides what a @Transactional method does when a transaction already exists. REQUIRED, the default, joins it or starts one. REQUIRES_NEW pauses it and runs its own, so an audit record can commit even if the payment rolls back."
+buildsOn: [transactional]
+scenarios:
+  - q: "pay() (REQUIRED) calls ledger.post() (also REQUIRED) on another bean. post() throws; pay() catches the exception, logs it and returns. What does the caller get?"
+    a: "UnexpectedRollbackException. Both methods share one transaction, and post() marked it rollback-only when its exception passed through its proxy. pay() then tried to commit, so Spring rolled back and threw this to show nothing was saved."
+  - q: "You must keep a record of every payment attempt, even failed ones. Which propagation for AuditService.record()?"
+    a: "REQUIRES_NEW. The audit row then commits in its own transaction before pay() finishes, so a later rollback of the payment does not remove it. With REQUIRED the audit row would be rolled back together with the payment."
+  - q: "The pool has 10 connections. 10 requests run pay() at once, and each calls a REQUIRES_NEW method. What happens?"
+    a: "All 10 outer transactions hold the 10 connections, and each inner one waits for an 11th that never comes. The threads stay stuck until the pool's connection timeout fails them. Spring says the pool must exceed the concurrent threads by at least one."
 confusedWith: [required-vs-requires-new]
 tags: [transactions, propagation]
 visual: table
 sources:
   - title: "Transaction Propagation (Spring Framework 7.0.9 reference)"
     url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/tx-propagation.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Propagation (Spring Framework 7.0.9 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/annotation/Propagation.html"
     verifiedOn: "2026-10-19"
-  - title: "JpaTransactionManager: nested transactions apply to the JDBC connection only (Spring Framework 7.0 API)"
+  - title: "JpaTransactionManager: nestedTransactionAllowed and JDBC savepoints (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/orm/jpa/JpaTransactionManager.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Transaction Propagation and Isolation in Spring @Transactional (Baeldung)"
     url: "https://www.baeldung.com/spring-transactional-propagation-isolation"
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+Propagation is a setting on [@Transactional](card:transactional) that says what a method does when it is called while a transaction is already running. It can **join** that transaction (share it, so both commit or roll back together), **start its own** (pause the caller's until it finishes; Spring calls this *suspending* it), or refuse to run. The default, `REQUIRED`, joins if there is a transaction and starts one if there is not.
+
 ## Why it exists
 
-Service methods call each other, and each may be @Transactional. Spring must know whether the inner call shares the outer transaction or runs on its own.
+Service methods call other service methods, and each may be `@Transactional`. Some work must fail together: the payment and its ledger entry. Other work must survive a failure: the record that a payment was attempted. Without a rule per method, Spring could not tell these apart. Propagation lets each method declare which kind it is.
 
 ## How it works
 
-| Propagation | A transaction exists | No transaction |
+| Propagation | A transaction exists | No transaction exists |
 | --- | --- | --- |
 | `REQUIRED` (default) | Join it | Start one |
-| `REQUIRES_NEW` | Suspend it, start a new one | Start one |
+| `REQUIRES_NEW` | Pause it, start a new one | Start one |
 | `NESTED` | Savepoint inside it | Start one |
 | `SUPPORTS` | Join it | Run without one |
 | `MANDATORY` | Join it | Throw an exception |
-| `NOT_SUPPORTED` | Suspend it, run without one | Run without one |
+| `NOT_SUPPORTED` | Pause it, run without one | Run without one |
 | `NEVER` | Throw an exception | Run without one |
 
-- The inner method must be on another bean, so the call goes through its proxy.
-- Spring advises a pool larger than the number of concurrent threads before using `REQUIRES_NEW`.
+Follow one payment where `pay()` uses `REQUIRED` and `AuditService.record()` uses `REQUIRES_NEW`:
+
+1. The controller calls `pay()`. Its proxy finds no transaction, so it starts transaction T1.
+2. `pay()` calls `audit.record()`. That proxy sees T1, pauses it, and starts T2 on a second connection.
+3. `record()` saves the audit row. Its proxy commits T2 and resumes T1.
+4. `pay()` saves the payment, then the debit throws a `RuntimeException`. The proxy of `pay()` rolls back T1.
+5. The payment row is gone, but the audit row stays, because T2 had already committed.
+
+So propagation is decided at each proxy, at the moment the call arrives.
 
 ## Example
 
-```java
-@Transactional                                       // REQUIRED
-public void placeOrder(OrderRequest request) {
-    audit.record("attempt " + request.id());         // REQUIRES_NEW: commits now
-    orders.save(Order.from(request));
-    stock.reserve(request);                          // throws: the order rolls back,
-}                                                    // the audit row stays
+This is the code for the five steps above:
 
-// In AuditService, another bean
-@Transactional(propagation = Propagation.REQUIRES_NEW)
-public void record(String message) { auditLog.save(new AuditEntry(message)); }
+```java
+@Service
+public class PaymentService {                            // fields omitted
+    @Transactional                                       // REQUIRED
+    public void pay(PaymentRequest request) {
+        audit.record("attempt " + request.orderId());    // REQUIRES_NEW: commits now
+        payments.save(new Payment(request.amount()));
+        accounts.debit(request.accountId(), request.amount()); // throws: payment rolls back
+    }                                                    // the audit row stays
+}
+
+@Service
+public class AuditService {
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void record(String message) { auditLog.save(new AuditEntry(message)); }
+}
 ```
+
+What to notice:
+
+- `record()` lives in a separate bean, so the call goes through its proxy. As a method of `PaymentService`, `this.record()` would skip the proxy and the audit row would roll back with the payment.
+- Remove `propagation = REQUIRES_NEW` and `record()` joins T1, so the audit row disappears in the rollback.
+- While `record()` runs, the thread holds two connections: one for the paused T1 and one for T2.
+
+## Rules and defaults
+
+- **Default:** `REQUIRED` (Spring Framework 7.0).
+- **Joining ignores your settings:** a method that joins uses the caller's isolation, timeout and readOnly, and silently ignores its own. Set `validateExistingTransaction = true` on the transaction manager to reject mismatches instead.
+- **REQUIRES_NEW needs a big enough pool:** the connection pool (you will see it in [Connection pooling](card:connection-pool)) must exceed the number of concurrent threads by at least one, or threads can deadlock waiting for their second connection.
+- **NESTED with JPA:** it uses JDBC savepoints. `JpaTransactionManager` allows it only after you set `nestedTransactionAllowed = true`, and the savepoint covers plain JDBC work, not the entities Hibernate holds in memory.
+- **Rollback-only:** when a rollback exception, such as a `RuntimeException`, leaves a joined method through its proxy, the shared transaction is marked rollback-only. The outer method can no longer commit it.
+
+## Not to be confused with
+
+**Propagation** decides *which* transaction a method runs in. **Isolation**, which you will see in [ACID and isolation levels](card:acid-isolation), decides *how much* that transaction sees of other transactions running at the same time. Rule: propagation is about methods calling methods; isolation is about users running at once.
+
+## Common mistakes
+
+- **"REQUIRES_NEW on a method in the same class gives it its own transaction."** The this-call skips the proxy, so the setting is never read. Move the method to another bean.
+- **"NESTED is a lighter REQUIRES_NEW."** NESTED never commits on its own; nothing is saved until the outer transaction commits.
 
 ## Interview Qs
 
 ### If REQUIRED can start a transaction, why do we need REQUIRES_NEW?
 
-For work that must commit on its own, such as an audit log or a failure record. REQUIRED would roll it back together with the caller.
+REQUIRED starts one only when none exists; otherwise it joins, so its work rolls back with the caller's. REQUIRES_NEW is for work that must commit on its own whatever the caller does, such as an audit log or a failure record.
 
 ### What is UnexpectedRollbackException?
 
-An inner REQUIRED method failed and marked the shared transaction rollback-only. The outer method caught the error and tried to commit, so Spring throws this to show nothing was committed.
+An inner method that joined the transaction threw, so its proxy marked the shared transaction rollback-only. The outer method caught the exception and tried to commit. Spring rolls back instead and throws UnexpectedRollbackException, so the caller knows nothing was saved.
 
-### REQUIRES_NEW vs NESTED?
+### What is the difference between REQUIRES_NEW and NESTED?
 
-REQUIRES_NEW is a separate transaction with its own commit. NESTED is one transaction with a savepoint: the inner part can roll back alone, but nothing commits until the outer one does.
+REQUIRES_NEW runs a separate physical transaction with its own connection and its own commit. NESTED stays in the same transaction and sets a savepoint: the inner part can roll back to it alone, but nothing commits until the outer transaction commits.

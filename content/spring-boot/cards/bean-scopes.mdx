@@ -5,24 +5,31 @@ title: Bean Scopes
 topic: beans-di
 level: beginner
 heat: 3
-hook: "A scope says how many instances of a bean exist. The default, singleton, is one shared instance per container, not per JVM."
+hook: "A scope says how many objects Spring makes from one bean. The default, singleton, is one shared object per container, not one per JVM."
 points:
-  - { k: "Singleton", v: "the default: one instance per container and bean definition", kind: default }
-  - { k: "Prototype", v: "a new instance each time the bean is requested" }
-  - { k: "Web scopes", v: "request, session, application, websocket: web apps only" }
-  - { k: "Prototype in a singleton", v: "injected once, so the singleton keeps one instance", kind: minus }
-  - { k: "Thread safety", v: "Spring does not make singletons thread-safe; keep them stateless", kind: minus }
+  - { k: "Singleton (default)", v: "one shared object per container and bean definition (Spring Framework 7.0)", kind: default }
+  - { k: "Prototype", v: "a new object each time the bean is injected or requested with getBean" }
+  - { k: "Web scopes", v: "request, session, application and websocket; they work only in web apps" }
+  - { k: "Prototype in a singleton", v: "is injected once, so the singleton keeps that one object; fetch fresh ones with ObjectProvider", kind: minus }
+  - { k: "Thread safety", v: "Spring does not make singletons thread-safe; many requests share one, so keep it stateless", kind: minus }
 trap:
-  wrong: "A Spring singleton is the GoF singleton: one instance per JVM."
-  right: "It is one instance per container and per bean definition. Two @Bean methods for one class give two separate singletons."
-sayIt: "Beans are singletons by default: one shared instance per container, so I keep them stateless. Prototype gives a new instance per request for the bean; inside a singleton I fetch it through ObjectProvider."
+  wrong: "A Spring singleton is the design-pattern singleton: one object per JVM."
+  right: "It is one object per container and per bean definition. Two @Bean methods returning the same class give two separate singletons."
+  why: "Both are called singleton, and the design pattern is taught first, so people carry its meaning over to Spring."
+sayIt: "Beans are singletons by default: one shared object per container, used by all threads, so I keep them stateless. Prototype gives a new object each time the bean is requested; inside a singleton I fetch it through ObjectProvider. Request and session scopes exist for web apps."
+buildsOn: [ioc-container, dependency-injection]
+scenarios:
+  - q: "PaymentService, a singleton, stores the amount of the current payment in a field and reads it back later in the same method call. Two users pay at the same time. What can go wrong?"
+    a: "Both requests run on the same PaymentService object on different threads, so one request can overwrite the field before the other reads it. Keep per-request data in local variables or parameters, not in fields of a singleton."
+  - q: "PaymentReceipt is prototype-scoped and injected into PaymentService's constructor. Does each payment get a fresh receipt?"
+    a: "No. The receipt was created once, when the singleton was built, so every payment shares it. Inject ObjectProvider<PaymentReceipt> and call getObject() for each payment to get a new one."
 confusedWith: [singleton-vs-prototype]
 tags: [scopes, singleton, prototype, request-scope]
 visual: table
 sources:
   - title: "Bean Scopes (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "ObjectProvider (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/beans/factory/ObjectProvider.html"
     verifiedOn: "2026-10-19"
@@ -31,34 +38,86 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+A bean's scope decides how many objects the [container](card:ioc-container) makes from one bean definition, and how long each one lives. The default scope, singleton, means one shared object for the whole container: every class that injects `PaymentService` gets the same object. The prototype scope means a new object every time the bean is requested. Web apps also have scopes tied to one HTTP request or one user session.
+
 ## Why it exists
 
-Most beans hold no per-user state, so one shared copy is cheapest. A few hold state for one caller, one HTTP request or one session, and need their own copy.
+Most beans, like `PaymentService`, hold no data about one user or one call; they only have methods and other beans. One shared object is then cheapest and safe. A few objects do hold data for one use, such as a receipt being built for one payment. Sharing such an object would mix different users' data, so each use needs its own object.
 
 ## How it works
 
-| Scope | One instance per | Works in |
+| Scope | One object per | Works in |
 | --- | --- | --- |
 | singleton (default) | container | any app |
 | prototype | request for the bean | any app |
 | request | HTTP request | web apps |
 | session | HTTP session | web apps |
-| application | `ServletContext` | web apps |
+| application | `ServletContext` (the running web app) | web apps |
 | websocket | WebSocket session | web apps |
 
-- Set it with `@Scope("prototype")`, or `@RequestScope` and `@SessionScope` for web scopes.
-- For a fresh prototype inside a singleton, inject `ObjectProvider<T>` and call `getObject()`.
+1. You set the scope on the bean. No annotation means singleton; `@Scope("prototype")`, `@RequestScope` or `@SessionScope` choose another.
+2. For a singleton, the container creates the object once, usually at startup, and hands the same object to everyone.
+3. For a prototype, the container creates a new object each time the bean is injected or fetched with `getBean`, then keeps no record of it.
+4. For request or session scope, the container keeps one object per HTTP request or per user session, and drops it when that request or session ends.
+
+So a scope answers one question: who shares this object?
+
+## Example
+
+`PaymentService` keeps the default scope; `PaymentReceipt` is a prototype.
+
+```java
+@Component
+class PaymentService { }                 // singleton: the default
+
+@Component
+@Scope("prototype")
+class PaymentReceipt { }                 // a new object per request for the bean
+
+public class Main {
+    public static void main(String[] args) {
+        var context = new AnnotationConfigApplicationContext(PaymentService.class, PaymentReceipt.class);
+        System.out.println(context.getBean(PaymentService.class) == context.getBean(PaymentService.class));
+        System.out.println(context.getBean(PaymentReceipt.class) == context.getBean(PaymentReceipt.class));
+    }
+}
+```
+
+```text output
+true
+false
+```
+
+What to notice:
+
+- `true`: both calls returned the one shared `PaymentService`.
+- `false`: each `getBean` call built a new `PaymentReceipt`.
+- If `PaymentService` took a `PaymentReceipt` in its constructor, it would get one receipt, once, and keep it. To get a new receipt each time, inject `ObjectProvider<PaymentReceipt>` and call `getObject()` whenever you need one.
+
+## Rules and defaults
+
+- **Default:** singleton, one object per container and per bean definition (Spring Framework 7.0).
+- **Thread safety:** Spring does not make a singleton thread-safe. Many requests call the same object at once, so keep it stateless, or protect any shared state yourself.
+- **Prototype cleanup:** Spring does not run destroy callbacks, such as `@PreDestroy`, for prototype beans; the code that uses them must clean up.
+- **Web scopes:** request, session, application and websocket need a web-aware `ApplicationContext`; in a Spring MVC app this works with no extra setup.
+- **Rule of thumb from the Spring docs:** prototype for stateful beans, singleton for stateless beans.
+
+## Not to be confused with
+
+The Singleton design pattern (from the "Gang of Four" book) makes a class allow only one object per class loader, usually through a private constructor. A Spring singleton is an ordinary class: the container simply creates one object per bean definition, and your code could still call `new`. Rule: the pattern's class forbids a second object; Spring's container just does not make one.
 
 ## Interview Qs
 
 ### What is the default scope, and is it thread-safe?
 
-Singleton: one instance per container, shared by all threads. Spring does not make it thread-safe; that depends on your code. Keep singletons stateless, or guard shared state.
+Singleton: one object per container, shared by all threads. Spring does not make it thread-safe; that depends on your code. Keep singletons stateless, or guard shared state with thread-safe types or locks.
 
 ### A prototype bean is injected into a singleton. What happens?
 
-The singleton gets one prototype instance when it is created and keeps it forever. To get a new one each time, inject `ObjectProvider<T>` and call `getObject()`.
+The singleton gets one prototype object when the singleton is created and keeps it for its whole life, so the prototype behaves like a singleton there. To get a new object each time, inject `ObjectProvider<T>` and call `getObject()`.
 
 ### When would you use request or session scope?
 
-For data that belongs to one HTTP request or one user session, such as the current user's preferences. They work only in a web application context.
+For data that belongs to one HTTP request or one user session, such as the current request's trace details or a user's shopping cart. They work only in a web application context.

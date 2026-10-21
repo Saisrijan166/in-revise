@@ -5,17 +5,25 @@ title: Profiles
 topic: configuration
 level: beginner
 heat: 2
-hook: "A profile is a named switch, like dev or prod, that turns on its own property file and its own beans at start-up."
+hook: "A profile is a named switch, such as dev or prod. Turning it on at startup loads that profile's settings file and creates the beans marked for it."
 points:
-  - { k: "Turn on", v: "spring.profiles.active=prod, or SPRING_PROFILES_ACTIVE=prod" }
-  - { k: "Files", v: "application-prod.properties overrides application.properties" }
-  - { k: "@Profile", v: "creates a bean only on a match: \"prod\", \"!prod\", \"a & b\"" }
-  - { k: "Several active", v: "last wins: with prod,live the live file overrides prod" }
-  - { k: "default profile", v: "on only when no other profile is active", kind: default }
+  - { k: "Turn on", v: "spring.profiles.active=prod in a file, SPRING_PROFILES_ACTIVE=prod, or --spring.profiles.active=prod" }
+  - { k: "Files", v: "application-prod.properties loads on top of application.properties, and its values win" }
+  - { k: "@Profile", v: "a bean marked @Profile(\"dev\") is created only when dev is on; \"!dev\" means when dev is off" }
+  - { k: "Several active", v: "with prod,live both are on; if both files set a key, the last one listed (live) wins" }
+  - { k: "Replace, not add", v: "a higher source's spring.profiles.active replaces the list; spring.profiles.include adds", kind: minus }
+  - { k: "default profile", v: "named default; it is on only when no other profile is active", kind: default }
 trap:
   wrong: "--spring.profiles.active=prod adds prod to the profiles set in application.properties."
-  right: "It replaces them: the higher source wins. Use spring.profiles.include to add profiles instead."
-sayIt: "Profiles separate per-environment setup. Shared values sit in application.properties, prod overrides in application-prod.properties, and environment-only beans get @Profile. I pick the profile at deploy time."
+  right: "It replaces them, because the higher source wins for that key. Use spring.profiles.include to add profiles instead."
+  why: "Profiles feel like a list you add to, and other settings files are layered on top of each other, so people expect the lists to merge."
+sayIt: "Profiles separate per-environment setup. Shared values sit in application.properties, production overrides in application-prod.properties, and environment-only beans get @Profile. I choose the profile at deploy time, so the same jar runs everywhere."
+buildsOn: [externalized-configuration, component-vs-bean]
+scenarios:
+  - q: "application.properties has spring.profiles.active=dev. You start the payment service with SPRING_PROFILES_ACTIVE=prod. Which profiles are active?"
+    a: "Only prod. The environment variable ranks above the file, so its value replaces the whole list for that key. To run dev and prod together, list both, or use spring.profiles.include."
+  - q: "No profile is set at all. Which FraudCheckClient bean is created: the one with @Profile(\"dev\") or the one with @Profile(\"!dev\")?"
+    a: "The \"!dev\" one. With no profile set, only the profile named default is on, so dev is off and \"!dev\" matches. The dev bean is skipped."
 confusedWith: []
 tags: [configuration, profiles, environments]
 visual: flow
@@ -25,7 +33,7 @@ sources:
     verifiedOn: "2026-10-19"
   - title: "Externalized Configuration: Profile Specific Files (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/features/external-config.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Environment Abstraction: Bean Definition Profiles (Spring Framework 7.0.9 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/environment.html"
     verifiedOn: "2026-10-19"
@@ -34,59 +42,81 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+A profile is a name, such as `dev`, `test` or `prod`, that you switch on when the app starts. It changes two things. Settings: `application-prod.properties` is loaded on top of `application.properties`. [Beans](card:component-vs-bean): a class or `@Bean` method marked `@Profile("prod")` is created only when `prod` is on. Profiles build on [externalized configuration](card:externalized-configuration): they decide which extra files and beans join the app.
+
 ## Why it exists
 
-Dev, test and prod need different settings and sometimes different beans, such as a fake payment gateway in dev. Profiles keep all of them in one codebase and pick the right set at start-up.
+The payment service talks to a real fraud-check API in production, but on a laptop there is no API to call, and the database URL differs too. Without profiles you would keep separate copies of the config, or write `if (env.equals("prod"))` in the code. Profiles keep every environment's setup in one codebase, side by side, and the right set is chosen at startup by one setting.
 
 ## How it works
 
 <Mermaid
-  alt="Profile activation. Setting SPRING_PROFILES_ACTIVE to prod does two things. Files: application.properties loads, then application-prod.properties, whose values win. Beans: beans with @Profile prod or with no @Profile are created; beans with @Profile dev are skipped."
+  alt="Profile activation. Setting SPRING_PROFILES_ACTIVE to prod does two things. Files: application.properties loads first, then application-prod.properties, whose values win. Beans: beans with @Profile prod, and beans with no @Profile, are created; beans with @Profile dev are skipped."
   chart={`flowchart LR
   A(["SPRING_PROFILES_ACTIVE=prod"]) --> F1["application.properties"]
   F1 --> F2["application-prod.properties: its values win"]
-  A --> B1["@Profile('prod') and plain beans: created"]
-  A --> B2["@Profile('dev') beans: skipped"]`}
+  A --> B1["@Profile prod and plain beans: created"]
+  A --> B2["@Profile dev beans: skipped"]`}
 />
 
-- No profile active: the `default` profile is on, so `application-default.properties` applies.
-- `spring.profiles.active`, `include` and `group` are refused inside profile-specific files.
-- A [profile group](card:profile-groups) turns on several profiles with one name.
+1. At startup, Boot reads `spring.profiles.active` from the Environment, wherever it was set.
+2. It loads `application.properties`, then the file of each active profile, such as `application-prod.properties`. Where both set a key, the profile file wins.
+3. While registering beans, it checks every `@Profile`. A bean whose condition does not match is skipped; a bean with no `@Profile` is always created.
+4. If no profile was set, the `default` profile is on, and Boot logs `No active profile set, falling back to 1 default profile: "default"`.
 
 ## Example
 
+The payment service calls a fraud-check API. On a laptop it uses a fake that approves every payment:
+
+```properties
+# application-prod.properties: loaded only when prod is on
+app.fraud-check.url=https://fraud.example.com
+spring.datasource.url=jdbc:postgresql://prod-db:5432/payments
+```
+
 ```java
 @Configuration
-public class PaymentConfig {
+public class FraudCheckConfig {
 
     @Bean
     @Profile("dev")
-    PaymentGateway fakeGateway() { return new FakeGateway(); }
+    FraudCheckClient fakeFraudCheck() { return payment -> true; }
 
     @Bean
     @Profile("!dev")
-    PaymentGateway realGateway() { return new CardGateway(); }
+    FraudCheckClient httpFraudCheck(@Value("${app.fraud-check.url}") String url) {
+        return new HttpFraudCheckClient(url);
+    }
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Active profiles | none | Spring Boot 4.1 |
-| Fallback when none is active | `default` (rename with `spring.profiles.default`) | Spring Boot 4.1 |
-| Two active profiles set one key | the last one listed wins | Spring Boot 4.1 |
+- With `dev` on, only `fakeFraudCheck` exists; with any other profile, or none, only `httpFraudCheck` exists. Exactly one `FraudCheckClient` bean is created either way.
+- The production URL lives only in `application-prod.properties`. Start without `prod` and `${app.fraud-check.url}` must come from somewhere else, or startup fails.
+- No code changes between environments: `SPRING_PROFILES_ACTIVE=prod java -jar payment.jar` picks the production set.
+
+## Rules and defaults
+
+- **No profile set:** the `default` profile is on, so `application-default.properties` and `@Profile("default")` beans apply. Rename it with `spring.profiles.default`.
+- **Several profiles:** `spring.profiles.active=prod,live` turns on both; for the same key, the profile listed last wins.
+- **Adding instead of replacing:** `spring.profiles.include` always adds its profiles.
+- **Groups:** `spring.profiles.group.production=proddb,prodmq` turns on three profiles with one name, see [profile groups](card:profile-groups).
+- **Not allowed:** `spring.profiles.active`, `include` and `group` inside a profile-specific file such as `application-prod.properties`; Boot refuses them.
+- **Expressions:** `@Profile` accepts `!`, `&` and `|`, such as `@Profile("prod & eu")`.
 
 ## Interview Qs
 
 ### Why do we need profiles?
 
-Environments need different settings and sometimes different beans. Profiles keep dev, test and prod setup in one codebase and choose the right set at start-up, so the same build moves from test to production unchanged.
+Environments need different settings and sometimes different beans, such as a fake fraud check on a laptop and the real API in production. Profiles keep every environment's setup in one codebase and choose the right set at startup, so the same build moves from test to production unchanged.
 
 ### How do you activate a profile?
 
-`spring.profiles.active=prod` in a file, `SPRING_PROFILES_ACTIVE=prod` as an env var, or `--spring.profiles.active=prod` on the command line. A higher source replaces a lower one; `spring.profiles.include` adds instead.
+Set `spring.profiles.active=prod` in a file, `SPRING_PROFILES_ACTIVE=prod` as an environment variable, or `--spring.profiles.active=prod` on the command line. A higher source replaces the list from a lower one; `spring.profiles.include` adds profiles instead.
 
 ### What happens if no profile is active?
 
-The `default` profile is on, so `application-default.properties` and `@Profile("default")` beans load. Once any profile is active, `default` no longer applies.
+The `default` profile is on. `application-default.properties` and `@Profile("default")` beans are used, and Boot logs that it fell back to the default profile. As soon as any profile is active, `default` no longer applies.

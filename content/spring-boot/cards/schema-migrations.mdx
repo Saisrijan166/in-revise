@@ -5,79 +5,122 @@ title: "Schema Migrations: Flyway and Liquibase"
 topic: data
 level: intermediate
 heat: 1
-hook: "Every schema change is a versioned script in the repo; Flyway or Liquibase runs the new ones at startup and records them."
+hook: "Every database schema change is a numbered script in your repo; Flyway or Liquibase runs the new ones at startup and records each one."
 points:
-  - { k: "Flyway", v: "V1__init.sql, V2__add_email.sql in db/migration; each runs once" }
-  - { k: "Liquibase", v: "changesets in db/changelog/db.changelog-master.yaml" }
-  - { k: "ddl-auto default (Boot 4.1)", v: "create-drop for an embedded DB with no migration tool; else none", kind: default }
-  - { k: "Never edit an applied script", v: "its checksum no longer matches; add a new version", kind: minus }
-  - { k: "Changed in 4.0", v: "add spring-boot-starter-flyway or -liquibase, not only the library" }
+  - { k: "Flyway", v: "SQL files such as V2__add_currency.sql in db/migration; each one runs once, in version order" }
+  - { k: "Liquibase", v: "changesets listed in db/changelog/db.changelog-master.yaml, in SQL, XML, YAML or JSON" }
+  - { k: "ddl-auto default (Boot 4.1)", v: "create-drop for an embedded database with no migration tool; none in every other case", kind: default }
+  - { k: "Never edit an applied script", v: "Flyway compares checksums at startup and fails; add a new version instead", kind: minus }
+  - { k: "Changed in 4.0", v: "add spring-boot-starter-flyway or -liquibase; the library jar alone is not enough" }
 trap:
   wrong: "Use ddl-auto=update in production; Hibernate keeps the schema in sync."
-  right: "update only adds what is missing and fixes column types, with no history. Use Flyway or Liquibase and set ddl-auto to validate or none."
-sayIt: "I never let Hibernate change a production schema. Each change is a versioned Flyway script; Boot runs the pending ones at startup and Hibernate only validates."
+  right: "update only adds what is missing and alters wrong column types, with no history. Use Flyway or Liquibase and set ddl-auto to validate or none."
+  why: "On a laptop, update feels perfect: tables and columns appear by themselves as you add fields, so it looks safe to keep."
+sayIt: "I never let Hibernate change a production schema. Each change is a versioned Flyway script in the repo; Boot runs the pending ones at startup, Flyway records them in its history table, and Hibernate only validates."
+buildsOn: [jpa-entities, starters]
+scenarios:
+  - q: "A teammate fixes a typo in V2__add_currency.sql, which already ran on staging. The next deploy to staging fails at startup. Why, and what is the fix?"
+    a: "Flyway stored V2's checksum when it ran. At startup it validates applied scripts, sees a different checksum and stops. Undo the edit and put the fix in a new, higher-numbered script. Use Flyway's repair only if you are sure the database already matches."
+  - q: "After upgrading to Spring Boot 4.0, flyway-core is still on the classpath, but migrations no longer run. Why?"
+    a: "Since Boot 4.0 the Flyway auto-configuration comes with spring-boot-starter-flyway. Add that starter, plus the database module such as flyway-database-postgresql, and Boot runs the migrations again."
+  - q: "You rename the entity field amount to totalAmount with ddl-auto=update. What happens to the table?"
+    a: "Hibernate adds a new empty total_amount column and leaves the old amount column with all its data. update cannot detect a rename. A migration with ALTER TABLE ... RENAME COLUMN keeps the data."
 confusedWith: []
 tags: [flyway, liquibase, schema]
-visual: table
+visual: flow
 sources:
   - title: "Database Initialization how-to (Spring Boot 4.1.1)"
     url: "https://docs.spring.io/spring-boot/how-to/data-initialization.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Boot 4.0 Migration Guide: Flyway and Liquibase starters (spring-projects wiki)"
     url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
     verifiedOn: "2026-10-19"
   - title: "Versioned migrations (Redgate Flyway docs)"
     url: "https://documentation.red-gate.com/fd/versioned-migrations-273973333.html"
-    verifiedOn: "2026-10-19"
-  - title: "A Short Guide to Hibernate 7 (7.4): automatic schema export"
+    verifiedOn: "2026-10-21"
+  - title: "Validate On Migrate setting (Redgate Flyway docs)"
+    url: "https://documentation.red-gate.com/fd/flyway-validate-on-migrate-setting-277579048.html"
+    verifiedOn: "2026-10-21"
+  - title: "A Short Guide to Hibernate 7 (7.4): schema management settings"
     url: "https://docs.hibernate.org/orm/7.4/introduction/html_single/"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "What is a Changelog? (Liquibase docs)"
     url: "https://docs.liquibase.com/concepts/changelogs/home.html"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+The schema is the structure of the database: its tables, columns and indexes. A schema migration is a small script that changes it by one step, such as adding a column. Flyway and Liquibase are tools that keep these scripts in order, run only the ones a database has not had yet, and record each one in a history table. Spring Boot runs them for you when the app starts.
+
 ## Why it exists
 
-Every environment needs the same schema, shipped with the code that needs it. Letting Hibernate alter tables leaves no record of what changed.
+The `Payment` [entity](card:jpa-entities) gains a `currency` field, so every database (developer, test, production) needs a new column exactly when the new code arrives. Running SQL by hand on each one is easy to forget or do out of order. Letting Hibernate alter tables with `ddl-auto=update` leaves no record, nothing to review, and it cannot rename a column or move data. Migrations make schema changes part of the code: reviewed, versioned and applied the same way everywhere.
 
 ## How it works
 
-| | Flyway | Liquibase |
-| --- | --- | --- |
-| A change is | A SQL file, `V2__add_email.sql` | A changeset in a changelog |
-| Written in | SQL files | SQL, XML, YAML or JSON |
-| Default location | `classpath:db/migration` | `db/changelog/db.changelog-master.yaml` |
-| History table | `flyway_schema_history` | `DATABASECHANGELOG` |
+<Mermaid
+  alt="At startup Flyway reads its history table, which lists V1 and V2 as applied. It checks the checksums of V1 and V2 against the files. It then runs V3, the new script, and records it. After that Hibernate starts and validates the entities against the tables."
+  chart={`flowchart LR
+  H[("flyway_schema_history: V1, V2")] --> C{Checksums of V1, V2 match?}
+  C -- no --> F[Startup fails]
+  C -- yes --> R[Run V3, record it]
+  R --> V[Hibernate validates the schema]`}
+/>
 
-- At startup the tool reads its history table, then runs only the scripts not yet applied, in order.
-- Use one tool alone; Boot advises against mixing it with `schema.sql` and `data.sql`.
+1. You add `V3__add_currency.sql` under `src/main/resources/db/migration` and commit it with the code that needs the column.
+2. The app starts. Boot runs Flyway before the beans that use the database, such as JPA.
+3. Flyway reads its `flyway_schema_history` table and sees that V1 and V2 are already applied.
+4. It recomputes the checksums of V1 and V2 from the files. If one was edited after it ran, startup fails here.
+5. It runs V3, then records its version, description and checksum in the history table.
+6. Hibernate starts. With `ddl-auto=validate` it checks that the entities match the tables and changes nothing.
+
+So the history table is the key: every database remembers which scripts it has had, and gets only the missing ones.
 
 ## Example
 
+The migration adds the column, and the settings let Flyway own the schema:
+
 ```sql
--- src/main/resources/db/migration/V2__add_email.sql
-ALTER TABLE customer ADD COLUMN email VARCHAR(255);
+-- src/main/resources/db/migration/V3__add_currency.sql
+ALTER TABLE payment ADD COLUMN currency VARCHAR(3) NOT NULL DEFAULT 'INR';
 ```
 
-## Defaults
+```properties
+spring.jpa.hibernate.ddl-auto=validate
+```
 
-| What | Default | Where |
+What to notice:
+
+- The file name is the contract: `V`, the version, two underscores, a description. Flyway orders scripts by version number.
+- The `DEFAULT 'INR'` fills existing rows, so `NOT NULL` does not fail on payments that are already there.
+- With `validate`, forgetting this script makes startup fail with a missing-column error, instead of failing later on the first query.
+
+## Rules and defaults
+
+| What | Flyway | Liquibase |
 | --- | --- | --- |
-| `ddl-auto`, embedded DB, no Flyway or Liquibase | `create-drop` | Spring Boot 4.1 |
-| `ddl-auto`, every other case | `none` | Spring Boot 4.1 |
-| `schema.sql`, `data.sql` | Embedded in-memory databases only | Spring Boot 4.1 |
+| A change is | A SQL file, `V3__add_currency.sql` | A changeset in a changelog |
+| Written in | SQL | SQL, XML, YAML or JSON |
+| Default location | `classpath:db/migration` | `db/changelog/db.changelog-master.yaml` |
+| History table | `flyway_schema_history` | `DATABASECHANGELOG` |
+
+- **Starters (changed in 4.0):** add `spring-boot-starter-flyway` or `spring-boot-starter-liquibase`. For Flyway on PostgreSQL or MySQL, also add the database module, `flyway-database-postgresql` or `flyway-mysql`.
+- **ddl-auto default (Spring Boot 4.1):** `create-drop` when the database is embedded and no Flyway or Liquibase is found; `none` in every other case.
+- **Checksum check:** `spring.flyway.validate-on-migrate` is `true` by default, so an edited applied script stops startup.
+- **One tool only:** do not mix Flyway or Liquibase with `schema.sql` and `data.sql`; Boot plans to remove support for that mix.
+- **Test data:** Flyway scripts in `src/test/resources/db/migration` run only in tests and are not packaged in the jar.
 
 ## Interview Qs
 
-### Why not ddl-auto=update in production?
+### Why not use ddl-auto=update in production?
 
-It only adds what is missing and alters wrong column types. It keeps no history and moves no data. Versioned scripts are reviewed and repeatable; Hibernate should only validate.
+It only adds what is missing and alters wrong column types. It keeps no history, cannot rename a column, and never moves data. Versioned scripts are reviewed in code review and run the same way on every database, so Hibernate should only validate.
 
-### How does Flyway know what to run?
+### How does Flyway know which scripts to run?
 
-Its flyway_schema_history table lists each applied version with a checksum. At startup it runs the newer versions in order; the checksum shows if an applied script was edited.
+Its flyway_schema_history table lists every applied version with a checksum. At startup Flyway compares that list with the files, checks that applied files are unchanged, and runs the newer versions in order.
 
-### Flyway vs Liquibase?
+### What is the difference between Flyway and Liquibase?
 
-Flyway runs plain SQL files ordered by version. Liquibase runs changesets from a changelog in XML, YAML, JSON or SQL. Both run at Boot startup and keep a history table.
+Flyway runs plain SQL files ordered by their version number. Liquibase runs changesets listed in a changelog, written in SQL, XML, YAML or JSON. Both run at Boot startup, run each change once, and keep a history table of what they applied.

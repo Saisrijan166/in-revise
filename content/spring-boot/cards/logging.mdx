@@ -5,24 +5,44 @@ title: Logging
 topic: configuration
 level: beginner
 heat: 2
-hook: "Code logs through the SLF4J API; Spring Boot sends it to Logback, INFO and above, on the console."
+hook: "Your code logs through the SLF4J API; Spring Boot sends those lines to Logback and prints INFO and above on the console, which you tune with logging.* properties."
 points:
-  - { k: "Default", v: "Logback, when you use the starters", kind: default }
-  - { k: "Levels", v: "TRACE < DEBUG < INFO < WARN < ERROR; a logger shows its level and up" }
-  - { k: "Set a level", v: "logging.level.root=warn, logging.level.com.example=debug" }
-  - { k: "Use {}", v: "log.info(\"Paid {}\", id): no string is built when the level is off", kind: plus }
-  - { k: "Files", v: "console only until logging.file.name or logging.file.path is set", kind: default }
+  - { k: "SLF4J + Logback", v: "code calls the SLF4J API; with the starters, Logback writes the lines", kind: default }
+  - { k: "Levels", v: "TRACE < DEBUG < INFO < WARN < ERROR; a logger prints its own level and everything above" }
+  - { k: "Default level", v: "INFO: ERROR, WARN and INFO lines print; DEBUG and TRACE are hidden", kind: default }
+  - { k: "Per package", v: "logging.level.com.example.payment=debug raises one package; logging.level.root sets all" }
+  - { k: "Use {}", v: "log.info(\"Paid {}\", id) builds the message only if INFO is on; + always builds it", kind: plus }
+  - { k: "Log file", v: "console only, until you set logging.file.name or logging.file.path", kind: default }
 trap:
   wrong: "Starting with --debug logs everything, including my code, at DEBUG."
-  right: "It raises only core loggers (embedded server, Hibernate, Spring Boot). For your code, set logging.level.com.example=debug."
-sayIt: "Spring Boot uses SLF4J with Logback and logs INFO and above to the console. I set levels per package with logging.level.*, add a file with logging.file.name, and switch to JSON with structured logging."
+  right: "It raises only core loggers (embedded server, Hibernate, Spring Boot). For your code, set logging.level.com.example.payment=debug."
+  why: "The flag is called debug, so it sounds like it switches the whole app to the DEBUG level."
+sayIt: "Spring Boot uses SLF4J with Logback and logs INFO and above to the console. I set levels per package with logging.level.*, add a file with logging.file.name, use {} placeholders, and switch to JSON with structured logging."
+buildsOn: [externalized-configuration]
+scenarios:
+  - q: "In production you need DEBUG lines from PaymentService for ten minutes, without a rebuild. How?"
+    a: "Restart with LOGGING_LEVEL_COM_EXAMPLE_PAYMENT=DEBUG or --logging.level.com.example.payment=debug. Levels are ordinary properties, so any property source can set them. With Actuator's loggers endpoint exposed, a POST to /actuator/loggers/com.example.payment changes the level without a restart."
+  - q: "log.debug(\"Order \" + order.toString()) runs a million times at INFO level. Is there a cost, even though nothing prints?"
+    a: "Yes. Java builds the string before calling debug, so toString runs a million times for nothing. With log.debug(\"Order {}\", order), SLF4J checks the level first and never formats the message."
 confusedWith: []
 tags: [logging, logback, slf4j]
-visual: flow
+visual: code
 sources:
   - title: "Logging (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/features/logging.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Logging how-to: configure Log4j for logging (Spring Boot 4.1.1)"
+    url: "https://docs.spring.io/spring-boot/how-to/logging.html"
+    verifiedOn: "2026-10-21"
+  - title: "Common Application Properties: logging.logback.rollingpolicy.* (Spring Boot 4.1.1)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
+  - title: "Loggers: configure a logger at runtime (Spring Boot 4.1.1 Actuator reference)"
+    url: "https://docs.spring.io/spring-boot/reference/actuator/loggers.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Boot 3.4 Release Notes: graceful shutdown by default, structured logging"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-3.4-Release-Notes"
+    verifiedOn: "2026-10-21"
   - title: "SLF4J FAQ: the fastest way of (not) logging"
     url: "https://www.slf4j.org/faq.html"
     verifiedOn: "2026-10-19"
@@ -34,35 +54,65 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Logging is how the app writes a record of what it did, with a time, a **level** and the class that wrote it. A level says how important a line is, from TRACE (most detail) to ERROR. Your code calls **SLF4J**, a logging API with no output of its own. Behind it, **Logback** does the writing; the Spring Boot starters bring Logback and set it up for you, so logging works with no setup file.
+
 ## Why it exists
 
-`System.out.println` has no levels, no files and no format. A logging API with levels lets each environment show more or less detail, set with properties instead of code changes.
+`System.out.println` has no levels, no time, no class name and no way to send lines to a file. In production you want only important lines; while chasing a bug you want every detail from one class. A logging library gives each line a level, and properties choose which levels print. Coding against SLF4J also means the backend, such as Logback or Log4j2, can change without touching your code.
 
 ## How it works
 
 <Mermaid
-  alt="Logging path. Your code calls the SLF4J Logger. Logback receives the call and checks the level. Lines at INFO and above go to the console by default, and also to a log file when logging.file.name is set."
+  alt="Logging path. Your code calls the SLF4J Logger. Logback receives the call and compares the line's level with the logger's level. Lines at INFO and above go to the console by default, and also to a log file when logging.file.name is set."
   chart={`flowchart LR
   A["Your code: SLF4J Logger"] --> L["Logback: level check"]
   L --> CON["Console: INFO and above"]
   L -. "if logging.file.name is set" .-> F["Log file, rotated at 10 MB"]`}
 />
 
-- Custom setup goes in `logback-spring.xml`, not `logback.xml`, so Spring extensions work.
-- [Structured logging](card:structured-logging) writes JSON (ECS, GELF, Logstash) for log tools, since Spring Boot 3.4.
+1. A class gets a logger named after itself, such as `com.example.payment.PaymentService`.
+2. The code calls `log.debug(...)`, `log.info(...)` or another level method.
+3. Logback finds that logger's level. If `logging.level` sets none for the package, it uses the root level, INFO by default.
+4. If the line's level is at or above the logger's level, Logback formats it and writes it to the console, and to the file if one is set. Otherwise the call returns at once.
 
 ## Example
 
-```java
-private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
+`PaymentService` in the payment service logs each payment. Payment 41 passes the fraud check; for payment 42 the check throws:
 
-void pay(String paymentId) {
-    log.debug("Paying {}", paymentId);   // skipped cheaply unless DEBUG is on
-    log.info("Payment processed: {}", paymentId);
+```java
+@Service
+class PaymentService {
+    private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
+    private final FraudCheckClient fraudCheck;
+    PaymentService(FraudCheckClient fraudCheck) { this.fraudCheck = fraudCheck; }
+    void pay(Long paymentId) {
+        log.debug("Checking fraud for payment {}", paymentId);   // hidden at INFO
+        try {
+            fraudCheck.verify(paymentId);
+            log.info("Payment {} completed", paymentId);
+        } catch (IllegalStateException e) {
+            log.warn("Payment {} failed the fraud check", paymentId, e);
+        }
+    }
 }
 ```
 
-## Defaults
+```text output
+2026-10-21T16:49:58.614+05:30  INFO 108067 --- [           main] com.example.payment.PaymentService       : Payment 41 completed
+2026-10-21T16:49:58.614+05:30  WARN 108067 --- [           main] com.example.payment.PaymentService       : Payment 42 failed the fraud check
+
+java.lang.IllegalStateException: Fraud service timed out
+```
+
+What to notice:
+
+- The DEBUG lines are missing, because the default level is INFO. With `logging.level.com.example.payment=debug`, "Checking fraud for payment 41" and "… 42" appear too.
+- Each line shows the time, level, process id, thread, logger name and message: Boot's default console format.
+- The exception passed as the last argument, after the `{}` values, is printed with its stack trace below the WARN line.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
@@ -71,16 +121,26 @@ void pay(String paymentId) {
 | Log file | none, console only | Spring Boot 4.1 |
 | File rotation (Logback) | new file at 10 MB, 7 archives kept | Spring Boot 4.1 |
 
+- **Your own Logback file:** name it `logback-spring.xml`, not `logback.xml`. Boot then controls when it loads, and Spring extensions such as `<springProfile>` work.
+- **File settings:** `logging.file.name=payment.log` writes that file; `logging.file.path=/var/log` writes `spring.log` into that folder. If both are set, only the name is used.
+- **Groups:** `logging.level.web=debug` or `logging.level.sql=debug` raise Boot's predefined groups of Spring web or SQL loggers at once.
+- **JSON logs:** `logging.structured.format.console=ecs` (or `gelf`, `logstash`) prints each line as JSON for log tools (since Boot 3.4).
+- **Log4j2 instead:** exclude `spring-boot-starter-logging` and add `spring-boot-starter-log4j2`; your SLF4J code stays the same.
+
+## Common mistakes
+
+- **"Setting logging levels in a @PropertySource file."** Logging starts before the application context exists, and `@PropertySource` files are added too late for `logging.*`, as [externalized configuration](card:externalized-configuration) explains. Use `application.properties`, environment variables or command-line arguments.
+
 ## Interview Qs
 
 ### Which logging framework does Spring Boot use by default?
 
-Logback, when you use the starters. Your code should call the SLF4J API, so the backend can change (for example to Log4j2) without code changes.
+Logback, when you use the starters. Your code should call the SLF4J API, so the backend can change, for example to Log4j2 by swapping `spring-boot-starter-logging` for `spring-boot-starter-log4j2`, without code changes.
 
 ### How do you enable debug logging for your own code?
 
-Set `logging.level.com.example=debug`, or the env var `LOGGING_LEVEL_COM_EXAMPLE=DEBUG`. The `--debug` flag only raises core loggers and prints the auto-configuration report.
+Set `logging.level.com.example.payment=debug`, or the environment variable `LOGGING_LEVEL_COM_EXAMPLE_PAYMENT=DEBUG`. The `--debug` flag only raises a few core loggers and prints the auto-configuration report; it does not change your packages.
 
 ### Why use {} placeholders instead of string concatenation?
 
-With `"Paid " + id` the string is built even when the level is off. With `"Paid {}", id` SLF4J checks the level first and builds the message only if it will be logged.
+With `"Paid " + id` the string is built even when the level is off. With `"Paid {}", id`, SLF4J checks the level first and builds the message only if it will be printed. That saves work in hot code paths at levels such as DEBUG.

@@ -5,73 +5,121 @@ title: "HTTP Clients: RestClient and WebClient"
 topic: web
 level: intermediate
 heat: 2
-hook: "Call other services with RestClient (blocking) or WebClient (reactive). RestTemplate is deprecated; interface clients sit on top."
+hook: "To call another service, use RestClient in normal blocking code or WebClient in reactive code; RestTemplate is deprecated, and interface clients can sit on top."
 points:
-  - { k: "RestClient", v: "synchronous, fluent API; the default choice for blocking code" }
-  - { k: "WebClient", v: "non-blocking and reactive; for WebFlux and streaming" }
-  - { k: "@HttpExchange", v: "declare an interface; Spring generates the client" }
-  - { k: "RestTemplate", v: "deprecated in the 7.0 docs; @Deprecated in 7.1, removed in 8.0", kind: minus }
-  - { k: "Boot 4.1", v: "inject the prototype RestClient.Builder; no RestTemplate bean", kind: default }
+  - { k: "RestClient", v: "synchronous client with a fluent API (Framework 6.1+); the default choice in a Spring MVC app" }
+  - { k: "WebClient", v: "non-blocking client that returns a Mono or Flux, a promise of the answer; for WebFlux apps and streaming" }
+  - { k: "@HttpExchange interface", v: "you declare a Java interface for the remote API, and Spring generates a client that implements it" }
+  - { k: "RestTemplate", v: "deprecated in the Framework 7.0 docs; @Deprecated planned for 7.1 and removal for 8.0", kind: minus }
+  - { k: "Boot gives you", v: "a pre-configured prototype RestClient.Builder bean to inject; Spring Boot 4.1 has no RestTemplate bean", kind: default }
+  - { k: "Timeouts", v: "set spring.http.clients.connect-timeout and read-timeout so a slow service cannot hold your threads" }
 trap:
-  wrong: "Use WebClient everywhere because reactive is faster."
-  right: "Pick by execution model: RestClient in a blocking app, WebClient in reactive or streaming code."
-sayIt: "For new blocking code I use RestClient from the injected builder, or an @HttpExchange interface on top of it. WebClient is for reactive apps. RestTemplate is deprecated, and I always set timeouts."
+  wrong: "Use WebClient everywhere, because reactive code is faster."
+  right: "Pick the client by execution model: RestClient in blocking code such as Spring MVC, WebClient in reactive or streaming code."
+  why: "WebClient was long presented as the modern replacement for RestTemplate, before RestClient existed, so 'new' and 'reactive' got mixed up with 'faster'."
+sayIt: "For new blocking code I use RestClient built from Boot's injected builder, or an @HttpExchange interface on top of it. WebClient is for reactive apps. RestTemplate is deprecated. I always set connect and read timeouts."
+buildsOn: [rest-controller, bean-scopes]
+scenarios:
+  - q: "PaymentService calls the fraud service with RestClient. The fraud service answers 503. What happens in PaymentService, and how can you react differently?"
+    a: "retrieve() throws an exception (a RestClientException subclass) for any 4xx or 5xx response, so the call fails unless you catch it. Use onStatus(...) to map that status to your own exception or fallback."
+  - q: "The fraud service sometimes takes 60 seconds to answer, and the payment service runs out of request threads. What was missing?"
+    a: "A read timeout. Without one, each call waits as long as the remote service takes, and every waiting call holds a request thread. Set spring.http.clients.read-timeout, for example 2s, and handle the timeout error."
 confusedWith: []
 tags: [web, http-client, rest-client, web-client]
 visual: table
 sources:
   - title: "REST Clients (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/integration/rest-clients.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "The state of HTTP clients in Spring: RestTemplate deprecation plan (spring.io blog)"
     url: "https://spring.io/blog/2025/09/30/the-state-of-http-clients-in-spring"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Calling REST Services: RestClient.Builder, HTTP Service clients, timeouts (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/io/rest-client.html"
+    verifiedOn: "2026-10-21"
+  - title: "Build Systems: spring-boot-starter-restclient (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/using/build-systems.html"
+    verifiedOn: "2026-10-21"
   - title: "Spring Cloud OpenFeign reference: feature-complete"
     url: "https://docs.spring.io/spring-cloud-openfeign/reference/spring-cloud-openfeign.html"
     verifiedOn: "2026-10-19"
-  - title: "Calling REST Services (Spring Boot 4.1 reference)"
-    url: "https://docs.spring.io/spring-boot/reference/io/rest-client.html"
-    verifiedOn: "2026-10-19"
 ---
+
+## What it is
+
+An HTTP client is the code your service uses to call another service's API, the way a browser calls a website. Spring offers two clients today. RestClient makes a call and waits for the answer, which fits a normal Spring MVC app. WebClient starts the call and returns at once with a promise of the answer, which fits reactive apps, as you will see in [Spring MVC vs WebFlux](card:mvc-vs-webflux). Both turn your Java objects into JSON requests and JSON answers back into objects.
 
 ## Why it exists
 
-Services call other services over HTTP. A client turns Java objects into requests and responses back into objects, and handles errors and timeouts so your code does not.
+The payment service must ask a fraud service "is this payment safe?" before it saves anything. With a raw HTTP library you would build the URL, write the JSON, send it, check the status, read the bytes and parse them, every time. A client does these steps for you, reuses the same [message converters](card:dispatcher-servlet) as your controllers, and turns error statuses into exceptions.
 
 ## How it works
 
 <Compare id="restclient-vs-webclient-vs-resttemplate" />
 
-- Set connect and read timeouts, for example `spring.http.clients.read-timeout=5s`, so a slow service cannot hold your threads.
-- A 4xx or 5xx response throws an exception by default; `onStatus(...)` handles it your way.
-- OpenFeign still works but is feature-complete; its docs suggest HTTP service clients.
+1. Spring Boot creates a `RestClient.Builder` with its defaults, such as the JSON converters and the timeout properties. It is a prototype bean, so each injection gets a fresh builder.
+2. Your class injects the builder, sets a base URL and builds one `RestClient`, which it keeps.
+3. Each call names the method and the path, adds a body if needed, and calls `retrieve()`.
+4. The client sends the request. A 4xx or 5xx answer throws an exception; a 2xx answer is read into the type you ask for.
 
 ## Example
 
+A `FraudCheckClient` that the payment service calls before saving a payment:
+
 ```java
 @Service
-class PriceClient {
+class FraudCheckClient {
     private final RestClient http;
-    PriceClient(RestClient.Builder builder) {                // auto-configured by Boot
-        this.http = builder.baseUrl("https://prices.example.com").build();
+    FraudCheckClient(RestClient.Builder builder) {              // Boot's pre-configured builder
+        this.http = builder.baseUrl("https://fraud.internal.example").build();
     }
-    Price price(String sku) {
-        return http.get().uri("/prices/{sku}", sku)
-                .retrieve().body(Price.class);              // 4xx/5xx throw
+    FraudResult check(PaymentRequest request) {
+        return http.post().uri("/checks")
+                .body(request)                                  // written as JSON
+                .retrieve()                                     // a 4xx or 5xx reply throws
+                .body(FraudResult.class);                       // JSON read into a record
     }
 }
 ```
 
+The same call as an HTTP service interface, with its settings in properties:
+
+```java
+interface FraudCheckApi {                             // Spring generates the implementation
+    @PostExchange("/checks")
+    FraudResult check(@RequestBody PaymentRequest request);
+}
+```
+
+```properties
+spring.http.clients.connect-timeout=1s
+spring.http.clients.read-timeout=2s
+spring.http.serviceclient.fraud.base-url=https://fraud.internal.example
+```
+
+What to notice:
+
+- Injecting the builder, not calling `RestClient.create()`, keeps Boot's converters and timeout settings.
+- With the interface, you write no request code at all; you register it with `@ImportHttpServices(group = "fraud", types = FraudCheckApi.class)`, usually on the main application class, and inject `FraudCheckApi` like any bean.
+- `read-timeout=2s` means a fraud service that does not answer within 2 seconds causes an exception instead of a thread that waits forever.
+
+## Rules and defaults
+
+- **Starter (Spring Boot 4):** `spring-boot-starter-restclient` brings the blocking clients (RestClient, RestTemplate and HTTP service clients); `spring-boot-starter-webclient` brings the reactive one.
+- **No RestTemplate bean:** Boot offers a `RestTemplateBuilder` but no ready `RestTemplate`, because each one usually needs its own settings.
+- **Errors by default:** a 4xx or 5xx answer throws a `RestClientException` subclass. Use `onStatus(...)` to handle it your way.
+- **OpenFeign:** Spring Cloud OpenFeign still works but is feature-complete; its docs point to Spring's HTTP service clients.
+
 ## Interview Qs
 
-### RestTemplate vs RestClient vs WebClient?
+### What is the difference between RestTemplate, RestClient and WebClient?
 
-RestTemplate is the classic blocking client with template methods; Framework 7.0 deprecates it, with removal planned for 8.0. RestClient is also blocking, with a fluent API. WebClient is non-blocking and reactive. New blocking code should use RestClient.
+RestTemplate is the classic blocking client with methods like getForObject; Spring Framework 7.0 deprecates it, with removal planned for 8.0. RestClient is also blocking but has a fluent API. WebClient is non-blocking and reactive. New blocking code should use RestClient.
 
 ### If RestClient can call APIs, why do we need WebClient?
 
-Different execution models. RestClient blocks the calling thread until the response arrives. WebClient returns Mono or Flux, does not wait, and supports streaming, so it fits WebFlux apps.
+They follow different execution models. RestClient blocks the calling thread until the answer arrives. WebClient returns a Mono or Flux at once and does not hold a thread while waiting, and it supports streaming. That fits WebFlux apps, where threads must never block.
 
 ### What is an HTTP service client?
 
-A Java interface whose methods carry @GetExchange or @PostExchange. Spring generates a proxy that makes the calls through RestClient or WebClient, so you declare the API once instead of building each request.
+A Java interface whose methods carry @GetExchange, @PostExchange and similar annotations. Spring generates a proxy that makes the calls through RestClient or WebClient. You declare the remote API once, as a typed interface, instead of building each request by hand.

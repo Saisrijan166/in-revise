@@ -5,16 +5,24 @@ title: Circular Dependencies
 topic: beans-di
 level: interview
 heat: 2
-hook: "A needs B and B needs A. Spring Boot refuses this at startup by default; fix the design, not the setting."
+hook: "Bean A needs bean B and bean B needs bean A. Spring Boot stops at startup when it sees this loop; the real fix is to break the loop in your design."
 points:
-  - { k: "Allowed?", v: "no: spring.main.allow-circular-references=false since Boot 2.6", kind: default }
-  - { k: "Constructor cycle", v: "can never be built: BeanCurrentlyInCreationException", kind: minus }
-  - { k: "Best fix", v: "move the shared logic into a third bean", kind: plus }
-  - { k: "Quick fix", v: "@Lazy on one constructor parameter injects a proxy" }
+  - { k: "What it is", v: "two or more beans that need each other, directly or through a chain, so none can be built first" }
+  - { k: "Boot default", v: "spring.main.allow-circular-references=false since Spring Boot 2.6, so any cycle fails startup", kind: default }
+  - { k: "Constructor cycle", v: "fails with BeanCurrentlyInCreationException even when cycles are allowed; a @Lazy parameter gets past it", kind: minus }
+  - { k: "Best fix", v: "move the shared logic into a third bean, or depend on a lower-level bean, so the loop disappears", kind: plus }
+  - { k: "Stopgap", v: "@Lazy on one constructor parameter injects a stand-in proxy and fetches the real bean on first use" }
 trap:
-  wrong: "Switch to setter or field injection and the cycle is fixed."
-  right: "Not in Spring Boot: since 2.6 every cycle fails at startup unless you allow circular references. Break the cycle instead."
-sayIt: "Spring Boot rejects circular dependencies at startup. I break the cycle by moving the shared logic into a third bean; @Lazy on one dependency is a stopgap, and allowing circular references is a last resort."
+  wrong: "Switch from constructor injection to field injection and the cycle goes away."
+  right: "In Spring Boot 2.6+ a field or setter cycle also fails at startup by default. Remove the cycle from the design instead."
+  why: "Plain Spring Framework does resolve field and setter cycles, and many older tutorials were written before Spring Boot 2.6 turned that off."
+sayIt: "A circular dependency is two beans that need each other. Spring Boot refuses it at startup by default. I break the cycle by moving the shared logic into a third bean; @Lazy on one dependency is only a stopgap, and allowing circular references is a last resort."
+buildsOn: [dependency-injection, bean-lifecycle]
+scenarios:
+  - q: "An app with field injection started fine on Spring Boot 2.5. After an upgrade to 2.6 or later it fails with 'The dependencies of some of the beans in the application context form a cycle'. Nothing in the code changed. Why?"
+    a: "The code always had a cycle. Plain Spring resolved it through field injection, but Spring Boot 2.6 set spring.main.allow-circular-references to false, so the same cycle now stops startup. Remove the cycle rather than switch the property back on."
+  - q: "PaymentService takes @Lazy NotificationService in its constructor, and the app starts. When does PaymentService get the real NotificationService?"
+    a: "At startup it gets a proxy, a stand-in object. On the first method call through that proxy, Spring looks up the real NotificationService bean and passes the call to it. The cycle still exists; it is only hidden."
 confusedWith: []
 tags: [circular-dependency, startup, lazy]
 visual: flow
@@ -31,52 +39,90 @@ sources:
   - title: "Lazy: lazy-resolution proxy at injection points (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/context/annotation/Lazy.html"
     verifiedOn: "2026-10-19"
+  - title: "BeanCurrentlyInCreationFailureAnalyzer.java: the startup failure message (Spring Boot v4.1.1 source)"
+    url: "https://github.com/spring-projects/spring-boot/blob/v4.1.1/core/spring-boot/src/main/java/org/springframework/boot/diagnostics/analyzer/BeanCurrentlyInCreationFailureAnalyzer.java"
+    verifiedOn: "2026-10-21"
   - title: "Circular Dependencies in Spring: redesign as the best fix (Baeldung)"
     url: "https://www.baeldung.com/circular-dependencies-in-spring"
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+A circular dependency is a loop between beans: `PaymentService` needs `NotificationService`, and `NotificationService` needs `PaymentService`. The loop can also be longer, such as A needs B, B needs C and C needs A. With [dependency injection](card:dependency-injection), Spring must build a bean's dependencies before it can finish that bean, so in a loop there is no bean it can finish first.
+
 ## Why it exists
 
-Two beans that need each other cannot both be built first. The loop usually means they share a job that belongs in a third class, so Spring Boot fails early.
+You never add a cycle on purpose. It grows when one class reaches back into another for a small piece of data, for example to read a payment's status. If Spring quietly patched every loop, two classes would stay tangled and harder to test and change. So Spring Boot fails at startup and prints the loop, and you fix the design while the change is still small.
 
 ## How it works
 
 <Mermaid
-  alt="Before: OrderService needs InvoiceService and InvoiceService needs OrderService, a cycle that fails at startup. After: the shared logic moves into a new TaxCalculator bean; both services use TaxCalculator, and neither needs the other."
+  alt="Left: the cycle. PaymentService needs NotificationService and NotificationService needs PaymentService, so startup fails. Right: the fix. PaymentService needs NotificationService, and NotificationService reads the payment from PaymentRepository instead, so there is no loop."
   chart={`flowchart LR
-  subgraph BAD [Cycle: fails at startup]
-    A[OrderService] -- needs --> B[InvoiceService]
-    B -- needs --> A
+  subgraph BAD [Cycle: startup fails]
+    P1[PaymentService] -- needs --> N1[NotificationService]
+    N1 -- needs --> P1
   end
-  subgraph GOOD [Fixed: a third bean]
-    A2[OrderService] --> T[TaxCalculator]
-    B2[InvoiceService] --> T
+  subgraph GOOD [Fixed: no loop]
+    P2[PaymentService] -- needs --> N2[NotificationService]
+    N2 -- needs --> R[PaymentRepository]
+    P2 -- needs --> R
   end`}
 />
 
-- With [constructor injection](card:dependency-injection) neither bean can be created first, so even plain Spring fails.
-- `@Lazy` hides the design problem; use it only as a stopgap.
+1. Spring starts to build `PaymentService` and sees that its constructor needs a `NotificationService`.
+2. It marks `PaymentService` as "currently in creation" and starts to build `NotificationService`.
+3. The `NotificationService` constructor needs a `PaymentService`, but that bean is still unfinished.
+4. Spring throws `BeanCurrentlyInCreationException`. Spring Boot's failure report draws the loop and stops the app.
+
+The fix on the right works because `NotificationService` only needed to read a payment, and `PaymentRepository` can do that. Each bean now depends on something below it, never back up.
 
 ## Example
 
+This is the cycle from the diagram, with [constructor injection](card:dependency-injection):
+
 ```java
 @Service
-class OrderService {
-    private final InvoiceService invoices;
+public class PaymentService {
+    private final NotificationService notifications;
+    public PaymentService(NotificationService notifications) { this.notifications = notifications; }
+}
 
-    OrderService(@Lazy InvoiceService invoices) {   // a proxy, resolved on first call
-        this.invoices = invoices;
-    }
+@Service
+public class NotificationService {
+    private final PaymentService payments;   // only used to read a payment's status
+    public NotificationService(PaymentService payments) { this.payments = payments; }
 }
 ```
+
+What to notice:
+
+- Neither constructor can run without the other object already built, so this fails at startup in any Spring app.
+- The comment shows the real problem: `NotificationService` uses `PaymentService` for a read that `PaymentRepository` can do. Change that one field and the cycle is gone.
+- Writing `@Lazy PaymentService payments` in the second constructor would also let the app start, but the two classes would stay tangled.
+
+## Rules and defaults
+
+- **Spring Boot default:** `spring.main.allow-circular-references` is `false` (since Spring Boot 2.6, still so in 4.1). Any cycle fails with "The dependencies of some of the beans in the application context form a cycle".
+- **Plain Spring Framework:** without Boot, field and setter cycles between singletons are resolved; only constructor cycles fail.
+- **Allowing cycles:** setting the property to `true` lets Spring resolve field and setter cycles again. Constructor cycles still fail. Boot's own message calls this a last resort.
+- **`@Lazy` on a parameter:** Spring injects a lazy-resolution proxy, a stand-in that looks up the real bean on the first method call. `ObjectProvider<NotificationService>` gives a similar delayed lookup.
+
+## Not to be confused with
+
+`@Lazy` on a class, from [bean lifecycle](card:bean-lifecycle), delays **creating** that bean until something first needs it. `@Lazy` on a constructor parameter delays **looking up** the dependency, by injecting a stand-in. Only the second one gets a constructor cycle past startup. Rule: on the class = create later; on the parameter = fetch later.
 
 ## Interview Qs
 
 ### How do you fix a circular dependency?
 
-Best: redesign, moving the shared logic into a third bean. Quick fix: `@Lazy` on one dependency. Last resort: `spring.main.allow-circular-references=true`, which never fixes constructor cycles.
+First redesign: move the shared logic into a third bean, or make one bean depend on a lower-level bean such as a repository. As a quick stopgap, put `@Lazy` on one constructor parameter. Setting `spring.main.allow-circular-references=true` is a last resort, and it never fixes a constructor cycle.
 
-### Why does constructor injection expose cycles?
+### Why does constructor injection expose cycles so early?
 
-Spring cannot call either constructor without the other object, so startup fails with BeanCurrentlyInCreationException. That is useful: you see the design problem on day one.
+Spring must call a constructor with all its arguments ready. In a loop, neither argument can exist first, so startup fails with `BeanCurrentlyInCreationException`. That is useful: you see the design problem on the first run, not later as a half-built bean.
+
+### What happens if you set spring.main.allow-circular-references=true?
+
+Spring goes back to resolving field and setter cycles, by handing one bean an early reference to the other before it is fully initialised. Constructor cycles still fail. The tangled design stays, so treat it as a temporary switch while you remove the cycle.

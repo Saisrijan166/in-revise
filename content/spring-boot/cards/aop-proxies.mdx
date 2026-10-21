@@ -5,70 +5,130 @@ title: Proxies and Self-Invocation
 topic: beans-di
 level: interview
 heat: 3
-hook: "Callers get a proxy, not your bean; advice runs only on calls through it, so this.method() gets no @Transactional."
+hook: "Other beans call a proxy, not your bean. Extra behaviour like @Transactional runs only on calls through it, so a bean calling its own method gets none."
 points:
-  - { k: "Proxy", v: "a wrapper that runs the advice, then calls the real bean" }
-  - { k: "Uses it", v: "@Transactional, @Async and your own @Aspect classes" }
-  - { k: "Spring Boot default", v: "CGLIB subclass proxies (spring.aop.proxy-target-class=true)", kind: default }
-  - { k: "Self-invocation", v: "this.other() skips the proxy, so no advice runs", kind: minus }
-  - { k: "CGLIB limit", v: "final or private methods cannot be advised", kind: minus }
+  - { k: "Proxy", v: "a wrapper object Spring injects in place of your bean; it runs the advice, then calls the real bean" }
+  - { k: "Who needs one", v: "@Transactional, @Async, @Cacheable, method security and your own @Aspect classes" }
+  - { k: "Spring Boot default", v: "CGLIB subclass proxies, because spring.aop.proxy-target-class=true (Spring Boot 4.1)", kind: default }
+  - { k: "Self-invocation", v: "a call like this.pay() from inside the bean goes to the real object, so no advice runs", kind: minus }
+  - { k: "Final or private methods", v: "a CGLIB proxy cannot override them, so their annotations are silently ignored", kind: minus }
 trap:
   wrong: "Calling a @Transactional method from another method of the same bean starts a transaction."
-  right: "The call goes through this, not the proxy, so no transaction starts. Move the method to another bean."
-sayIt: "Spring wraps an advised bean in a proxy, CGLIB by default in Spring Boot. The proxy runs the advice, then calls the bean. A this-call inside the bean skips the proxy, so @Transactional or @Async is ignored."
+  right: "The call goes through this, the real object, not through the proxy, so no transaction starts. Move the method to another bean."
+  why: "The annotation is right there on the method, so it looks as if the method itself starts the transaction. In fact only the proxy reads it."
+sayIt: "Spring puts a proxy, by default a CGLIB subclass in Spring Boot, in front of a bean that needs extra behaviour. Callers hold the proxy, which runs the advice and then the bean. A this-call inside the bean skips the proxy, so @Transactional or @Async is ignored."
+buildsOn: [spring-aop]
+scenarios:
+  - q: "PaymentService.payAll() loops over a list and calls pay() for each item. pay() is @Transactional; payAll() is not. A controller calls payAll(). How many transactions start?"
+    a: "None. The controller's call reaches the proxy, but payAll() has no annotation, so the proxy just passes it on. Inside, pay() is called through this, the real object, so the proxy never sees those calls."
+  - q: "You make PaymentService a final class to stop others from extending it. It has a @Transactional method. What happens at startup?"
+    a: "Startup fails with 'Could not generate CGLIB subclass'. Spring Boot's default proxy is a subclass of your class, and a final class cannot have one. Remove final, or give the bean an interface and switch to JDK proxies."
 confusedWith: [jdk-proxy-vs-cglib]
 tags: [aop, proxy, cglib, self-invocation]
 visual: flow
 sources:
   - title: "Proxying Mechanisms: JDK vs CGLIB, understanding AOP proxies (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/aop/proxying.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Aspect Oriented Programming (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/features/aop.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Using @Transactional: proxy mode and self-invocation (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html"
     verifiedOn: "2026-10-19"
+  - title: "Common Application Properties: spring.main.allow-circular-references, false by default (Spring Boot 4.1)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
   - title: "Task Execution and Scheduling: @Async proxy mode (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/integration/scheduling.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A proxy is a wrapper object that Spring creates around a bean and hands to everyone who asks for that bean. When a caller calls a method, the proxy first runs the extra code, the [advice](card:spring-aop), and then calls the same method on your real object. Self-invocation is the case where your object calls one of its own methods through `this`: that call never passes the proxy.
 
 ## Why it exists
 
-Spring adds behaviour such as transactions without changing your class. It does this by handing callers a proxy object that runs the extra code around each call.
+Spring wants to add behaviour like transactions without changing your class or making you call Spring code. A proxy does this from the outside: your `PaymentService` stays plain Java, and the proxy in front of it opens and closes the transaction. The price is the self-invocation rule. Many "my @Transactional or @Async does nothing" bugs come from not knowing it.
 
 ## How it works
 
 <Mermaid
-  alt="The caller calls placeOrder on a proxy. The proxy runs the advice, then calls the real OrderService. A this.audit call inside it skips the proxy."
+  alt="The controller calls payAll on the PaymentService proxy. The proxy runs the advice and then calls payAll on the real PaymentService. Inside, the real object calls this.pay, which goes straight to itself, so the proxy and its advice are skipped."
   chart={`flowchart LR
-  C[Caller] -- "placeOrder()" --> P["Proxy: advice runs"]
-  P -- "then calls" --> T[Real OrderService]
-  T -- "this.audit(): no proxy" --> T`}
+  C[PaymentController] -- "payAll()" --> P["Proxy: runs the advice"]
+  P -- "then calls payAll()" --> T[Real PaymentService]
+  T -- "this.pay(): proxy skipped" --> T`}
 />
 
-- Fixes for self-invocation, best first: move the method to another bean, inject the bean into itself, or use AspectJ weaving.
-- A JDK proxy implements the bean's interfaces; a CGLIB proxy is a generated subclass. See [JDK vs CGLIB](compare:jdk-proxy-vs-cglib).
-- Do not rely on proxied annotations inside `@PostConstruct`; the proxy may not be ready yet.
+1. At startup Spring sees that `PaymentService` needs advice, such as a `@Transactional` method or a matching aspect.
+2. It creates a proxy for that bean and registers the proxy in the container instead of the plain object.
+3. `PaymentController` gets the proxy injected, so each of its calls lands on the proxy first.
+4. The proxy runs the advice and then calls the real `PaymentService`.
+5. Inside that method, a call such as `pay()` means `this.pay()`. It goes straight to the real object, so no advice runs.
 
-## Defaults
+So the key idea is: advice runs only on calls that **arrive from outside** the bean, through the proxy.
+
+## Example
+
+The `LoggingAspect` from [Spring AOP](card:spring-aop) logs every `PaymentService` method. Here `payAll` calls `pay` from inside:
+
+```java
+@Service
+public class PaymentService {
+
+    public String pay(long amount) {
+        return "PAID " + amount;
+    }
+
+    public void payAll(List<Long> amounts) {
+        amounts.forEach(amount -> pay(amount));   // this.pay(): skips the proxy
+    }
+}
+```
+
+The caller prints the injected object's class and then calls `payAll(List.of(100L, 200L))`:
+
+```text output
+PaymentService$$SpringCGLIB$$0
+-> payAll
+<- payAll returned null
+```
+
+What to notice:
+
+- The injected object is not `PaymentService` but a generated subclass of it: the CGLIB proxy.
+- Only `payAll` is logged. The two `pay` calls ran, but through `this`, so the aspect never saw them.
+- If `pay` were `@Transactional`, the same rule applies: no transaction would start for those two calls.
+- The cleanest fix is to move `pay` into another bean, such as a `PaymentProcessor`, and call it through that bean's proxy.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
-| Proxy type | CGLIB (`spring.aop.proxy-target-class=true`); set `false` for JDK proxies | Spring Boot 4.1 |
-| Core Spring without Boot | JDK proxy if the bean has an interface, else CGLIB | Spring Framework 7.0 |
+| Proxy type | CGLIB subclass (`spring.aop.proxy-target-class=true`); set `false` for JDK proxies | Spring Boot 4.1 |
+| Proxy type without Boot | JDK proxy if the bean implements an interface, otherwise CGLIB | Spring Framework 7.0 |
+
+- **Final class:** a CGLIB proxy cannot subclass it, so startup fails with "Could not generate CGLIB subclass".
+- **Final or private method:** it cannot be overridden, so the proxy cannot advise it. There is no error; the annotation is ignored.
+- **Fixes for self-invocation, best first:** move the method to another bean; inject the bean into itself with `@Lazy` and call through that reference (Spring Boot rejects a plain self-reference as a cycle); or use AspectJ weaving, which has no proxy. `AopContext.currentProxy()` also works, but the docs strongly discourage it.
+- **Startup code:** do not rely on proxied behaviour inside `@PostConstruct`; the proxy may not be ready, and the call goes through `this` anyway.
+
+## Not to be confused with
+
+A JDK dynamic proxy implements the same interfaces as your bean, so it can only stand in for that interface. A CGLIB proxy is a generated subclass of your class, so it works without an interface but cannot touch final classes or methods. Rule: JDK = "is the interface"; CGLIB = "is a subclass".
 
 ## Interview Qs
 
 ### Why does @Transactional not work when I call the method from the same class?
 
-The call uses `this`, the real object, so the proxy never sees it. Move the method to another bean, or use AspectJ weaving.
+Because the call goes through `this`, the real object, not through the proxy that starts transactions. The annotation is only read by the proxy. Move the method into another bean, inject the bean into itself with `@Lazy`, or switch to AspectJ weaving, which puts the advice inside the class itself.
 
-### If @Transactional is just an annotation, who starts the transaction?
+### If @Transactional is only an annotation, who starts the transaction?
 
-A proxy Spring puts around the bean. It reads the annotation, starts the transaction, calls your method, then commits or rolls back.
+A proxy that Spring puts in front of the bean. When a caller calls the method, the proxy reads the annotation, starts a transaction, calls your method, and then commits, or rolls back if a runtime exception escapes. Your method itself contains no transaction code.
 
-### JDK dynamic proxy vs CGLIB?
+### JDK dynamic proxy or CGLIB?
 
-A JDK proxy implements the bean's interfaces, so only interface methods are advised. CGLIB generates a subclass, so no interface is needed, but final and private methods cannot be advised. Spring Boot uses CGLIB by default.
+A JDK proxy implements the bean's interfaces, so only interface methods are advised and you must inject the interface type. CGLIB generates a subclass, so no interface is needed and you can inject the class, but final classes and final or private methods cannot be advised. Spring Boot uses CGLIB by default.

@@ -5,17 +5,25 @@ title: DTOs and the Entity vs DTO Split
 topic: web
 level: beginner
 heat: 3
-hook: "The entity is the database's shape; the DTO is the API's shape. Map between them in the service, never return entities."
+hook: "The entity has the database's shape; the DTO has the API's shape. The service maps one to the other, so a controller never sends an entity out."
 points:
-  - { k: "Entity", v: "persistence model: every column, relations, internal fields" }
-  - { k: "DTO", v: "API contract: only the fields a client may send or see" }
-  - { k: "Java record", v: "a short, immutable DTO with one line per field" }
-  - { k: "Open-in-view", v: "on by default in Boot: JSON can trigger lazy SQL", kind: default }
-  - { k: "@JsonIgnore", v: "hides a field, but one forgotten field leaks", kind: minus }
+  - { k: "Entity", v: "the class mapped to a database table: every column, its relations and internal fields" }
+  - { k: "DTO", v: "a small class for one API call that holds only the fields a client may send or see" }
+  - { k: "Request and response DTO", v: "use separate ones, so a client cannot set fields such as id or status by sending extra JSON" }
+  - { k: "Java record", v: "the usual way to write a DTO: one line, immutable, with constructor and accessors generated" }
+  - { k: "@JsonIgnore", v: "hides one entity field from JSON, but every new field you forget to mark leaks out", kind: minus }
+  - { k: "Entity as JSON", v: "Jackson reads every property, so related objects that JPA loads on first use can run extra SQL", kind: minus }
 trap:
   wrong: "Return the entity and mark the secret fields with @JsonIgnore."
-  right: "Return a DTO with only the fields the client needs. OWASP advises picking fields, not hiding them one by one."
-sayIt: "Entities model the database; DTOs model the API. A DTO hides internal fields, stops mass assignment, avoids lazy-loading surprises during JSON writing, and lets the schema change without breaking clients."
+  right: "Return a DTO that lists only the fields the client needs. OWASP advises choosing fields to send, not hiding them one by one."
+  why: "@JsonIgnore is quick and works for the fields you remember today, so the risk of the next new field only shows up later."
+sayIt: "Entities model the database; DTOs model the API. A response DTO hides internal fields, a request DTO stops mass assignment, and neither triggers lazy loading while JSON is written. The tables can change without breaking clients."
+buildsOn: [rest-controller]
+scenarios:
+  - q: "The Payment entity gains a new column, cardToken. The controller returns Payment directly. What happens on the next GET /payments/42?"
+    a: "Jackson writes every property it can reach, so the card token is now in the JSON response. With a PaymentResponse DTO, the new column stays inside the service until someone adds it to the DTO on purpose."
+  - q: "A client sends {\"amount\": 500, \"status\": \"PAID\"} to POST /payments, and the controller reads the body straight into the Payment entity. What is the risk?"
+    a: "Mass assignment: the client sets status to PAID without paying. A PaymentRequest DTO with only amount and currency gives the client no way to send status, so the server decides it."
 confusedWith: []
 tags: [web, rest, dto, api-design]
 visual: table
@@ -25,54 +33,76 @@ sources:
     verifiedOn: "2026-10-19"
   - title: "SQL Databases: Open EntityManager in View (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/data/sql.html"
-    verifiedOn: "2026-10-19"
-  - title: "Common Application Properties: spring.jpa.open-in-view (Spring Boot 4.1 appendix)"
-    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "JEP 395: Records (OpenJDK)"
     url: "https://openjdk.org/jeps/395"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+A DTO (data transfer object) is a small class that carries data in or out of your API and nothing else. Its opposite is the entity: the class mapped to a database table, which you will meet in [JPA Entities](card:jpa-entities). In the payment service, `Payment` is the entity, while `PaymentRequest` (what a client sends) and `PaymentResponse` (what a client gets back) are DTOs. The service converts between them, so the controller only sees DTOs.
+
 ## Why it exists
 
-The database model and the API contract change for different reasons. Sending entities straight out leaks internal fields, ties clients to your tables, and lets JSON writing trigger database queries.
+The database model and the API contract change for different reasons. If the controller returns the `Payment` entity, three things go wrong. Internal fields such as a card token or a fraud score appear in the JSON. Every column rename breaks the mobile app. And when JSON is written, a related object that JPA loads only on first use can quietly run extra SQL. A DTO puts a fixed, deliberate contract between the outside world and your tables.
 
 ## How it works
 
 <Compare id="entity-vs-dto" />
 
-- Map entity to DTO in the service layer; the controller only sees DTOs.
-- Use separate request and response DTOs: clients must not set `id`, `role` or `status` by sending extra JSON.
+1. The client sends JSON, and Spring reads it into a request DTO, `PaymentRequest`. Only its fields can be set.
+2. The controller passes the DTO to `PaymentService`.
+3. The service builds or loads the `Payment` entity, applies the business rules and saves it.
+4. The service copies the fields the client may see into a response DTO, `PaymentResponse`.
+5. The controller returns that DTO, and Jackson writes it as JSON. The entity never leaves the service.
 
 ## Example
 
+The DTOs of the payment service and the mapping step inside `PaymentService`:
+
 ```java
-record CreateUserRequest(@NotBlank String name, @Email String email) { }
-record UserResponse(Long id, String name, String email) {
-    static UserResponse from(User u) {                 // entity -> DTO
-        return new UserResponse(u.getId(), u.getName(), u.getEmail());
+record PaymentRequest(BigDecimal amount, String currency) { }        // what a client may send
+
+record PaymentResponse(Long id, BigDecimal amount, PaymentStatus status) {  // what a client sees
+    static PaymentResponse from(Payment p) {                         // entity -> DTO
+        return new PaymentResponse(p.getId(), p.getAmount(), p.getStatus());
     }
 }
-// The User entity also has passwordHash and internalStatus: never sent out.
+
+// In PaymentService: the entity stays inside, only the DTO goes out
+PaymentResponse create(PaymentRequest req) {
+    Payment saved = repository.save(new Payment(req.amount(), req.currency()));
+    return PaymentResponse.from(saved);
+}
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| `spring.jpa.open-in-view` | `true` (EntityManager open for the whole request) | Spring Boot 4.1 |
+- `PaymentRequest` has no `id` or `status`. The database creates the id and the service sets the status, so a client cannot fake either.
+- The `Payment` entity also holds `cardToken` and `fraudScore`. `PaymentResponse.from` does not copy them, so they can never reach the JSON.
+- A record gives you the constructor, accessors such as `amount()`, `equals` and `toString` from one line.
+
+## Rules and defaults
+
+- **Where to map:** in the service layer, so the controller sees only DTOs and every read of the entity happens inside the service.
+- **Extra SQL during JSON writing:** returning an entity can run queries while Jackson writes it, because Spring Boot can keep the JPA `EntityManager` open for the whole web request. You will see this setting, open-in-view, and its default in [Lazy Loading and the N+1 Problem](card:lazy-loading-n-plus-one).
+- **One DTO per purpose:** a create request, an update request and a response often need different fields. Sharing one class brings back mass assignment.
+
+## Common mistakes
+
+- **"A DTO is extra code for nothing in a small app."** In a tiny prototype the entity and the DTO may look the same. The DTO pays off the first time a column changes or a sensitive field is added, and by then many clients depend on the shape.
 
 ## Interview Qs
 
 ### If the entity already holds the data, why do we need a DTO?
 
-The entity is shaped by the database; the DTO is the API contract. A DTO hides fields such as passwordHash, blocks mass assignment, and lets you change tables without breaking clients.
+The entity is shaped by the database; the DTO is the API contract. A response DTO hides fields such as a card token, a request DTO blocks mass assignment, and the tables can change without breaking clients. They change for different reasons, so they should be different classes.
 
 ### Why is returning a JPA entity from a controller risky?
 
-Jackson writes every property it can reach. Lazy relations then load during JSON writing, running extra queries, because open-in-view keeps the EntityManager open. Internal fields leak, and the API breaks when a table changes.
+Jackson writes every property it can reach. Related objects that JPA loads lazily can then run extra queries during JSON writing, as [Lazy Loading and the N+1 Problem](card:lazy-loading-n-plus-one) shows. Internal fields leak, and the API breaks whenever a table changes.
 
 ### Is @JsonIgnore enough to protect sensitive fields?
 
-No. It only hides the fields you remember to mark. Choose the fields to send in a response DTO instead, as OWASP advises.
+No. It protects only the fields you remember to mark, and every new field is exposed by default. A response DTO works the other way round: nothing is sent unless you add it. That is what OWASP recommends.

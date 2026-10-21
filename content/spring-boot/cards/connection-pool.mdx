@@ -5,38 +5,53 @@ title: Connection Pooling with HikariCP
 topic: data
 level: intermediate
 heat: 1
-hook: "A pool keeps database connections open and lends them to threads; Boot uses HikariCP, with 10 connections and a 30 s wait."
+hook: "A connection pool keeps a few database connections open and lends them to requests; Spring Boot uses HikariCP, with 10 connections by default."
 points:
   - { k: "Default pool (Boot 4.1)", v: "HikariCP, brought in by the jdbc and data-jpa starters", kind: default }
-  - { k: "maximum-pool-size", v: "10 by default (HikariCP 7.0)", kind: default }
-  - { k: "connection-timeout", v: "30 s wait for a free one, then SQLException", kind: default }
-  - { k: "Configure", v: "spring.datasource.hikari.* properties" }
-  - { k: "Bigger pool", v: "often slower: the database has only so many cores", kind: minus }
+  - { k: "maximum-pool-size", v: "10 connections by default, idle and in use together (HikariCP 7.0)", kind: default }
+  - { k: "connection-timeout", v: "a request waits up to 30 s for a free connection, then gets an SQLException", kind: default }
+  - { k: "Configure", v: "with spring.datasource.hikari.* properties in application.properties" }
+  - { k: "Held for", v: "the whole transaction, so long transactions need more connections", kind: minus }
+  - { k: "Bigger pool", v: "often slower: the database has only so many CPU cores and disks", kind: minus }
 trap:
   wrong: "More connections always mean more throughput."
-  right: "Past the database's capacity, extra connections only add switching. HikariCP suggests starting near cores x 2 + disks."
-sayIt: "Boot uses HikariCP by default and I tune it with spring.datasource.hikari.*. I keep the pool small, near cores times two plus disks, then measure, and keep transactions short so connections come back fast."
+  right: "Past the database's capacity, extra connections only add waiting and switching. HikariCP suggests starting near cores x 2 + disks, then measuring."
+  why: "In the app, more of anything (threads, servers) often helps, so a bigger pool looks like a free speed-up. The limit is on the database side."
+sayIt: "Boot uses HikariCP by default, with 10 connections and a 30-second wait. I tune it with spring.datasource.hikari.*, keep the pool small, near cores times two plus disks, and keep transactions short so connections come back fast."
+buildsOn: [transactional, transaction-propagation]
+scenarios:
+  - q: "The pool has 10 connections. 50 requests arrive at once, and each holds a connection for 200 ms. What happens?"
+    a: "10 run at once and 40 wait in the pool's queue. They are served in about five rounds, so all finish in roughly a second, well inside the 30-second connection timeout. Nobody gets an error; some requests are just slower."
+  - q: "Under load, requests fail after 30 seconds with an SQLException saying no connection is available. What do you check first?"
+    a: "Why connections are not coming back: long transactions, slow remote calls inside a transaction, or code that never returns a connection. Turn on leak-detection-threshold to log them. Only after that ask whether the pool is too small for the load."
 confusedWith: []
 tags: [jdbc, hikaricp, performance]
 visual: flow
 sources:
   - title: "SQL Databases: supported connection pools (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/data/sql.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "HikariCP README: configuration and defaults (GitHub)"
     url: "https://github.com/brettwooldridge/HikariCP"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "About Pool Sizing (HikariCP wiki)"
     url: "https://github.com/brettwooldridge/HikariCP/wiki/About-Pool-Sizing"
     verifiedOn: "2026-10-19"
   - title: "Dependency versions: HikariCP 7.0.2 (Spring Boot 4.1.1 appendix)"
     url: "https://docs.spring.io/spring-boot/appendix/dependency-versions/coordinates.html"
     verifiedOn: "2026-10-19"
+  - title: "Common Application Properties: server.tomcat.threads.max (Spring Boot 4.1.1 appendix)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A database connection is an open network session between your app and the database, already logged in and ready for SQL. A connection pool opens a set of these connections once and keeps them. A request **borrows** one, uses it, and **returns** it, instead of opening and closing its own. Spring Boot uses the HikariCP pool by default.
 
 ## Why it exists
 
-Opening a database connection for every request is slow. A pool opens a set of connections once and lends them to threads, which give them back when done.
+Every request to the payment service needs the database. Opening a new connection each time means a network handshake and a login before any SQL runs, and a traffic spike can open hundreds of connections that overload the database. A pool pays the opening cost once and caps the number of connections, so the database gets steady, limited load.
 
 ## How it works
 
@@ -49,38 +64,64 @@ Opening a database connection for every request is slow. A pool opens a set of c
   P --> DB[(Database)]`}
 />
 
-- Boot picks HikariCP whenever it is present; `spring.datasource.type` chooses another pool.
-- Keep `max-lifetime` a few seconds below any database or network connection limit.
-- `leak-detection-threshold` logs a connection held too long, a sign of code that never returns it.
+1. When the app first uses the database, usually during startup, HikariCP opens connections and keeps them ready.
+2. A request enters a [@Transactional](card:transactional) method, and the transaction manager borrows a connection from the pool.
+3. The thread keeps that connection until the transaction commits or rolls back. Then the connection goes back to the pool; it is not closed.
+4. If all 10 are busy, the next thread waits. If none comes back within 30 seconds, it gets an `SQLException`.
+5. HikariCP retires each connection after its maximum lifetime, 30 minutes by default, and opens a fresh one.
+
+So the length of your transactions decides how many connections you need: a connection is busy for the whole transaction.
 
 ## Example
 
+The payment service's pool settings, set to fail fast and to report leaks:
+
 ```properties
-spring.datasource.url=jdbc:postgresql://db:5432/shop
+spring.datasource.url=jdbc:postgresql://db:5432/payments
 spring.datasource.hikari.maximum-pool-size=10
 spring.datasource.hikari.connection-timeout=5000
 spring.datasource.hikari.leak-detection-threshold=20000
 ```
 
-## Defaults
+What to notice:
+
+- `connection-timeout=5000` makes a waiting request fail after 5 seconds instead of 30, so a stuck database shows up quickly.
+- `leak-detection-threshold=20000` logs a message about a possible leak when a connection stays out for more than 20 seconds. It is off by default.
+- Boot binds these kebab-case names to HikariCP's own settings, such as `maximumPoolSize`.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
 | `maximumPoolSize` | 10 | HikariCP 7.0 |
-| `minimumIdle` | Same as `maximumPoolSize` (fixed size) | HikariCP 7.0 |
+| `minimumIdle` | Same as `maximumPoolSize` (a fixed-size pool) | HikariCP 7.0 |
 | `connectionTimeout` | 30 s | HikariCP 7.0 |
+| `idleTimeout` | 10 min, used only when `minimumIdle` is below the maximum | HikariCP 7.0 |
 | `maxLifetime` | 30 min | HikariCP 7.0 |
+
+- **Which pool:** Boot always picks HikariCP when it is present. Without it, Boot tries Tomcat JDBC, then Commons DBCP2, then Oracle UCP. `spring.datasource.type` picks one directly.
+- **maxLifetime:** set it a few seconds shorter than any time limit the database or the network puts on connections.
+- **Sizing:** HikariCP's guide starts at (CPU cores x 2) + number of disks on the database server, then load-test.
+- **REQUIRES_NEW:** each such call holds a second connection, so the pool must exceed the number of concurrent threads, as in [propagation](card:transaction-propagation).
+
+## Not to be confused with
+
+The **connection pool** limits how many database connections exist. The **web server's thread pool** limits how many requests run at once: embedded Tomcat allows 200 worker threads by default in Spring Boot 4.1 (the limit does not apply with virtual threads). Rule: threads carry requests; connections carry SQL. 200 threads can share 10 connections, because most of a request's time is not spent in the database.
+
+## Common mistakes
+
+- **"A slow HTTP call inside a transaction only slows that request."** The thread keeps its connection for the whole transaction, so the call also blocks one of the 10 connections. Make remote calls, such as the fraud check, before or after the transaction.
 
 ## Interview Qs
 
 ### Which connection pool does Spring Boot use?
 
-HikariCP, chosen whenever it is on the classpath; the jdbc and data-jpa starters bring it in. Without it Boot tries Tomcat JDBC, then DBCP2, then Oracle UCP.
+HikariCP, chosen whenever it is on the classpath; the jdbc and data-jpa starters bring it in. Without it, Boot tries Tomcat JDBC, then DBCP2, then Oracle UCP. You can force one with spring.datasource.type.
 
-### How do you size the pool?
+### How do you size the connection pool?
 
-Smaller than most expect. HikariCP's guide starts at cores x 2 plus disks, about 10 for a 4-core server with one disk, then load-test.
+Smaller than most people expect. HikariCP's guide starts at CPU cores times two plus disks on the database server, (4 x 2) + 1 = 9 for a 4-core server with one disk. Then load-test and adjust, and keep transactions short.
 
 ### Threads fail waiting for a connection. What do you check?
 
-All connections stayed busy for the whole timeout. Look for long transactions and leaked connections first, then whether the pool size fits the load.
+All connections stayed busy for the whole timeout. First look for long transactions, slow calls inside transactions and leaked connections, using leak-detection-threshold. Then check whether the pool size fits the real load.

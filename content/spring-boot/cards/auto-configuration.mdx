@@ -5,17 +5,24 @@ title: Auto-Configuration
 topic: boot-basics
 level: intermediate
 heat: 3
-hook: "Boot looks at your classpath, properties and beans, and creates the beans you did not write yourself."
+hook: "Spring Boot creates the common beans your app needs, like a DataSource, based on your jars and settings, and steps back when you define your own."
 points:
-  - { k: "Conditional", v: "each auto-config applies only if its conditions match" }
-  - { k: "Backs off", v: "define your own bean and Boot skips its own", kind: plus }
-  - { k: "Exclude", v: "exclude on the annotation, or spring.autoconfigure.exclude" }
-  - { k: "See why", v: "--debug logs the condition evaluation report" }
-  - { k: "Hidden setup", v: "beans appear that you never declared; check the report", kind: minus }
+  - { k: "Rule-based", v: "each auto-configuration runs only if its conditions are true" }
+  - { k: "Your bean wins", v: "if you define a bean of that type, Boot does not create its own", kind: plus }
+  - { k: "Inputs", v: "the jars on the classpath, your properties, and the beans you already have" }
+  - { k: "Turn one off", v: "exclude it on @SpringBootApplication or with spring.autoconfigure.exclude" }
+  - { k: "Hidden beans", v: "beans appear that you never wrote; --debug shows where they came from", kind: minus }
 trap:
-  wrong: "Auto-configuration configures everything it knows about, whatever you do."
-  right: "It is conditional and backs off: if you define a bean of that type, Boot does not create its own."
-sayIt: "Auto-configurations are configuration classes with conditions like @ConditionalOnClass and @ConditionalOnMissingBean. They run after my beans, so my DataSource replaces Boot's. --debug shows what matched."
+  wrong: "Auto-configuration sets up everything Spring Boot knows about, whatever you do."
+  right: "Each auto-configuration checks conditions first, and backs off when you already defined that bean."
+  why: "From the outside it looks like magic, because a database or JSON setup appears without any code from you."
+sayIt: "Auto-configuration is a set of configuration classes inside Boot's jars, each guarded by conditions such as @ConditionalOnClass and @ConditionalOnMissingBean. My beans are registered first, so if I define a DataSource, Boot's own backs off. --debug shows which ones matched."
+buildsOn: [component-vs-bean, starters]
+scenarios:
+  - q: "You add spring-boot-starter-data-jpa and an H2 jar, and write no database code. The app starts with a working database. Why?"
+    a: "The DataSource auto-configuration found an embedded database class on the classpath and no DataSource bean of yours, so its conditions matched and it created an in-memory database."
+  - q: "You define your own DataSource bean, pointing to PostgreSQL. Does Boot still create its embedded one too?"
+    a: "No. Its @ConditionalOnMissingBean condition fails because a DataSource already exists, so Boot backs off and only your bean is used."
 confusedWith: []
 tags: [auto-configuration, conditional, starters]
 visual: flow
@@ -31,50 +38,75 @@ sources:
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+Auto-configuration is Spring Boot creating ready-made [beans](card:ioc-container) for you. A bean is an object that Spring creates and manages. When you add a starter, such as the one for databases, Boot also brings setup code that can build the beans that library needs. That setup code runs only when it makes sense for your app.
+
 ## Why it exists
 
-Most apps need the same infrastructure beans, such as a DataSource or a JSON mapper. Auto-configuration creates them for you and steps aside when you define your own.
+Almost every app needs the same plumbing: a database connection pool, a JSON converter, a web server. In plain Spring you wrote a `@Bean` method for each of them, in every project, with almost the same code. Auto-configuration writes that code once, inside Boot, so a new app works with zero setup. You still keep control, because your own bean always replaces Boot's.
 
 ## How it works
 
 <Mermaid
-  alt="Auto-configuration flow. Your own beans are registered first. Boot then reads the auto-configuration classes listed in each jar. For each one it checks the conditions: is the class on the classpath, is there no bean of yours of that type, does the property allow it. If yes, Boot creates its bean; if no, it skips it."
+  alt="Auto-configuration flow. Step 1: your own beans are registered. Step 2: Boot reads the list of auto-configuration classes from its jars. Step 3: for each one it checks its conditions: is a class on the classpath, is there no bean of yours of that type, does a property allow it. If yes, Boot creates its bean. If no, it skips it, which is called backing off."
   chart={`flowchart TD
-  U[1. Your beans are registered] --> L[2. Boot reads the listed auto-configurations]
-  L --> C{3. Class present? No bean of yours? Property allows it?}
+  U[1. Your beans are registered] --> L[2. Boot reads its list of auto-configurations]
+  L --> C{3. Conditions true?}
   C -- yes --> NEW[Create Boot's bean]
   C -- no --> SKIP[Skip it: back off]`}
 />
 
-- Example: HSQLDB on the classpath and no `DataSource` bean gives an in-memory database. Declare a `DataSource` and that support backs away.
-- How Boot knows what to configure: jars on the classpath, your properties, and the beans you already have.
+1. Spring first registers the beans you wrote yourself.
+2. Boot then reads a list of auto-configuration classes that ships inside its jars.
+3. Each class has conditions, such as "only if this library is on the classpath" or "only if the app has no bean of this type yet". If they are all true, Boot creates the bean. If one is false, it skips that class.
+
+So the order is the key: your beans come first, and Boot fills only the gaps.
 
 ## Example
 
+The payment service needs a `DataSource`, the object that hands out database connections. Boot's own auto-configuration looks roughly like this simplified version:
+
 ```java
 @AutoConfiguration
-@ConditionalOnClass(AcmeClient.class)    // only if the library is present
-public class AcmeAutoConfiguration {
+@ConditionalOnClass(DataSource.class)     // only if JDBC is on the classpath
+public class MyDataSourceAutoConfiguration {
 
     @Bean
-    @ConditionalOnMissingBean            // back off if the app has one
-    AcmeClient acmeClient() {
-        return new AcmeClient();
+    @ConditionalOnMissingBean             // only if the app has no DataSource yet
+    DataSource dataSource(DataSourceProperties props) {
+        return props.initializeDataSourceBuilder().build();
     }
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| `@ConditionalOnProperty` matches | the property exists and is not `false` | Spring Boot 4.1 |
+- `@ConditionalOnClass` keeps this class silent in apps that do not use a database at all.
+- `@ConditionalOnMissingBean` is the "back off" rule. If the payment service defines its own `DataSource` bean, this method never runs.
+- The bean is built from `spring.datasource.*` properties, so you change the database URL in configuration, not in code.
+
+## Rules and defaults
+
+- **Runs automatically:** `@SpringBootApplication` includes `@EnableAutoConfiguration`, so you do not switch it on yourself.
+- **Where the list lives:** each jar lists its classes in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` (the only supported place since Spring Boot 3.0).
+- **Turning one off:** `@SpringBootApplication(exclude = DataSourceAutoConfiguration.class)`, or the `spring.autoconfigure.exclude` property.
+- **`@ConditionalOnProperty`:** by default it matches when the property exists and is not `false`.
+
+## Not to be confused with
+
+A [starter](card:starters) decides **which jars** you get. Auto-configuration decides **which beans** Boot builds from those jars. The starter brings the database library; auto-configuration notices it and creates the `DataSource`.
+
+## Common mistakes
+
+- **"I must exclude Boot's bean before I can define my own."** Not needed. Defining your bean is enough; Boot backs off by itself.
+- **Guessing why a bean exists.** Start the app with `--debug` to print the condition evaluation report, which lists every auto-configuration and the conditions that passed or failed.
 
 ## Interview Qs
 
 ### How does Spring Boot know what to configure?
 
-It reads the auto-configuration classes listed in each jar. Each has conditions on the classpath, properties, web app type and existing beans. Only those whose conditions match add beans.
+It reads the auto-configuration classes listed in its jars. Each one has conditions on the classpath, properties, the type of web app and the beans that already exist. Only the classes whose conditions all match add beans.
 
 ### How do you disable one auto-configuration?
 
@@ -82,4 +114,4 @@ Use `exclude` on `@SpringBootApplication`, `excludeName` when the class is not o
 
 ### Why was a bean (not) auto-configured?
 
-Start the app with `--debug`. It logs the condition evaluation report: each auto-configuration with the conditions that matched or failed.
+Start the app with `--debug`. It logs the condition evaluation report: each auto-configuration with the conditions that matched or failed. With Actuator, the `/actuator/conditions` endpoint shows the same report.

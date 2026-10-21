@@ -5,24 +5,32 @@ title: Externalized Configuration
 topic: configuration
 level: beginner
 heat: 2
-hook: "Keep settings outside the code: Spring Boot merges every source into one Environment, and the higher source wins."
+hook: "Keep settings outside the code. Boot merges config files, environment variables and command-line arguments into one Environment, and a higher source wins."
 points:
-  - { k: "Order (high to low)", v: "command line > system properties > env vars > config files" }
-  - { k: "Config files", v: "outside the jar beats inside; application-{profile} beats plain" }
-  - { k: "Env var names", v: "SPRING_DATASOURCE_URL sets spring.datasource.url" }
-  - { k: "Placeholders", v: "${DB_PASSWORD} reads another key; ${name:default} adds a fallback" }
-  - { k: "Secrets", v: "no built-in encryption; pass them in at deploy time", kind: minus }
+  - { k: "Order (high to low)", v: "command-line arguments, then Java system properties, then environment variables, then config files" }
+  - { k: "Config files", v: "a file outside the jar beats one inside; application-{profile} beats plain application" }
+  - { k: "Env var names", v: "SPRING_DATASOURCE_URL sets spring.datasource.url: dots become _, dashes go, all upper case" }
+  - { k: "Placeholders", v: "${DB_PASSWORD} reads another value; ${name:fallback} uses fallback when name is missing" }
+  - { k: "Same jar everywhere", v: "change a value at deploy time; no rebuild for dev, test or production", kind: plus }
+  - { k: "Secrets", v: "Boot has no built-in encryption; pass secrets in at deploy time, never commit them", kind: minus }
 trap:
   wrong: "To change a value in application.properties, you must rebuild the jar."
-  right: "Override it at deploy time: --server.port=9090, SERVER_PORT=9090, or a config file outside the jar."
-sayIt: "Spring Boot merges config files, env vars, system properties and command-line arguments into one Environment. Higher sources win, so one jar runs everywhere and secrets stay out of the code."
+  right: "Override it at deploy time: --server.port=9090, SERVER_PORT=9090, or an application.properties file next to the jar."
+  why: "application.properties lives in src/main/resources and is packed into the jar, so it feels like part of the code."
+sayIt: "Spring Boot merges config files, environment variables, system properties and command-line arguments into one Environment. Higher sources win, so the same jar runs in every environment and secrets stay out of the code."
+buildsOn: [application-startup]
+scenarios:
+  - q: "application.properties sets server.port=8080. You start the payment service with SERVER_PORT=9090 java -jar payment.jar --server.port=9000. Which port does it use?"
+    a: "9000. Command-line arguments rank above environment variables, and both rank above config files. The env var would win over the file if the argument were removed."
+  - q: "Inside the jar, application-prod.properties sets app.fraud-check.url to the test server. Ops put an application.properties next to the jar with the production URL, and start with the prod profile. Which URL wins?"
+    a: "The file next to the jar. Files outside the jar rank above all files inside it, even a profile-specific one inside. Only an application-prod.properties outside the jar would rank higher still."
 confusedWith: [properties-vs-yaml]
 tags: [configuration, properties, environment]
 visual: table
 sources:
   - title: "Externalized Configuration (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/features/external-config.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "III. Config (The Twelve-Factor App)"
     url: "https://12factor.net/config"
     verifiedOn: "2026-10-17"
@@ -31,9 +39,13 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Externalized configuration means keeping settings, such as the database URL, the port or an API key, outside your Java code. Boot reads them from many **property sources**: config files, environment variables, Java system properties and command-line arguments. It merges them all into one object, the `Environment`, while the app [starts](card:application-startup). When two sources set the same key, the higher-ranked source wins.
+
 ## Why it exists
 
-One jar must run in dev, test and production with different URLs, ports and secrets. Values kept outside the code need no rebuild per environment and stay out of Git.
+The payment service must run on a laptop, in test and in production, each with its own database URL and secrets. Hardcoding `String password = "secret123"` means a rebuild per environment and a password in Git. With externalized configuration you build one jar, keep safe defaults in `application.properties`, and override only what differs at deploy time. Passwords come from the environment and never enter the code or the repository.
 
 ## How it works
 
@@ -44,35 +56,52 @@ One jar must run in dev, test and production with different URLs, ports and secr
 | 3 | [OS environment variables](card:os-environment-variables) | `SERVER_PORT=9000` |
 | 4 | [Config files](card:config-data-files) | `application.properties` or `application.yml` |
 
-- Short list: the full one has 15 sources; test properties even beat the command line.
-- Env var form: dots become `_`, dashes are dropped, all upper case.
-- The two file formats hold the same keys: [properties vs YAML](compare:properties-vs-yaml).
+1. At startup, Boot loads `application.properties` (or `.yml`) from inside the jar, then any profile-specific file, then the same files from outside the jar.
+2. It adds environment variables, Java system properties and command-line arguments on top.
+3. For each key, the source with the highest rank provides the value.
+4. `@Value`, `@ConfigurationProperties` and your beans read that merged value, never a single file.
+
+This table is the short version; the full list has 15 sources, and test properties even beat the command line.
 
 ## Example
 
+The payment service ships with `server.port=8080` and `app.fraud-check.url=http://localhost:9000` in its `application.properties`. The same jar, started three ways:
+
 ```bash
-java -jar app.jar                       # 8080 from application.properties
-SERVER_PORT=9090 java -jar app.jar      # env var wins: 9090
-java -jar app.jar --server.port=9000    # command line wins: 9000
+java -jar payment.jar                          # port 8080, from the file
+SERVER_PORT=9090 java -jar payment.jar         # port 9090: env var beats the file
+java -jar payment.jar --server.port=9000       # port 9000: argument beats both
+APP_FRAUDCHECK_URL=https://fraud.example.com java -jar payment.jar   # fraud URL
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Config file name | `application` (change with `spring.config.name`) | Spring Boot 4.1 |
-| Folders searched | `classpath:/`, `classpath:/config/`, `./`, `./config/`, `./config/*/`; later wins | Spring Boot 4.1 |
+- No rebuild happened between the runs; only the environment changed.
+- `APP_FRAUDCHECK_URL` sets `app.fraud-check.url`: each dot became `_`, the dash was dropped, and everything is upper case. Most operating systems do not allow dots in variable names, which is why this form exists.
+- Each override touches only its own key; every other value still comes from the file.
+
+## Rules and defaults
+
+- **File name and folders:** Boot looks for `application.*` (change with `spring.config.name`) in `classpath:/`, `classpath:/config/`, `./`, `./config/` and `./config/*/`; later locations win.
+- **File order:** inside the jar, then a profile file inside the jar, then outside the jar, then a profile file outside the jar. The last one wins.
+- **Placeholders:** `spring.datasource.password=${DB_PASSWORD}` reads the env var; `${DB_PASSWORD:dev}` falls back to `dev` when it is missing.
+- **Too late for some keys:** `@PropertySource` files are added during the context refresh, too late for `logging.*` and `spring.main.*`.
+- **Mounted secrets:** `spring.config.import=optional:configtree:/etc/config/` reads a folder where each file name is a key and its content the value, as Kubernetes mounts secrets.
+
+## Not to be confused with
+
+The **Environment** is the merged result of all sources. A **config file** such as `application.properties` is only one of those sources, and the lowest common one. Rule: the file gives defaults; the Environment gives the value your code actually sees. The two file formats are compared in [properties vs YAML](compare:properties-vs-yaml).
 
 ## Interview Qs
 
 ### Where can Spring Boot read configuration from?
 
-Config files inside and outside the jar (plain and profile-specific), environment variables, Java system properties and command-line arguments, among others. All of them land in one `Environment`, and a higher source overrides a lower one.
+From config files inside and outside the jar (plain and profile-specific), environment variables, Java system properties and command-line arguments, among others. All of them are merged into one `Environment`, and for each key a higher-ranked source overrides a lower one.
 
-### An env var and application.properties set the same key. Which wins?
+### An environment variable and application.properties set the same key. Which wins?
 
-The environment variable. From the top: command-line arguments, Java system properties, environment variables, then config files. Among files, outside the jar beats inside.
+The environment variable. From the top, the order is command-line arguments, Java system properties, environment variables, then config files. Among files, a file outside the jar beats one inside, and a profile-specific file beats the plain one.
 
 ### How do you keep secrets out of the jar?
 
-Reference them with a placeholder such as `${DB_PASSWORD}` and supply the value at deploy time as an env var or a mounted file (a configuration tree). Spring Boot has no built-in encryption; Spring Cloud Vault can store them.
+Reference them with a placeholder such as `${DB_PASSWORD}` and supply the value at deploy time, as an environment variable or a mounted file read with `configtree:`. Spring Boot has no built-in encryption, so the secret must never be committed; a tool such as Spring Cloud Vault can store it.

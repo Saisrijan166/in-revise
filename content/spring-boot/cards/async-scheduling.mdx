@@ -5,88 +5,144 @@ title: "@Async and @Scheduled"
 topic: beans-di
 level: intermediate
 heat: 2
-hook: "@Async runs a method on another thread and returns at once; @Scheduled runs a method on a timer."
+hook: "@Async runs a method on another thread so the caller does not wait; @Scheduled runs a method again and again on a timer. Both use thread pools that Spring manages."
 points:
-  - { k: "Switch on", v: "@EnableAsync and @EnableScheduling on a @Configuration class" }
-  - { k: "@Async executor", v: "Boot: ThreadPoolTaskExecutor, 8 core threads, unbounded queue", kind: default }
-  - { k: "Scheduler", v: "Boot: 1 thread, so a slow job delays the others", kind: default }
-  - { k: "Self-call", v: "this.send() skips the proxy and runs on the caller's thread", kind: minus }
-  - { k: "Many instances", v: "each instance runs the job; @Scheduled is not a cluster lock", kind: minus }
+  - { k: "Switch on", v: "@Async needs @EnableAsync and @Scheduled needs @EnableScheduling, on any @Configuration class" }
+  - { k: "@Async pool", v: "Spring Boot 4.1: ThreadPoolTaskExecutor with 8 core threads and an unbounded queue, named task-1, task-2", kind: default }
+  - { k: "Scheduler", v: "Spring Boot 4.1: 1 thread, so a slow scheduled job delays every other scheduled job", kind: default }
+  - { k: "Proxy needed", v: "@Async works only on calls through the proxy; a call from the same class runs on the caller's thread", kind: minus }
+  - { k: "Many instances", v: "every running copy of the app runs the scheduled job; @Scheduled is not a cluster-wide lock", kind: minus }
 trap:
-  wrong: "With three instances, a @Scheduled job runs once."
-  right: "It runs on every instance. Add a shared lock such as ShedLock so only one runs it at a time."
-sayIt: "@Async hands the call to Boot's task executor and returns at once; @Scheduled runs a method by fixedRate, fixedDelay or cron. @Async needs the proxy, and every instance runs scheduled jobs."
+  wrong: "With three instances of the app running, a @Scheduled job runs once."
+  right: "It runs on all three, because each instance has its own scheduler. Add a shared lock, such as ShedLock, so only one instance runs it at a time."
+  why: "On a laptop you run one instance, and the job runs once. The second and third copies only appear in production, behind a load balancer."
+sayIt: "@Async hands the call to Spring Boot's task executor and returns at once; @Scheduled runs a method by fixedRate, fixedDelay or cron. Both are applied by proxies, the default pools are small, and every instance of the app runs its scheduled jobs."
+buildsOn: [aop-proxies]
+scenarios:
+  - q: "PaymentService.pay() calls this.sendReceipt(), which is marked @Async, in the same class. The receipt is sent, but pay() is slow. Why?"
+    a: "The call goes through this, not the proxy, so @Async is never applied and sendReceipt() runs on the caller's thread. Move sendReceipt() to NotificationService and call it through that injected bean."
+  - q: "A void @Async method throws an exception. What does the caller see?"
+    a: "Nothing. The caller has already returned, so the exception cannot reach it. Spring passes it to an AsyncUncaughtExceptionHandler, which only logs it by default. Return a CompletableFuture if the caller needs to know about failures."
+  - q: "Under heavy load you see thousands of queued receipt tasks but still only 8 task threads. Why does the pool not grow?"
+    a: "A ThreadPoolTaskExecutor adds threads beyond the core size only when the queue is full. Spring Boot's default queue is unbounded, so it is never full. Set spring.task.execution.pool.queue-capacity and max-size to let it grow."
 confusedWith: [fixed-rate-vs-fixed-delay]
 tags: [async, scheduling, threads, executor]
 visual: flow
 sources:
   - title: "Task Execution and Scheduling (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/features/task-execution-and-scheduling.html"
-    verifiedOn: "2026-10-19"
-  - title: "TaskExecutionProperties.java: pool defaults (Spring Boot v4.1.1 source)"
+    verifiedOn: "2026-10-21"
+  - title: "TaskExecutionProperties.java: 8 core threads, unbounded queue, prefix task- (Spring Boot v4.1.1 source)"
     url: "https://github.com/spring-projects/spring-boot/blob/v4.1.1/core/spring-boot-autoconfigure/src/main/java/org/springframework/boot/autoconfigure/task/TaskExecutionProperties.java"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "TaskSchedulingProperties.java: 1 thread, prefix scheduling- (Spring Boot v4.1.1 source)"
+    url: "https://github.com/spring-projects/spring-boot/blob/v4.1.1/core/spring-boot-autoconfigure/src/main/java/org/springframework/boot/autoconfigure/task/TaskSchedulingProperties.java"
+    verifiedOn: "2026-10-21"
+  - title: "Common Application Properties: spring.task.execution.pool.* and spring.task.scheduling.pool.size (Spring Boot 4.1)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
   - title: "Task Execution and Scheduling (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/integration/scheduling.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "ShedLock README (GitHub)"
     url: "https://github.com/lukas-krecan/ShedLock"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+`@Async` and `@Scheduled` are two annotations that run your method on a thread other than the caller's. `@Async` on a method means "when someone calls this, run it in the background and let the caller continue". `@Scheduled` means "nobody calls this; Spring runs it on a timer", such as every 10 minutes or at 09:00 on weekdays. Both hand the work to a thread pool, a set of reusable threads that Spring creates and manages.
+
 ## Why it exists
 
-Some work should not make the caller wait, like sending an email; some must run on a timer, like a nightly report.
+When a payment completes, the customer should not wait while a receipt e-mail is sent. And stale `PENDING` payments must be expired every few minutes, with no user request to trigger it. In plain Java you would create threads by hand, size the pool yourself, and write a `while (true) { work(); sleep(); }` loop. That code is easy to get wrong and hard to stop cleanly at shutdown. With one annotation, Spring runs the method on a configured pool and shuts the pool down with the app.
 
 ## How it works
 
 <Mermaid
-  alt="The caller calls an @Async method through the proxy, which returns at once and hands the work to the task executor. The scheduler thread triggers @Scheduled methods."
+  alt="Two paths. Async: the caller calls sendReceipt on the proxy, the proxy returns at once and hands the call to the task executor, and a pool thread named task-1 runs the method. Scheduled: the scheduler thread named scheduling-1 runs expireStalePayments by its timer: fixedRate, fixedDelay or cron."
   chart={`flowchart LR
-  C[Caller] -- calls --> P[Spring proxy]
+  C[PaymentService] -- "sendReceipt()" --> P[Proxy]
   P -- "returns at once" --> C
-  P -- "hands off" --> E[Task executor]
-  E --> M["@Async method on a pool thread"]
-  S[Scheduler thread] -- "fixedRate, fixedDelay, cron" --> J["@Scheduled method"]`}
+  P -- "hands off" --> E["Task executor: task-1"]
+  S["Scheduler: scheduling-1"] -- "fixedRate, fixedDelay or cron" --> J["expireStalePayments()"]`}
 />
 
-- `@Async` returns `void` or a `Future`, usually `CompletableFuture`; a `void` method's exception never reaches the caller.
-- A `@Scheduled` method returns `void` and takes no arguments. See [fixedRate vs fixedDelay vs cron](compare:fixed-rate-vs-fixed-delay).
-- The default queue is unbounded, so the pool never grows past 8; set `queue-capacity`.
+1. `@EnableAsync` and `@EnableScheduling` tell Spring to look for these annotations on beans.
+2. For a bean with an `@Async` method, Spring creates a [proxy](card:aop-proxies). When a caller calls that method, the proxy puts the call on the task executor's queue and returns at once.
+3. A free thread from the executor's pool takes the call and runs your method.
+4. For every `@Scheduled` method, Spring registers a task with the scheduler at startup. The scheduler's thread runs the method each time its timer fires.
+
+So `@Async` reacts to a call, while `@Scheduled` reacts to the clock, and only `@Async` depends on the call passing through the proxy.
 
 ## Example
 
+The payment service sends receipts in the background and expires stale payments every 10 minutes. The app has `@EnableAsync` and `@EnableScheduling`, and `PaymentService` prints its own thread before it calls `sendReceipt(42)`:
+
 ```java
 @Service
-class ReportService {
+public class NotificationService {
     @Async
-    public CompletableFuture<Report> build(long id) {
-        return CompletableFuture.completedFuture(reports.load(id));
+    public void sendReceipt(long paymentId) {
+        System.out.println("receipt " + paymentId + " on " + Thread.currentThread().getName());
     }
+}
 
-    @Scheduled(cron = "0 0 9 * * MON-FRI", zone = "Asia/Kolkata")   // 09:00 on weekdays
-    public void sendDailyReport() { mailer.sendDaily(); }
+@Component
+public class PaymentCleanupJob {
+    @Scheduled(fixedDelay = 10, timeUnit = TimeUnit.MINUTES)   // 10 min after each run ends
+    public void expireStalePayments() {
+        System.out.println("cleanup on " + Thread.currentThread().getName());
+    }
 }
 ```
 
-## Defaults
+```text output
+cleanup on scheduling-1
+pay() on main
+receipt 42 on task-1
+```
+
+What to notice:
+
+- The first cleanup runs right after startup, on Boot's single scheduler thread, `scheduling-1`.
+- The receipt runs on `task-1`, a thread of Boot's task executor, while the caller ran on `main`. That is the proof that `@Async` worked.
+- Remove `@EnableAsync` and the receipt line says `main`: the method still runs, but the caller waits for it.
+- `fixedDelay` counts 10 minutes from the end of each run, so two cleanups never overlap. See [fixedRate vs fixedDelay vs cron](compare:fixed-rate-vs-fixed-delay).
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
-| `@Async` executor | `ThreadPoolTaskExecutor`: 8 core threads, unbounded queue | Spring Boot 4.1 |
-| Scheduler | `ThreadPoolTaskScheduler` with 1 thread | Spring Boot 4.1 |
-| `spring.threads.virtual.enabled=true` | `SimpleAsyncTaskExecutor` and `SimpleAsyncTaskScheduler` on virtual threads | Spring Boot 4.1, Java 21+ |
+| `@Async` executor | `ThreadPoolTaskExecutor`: 8 core threads, unbounded queue, thread names `task-` | Spring Boot 4.1 |
+| Scheduler | `ThreadPoolTaskScheduler` with 1 thread, thread names `scheduling-` | Spring Boot 4.1 |
+| With `spring.threads.virtual.enabled=true` | `SimpleAsyncTaskExecutor` and `SimpleAsyncTaskScheduler` on virtual threads | Spring Boot 4.1, Java 21+ |
+
+- **Tuning:** set `spring.task.execution.pool.queue-capacity` and `spring.task.execution.pool.max-size` to bound the queue and let the pool grow, and `spring.task.scheduling.pool.size` for more scheduler threads.
+- **Your own executor:** if you define an `Executor` bean, Boot's executor backs off and `@Async` uses yours. `@Async("reportExecutor")` picks an executor by bean name.
+- **Return types:** an `@Async` method returns `void`, `Future` or `CompletableFuture`. Exceptions from a `void` method go to an `AsyncUncaughtExceptionHandler`, which only logs them by default.
+- **`@Scheduled` methods:** must return `void` and take no arguments; inject what they need instead.
+- **Not allowed:** `@Async` on a lifecycle callback such as `@PostConstruct` does not run it in the background.
+
+## Not to be confused with
+
+`fixedRate` counts the time between the **starts** of two runs, `fixedDelay` counts from the **end** of one run to the start of the next, and `cron` fires at **clock times**. Rule: rate = steady beat; delay = rest after each run; cron = calendar.
+
+## Common mistakes
+
+- **"@Scheduled gives me a distributed job."** Each instance schedules its own copy. Use a shared lock such as ShedLock, or a single dedicated instance, for once-only jobs.
+- **"The default @Async pool protects me from overload."** Its queue is unbounded, so under load tasks pile up in memory while the pool stays at 8 threads. Set a queue capacity.
 
 ## Interview Qs
 
 ### Why does my @Async method run on the caller's thread?
 
-The call skips the proxy: it comes from the same class, `@EnableAsync` is missing, or the object was made with `new`.
+The call did not pass through the proxy. Common causes: the method is called from the same class through `this`, `@EnableAsync` is missing, the object was created with `new` instead of being injected, or the method is private or final, so the proxy cannot override it.
 
 ### If Java already has threads, why use @Async or @Scheduled?
 
-They hand work to Spring-managed, configurable thread pools with one annotation, instead of hand-written threads and `while (true) { sleep(); }` loops.
+Java gives you the raw threads and executors. These annotations connect them to Spring: one annotation instead of hand-written pools and `sleep()` loops, pools sized through properties, executors chosen by bean name, and clean shutdown with the application context.
 
-### A @Scheduled job runs twice in production. Why?
+### A @Scheduled job runs twice in production. Why, and how do you fix it?
 
-Each instance has its own scheduler, so two pods run it twice. Add a shared lock such as ShedLock.
+Production runs two instances, and each has its own scheduler, so each runs the job. Add a shared lock, such as ShedLock with a database table, so only one instance runs it at a time. Also check that the job's class is not registered as a bean twice.

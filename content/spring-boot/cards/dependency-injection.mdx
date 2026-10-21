@@ -5,17 +5,25 @@ title: Dependency Injection
 topic: beans-di
 level: beginner
 heat: 3
-hook: "A bean declares what it needs and Spring passes it in. Prefer the constructor: final fields, nothing missing, easy tests."
+hook: "A class lists what it needs, usually as constructor parameters, and Spring passes in the matching beans. The class never creates its own helpers."
 points:
-  - { k: "Constructor injection", v: "required dependencies as arguments; fields can be final", kind: plus }
-  - { k: "One constructor", v: "Spring uses it; no @Autowired needed" }
-  - { k: "Setter injection", v: "for optional dependencies with a sensible default" }
-  - { k: "Field injection", v: "@Autowired on a field; hides dependencies, no final", kind: minus }
-  - { k: "new", v: "an object you build with new gets nothing injected", kind: minus }
+  - { k: "Dependency", v: "another object a class needs to do its work, such as the repository a service saves to" }
+  - { k: "Constructor injection", v: "dependencies are constructor parameters, so fields can be final and are never null", kind: plus }
+  - { k: "One constructor", v: "Spring uses it automatically; you do not need @Autowired on it" }
+  - { k: "Matched by type", v: "Spring passes the bean whose type fits; no match, or two matches with nothing to choose, fails startup" }
+  - { k: "Field injection", v: "@Autowired on a field hides what the class needs, and the field cannot be final", kind: minus }
+  - { k: "new inside a bean", v: "an object you create with new is not a bean and gets nothing injected", kind: minus }
 trap:
   wrong: "Every constructor that Spring uses needs @Autowired."
   right: "A class with one constructor is wired through it with no annotation. Only with several constructors do you mark one with @Autowired."
-sayIt: "I use constructor injection: fields are final, a bean is never built without its dependencies, and a unit test just calls new with mocks. Setters only for optional dependencies."
+  why: "Older tutorials put @Autowired on every constructor, because early Spring versions needed it, and the habit stayed."
+sayIt: "Dependency injection means a bean declares what it needs and the container passes it in. I use constructor injection: fields are final, a bean is never built without its dependencies, and a unit test just calls new with fakes. Setters only for optional dependencies."
+buildsOn: [ioc-container]
+scenarios:
+  - q: "PaymentService has two constructors and neither has @Autowired: one takes a PaymentRepository, the other takes nothing. Which one does Spring use?"
+    a: "The no-argument one, so the repository is never set and stays null. With several constructors Spring needs @Autowired on the one to use; without it, Spring falls back to the default constructor."
+  - q: "You want to unit-test PaymentService without starting Spring or a database. With constructor injection, how?"
+    a: "Call new PaymentService(fakeRepository) in the test. The constructor lists everything the class needs, so you pass a fake by hand. No container, no reflection and no database are needed."
 confusedWith: [constructor-vs-setter-vs-field-injection]
 tags: [dependency-injection, autowired, constructor-injection]
 visual: flow
@@ -23,9 +31,9 @@ sources:
   - title: "Dependency Injection: constructor-based or setter-based DI? (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-collaborators.html"
     verifiedOn: "2026-10-19"
-  - title: "Using @Autowired (Spring Framework 7.0 reference)"
+  - title: "Using @Autowired: single and multiple constructors (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Beans and Dependency Injection (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/using/spring-beans-and-dependency-injection.html"
     verifiedOn: "2026-10-19"
@@ -34,14 +42,18 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Dependency injection (DI) is the way the [container](card:ioc-container) connects beans. A dependency is another object a class needs to do its work: `PaymentService` needs a `PaymentRepository` to save payments. With DI the class only declares what it needs, usually as constructor parameters, and the container passes in the matching beans. DI is how Spring puts inversion of control into practice.
+
 ## Why it exists
 
-A class that builds its own collaborators is tied to them and hard to test. With DI the class only declares what it needs, and the [container](card:ioc-container) supplies it.
+If `PaymentService` creates its own repository with `new`, it is tied to that one class. A unit test cannot hand it a fake repository, and the repository it built is not a bean, so Spring cannot manage it. With DI, `PaymentService` asks for "some `PaymentRepository`" and does not care which class it gets. Spring passes the real one; a test passes a fake.
 
 ## How it works
 
 <Mermaid
-  alt="The container creates PaymentRepository first, then creates PaymentService and passes the repository into its constructor, then creates PaymentController and passes the service into its constructor."
+  alt="The container creates PaymentRepository first, because it needs nothing. Then it creates PaymentService and passes the repository into its constructor. Then it creates PaymentController and passes the service into its constructor."
   chart={`flowchart LR
   C[Container] -- "1. creates" --> R[PaymentRepository]
   C -- "2. new PaymentService(repo)" --> S[PaymentService]
@@ -50,35 +62,62 @@ A class that builds its own collaborators is tied to them and hard to test. With
   S -. injected into .-> W`}
 />
 
-- Spring builds the dependencies first, then passes them in, matching by type.
-- Several constructors: mark the one Spring should use with `@Autowired`.
+1. Spring reads each bean's constructor to see what it needs. `PaymentController` needs a `PaymentService`, and `PaymentService` needs a `PaymentRepository`.
+2. It creates the beans in dependency order, starting with the repository, which needs nothing.
+3. It calls `new PaymentService(repository)` with the bean it already has, then `new PaymentController(service)`.
+4. It finds each dependency by its type. If no bean of that type exists, or several do and nothing says which one to use, startup fails; [@Primary and @Qualifier](card:bean-selection) shows how to choose.
+
+So you never write the wiring code; you only write constructors.
 
 ## Example
+
+`PaymentService` declares its one dependency in the constructor, and a test builds it without Spring.
 
 ```java
 @Service
 public class PaymentService {
-    private final PaymentRepository repository;   // final: set once, never null
+    private final PaymentRepository repository;           // final: set once, never null
 
-    public PaymentService(PaymentRepository repository) {   // no @Autowired needed
+    public PaymentService(PaymentRepository repository) { // no @Autowired needed
         this.repository = repository;
+    }
+
+    public Payment pay(long amount) {
+        return repository.save(new Payment(null, amount, "COMPLETED"));
     }
 }
 
-// Unit test without Spring
-var service = new PaymentService(mock(PaymentRepository.class));
+// In a unit test, no Spring at all:
+var service = new PaymentService(new InMemoryPaymentRepository());
 ```
+
+What to notice:
+
+- `private final` means the field is set once, in the constructor, and can never be null or replaced later.
+- The class has one constructor, so Spring uses it without `@Autowired`. Add a second constructor and you must mark the one Spring should use with `@Autowired`.
+- The parameter type is the `PaymentRepository` interface, not a concrete class, so Spring and the test can each pass a different implementation.
+- The test line builds the service with `new` and an in-memory fake: no container, no database, a fast test.
+
+## Rules and defaults
+
+- **Single constructor:** Spring always uses it, with or without `@Autowired`.
+- **Several constructors:** mark one with `@Autowired`. If none is marked, Spring uses the no-argument constructor when there is one.
+- **Optional dependencies:** the Spring docs advise setter injection for dependencies that have a sensible default; `@Autowired(required = false)` or an `Optional<T>` parameter also mark a dependency as optional.
+
+## Not to be confused with
+
+There are three ways to inject. Constructor injection passes dependencies as constructor parameters. Setter injection lets Spring create the object first and then call a setter marked `@Autowired`. Field injection puts `@Autowired` on a field, which Spring fills by reflection, setting it directly after the object exists. Rule: constructor for required dependencies, setter for optional ones, field injection avoided in application code.
 
 ## Interview Qs
 
 ### What is dependency injection, and how is it related to IoC?
 
-An object receives its dependencies instead of creating them. IoC is the principle that the container controls object creation; DI is how Spring applies it, through constructors, setters or fields.
+An object receives its dependencies from outside instead of creating them. IoC is the principle that the container controls object creation and wiring; DI is how Spring applies it, through constructor parameters, setters or fields.
 
-### Why is constructor injection preferred?
+### Why is constructor injection preferred over field injection?
 
-Dependencies are explicit, fields can be final, the bean is never half-built, and a unit test can call the constructor with mocks. The Spring team recommends it for required dependencies.
+Dependencies are visible in the constructor, fields can be `final`, the bean can never exist half-built, and a unit test can call the constructor with fakes. With field injection, `new PaymentService()` in a test leaves the field null, and you need Spring or reflection to fill it. The Spring team recommends constructors for required dependencies.
 
 ### Why not create a dependency with new inside a bean?
 
-That object is not a bean: Spring injects nothing into it and does not manage it, and the class is tied to one implementation, so tests cannot swap in a mock.
+That object is not a bean: Spring injects nothing into it and does not manage it. Your class is also tied to one implementation, so a test cannot swap in a fake.

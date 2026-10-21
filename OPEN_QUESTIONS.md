@@ -515,3 +515,37 @@ added because all 15 accents were in use.
 - OpenTelemetry GenAI metric names are still in Development status; the content names only Spring AI's `gen_ai.client.token.usage`.
 - Left out for lack of a primary source: parent-child (small-to-big) chunking, a "small language model" glossary term, A/B tests as an eval signal.
 - "Deep learning contains generative AI" is the usual teaching picture; Google's glossary notes GenAI has no formal definition.
+
+## Q. Teaching template v3, Spring Boot pilot (21-10-2026)
+
+The owner found every tech too compressed to learn from: "random points", terms used before they are explained, and ambiguity between concepts. They asked for the step-by-step clarity of the reference files, for all techs. Template v3 (CLAUDE.md 3.1.1) adds:
+
+- the concept sections What it is, Rules and defaults, Not to be confused with and Common mistakes, plus an explained Example;
+- `trap.why`, `buildsOn`, `scenarios`, and comparison `explain` / `example` / `sayIt`.
+
+Spring Boot is the pilot and the only v3 tech so far.
+
+| Concepts | Comparisons | Terms | Learn view, average words (before → after) | Checked / fixed / dropped |
+|---|---|---|---|---|
+| 62 | 35 | 349 | 314 → 841 (Revise 124 → 180) | ~2,690 / 49 / 0 in the independent pass (plus ~250 facts added or corrected while rewriting) |
+
+All Java examples compile against Spring Framework 7.0.5 and Spring Boot 4.0.3 / 4.1.1 jars (Spring Security 7.0.3; the JWT example against 6.5.11 resource-server jars, same API). Output panels come from real runs. Migration SQL ran on PostgreSQL 18 only.
+
+### Q1. Decisions for the owner
+
+- **Review the pilot**, then say "go" for the other 15 techs, or what to change in the style first.
+- **Length:** a Learn page is now about 4 minutes, up from about 1.5. If that is too long, the easiest cuts are Common mistakes and the third interview question.
+- **New order:** Spring Core (what Spring is, beans, DI, AOP, events) now comes before Boot Basics, and transactions come before locking.
+- **"Rules and defaults" is back in v3** (it was removed in 5.6 for v2), because your brief asked for defaults, rules and automatic behaviour.
+
+### Q2. Left out or worded carefully (not confirmed by the docs)
+
+- Whether fixedRate runs overlap on the virtual-thread scheduler. The content makes no claim.
+- Spring Framework 7.0 `@Proxyable`: left out as rarely asked.
+- Whether a derived query with a misspelt property fails at startup, and what an update `@Query` without `@Modifying` does.
+- A request that matches no URL rule when there is no `anyRequest()`.
+- Two facts confirmed only from the Spring Security 7.0.3 code: bearer-token requests skip the CSRF check, and what `csrf.spa()` sets up.
+- The default access level of the `shutdown` and `heapdump` endpoints; whether a Boot/Cloud version mismatch fails startup; the exit code of a failed startup.
+- That Boot's build plugins compile with `-parameters`, which the parameter-name fallback for bean selection relies on. It is worded as a condition.
+- Eureka `healthcheck.enabled`: one property table says true, the code and guide say off. The content follows the code.
+- Config Server's default Git label (main vs master): the docs differ. The content follows the Git backend page.

@@ -5,17 +5,24 @@ title: Spring AOP
 topic: beans-di
 level: intermediate
 heat: 2
-hook: "AOP writes cross-cutting code, like logging or transactions, once: the pointcut says where, the advice says what."
+hook: "AOP lets you write code that many methods need, like logging or timing, once in one class; a pointcut says which methods, and advice says what runs there."
 points:
-  - { k: "Aspect", v: "a class that holds the cross-cutting logic" }
-  - { k: "Pointcut + advice", v: "which methods to match + the code that runs there" }
-  - { k: "Join point", v: "in Spring AOP, always a method execution on a bean" }
-  - { k: "Weaving", v: "Spring AOP does it at runtime, with proxies" }
-  - { k: "@Aspect", v: "not found by scanning alone; add @Component", kind: minus }
+  - { k: "Aspect", v: "the class that holds the shared code; it needs @Aspect and also @Component to become a bean" }
+  - { k: "Pointcut", v: "an expression that picks the methods, such as every public method of PaymentService" }
+  - { k: "Advice", v: "the code that runs at those methods: @Before, @AfterReturning, @AfterThrowing, @After or @Around" }
+  - { k: "Join point", v: "a place where advice can run; in Spring AOP it is always a method call on a bean" }
+  - { k: "Weaving", v: "attaching the aspect to the beans; Spring AOP does it at runtime by wrapping the bean in a proxy" }
 trap:
-  wrong: "Spring AOP can advise any code: fields, constructors, private methods."
-  right: "Spring AOP advises only method executions on Spring beans. For field access, use AspectJ."
-sayIt: "AOP keeps cross-cutting code like logging, security and transactions in one aspect. A pointcut picks the methods, advice runs before, after or around them, and Spring applies it at runtime through proxies."
+  wrong: "Spring AOP can advise any code: constructors, field access, private methods and objects made with new."
+  right: "Spring AOP advises only method calls that reach a Spring bean through its proxy, in practice public methods. Use AspectJ weaving for anything else."
+  why: "AOP as an idea, and the AspectJ language, can advise fields and constructors, and Spring borrows AspectJ's annotations, so people assume Spring AOP can do the same."
+sayIt: "AOP keeps cross-cutting code like logging, security checks and transactions in one aspect. A pointcut picks the methods, advice runs before, after or around them, and Spring applies it at runtime by putting a proxy in front of the bean."
+buildsOn: [ioc-container, component-scanning]
+scenarios:
+  - q: "You write a LoggingAspect class with @Aspect and an @Around advice, but nothing is ever logged. The pointcut is correct. What is the most likely cause?"
+    a: "The aspect is not a bean. Component scanning does not pick up @Aspect on its own, so Spring never reads the aspect. Add @Component, or declare it with a @Bean method."
+  - q: "An @Around advice logs the call but forgets to return the result of proceed(). What does the caller of PaymentService.pay() get?"
+    a: "The value the advice returns is what the caller sees. If the advice returns null, or is declared void, the caller gets null even though pay() returned a value. Always return the result of proceed()."
 confusedWith: []
 tags: [aop, aspect, advice, pointcut]
 visual: table
@@ -29,50 +36,105 @@ sources:
   - title: "Spring AOP Capabilities and Goals (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/aop/introduction-spring-defn.html"
     verifiedOn: "2026-10-19"
+  - title: "Declaring a Pointcut: which calls a proxy can intercept (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/pointcuts.html"
+    verifiedOn: "2026-10-21"
+  - title: "Declaring Advice: around advice and advice ordering (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/aop/ataspectj/advice.html"
+    verifiedOn: "2026-10-21"
+  - title: "Aspect Oriented Programming (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/features/aop.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Boot 4.0 Migration Guide: spring-boot-starter-aop renamed to spring-boot-starter-aspectj"
+    url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+AOP (aspect-oriented programming) is a way to write code that many methods need, such as logging, timing or a security check, in one class instead of inside every method. Such code is called a cross-cutting concern, because it cuts across many classes. Spring AOP is Spring's version: you write the shared code once in an aspect, say which bean methods it applies to, and Spring runs it whenever those methods are called.
 
 ## Why it exists
 
-Logging, security checks, metrics and transactions are needed in many classes. Without AOP the same lines repeat in every method; an aspect writes them once.
+Say every method of `PaymentService` and `RefundService` must log its start, its result and how long it took. Without AOP you copy the same five lines into each method. The business logic gets buried, a new method can easily miss the logging, and a change means editing every copy. With AOP the logging lives in one aspect, and the services hold only business code. Spring itself uses the same idea for `@Transactional`, `@Async` and `@Cacheable`.
 
 ## How it works
 
-| Term | Question it answers | Example |
+| Term | Question it answers | In the example below |
 | --- | --- | --- |
-| Aspect | Where does the shared logic live? | `TimingAspect` with `@Aspect` |
-| Join point | Where could it run? | Any bean method call |
-| Pointcut | Where should it run? | `execution(* com.shop.service..*.*(..))` |
-| Advice | What runs, and when? | `@Before`, `@AfterReturning`, `@AfterThrowing`, `@After`, `@Around` |
-| Weaving | How is it attached? | At runtime, through a [proxy](card:aop-proxies) |
+| Aspect | Where does the shared code live? | `LoggingAspect`, marked `@Aspect` and `@Component` |
+| Join point | Where could the code run? | Any method call on a bean |
+| Pointcut | Where should it run? | `execution(* com.example.payments.PaymentService.*(..))`: every method of `PaymentService` |
+| Advice | What runs, and when? | `@Around`: code before and after the real method |
+| Weaving | How is it attached? | At runtime, by a [proxy](card:aop-proxies) in front of the bean |
 
-- `@Around` is the most powerful advice; the docs advise using the least powerful one that does the job.
-- Spring AOP is for method calls on beans; it is not a full AOP language like AspectJ.
+1. You write an aspect class with a pointcut and an advice method, and make it a bean.
+2. At startup Spring checks every bean against the pointcut.
+3. For each bean with a matching method, Spring registers a proxy, a wrapper object, in place of the plain bean. Other beans get the proxy injected.
+4. When a caller calls a matching method, the proxy runs the advice. An `@Around` advice runs the real method by calling `proceed()`.
+
+So the key idea is: the pointcut chooses **where**, the advice says **what**, and the proxy makes it happen at call time.
 
 ## Example
+
+The payment service logs every call to `PaymentService` from one aspect:
 
 ```java
 @Aspect
 @Component
-public class TimingAspect {
-    @Around("execution(* com.shop.service..*.*(..))")   // pointcut
-    public Object time(ProceedingJoinPoint pjp) throws Throwable {
-        long start = System.nanoTime();
-        try { return pjp.proceed(); }                    // run the real method
-        finally { System.out.println(pjp.getSignature() + " " + (System.nanoTime() - start)); }
+public class LoggingAspect {
+
+    @Around("execution(* com.example.payments.PaymentService.*(..))")   // pointcut
+    public Object log(ProceedingJoinPoint call) throws Throwable {      // advice
+        String name = call.getSignature().getName();
+        System.out.println("-> " + name);
+        Object result = call.proceed();                // run the real method
+        System.out.println("<- " + name + " returned " + result);
+        return result;
     }
 }
 ```
+
+A controller calls `paymentService.pay(500)`, and `pay` returns `"PAID " + amount`:
+
+```text output
+-> pay
+<- pay returned PAID 500
+```
+
+What to notice:
+
+- `PaymentService` has no logging code at all; the output comes from the aspect.
+- `call.proceed()` runs the real `pay` method. An advice that never calls it skips `pay` completely.
+- The advice must return `result`, because the value it returns is what the caller receives; returning `null` would hand the caller `null`.
+- Without `@Component`, scanning ignores the class and nothing is printed.
+
+## Rules and defaults
+
+- **Five kinds of advice:** `@Before` (before the method), `@AfterReturning` (after a normal return), `@AfterThrowing` (after an exception), `@After` (always, like `finally`) and `@Around` (wraps the call). The docs advise using the least powerful one that does the job.
+- **Spring Boot switches it on:** when AspectJ is on the classpath, Boot enables `@Aspect` support itself, so you do not add `@EnableAspectJAutoProxy`.
+- **Changed in 4.0:** the starter for your own `@Aspect` classes is now `spring-boot-starter-aspectj`; it was `spring-boot-starter-aop` in Spring Boot 3.x.
+- **Order of aspects:** when two aspects match the same method, the order is undefined unless you set `@Order`; the lower value runs first.
+- **Only bean methods:** Spring AOP never advises fields, constructors or objects you create with `new`.
+
+## Not to be confused with
+
+AspectJ is a full AOP language that adds the advice into the compiled bytecode, so it can also advise fields, constructors and calls inside the same object. Spring AOP reuses AspectJ's annotations, such as `@Aspect` and `@Around`, but applies them only through runtime proxies. Rule: Spring AOP = proxies around bean methods; AspectJ weaving = changes the bytecode itself.
 
 ## Interview Qs
 
 ### What are aspect, advice, pointcut and join point?
 
-An aspect is the class with the shared logic. A join point is a place it could run; in Spring AOP, a method execution. A pointcut selects join points. Advice is the code that runs there.
+An aspect is the class that holds the shared code. A join point is a place where that code could run; in Spring AOP it is always a method call on a bean. A pointcut is an expression that selects join points. Advice is the code that runs at the selected join points, before, after or around them.
 
-### What kinds of advice are there?
+### What kinds of advice are there, and when would you use @Around?
 
-`@Before`, `@AfterReturning` (normal return), `@AfterThrowing` (exception), `@After` (always, like finally) and `@Around`, which wraps the call and decides whether to call `proceed()`.
+`@Before`, `@AfterReturning`, `@AfterThrowing`, `@After` and `@Around`. Use `@Around` only when you need both sides of the call, such as timing a method, retrying it or skipping it. It is the most powerful kind, so for "log before every call" a `@Before` advice is clearer and safer.
 
-### Spring AOP vs AspectJ?
+### Where does Spring itself use AOP?
 
-Spring AOP weaves at runtime through proxies and advises only method executions on Spring beans. AspectJ weaves into the bytecode at compile or load time, so it can also advise more, such as field access.
+In `@Transactional`, which starts and ends a transaction around a method; in `@Async`, which runs a method on another thread; in `@Cacheable`; and in method security such as `@PreAuthorize`. Each works by a proxy that runs extra code around your method.
+
+### Spring AOP or AspectJ?
+
+Spring AOP needs no special build step and is enough for advice on public bean methods. Choose AspectJ weaving at compile or load time when you must advise fields, constructors, non-bean objects, or calls a bean makes to its own methods.

@@ -5,50 +5,82 @@ title: Optimistic vs Pessimistic Locking
 topic: data
 level: interview
 heat: 2
-hook: "Optimistic: check a version at update time and fail on conflict. Pessimistic: lock the row first so others wait."
+hook: "Optimistic locking checks a version number when you save and fails on a conflict. Pessimistic locking locks the row when you read it, so others wait."
 points:
-  - { k: "@Version", v: "a number or timestamp Hibernate bumps on every update" }
-  - { k: "Conflict", v: "Spring throws ObjectOptimisticLockingFailureException" }
-  - { k: "@Lock(PESSIMISTIC_WRITE)", v: "Hibernate runs select ... for update" }
-  - { k: "Optimistic", v: "no database locks held; best when conflicts are rare", kind: plus }
-  - { k: "Pessimistic", v: "blocks others; risks contention and deadlocks", kind: minus }
+  - { k: "@Version", v: "a number or timestamp field that Hibernate checks and increases on every update" }
+  - { k: "Optimistic conflict", v: "the UPDATE matches no row, so Spring throws ObjectOptimisticLockingFailureException" }
+  - { k: "@Lock(PESSIMISTIC_WRITE)", v: "the query runs as select ... for update; others wait until you commit" }
+  - { k: "Optimistic", v: "holds no database lock while you work; best when conflicts are rare", kind: plus }
+  - { k: "Pessimistic", v: "other transactions wait; long locks cause slow requests and deadlocks", kind: minus }
 trap:
   wrong: "@Transactional alone stops two users overwriting each other's update."
-  right: "Two transactions can still read the same row and both write: a lost update. Add @Version or a pessimistic lock."
-sayIt: "To stop lost updates I add a @Version field. Each update checks the version, and a stale one fails, so I retry or report a conflict. When conflicts are frequent and short, I lock the row with PESSIMISTIC_WRITE."
+  right: "Two transactions can still read the same row and both write it: a lost update. Add a @Version field or a pessimistic lock."
+  why: "A transaction sounds like protection from all concurrency problems, and READ COMMITTED does stop dirty reads, so people assume it also stops overwrites."
+sayIt: "To stop lost updates I add a @Version field. Each update checks that the version is unchanged, and a stale one fails, so I retry or return a conflict. When the same rows are updated often and a retry is costly, I lock the row with PESSIMISTIC_WRITE in a short transaction."
+buildsOn: [jpa-entities, transactional, acid-isolation]
+scenarios:
+  - q: "Account 7 has a balance of 1000 and no @Version. Two refunds of 300 run at the same moment; each reads 1000 and saves 700. What is the final balance?"
+    a: "700, not 400. Both transactions read the same old value and the second write silently replaced the first: a lost update. Neither @Transactional nor READ COMMITTED prevents this; @Version would make the second save fail."
+  - q: "With @Version, the second refund now fails with ObjectOptimisticLockingFailureException. What should the service do?"
+    a: "Run the whole read, change and write again in a new transaction, so it reads the fresh balance of 700 and saves 400. If a retry makes no sense, for example when a user edited a form, return 409 Conflict and let the user reload."
+  - q: "During a flash sale, hundreds of orders decrement the same stock row every second. Optimistic or pessimistic?"
+    a: "Pessimistic. With optimistic locking most of them would conflict and retry again and again. A short transaction with PESSIMISTIC_WRITE makes them queue on the row instead, each reading the current count."
+confusedWith: []
 tags: [jpa, concurrency, locking]
 visual: table
 sources:
   - title: "Version (Jakarta Persistence 3.2 API)"
     url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/Version.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Query.getResultList: TransactionRequiredException for a lock mode without a transaction (Jakarta Persistence 3.2 API)"
+    url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/Query.html"
+    verifiedOn: "2026-10-21"
   - title: "A Short Guide to Hibernate 7 (7.4): 3.8 version attributes, 8.16 optimistic and pessimistic locking"
     url: "https://docs.hibernate.org/orm/7.4/introduction/html_single/"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Data JPA 4.1: Locking (@Lock)"
     url: "https://docs.spring.io/spring-data/jpa/reference/jpa/locking.html"
     verifiedOn: "2026-10-19"
+  - title: "Explicit Locking: 13.3.4 Deadlocks (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/current/explicit-locking.html"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 9110 HTTP Semantics: 15.5.10 409 Conflict"
+    url: "https://www.rfc-editor.org/rfc/rfc9110#name-409-conflict"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Locking is how you stop two transactions from overwriting each other's change to the same row. **Optimistic locking** takes no lock: each row carries a version number, and an update succeeds only if the version is still the one you read. **Pessimistic locking** asks the database to lock the row when you read it, so other transactions wait until you commit. Both work on [JPA entities](card:jpa-entities) through Hibernate.
 
 ## Why it exists
 
-Two users read the same row, both change it, and the second write silently erases the first: a lost update. Locking detects or prevents that.
+Two refunds for account 7 run at the same moment. Each reads a balance of 1000, subtracts 300 and saves 700. The second save silently replaces the first, so one refund is lost. This is a **lost update**. [@Transactional](card:transactional) does not stop it, and neither does PostgreSQL's default [isolation level](card:acid-isolation), because each transaction only read committed data. Locking either detects the clash (optimistic) or prevents it (pessimistic).
 
 ## How it works
 
 <Compare id="optimistic-vs-pessimistic-locking" />
 
-- An optimistic conflict marks the transaction for rollback; retry the whole read-change-write.
-- Do not hold a pessimistic lock across a user's think time.
+With optimistic locking, the two refunds go like this:
+
+1. Refund A and refund B both load account 7 with `version = 3`.
+2. A commits first. Hibernate runs `UPDATE account SET balance = 700, version = 4 WHERE id = 7 AND version = 3`. One row matches, so it succeeds.
+3. B commits. Its `UPDATE` also says `WHERE version = 3`, but the row now has version 4, so no row matches.
+4. Hibernate sees that zero rows changed and throws `OptimisticLockException`. Spring passes it on as `ObjectOptimisticLockingFailureException`, and B's transaction rolls back.
+5. B runs again from the start: it reads balance 700 and version 4, and saves 400.
+
+With pessimistic locking, B's read itself waits until A commits, and then reads 700 directly.
 
 ## Example
+
+The entity gets a version field, and the repository gets one locking query for hot rows:
 
 ```java
 @Entity
 public class Account {
     @Id private Long id;
     private BigDecimal balance;
-    @Version private Long version;   // checked and bumped on every update
+    @Version private Long version;   // checked and increased on every update
 }
 
 public interface AccountRepository extends JpaRepository<Account, Long> {
@@ -58,12 +90,34 @@ public interface AccountRepository extends JpaRepository<Account, Long> {
 }
 ```
 
+What to notice:
+
+- You never set `version` yourself. Hibernate adds `version = ?` to every UPDATE and DELETE of the entity and increases it.
+- Remove `@Version` and both refunds succeed silently: the last write wins and the first refund is lost.
+- `findForUpdate` locks the row until the transaction ends. Call it inside a `@Transactional` method; without a transaction, JPA throws `TransactionRequiredException`.
+
+## Rules and defaults
+
+- **Version types (Jakarta Persistence 3.2):** `int`, `Integer`, `short`, `Short`, `long`, `Long`, `java.sql.Timestamp`, `Instant` or `LocalDateTime`. Use at most one version field per entity.
+- **After a conflict:** the transaction is marked for rollback. Retry the whole read, change and write in a new transaction, or report the conflict, for example as HTTP `409 Conflict`.
+- **Pessimistic lock modes:** `PESSIMISTIC_WRITE` is an exclusive lock (`select ... for update`). `PESSIMISTIC_READ` is a shared lock that blocks writers but not other readers.
+- **@Lock:** Spring Data JPA's way to set the lock mode on a repository query method.
+- **Keep locks short:** do not hold a pessimistic lock across a user interaction (Hibernate's advice), and keep slow remote calls out of the locked transaction.
+
+## Not to be confused with
+
+The **isolation level** is a rule the database applies to every transaction about what it may *read*. **Locking** is something you add to particular entities or queries to protect a *read-then-write* against another writer. Rule: isolation decides what you see; locking decides who may overwrite.
+
 ## Interview Qs
 
-### What is optimistic locking?
+### What is optimistic locking and how does it work in JPA?
 
-Add a @Version field. Each update checks that the version is unchanged and increments it. If another transaction updated first, the update fails with an optimistic lock exception, and the caller retries or reports a conflict.
+Add a field marked @Version. Every UPDATE then includes the version you read in its WHERE clause and increases it. If another transaction updated the row first, no row matches, Hibernate throws an optimistic lock exception, and the caller retries or reports a conflict.
 
-### Optimistic or pessimistic?
+### When do you choose optimistic and when pessimistic locking?
 
-Optimistic when conflicts are rare and reads dominate: no locks, high throughput. Pessimistic when the same rows are updated often and a retry is costly, such as stock counts; keep those transactions short.
+Optimistic when conflicts are rare, for example users editing their own data: no locks, high throughput, an occasional retry. Pessimistic when the same rows are updated often and a retry is costly, such as a stock count during a sale. Keep those transactions short.
+
+### Can pessimistic locking cause deadlocks?
+
+Yes. If transaction A locks row 1 and then wants row 2, while B holds row 2 and wants row 1, both wait for each other. PostgreSQL, for example, detects this and aborts one of the two. Lock rows in the same order everywhere and keep the locked section short.

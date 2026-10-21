@@ -5,66 +5,114 @@ title: "Testcontainers"
 topic: testing-production
 level: intermediate
 heat: 1
-hook: "Testcontainers starts your real database in Docker for the tests; @ServiceConnection points Spring Boot at it with no URL properties."
+hook: "Testcontainers starts your real database in Docker for the tests, and @ServiceConnection tells Spring Boot how to reach it, so you write no URL."
 points:
-  - { k: "Real service", v: "the same PostgreSQL, Kafka or Redis as production", kind: plus }
-  - { k: "@ServiceConnection", v: "connection details from the container beat spring.datasource.*" }
-  - { k: "Since", v: "service connections arrived in Spring Boot 3.1", kind: default }
-  - { k: "Needs Docker", v: "or another Docker-API compatible runtime", kind: minus }
+  - { k: "Real service", v: "tests run against the same PostgreSQL, Kafka or Redis that production uses", kind: plus }
+  - { k: "@ServiceConnection", v: "Boot takes the address and login from the container; they win over spring.datasource.* properties" }
+  - { k: "Container as a @Bean", v: "it starts before other beans, once per cached context, and later test classes can reuse it" }
+  - { k: "Since", v: "@ServiceConnection arrived in Spring Boot 3.1", kind: default }
+  - { k: "Needs Docker", v: "the test machine must run Docker or another Docker-API compatible runtime", kind: minus }
 trap:
   wrong: "If the tests pass on H2, the queries will work on PostgreSQL."
-  right: "H2 behaves a little differently from other databases. Test on the real database in a container."
-sayIt: "I run integration tests against the same database as production, started by Testcontainers. With @ServiceConnection, Spring Boot takes the URL and login from the container, so I write no connection properties."
+  right: "H2 only imitates other databases, and some SQL behaves differently. Test the queries on the real database, started in a container."
+  why: "H2 has compatibility modes for PostgreSQL and MySQL, so it looks like a drop-in copy."
+sayIt: "I run integration tests against the same database as production, started by Testcontainers. With @ServiceConnection, Spring Boot reads the URL and login from the container, so I write no connection properties."
+buildsOn: [spring-boot-testing, auto-configuration]
+scenarios:
+  - q: "A repository query uses a PostgreSQL-only function. It works in production but the @DataJpaTest fails on the embedded H2 database. What do you change?"
+    a: "Run the test on PostgreSQL in a container. Declare a PostgreSQLContainer @Bean with @ServiceConnection and import it into the test. In Spring Boot 4.1, @DataJpaTest keeps a DataSource that comes from a test container, so the query runs on the real database."
+  - q: "Ten test classes each start their own PostgreSQL container in a static @Container field. The suite is slow and some tests fail with a closed connection. Why?"
+    a: "The JUnit extension stops a static container after its class, but Spring may keep the cached context, which still points at the stopped container. Declare the container as a @Bean instead: it lives as long as the context, so all classes share one."
 confusedWith: []
 tags: [testing, testcontainers, docker]
 visual: code
 sources:
   - title: "Testcontainers (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/testing/testcontainers.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "AutoConfigureTestDatabase: replace defaults to NON_TEST (Spring Boot 4.1 API)"
+    url: "https://docs.spring.io/spring-boot/api/java/org/springframework/boot/jdbc/test/autoconfigure/AutoConfigureTestDatabase.html"
+    verifiedOn: "2026-10-21"
+  - title: "ServiceConnection: since 3.1.0 (Spring Boot 4.1 API)"
+    url: "https://docs.spring.io/spring-boot/api/java/org/springframework/boot/testcontainers/service/connection/ServiceConnection.html"
+    verifiedOn: "2026-10-21"
+  - title: "AutoConfigureTestDatabase.Replace: NON_TEST keeps a test-container DataSource (Spring Boot 4.1 API)"
+    url: "https://docs.spring.io/spring-boot/api/java/org/springframework/boot/jdbc/test/autoconfigure/AutoConfigureTestDatabase.Replace.html"
+    verifiedOn: "2026-10-21"
   - title: "Supported Docker environment (Testcontainers for Java)"
     url: "https://java.testcontainers.org/supported_docker_environment/"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "H2 Features: Compatibility (H2 Database)"
     url: "https://www.h2database.com/html/features.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Testcontainers is a Java library that starts real services, such as PostgreSQL or Kafka, in throwaway Docker containers while your tests run. A container is a small isolated process started from an image, like `postgres:18`. Spring Boot's `@ServiceConnection` then tells [auto-configuration](card:auto-configuration) where that container is, so the app connects to it without any URL in your properties.
 
 ## Why it exists
 
-An in-memory database or a mock does not behave exactly like production. Testcontainers gives each test run a throwaway real service in Docker.
+The usual shortcut is an in-memory database such as H2. It is fast, but it is not PostgreSQL: some SQL, types and functions behave differently, so a test can pass and the same query can fail in production. Installing a shared test database instead is slow to set up and tests disturb each other's data. Testcontainers gives each test run a fresh, real database and removes it afterwards.
 
 ## How it works
 
 <Steps label="A test with Testcontainers">
-  <Step title="Start">Testcontainers starts PostgreSQL in Docker.</Step>
-  <Step title="Connect">`@ServiceConnection` hands its address and login to Spring Boot.</Step>
+  <Step title="Start">Testcontainers pulls the image and starts PostgreSQL in Docker on a free port.</Step>
+  <Step title="Connect">`@ServiceConnection` creates connection details from the container: host, port, user, password.</Step>
   <Step title="Test">The DataSource, JPA and Flyway use the real database.</Step>
-  <Step title="Stop">The container is removed after the tests.</Step>
+  <Step title="Stop">The container is removed when the test context closes.</Step>
 </Steps>
 
-- Declared as a `@Bean`, a container starts once per cached context and is shared.
-- `@DynamicPropertySource` is the manual way: add the container's URL as a property yourself.
+1. You declare the container as a `@Bean` in a test configuration class.
+2. Spring starts container beans before any other bean, so the database is up before the `DataSource` is built.
+3. `@ServiceConnection` registers a `ConnectionDetails` bean, an object that holds the address and login. Auto-configuration uses it instead of `spring.datasource.*`.
+4. The context, and the container with it, is cached and reused by later test classes with the same configuration.
 
 ## Example
+
+This test configuration gives the payment service a real PostgreSQL 18 for its tests.
 
 ```java
 @TestConfiguration(proxyBeanMethods = false)
 class TestcontainersConfig {
+
     @Bean
-    @ServiceConnection   // no spring.datasource.url needed
+    @ServiceConnection   // Boot takes the URL, user and password from the container
     PostgreSQLContainer postgres() {
         return new PostgreSQLContainer("postgres:18");
     }
 }
 ```
 
+What to notice:
+
+- A test uses it with `@Import(TestcontainersConfig.class)`, for example on a `@DataJpaTest` for `PaymentRepository`.
+- There is no `spring.datasource.url` anywhere. The container picks a random free port, and `@ServiceConnection` passes it to Boot.
+- Remove `@ServiceConnection` and the container still starts, but the app does not know about it and connects to whatever the properties say.
+
+## Rules and defaults
+
+- **Dependency:** service connections need `spring-boot-testcontainers` as a test dependency.
+- **Precedence:** connection details from `@ServiceConnection` win over connection properties.
+- **Slice tests (Spring Boot 4.1):** `@AutoConfigureTestDatabase` defaults to `NON_TEST`, so a `@DataJpaTest` keeps a DataSource that points at a test container instead of swapping in an embedded database.
+- **Manual way:** a static `@DynamicPropertySource` method can add the container's URL as a property yourself. It is longer, but works for any property.
+- **Docker:** the machine that runs the tests needs Docker or another Docker-API compatible runtime.
+
+## Common mistakes
+
+- **"A static @Container field per test class is the same as a @Bean."** The JUnit extension stops that container after the class, while Spring may keep the cached context that still points at it. A container `@Bean` lives as long as its context.
+
 ## Interview Qs
 
 ### Why use Testcontainers instead of H2?
 
-H2 is not your production database; some SQL differs or is missing. A test can pass on H2 and fail in production. Testcontainers runs the real database, so tests check what really runs.
+H2 is not your production database. Some SQL, data types and functions differ or are missing, so a test can pass on H2 and fail in production. Testcontainers runs the real database, so the tests check what really runs, at the cost of needing Docker and a slower start.
 
 ### What does @ServiceConnection do?
 
-It reads the container's address and login and registers `ConnectionDetails` beans. Auto-configuration uses them instead of connection properties, so you write no URLs or ports.
+It reads the container's host, port and login and registers a `ConnectionDetails` bean. Auto-configuration uses that bean instead of the connection properties, so you write no URLs or ports, and the random port the container gets is handled for you.
+
+### How do you avoid starting a new container for every test class?
+
+Declare the container as a `@Bean` in one shared `@TestConfiguration`, and keep the test configuration the same across classes. The context is cached, and the container lives with the context, so all those classes share one running database.

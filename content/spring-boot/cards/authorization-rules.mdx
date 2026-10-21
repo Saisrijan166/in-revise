@@ -5,76 +5,131 @@ title: Authorization Rules and @PreAuthorize
 topic: security
 level: intermediate
 heat: 2
-hook: "URL rules in the filter chain are the first gate; @PreAuthorize on service methods is the second, finer one."
+hook: "URL rules in the filter chain are the first gate for every request; @PreAuthorize on a service method is a second, finer gate that can look at the data."
 points:
-  - { k: "Rule order", v: "checked top to bottom; only the first match applies" }
-  - { k: "anyRequest()", v: "the catch-all, last: authenticated() or denyAll()" }
-  - { k: "hasRole(\"ADMIN\")", v: "adds the prefix: checks ROLE_ADMIN" }
-  - { k: "Method security (Boot 4.1)", v: "off until you add @EnableMethodSecurity", kind: default }
-  - { k: "Changed in 7.0", v: "authorizeRequests removed; use authorizeHttpRequests", kind: minus }
+  - { k: "URL rules", v: "authorizeHttpRequests rules are checked top to bottom, and only the first match applies" }
+  - { k: "Catch-all last", v: "end with anyRequest(); denyAll() there blocks any URL you forgot to list", kind: plus }
+  - { k: "hasRole(\"ADMIN\")", v: "adds the prefix and checks the authority ROLE_ADMIN" }
+  - { k: "Method rules", v: "@PreAuthorize checks a SpEL expression in a proxy, before the method body runs" }
+  - { k: "Off by default (Boot 4.1)", v: "method rules work only after you add @EnableMethodSecurity", kind: default }
+  - { k: "Self-call skips it", v: "a call from another method of the same class bypasses the proxy and the check", kind: minus }
 trap:
   wrong: "Rule order does not matter; Spring picks the most specific matcher."
-  right: "The first matching rule wins. If /api/** comes before /api/admin/**, the admin rule never runs: list specific paths first."
-sayIt: "I secure URLs with authorizeHttpRequests, specific matchers first and anyRequest last, and add @EnableMethodSecurity so @PreAuthorize can guard service methods with expressions such as hasRole('ADMIN')."
+  right: "The first matching rule wins. If /payments/** comes before /payments/*/refund, the refund rule never runs, so list specific paths first."
+  why: "Many routers, such as Spring MVC's own request mapping, do pick the most specific pattern, so people expect security rules to work the same way."
+sayIt: "I secure URLs with authorizeHttpRequests, specific matchers first and anyRequest last, ideally denyAll. With @EnableMethodSecurity, @PreAuthorize also guards service methods, and can check arguments, for example that the payment belongs to the caller."
+buildsOn: [authentication-flow, security-filter-chain, aop-proxies]
+scenarios:
+  - q: "The rules list .requestMatchers(\"/payments/**\").authenticated() first and .requestMatchers(HttpMethod.POST, \"/payments/*/refund\").hasRole(\"ADMIN\") second. Can a normal customer refund a payment?"
+    a: "Yes. The refund URL already matches /payments/**, and only the first match applies, so any logged-in user passes. Move the refund rule above the broad one."
+  - q: "PaymentService.findFor(email) has @PreAuthorize, but a customer still sees another customer's payments. findFor is called from listPayments() in the same class. Why?"
+    a: "Method security works through a proxy around the bean. A call from inside the same object does not go through the proxy, so the check never runs. Put the check on the method the controller calls, or move it to another bean."
 confusedWith: [hasrole-vs-hasauthority]
 tags: [security, authorization, method-security]
-visual: table
+visual: flow
 sources:
   - title: "Authorize HttpServletRequests (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/authorization/authorize-http-requests.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Method Security (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/authorization/method-security.html"
-    verifiedOn: "2026-10-19"
-  - title: "Authorization Architecture (Spring Security 7.1 reference)"
-    url: "https://docs.spring.io/spring-security/reference/servlet/authorization/architecture.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Spring Security architecture: ExceptionTranslationFilter (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/architecture.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "What's New in Spring Security 7.0"
+    url: "https://docs.spring.io/spring-security/reference/7.0/whats-new.html"
+    verifiedOn: "2026-10-21"
+  - title: "Understanding AOP Proxies: self-invocation (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/core/aop/proxying.html"
+    verifiedOn: "2026-10-21"
+  - title: "Using the Plugin: parent POM compiles with -parameters (Spring Boot 4.1 Maven plugin)"
+    url: "https://docs.spring.io/spring-boot/maven-plugin/using.html"
+    verifiedOn: "2026-10-21"
   - title: "Spring Security interview questions (InterviewBit)"
     url: "https://www.interviewbit.com/spring-security-interview-questions/"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Authorization rules decide whether an [authenticated](card:authentication-flow) caller may do something. Spring Security has two places for them. URL rules, written with `authorizeHttpRequests`, are checked by AuthorizationFilter before the controller runs. Method rules, written with `@PreAuthorize` on a bean method, are checked when that method is called. Both compare the caller's authorities, such as `ROLE_ADMIN`, with what the rule asks for. A method rule can also use SpEL (Spring Expression Language) to read the method's arguments.
+
 ## Why it exists
 
-Being logged in is not enough: an ordinary user must not reach admin pages. Rules decide that per URL and, for finer checks, per method call.
+Login alone lets every customer call every endpoint, including refunds and other customers' payments. Writing `if` checks in each controller spreads access logic everywhere, and one missed check is a hole. URL rules put the coarse decisions in one list. Method rules sit on the service, so it stays protected whichever controller, scheduled job or message listener calls it.
 
 ## How it works
 
-| | URL rules | Method rules |
-| --- | --- | --- |
-| Where | `authorizeHttpRequests` in the SecurityFilterChain | `@PreAuthorize` on bean methods |
-| Can check | Path, HTTP method, authorities | Arguments, the user, any SpEL expression |
-| Switched on | When you write rules | `@EnableMethodSecurity` |
-| On denial | Not logged in: asked to log in; else 403 | AccessDeniedException, handled the same way |
+<Mermaid
+  alt="Two authorization gates. A request reaches AuthorizationFilter, which checks the URL rules top to bottom and applies the first match. If denied, ExceptionTranslationFilter answers 401 for an unknown caller or 403 for a known one. If allowed, the controller calls the service through a proxy, which evaluates @PreAuthorize. If false it throws AccessDeniedException, giving 403; if true the method runs."
+  chart={`flowchart TD
+  R([Request]) --> AF{"AuthorizationFilter: first matching URL rule allows?"}
+  AF -- no --> ET["ExceptionTranslationFilter: 401 or 403"]
+  AF -- yes --> C[PaymentController]
+  C --> PX{"Proxy: @PreAuthorize true?"}
+  PX -- no --> D([AccessDeniedException: 403])
+  PX -- yes --> M([PaymentService method runs])`}
+/>
 
-- `@Secured` is legacy: it lists authorities such as `ROLE_ADMIN`, no SpEL, and needs `securedEnabled = true`; prefer `@PreAuthorize`.
-- Method checks run in a [proxy](card:aop-proxies): calls from inside the same class skip them.
+1. AuthorizationFilter, the last filter in the chain, compares the request's path and HTTP method with the URL rules in the order you wrote them. The first rule that matches decides.
+2. That rule checks the current `Authentication`: `permitAll()`, `authenticated()`, `hasRole(...)` or `denyAll()`.
+3. If the rule denies, ExceptionTranslationFilter answers. A caller who is not logged in is asked to log in (401 or a redirect to the login page). A logged-in caller gets 403.
+4. If it allows, the controller calls the service. With `@EnableMethodSecurity`, that service bean is a [proxy](card:aop-proxies), and the proxy evaluates the `@PreAuthorize` expression first.
+5. If the expression is false, the proxy throws `AccessDeniedException`, which becomes 403. If true, the method body runs.
 
 ## Example
 
+The payment service lets only admins refund, and lets customers read only their own payments:
+
 ```java
 http.authorizeHttpRequests(auth -> auth
-    .requestMatchers("/admin/**").hasRole("ADMIN")
-    .requestMatchers(HttpMethod.GET, "/products/**").permitAll()
-    .anyRequest().authenticated());           // catch-all, last
+    .requestMatchers("/actuator/health").permitAll()
+    .requestMatchers(HttpMethod.POST, "/payments/*/refund").hasRole("ADMIN")
+    .requestMatchers("/payments/**").authenticated()
+    .anyRequest().denyAll());                   // allow-list: the rest is blocked
 
-@PreAuthorize("hasRole('ADMIN')")             // on a service method
-public void deleteUser(long id) { /* ... */ }
+@Service
+class PaymentService {
+    @PreAuthorize("hasRole('ADMIN') or #email == authentication.name")
+    public List<PaymentResponse> findFor(String email) { /* ... */ }
+}
 ```
+
+What to notice:
+
+- The refund rule comes before `/payments/**`. Swap them and any logged-in customer can refund.
+- `denyAll()` at the end makes the list an allow-list: a new endpoint nobody added a rule for is blocked, not open.
+- `#email` is the method argument and `authentication.name` is the logged-in user, so a customer can read only their own payments. A URL rule cannot see that argument.
+- Without `@EnableMethodSecurity` on a `@Configuration` class, the `@PreAuthorize` line is silently ignored.
+
+## Rules and defaults
+
+- **First match:** URL rules are checked in the order declared; only the first match applies.
+- **Method security (Boot 4.1):** off until you add `@EnableMethodSecurity`. It turns on `@PreAuthorize`, `@PostAuthorize`, `@PreFilter` and `@PostFilter`; it replaces the deprecated `@EnableGlobalMethodSecurity`.
+- **Other annotations:** `@Secured` needs `securedEnabled = true`, and JSR-250 annotations such as `@RolesAllowed` need `jsr250Enabled = true`.
+- **Argument names:** `#email` needs parameter names at runtime. Boot's Maven parent compiles with `-parameters`, so it works out of the box there.
+- **`@PostAuthorize`:** runs after the method, so do not use it on methods that write to the database.
+- **Changed in 7.0:** the old `authorizeRequests` was removed; use `authorizeHttpRequests`.
+
+## Not to be confused with
+
+`hasRole("ADMIN")` adds the `ROLE_` prefix and checks `ROLE_ADMIN`. `hasAuthority("ADMIN")` checks the exact string `ADMIN`. Rule: role = prefix added for you; authority = the exact string.
 
 ## Interview Qs
 
 ### Does the order of requestMatchers matter?
 
-Yes. AuthorizationFilter applies only the first rule that matches, so put specific paths before broad ones and end with `anyRequest()`. Ending with `denyAll()` turns the rules into an allow-list.
+Yes. AuthorizationFilter applies only the first rule that matches, so put specific paths before broad ones and end with `anyRequest()`. Ending with `denyAll()` turns the rules into an allow-list, so a forgotten endpoint is blocked.
 
-### @PreAuthorize vs @Secured?
+### What is the difference between @PreAuthorize and @Secured?
 
-`@Secured` only lists authorities, such as `ROLE_ADMIN`, and must be switched on with `securedEnabled = true`. `@PreAuthorize` is on with `@EnableMethodSecurity` and takes SpEL, so it can check arguments and the current user.
+`@Secured` only lists authorities, such as `ROLE_ADMIN`, and must be switched on with `securedEnabled = true`. `@PreAuthorize` is on with `@EnableMethodSecurity` and takes a SpEL expression, so it can also check arguments and the current user.
 
-### URL security or method security?
+### Should you use URL security or method security?
 
-Both. URL rules are a coarse first gate. Method rules guard the service layer whichever controller calls it, and can check data, such as whether the record belongs to the user.
+Both. URL rules are a coarse first gate for every request. Method rules guard the service layer whichever caller uses it, and can check data, such as whether a payment belongs to the user. Unannotated methods are not protected, so keep a URL catch-all.
+
+### Your @PreAuthorize has no effect. What do you check?
+
+First, that `@EnableMethodSecurity` is present. Second, that the method is called from another bean through the proxy, not from the same class. Third, that the object is a Spring bean and not created with `new`, because only beans get the proxy.

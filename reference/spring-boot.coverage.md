@@ -1,5 +1,5 @@
 # Coverage: Spring Boot
-Reference: reference/spring-boot.md  ·  Last updated: 19-10-2026
+Reference: reference/spring-boot.md  ·  Last updated: 21-10-2026
 
 Every numbered section (0–164) and every "why do we need X if Y exists" question (why-Q1 to why-Q40) appears in exactly one of
 Mapped, Corrected or Dropped. Baseline for corrections: Spring Boot 4.1 (4.1.1). Sources for corrections are primary pages.
@@ -436,3 +436,271 @@ Mapped, Corrected or Dropped. Baseline for corrections: Spring Boot 4.1 (4.1.1).
 | Old draft: @TimeLimiter (1 s default), aspect-order properties, Spring Cloud Circuit Breaker factory API, @ConcurrencyLimit, RetryTemplate | advanced; aspect order kept as one point |
 | Old draft: Spring Kafka JSON serde (Jackson 3 classes), @RetryableTopic, listener concurrency node, exactly-once Interview Q, versions row (spring-kafka 4.1.1, kafka-clients 4.2.1) | advanced; exactly-once kept as a tree type and in the trap |
 | Old draft: "fatal exceptions are never retried" defaults row | advanced |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1); each reference item mapped above still lands in the same concept id. Below are the reference items whose teaching point was newly added or strengthened during the rewrite, and the corrections made. An independent pass then checked about 2,690 claims and fixed 49.
+
+### Unit core-a
+
+**Added from the reference (item → concept)**
+
+- 0/1/2. Memory map, Spring vs Boot, why Boot → spring-vs-spring-boot: "plain Spring vs Boot" setup table (starters, auto-config, embedded server, external config, Actuator) and startup steps; topic road map in What it is.
+- 3. IoC "normally new / with Spring the container creates it" angle → ioc-container Why it exists and runnable example (eager creation, same object).
+- 4/16/17. DI types and @Autowired → dependency-injection: several-constructors rule (falls back to the no-arg constructor) as a scenario; optional dependencies (setter, required = false, Optional).
+- 7. Component scanning "different package not scanned" → component-scanning: sibling-package scenario, scanBasePackages replaces the default, Boot's "could not be found" message.
+- 9/10. @Configuration and @Bean → component-vs-bean: @Bean full vs lite mode (Not to be confused with + scenario), default names, own names.
+- 18–21. Multiple beans, @Qualifier, @Primary, naming → bean-selection: Boot's "required a single bean, but 2 were found" message, two @Primary beans fail.
+- 22–25. Scopes → bean-scopes: runnable singleton vs prototype example, GoF singleton contrast, stateful/stateless rule from the docs.
+- 26/27. Lazy init and lifecycle → bean-lifecycle: runnable order example, combined init/destroy order, @Bean close/shutdown inference, kill -9 caveat, @Lazy on @Configuration and @Lazy(false).
+- why-Q1, why-Q2, why-Q5, why-24, why-25, why-Q23 → Interview Qs and comparison explain/sayIt (unchanged mapping).
+
+**Corrections**
+
+- Draft dependency-injection trap did not say why @Autowired was everywhere; trap.why worded without a version (the 7.0 reference no longer states "since 4.3"). Source: Using @Autowired (Spring Framework 7.0 reference).
+- beanfactory-vs-applicationcontext: added row "shared beans created: when first requested vs at startup". Sources: Lazy-initialized Beans page; ConfigurableListableBeanFactory.preInstantiateSingletons Javadoc ("if desired"); confirmed by running a DefaultListableBeanFactory (bean created only on getBean).
+- System requirements re-checked: Spring Boot 4.1.1 needs Java 17+ (up to 26) and Spring Framework 7.0.9 or above; Tomcat 11.0 / Jetty 12.1.
+- spring-boot-starter-web is deprecated in favour of spring-boot-starter-webmvc (Boot 4.x build-systems page) — stated as "changed in 4.0".
+- Reference said @PreDestroy runs "when appropriate"; made concrete: not for prototypes, and no guarantee on SIGKILL (Runtime.addShutdownHook, Java SE 17 API).
+- No reference statement was found to be wrong in this unit.
+
+### Unit core-b
+
+**Added from the reference (item -> concept)**
+
+- 66 Spring AOP "instead of duplicating log(); method(); log();" -> spring-aop Why it exists (copy-the-logging problem, PaymentService/RefundService).
+- 68 Spring AOP proxy "@Transactional -> proxy -> start -> method -> commit/rollback" -> aop-proxies Interview Q "who starts the transaction?" (kept, reworded).
+- 69 Self-invocation methodA -> methodB -> aop-proxies Example (payAll -> pay, with real output) and scenario 1.
+- 121 "Don't blindly assume unlimited threads; configure an executor" -> async-scheduling Common mistakes (unbounded queue) and scenario 3 (pool never grows past 8), plus Rules (queue-capacity, max-size).
+- 125 "Event is not automatically async" -> application-events trap with trap.why.
+- why-Q21 / Q28 / Q29 -> kept as Interview Qs in aop-proxies and async-scheduling.
+
+**Added beyond the reference (all verified 21-10-2026)**
+
+- Boot 4.0 rename: spring-boot-starter-aop -> spring-boot-starter-aspectj; Boot enables @Aspect support itself when AspectJ is on the classpath (spring-aop Rules).
+- Around advice must return the result of proceed(); a void/null advice makes the caller see null (spring-aop Example, scenario 2).
+- Aspect ordering: undefined unless @Order; lower value runs first (spring-aop Rules).
+- Final class -> startup fails "Could not generate CGLIB subclass"; final method -> silently not advised (aop-proxies Rules, scenario 2; both confirmed by running on Boot 4.0.3).
+- AopContext.currentProxy() as a discouraged last-resort self-invocation fix (aop-proxies Rules).
+- Boot thread names task- and scheduling- (async-scheduling Example, real output).
+- Custom Executor bean makes Boot's executor back off; @Async("name") picks an executor (async-scheduling Rules).
+- @Async cannot be combined with @PostConstruct; void @Async exceptions go to AsyncUncaughtExceptionHandler, logged by default.
+- @Scheduled methods: void, no arguments; registering the job class twice also runs it twice.
+- Events: condition attribute, return value publishes a new event (not for @Async), applicationEventMulticaster bean for all-async events.
+- @TransactionalEventListener: writes after commit are not committed (Javadoc warning) -> use REQUIRES_NEW; since Framework 6.1 Spring rejects @Transactional on such listeners unless REQUIRES_NEW or NOT_SUPPORTED (confirmed by running Spring 7.0.5).
+- A synchronous listener's exception propagates out of publishEvent() (confirmed by running) -> application-events Common mistakes and scenario 1.
+- Plain Spring Framework still resolves field/setter cycles; constructor cycles fail even with allow-circular-references=true (confirmed by running Spring 7.0.5 and Boot 4.0.3).
+- @Lazy on a class vs on a parameter (circular-dependencies "Not to be confused with"). Run showed the @Lazy-injected bean is still created at startup as a singleton; only the lookup through the proxy is delayed, so the text says "fetch later", not "create later".
+- Glossary: cross-cutting-concern, thread-pool (add/spring-boot/core-b.glossary.yaml).
+
+**Corrections**
+
+- spring-aop trap.right: old "only method executions on Spring beans" became "only method calls that reach a bean through its proxy, in practice public methods" (Spring Framework 7.0 pointcuts page: JDK proxies intercept only public interface methods; CGLIB also protected/package-visible "if necessary").
+- fixed-rate-vs-fixed-delay row "Run longer than N: next one starts late, not in parallel" is now limited to Boot's default pooled scheduler. SimpleAsyncTaskScheduler (virtual threads) runs each trigger on its own thread with unlimited concurrency by default (SimpleAsyncTaskScheduler Javadoc), so overlap of fixedRate runs is possible there.
+- aop-proxies: the injected class name is PaymentService$$SpringCGLIB$$0 (real run), shown instead of the generic "subclass".
+- No reference contradictions with the docs were found in this unit.
+
+### Unit boot-config
+
+**Added from the reference (item → concept)**
+
+- 137. Starter data JPA: "you still need a database driver" → starters (points, scenario, Rules).
+- 87. Startup flow: component scanning and auto-configuration during refresh, server start, "don't overclaim exact order" → application-startup (Steps, numbered steps, closing line).
+- 34. Externalized configuration: `password = "secret123"` bad practice → externalized-configuration (Why it exists).
+- 136. Starter web: "contents change by version" angle → starters (webmvc brings Spring MVC, Jackson, Tomcat; checked in the 4.0.3 POM).
+- why-Q6 / why-Q27: "why do we need X when Y exists" kept as Interview Qs; why-26 → spring-boot-application trap and Interview Q.
+- Beyond the reference (verified): readiness refuses traffic while runners run; a failing runner fails startup; runners on the main thread; outside-the-jar file beats an inside profile file; configtree for mounted secrets; @PropertySource too late for logging.* / spring.main.*; constructor binding cannot be @Component; @ConfigurationProperties on @Bean for library classes; configuration processor for IDE metadata; log groups web/sql; logging.file.path writes spring.log; Log4j2 swap; Actuator loggers endpoint; shutdown phase timeout 30s; parent POM java.version 17 override.
+
+**Corrections**
+
+- Reference 32 lists Undertow as an embedded server: removed in Boot 4.0 (Servlet 6.1 baseline). Source: Spring Boot 4.0 Migration Guide. (Already in coverage; kept.)
+- Reference 136 uses spring-boot-starter-web: deprecated in 4.0 for spring-boot-starter-webmvc. Source: Build Systems (4.1.1).
+- Reference 8 shows @SpringBootApplication = @Configuration + ...: the real meta-annotation is @SpringBootConfiguration (a specialised @Configuration). Source: SpringBootApplication API.
+- Own draft fix: an earlier idea that an env var with a dash (APP_FRAUD-CHECK_URL) is ignored was tested and is wrong for Environment.getProperty (Boot 4.0.3 resolved it), so that scenario was not used; the canonical form (dots to _, dashes removed, upper case) is stated instead.
+
+### Unit web
+
+**Added from the reference (item -> concept)**
+
+| Reference item | Landed in |
+|---|---|
+| 39 REST API structure, 99 request flow, 160 architecture | dispatcher-servlet: sequence diagram of POST /payments through DispatcherServlet, controller, service, repository, JSON |
+| 98 "DispatcherServlet = front controller" | dispatcher-servlet What it is + Interview Q |
+| 14/15, why-Q3 @Controller vs @RestController | rest-controller What it is, How it works, scenario; comparison explain |
+| 45/46 @ResponseStatus vs ResponseEntity | rest-controller points, Rules, scenario (201 + Location) |
+| 47 JSON serialisation (both directions) | dispatcher-servlet steps 3 and 5; rest-controller Interview Q |
+| 40, 147 mapping annotations; why-Q12 | request-mapping points, Interview Q |
+| 41-44, why-Q10/11 path / param / body / header | request-mapping diagram, Not to be confused with, comparison example |
+| 48, 108, why-Q18 DTO reasons (contract, hidden fields, versioning) | dto Why, How it works steps, scenarios |
+| 109 @JsonIgnore is not a security boundary | dto trap, point, Interview Q |
+| 110 lazy loading + JSON trap | dto Why, Rules (open-in-view), Interview Q (details stay in lazy-loading-n-plus-one) |
+| 49/50 validation and @NotNull/@NotEmpty/@NotBlank | validation table, Interview Q |
+| 51/52, why-Q8/9 global handling | exception-handling; comparison explain/example |
+| 142 consistent error contract, no stack traces | exception-handling Rules (/error fields, message and trace hidden) |
+| 92 status codes, 93 REST design, 94 idempotency | rest-api-design table, Rules, scenarios |
+| 95/96, why-Q19/20 filter vs interceptor vs AOP | filters-interceptors steps (order), Interview Qs, comparison explain |
+| 126/127, why-Q35 RestClient vs WebClient | http-clients What it is, trap, Interview Q |
+| 128-130, why-Q34 WebFlux, Mono/Flux, blocking trap | mvc-vs-webflux points, scenario, Interview Q |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Reference 142 shows a default error body with `"error": "Payment not found"` | Boot's /error body has timestamp, status, error (the reason phrase) and path; message and trace are `never` included by default. Custom messages come from your own handler (ProblemDetail). | DefaultErrorAttributes Javadoc (Boot 4.1 API); appendix spring.web.error.* |
+| Reference 95/96 lists "authentication checks" as an interceptor use | Spring docs advise against interceptors as a security layer (path-matching mismatch); use Spring Security, a filter | Interception (Framework 7.0 reference) |
+| Reference 94 "GET normally expected to be idempotent" | GET is safe and idempotent by definition (RFC 9110 9.2) | RFC 9110 |
+| Draft wording (old concept): error properties | Boot 4.x uses spring.web.error.*; Boot 3.x used server.error.* (now stated as "changed in 4.0") | Boot 4.1 and 3.5 property appendices |
+| Draft wording (old concept): "@Deprecated in 7.1" for RestTemplate | "@Deprecated planned for 7.1" (7.1 is not released; 7.0.5 class has no @Deprecated) | spring.io blog 30-09-2025; javap on spring-web 7.0.5 |
+| Old Idempotency-Key source pointed to the -07 archive copy | Datatracker page: revision 07, expired, no RFC | datatracker.ietf.org (checked 21-10-2026) |
+
+**Added beyond the reference (verified 21-10-2026)**
+
+- DispatcherServlet processing order and HandlerExceptionResolver step; @EnableWebMvc vs WebMvcConfigurer (dispatcher-servlet).
+- Spring MVC's own status codes: 405 wrong method, 415 unsupported Content-Type, 400 missing/unconvertible values and unreadable JSON (HttpMessageNotReadableException) (request-mapping).
+- Enum conversion is by exact constant name, so `?status=paid` gives 400 (request-mapping).
+- `-parameters` compiler flag needed for name-based binding; Boot's starter parent sets it (request-mapping).
+- API versioning needs a resolver, e.g. `spring.mvc.apiversion.use.header=X-Version` (request-mapping).
+- HandlerMethodValidationException for parameter constraints; @Validated on a service throws ConstraintViolationException, which Spring MVC does not map to 400 (validation).
+- Nested objects need @Valid to cascade; validator reports all violations (validation).
+- Most specific @ExceptionHandler wins (ExceptionDepthComparator); local handlers before advice; ResponseEntityExceptionHandler; exceptions in filters never reach advice (exception-handling).
+- PUT may create (201); 400 vs 422 scenario (rest-api-design).
+- Interceptor registration via WebMvcConfigurer.addInterceptors + addPathPatterns; afterCompletion runs only when preHandle returned true; filter order via @Order on the class or FilterRegistrationBean, not @Order on a @Bean method (filters-interceptors).
+- Boot 4 starters spring-boot-starter-restclient / -webclient; @ImportHttpServices + spring.http.serviceclient.<group>.*; global spring.http.clients.connect-timeout / read-timeout; onStatus; no RestTemplate bean (http-clients).
+- MVC with both starters can still use WebClient; server.tomcat.threads.max has no effect with virtual threads; R2DBC as the non-blocking database option (mvc-vs-webflux).
+Glossary additions (web.glossary.yaml, 14 terms): servlet, enable-web-mvc, web-mvc-configurer, handler-exception-resolver-term, method-argument-not-valid-exception, handler-method-validation-exception, constraint-violation-exception, hibernate-validator, response-entity-exception-handler, once-per-request-filter-term, event-loop, blocking-call, r2dbc, import-http-services.
+
+### Unit data-a
+
+**Added from the reference (item -> concept)**
+
+- 53 / 137 Spring Data JPA, starter data JPA ("you still need the DB driver") -> jpa-hibernate-spring-data (Example, Rules: one starter brings Hibernate, Spring Data JPA, Spring ORM, HikariCP; add the driver yourself).
+- 54 / Q14 / Q15 three-way split -> jpa-hibernate-spring-data (How it works now traces one findById call through the three layers).
+- 55-58 @Entity, @Id, @GeneratedValue, relationships -> jpa-entities (What it is, How it works steps on owning side, Rules: entity class rules, AUTO id strategy).
+- 101-103 derived queries, @Query, JPQL vs SQL -> spring-data-repositories (How it works steps, Example notes, Interview Q).
+- 107 null handling (avoid Optional.get) -> spring-data-repositories (Common mistakes, scenario).
+- 110 lazy loading + JSON trap -> lazy-loading-n-plus-one (scenario, Common mistakes on open-in-view), linking to dto.
+- 152-157 persistence context, entity states, save not always insert, flush vs commit, first/second-level cache -> persistence-context (steps, Rules, Not to be confused with: first-level vs second-level cache vs Spring Cache).
+- 59 / Q17 LAZY vs EAGER, "EAGER is not always one query" -> lazy-vs-eager-fetch (explain, example), lazy-loading-n-plus-one trap.
+
+**Added beyond the reference (verified 21-10-2026)**
+
+- @Modifying needed for update/delete @Query; clearAutomatically = true to clear stale entities (Spring Data JPA query-methods page) -> spring-data-repositories Rules.
+- Inherited CRUD methods transactional (read-only for reads); declared query methods get no transaction by default (Spring Data JPA transactions page) -> spring-data-repositories Rules.
+- Derived deleteBy loads entities and deletes one by one so @PreRemove runs; bulk delete via @Modifying @Query -> spring-data-repositories Common mistakes.
+- Default query lookup strategy CREATE_IF_NOT_FOUND (declared query first, then derived) -> spring-data-repositories Rules.
+- Slice fetches page size + 1 rows, no count query -> spring-data-repositories scenario.
+- Selectively exposing CRUD methods by extending Repository -> crud-vs-jpa-repository example.
+- save() result: "use the returned instance" (CrudRepository Javadoc); merge returns a managed copy -> persistence-context Common mistakes.
+- Manually assigned ids without @Version: save() always merges (Spring Data JPA entity-persistence page) -> persistence-context Rules.
+- Entity scanning from the main class's package, @EntityScan, @EnableJpaRepositories (Boot 4.1 SQL docs) -> jpa-hibernate-spring-data Rules.
+- Entity class must be top-level or static inner, non-final, non-final fields (spec 2.1) -> jpa-entities Rules and record Interview Q.
+- Without mappedBy a @OneToMany is a separate unidirectional relationship mapped with a join table (spec 2.12.5) -> jpa-entities Example note.
+- AUTO flush makes pending changes visible to queries (spec 3.11.2) -> persistence-context scenario.
+- Proxy definition and LazyInitializationException once the persistence context ends (Hibernate 7.4 short guide, Proxies and lazy fetching) -> lazy-loading-n-plus-one What it is / step 5.
+
+**Corrections**
+
+- persistence-context draft source title said "3.11 flush mode"; the 3.2 spec section is 3.11.2 "Queries and Flush Mode" (title fixed).
+- jpa-entities: entity may also be a static inner class, not only top-level (spec 2.1); stated that way.
+- No reference fact contradicted the docs beyond the corrections already recorded in reference/spring-boot.coverage.md (repository hierarchy, EAGER not one query).
+
+### Unit data-b
+
+**Added from the reference (item → concept)**
+
+| Reference item | Landed in |
+|---|---|
+| 61. Transactions (all or nothing; payment + account example) | transactional: What it is, Why it exists, Example (running payment example) |
+| 63. Rollback trap | transactional: trap with `why`, points, scenario 1 |
+| 115. Database transaction vs Spring transaction | transactional: Not to be confused with ("the database does the work; the annotation marks the boundary") |
+| 116. Transactional service layer | transactional: point "Where", Interview Q (now also says why not controller or repository) |
+| 117. readOnly ("do not claim it makes the DB read-only") | transactional: Rules, Common mistakes, Interview Q "What does readOnly = true really do?" |
+| Q: Why doesn't @Transactional work on self-invocation? | transactional: point, Example note, scenario 2 |
+| 64. Propagation, why-Q22 REQUIRED vs REQUIRES_NEW | transaction-propagation (table, step-by-step run, Example); comparison required-vs-requires-new (explain, example, sayIt) |
+| 62. ACID, 65. Isolation (more isolation = less concurrency) | acid-isolation: What it is (ACID in plain words), table, timeline steps, point "Higher level" |
+| 149. Optimistic locking (version 1 → 2 conflict story) | locking: How it works steps 1-5 (two refunds) |
+| 150. Pessimistic locking (contention, deadlocks) | locking: point, Interview Q "Can pessimistic locking cause deadlocks?" |
+| 118. Spring Cache flow (cache? yes/no) | spring-cache: Mermaid and steps |
+| 119 / why-Q39. @Cacheable vs @CachePut | comparison cacheable-vs-cacheput-vs-cacheevict (explain, example, sayIt) |
+| 120. Redis + Spring Boot | spring-cache: Interview Q "Caffeine or Redis?", scenario 2 |
+| 145 / why-Q30. Cache vs database | spring-cache: trap with `why`, Interview Q |
+
+**Added beyond the reference (all verified 21-10-2026)**
+
+- transactional: Boot enables @Transactional support itself and registers a JpaTransactionManager (TransactionAutoConfiguration, JpaBaseConfiguration API; confirmed in the 4.0.3 jars); global `@EnableTransactionManagement(rollbackOn = ALL_EXCEPTIONS)` since Spring Framework 6.2; protected and package-private methods work with class-based proxies since 6.0; Spring advises annotating concrete classes; catch-and-log commits (Common mistake); Spring Data CRUD methods run in their own transaction (scenario 2).
+- transaction-propagation: `validateExistingTransaction`; `JpaTransactionManager.nestedTransactionAllowed` is false by default and savepoints cover only JDBC work; pool-deadlock scenario; propagation vs isolation rule.
+- acid-isolation: PostgreSQL 18 READ UNCOMMITTED behaves like READ COMMITTED; PostgreSQL serialization failures need a retry; MySQL 8.4 InnoDB plain reads use the snapshot taken at the first read (scenario 1); isolation applies only when the method starts the transaction.
+- locking: allowed @Version types in Jakarta Persistence 3.2 (incl. Instant, LocalDateTime); TransactionRequiredException for a lock query without a transaction; Hibernate's version check in the UPDATE/DELETE WHERE clause; 409 Conflict for a non-retryable conflict (RFC 9110); deadlock detection and consistent lock order (PostgreSQL 18 docs).
+- connection-pool: idleTimeout (10 min, only when minimumIdle < max); connection pool vs Tomcat thread pool (server.tomcat.threads.max = 200 in Boot 4.1, not used with virtual threads); remote calls inside a transaction hold a connection; 50-requests sizing scenario.
+- spring-cache: full Boot 4.1 provider order; @EnableCaching not on the main class (Boot's advice); public methods only, silently ignored otherwise; `unless`, `sync`, `allEntries`, `beforeInvocation`; Redis entries never expire by default; local (Caffeine) vs shared (Redis) on several instances; Spring Cache vs Hibernate second-level cache.
+- schema-migrations: database modules `flyway-database-postgresql` / `flyway-mysql`; `spring.flyway.validate-on-migrate` true by default (checksum check stops startup); test-only Flyway scripts in src/test/resources/db/migration; ddl-auto=update cannot detect a rename (scenario 3).
+
+**Corrections**
+
+- spring-cache (draft): the provider order listed only some providers and missed Generic, which Boot checks first. Now the full Boot 4.1 order: Generic, JCache, Hazelcast, Infinispan, Couchbase, Redis, Caffeine, Cache2k, Simple. Source: https://docs.spring.io/spring-boot/reference/io/caching.html
+- No reference fact in this unit contradicted the docs.
+
+### Unit security
+
+**Added from the reference (item → concept)**
+
+- 70. Spring Security (what it handles) → security-filter-chain, What it is (login, permission checks, attack protection).
+- 71 / why-Q31. Authentication vs Authorization, "why authorization if authentication exists" → authentication-flow (What it is, Why it exists, Interview Q 1, scenario 1).
+- 72. Filter chain "request → filters → authentication → authorization → controller" → security-filter-chain How it works (numbered steps in time order).
+- 73. Password storage, "verify at login" → password-encoding How it works steps 3–5 and the runnable example.
+- 74. JWT "signed, not inherently encrypted; no secrets in the payload" → jwt-resource-server trap and Interview Q; the login → token → validate flow is the numbered steps.
+- 75 / why-Q32. CORS vs CSRF, "why do we need both" → csrf-cors Interview Q 1 and comparison csrf-vs-cors (explain, sayIt).
+- 76. @PreAuthorize → authorization-rules Example (customer may read only own payments) and "Your @PreAuthorize has no effect" Interview Q.
+- Memory sheet "401 ≠ 403" → authentication-flow trap (with why) and points.
+- why-Q33. Session vs JWT → session-vs-jwt (explain, example, sayIt) and jwt-resource-server Interview Q 1.
+Added beyond the reference (verified now):
+- security-filter-chain: what makes Boot's default user back off (UserDetailsService, AuthenticationProvider or AuthenticationManager bean); /error is secured by default; TRACE logging tip; Common mistake "@Component filter runs twice" (Boot registers every Filter bean with the container). The last two had been dropped as advanced in the 19-10 rebuild; re-added because they are frequent real bugs.
+- authentication-flow: credentials erased by ProviderManager; ProviderNotFoundException; ThreadLocal context and the @Async scenario; session fixation (changeSessionId default); Authentication / @AuthenticationPrincipal controller parameters.
+- authorization-rules: denyAll() allow-list; @PostAuthorize not for writes; jsr250Enabled; @EnableGlobalMethodSecurity deprecated; -parameters needed for #arg names (Boot's Maven parent sets it); self-invocation scenario; "unannotated methods are not secured, keep a URL catch-all".
+- password-encoding: hashing vs encryption vs encoding; "never compare hashes with equals/WHERE" scenario; missing {id} prefix scenario; "why bcrypt and not SHA-256" Interview Q.
+- jwt-resource-server: key discovery is deferred to the first token request; aud scenario; 60 s skew scenario; Boot 4 starter rename (old name deprecated); OAuth2 vs JWT; refresh tokens.
+- csrf-cors: csrf.spa() (7.0) = CookieCsrfTokenRepository.withHttpOnlyFalse() + SPA request handler; bearer-token requests skip CSRF with oauth2ResourceServer; logout is POST-only with CSRF on; GET must not change data; allowedOriginPatterns with credentials; two CORS source beans = no auto CORS; "CORS only binds browsers" mistake.
+
+**Corrections**
+
+- hasRole("ROLE_ADMIN"): in authorizeHttpRequests it throws IllegalArgumentException when the chain is built ("should not start with ROLE_ ... Consider using hasAuthority"); in a SpEL @PreAuthorize expression the prefix is not added twice. Written into the hasrole-vs-hasauthority example and the "What you pass" row. Verified by running AuthorityAuthorizationManager.hasRole and SecurityExpressionRoot.hasRole against Spring Security 7.0.3 (S/compile/security/src2/demo2/RoleTest.java).
+- DelegatingPasswordEncoder error for a hash without {id}: the 7.x message is no longer "There is no PasswordEncoder mapped for the id null" (as the docs' troubleshooting text still says) but "Given that there is no default password encoder configured, each password must have a password encoding prefix...". The site only names the exception type, IllegalArgumentException (real run output).
+- Draft said "MD5, SHA-1 are fast"; extended to SHA-256 (OWASP: general-purpose fast hashes are unsuitable). Not a reference error.
+- Boot defaults: "form login for browsers, Basic for others" reworded to the doc's "depending on the Accept header".
+
+### Unit test-cloud
+
+**Added from the reference (item → concept)**
+
+- 77 Testing (annotation list, "know the version for mock beans") → `mockito` trap and "Changed in 4.0" point (@MockBean removed).
+- 78 / 79 / 80 @SpringBootTest, @WebMvcTest (what it is useful for: mapping, validation, serialisation, HTTP response), @DataJpaTest → `spring-boot-testing` What it is, Example, Rules and defaults.
+- 81 Mockito ("real dependency → mock, test service logic without a database") → `mockito` Why it exists and Example.
+- 82 Mock vs stub → `mockito` Not to be confused with + Interview Q.
+- 83 Actuator uses → `actuator` What it is / Why it exists.
+- 84 Health check (used by load balancer, Kubernetes, deployment platform, monitoring) → `actuator` Why it exists; the "healthy → traffic allowed" idea is taught as readiness.
+- 140 Executable jar ("app + dependencies + embedded server + java -jar") → `packaging-deployment` hook, What it is, Example.
+- 143 Observability (logs + metrics + traces) → `observability` table and What it is.
+- 144 Liveness vs readiness ("alive" is not "ready") → `liveness-vs-readiness` explain/example/sayIt; `actuator` trap and Interview Q.
+- why-Q36 @Mock vs mock bean → `mock-vs-mockitobean`; `mockito` Interview Q.
+- why-Q37 Unit test vs @SpringBootTest, why-Q38 @WebMvcTest vs @SpringBootTest → `unit-vs-slice-vs-springboottest`; `spring-boot-testing` Interview Qs.
+- Spring Cloud concepts were already "added beyond the reference"; their teaching points are kept.
+New verified facts added in this rewrite (about 35), each with a source:
+- Testing: @SpringBootTest web environments (MOCK, RANDOM_PORT, DEFINED_PORT, NONE); combining slices not supported; @DataJpaTest logs SQL, `@AutoConfigureTestDatabase(replace = Replace.NONE)`; Boot 4 test modules `spring-boot-<technology>-test`; different mock sets or properties start new contexts.
+- Mockito: MockitoExtension defaults to STRICT_STUBS (unused stub fails with UnnecessaryStubbingException); @InjectMocks tries constructor, then setters, then fields; @MockitoBean replaces or creates a bean, is reset AFTER each test, and is never wrapped in a Spring AOP proxy; unstubbed calls return empty values.
+- Testcontainers: container beans start before all other beans and stop after them, once per cached context; static @Container fields stop after the class and can clash with the context cache; `spring-boot-testcontainers` dependency; `@AutoConfigureTestDatabase` defaults to `NON_TEST` in Boot 4.1, so a @DataJpaTest keeps a test-container DataSource.
+- Actuator: custom `HealthIndicator` (package `org.springframework.boot.health.contributor` in Boot 4.1), entry named after the bean without the suffix; overall status = first in the status order; Boot adds no extra indicators to probe groups; liveness CORRECT after context refresh, readiness ACCEPTING_TRAFFIC after runners, REFUSING_TRAFFIC during graceful shutdown; graceful shutdown on by default; access to `shutdown` and `heapdump` restricted by default; `management.server.port`.
+- Observability: Observation API with low- and high-cardinality key values; `spring-boot-starter-zipkin` for Brave; `logging.pattern.correlation`; Micrometer warning on user-supplied tag values.
+- Packaging: war built with the Boot plugin still runs with `java -jar`; native image removes unreachable code, needs hints for reflection, resources, serialisation and proxies; Spring AOT generates code and hint files at build time; @Profile and @ConditionalOnProperty limited.
+- Config Server: `application*` files are shared by all clients; `{cipher}` values are decrypted by the server before sending.
+- Eureka: the client starter alone registers the app; `eureka.client.serviceUrl.defaultZone`; by default Eureka reports UP from heartbeats only, `eureka.client.healthcheck.enabled=true` sends the Actuator status.
+- Gateway: handler mapping → pre filters → proxied call → post filters; `StripPrefix` filter.
+- Resilience4j: `resilience4j.circuitbreaker.instances.<name>.*` / `resilience4j.retry.instances.<name>.*` keys; self-invocation skips the guards; do not retry non-idempotent calls.
+- Kafka: Boot attaches a `CommonErrorHandler` bean to the auto-configured listener factory; `FixedBackOff(1000L, 2)` = 3 deliveries; the DLT uses the same partition, so it needs at least as many partitions; transactional outbox for the dual-write problem.
+
+**Corrections**
+
+- Reference 77 says the mock-bean annotation "may differ by version": for the Boot 4.1 baseline it is definite. @MockBean/@SpyBean were removed in Spring Boot 4.0; use @MockitoBean/@MockitoSpyBean (Spring Framework 6.2+). Source: Spring Boot 4.0 Migration Guide; MockitoBean Javadoc.
+- Reference 84 ("app healthy → traffic allowed") describes readiness, not general health. Taught as readiness. Source: Spring Boot 4.1.1 Application Availability.
+- Reference 143 ("tracing typically integrates with an observability stack"): Spring Boot itself auto-configures Micrometer Tracing and log correlation; only the backend is external. Source: Spring Boot 4.1.1 Tracing.
+- Draft wording "2025.0.x for Boot 3.5" kept, but note: spring.io now marks 2025.0.x (Northfields) as end of life. Source: spring.io/projects/spring-cloud (checked 21-10-2026).
+- Removed a claim I first drafted, that a Boot/Cloud version mismatch "often fails at startup": the Spring Cloud compatibility verifier's default could not be confirmed (property docs list default false). Replaced with "untested and can break".

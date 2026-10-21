@@ -5,76 +5,126 @@ title: Application Events
 topic: beans-di
 level: intermediate
 heat: 2
-hook: "One bean publishes an event, others listen with @EventListener; by default listeners run at once, on the same thread."
+hook: "One bean announces that something happened, and other beans react, without the first one knowing them. By default every listener runs at once, on the same thread."
 points:
-  - { k: "Publish", v: "ApplicationEventPublisher.publishEvent(any object)" }
-  - { k: "Listen", v: "@EventListener on a method of any bean" }
-  - { k: "Default", v: "synchronous: publishEvent waits for every listener", kind: default }
-  - { k: "@TransactionalEventListener", v: "runs after the commit by default (AFTER_COMMIT)" }
-  - { k: "In-process only", v: "not a message broker; events stay inside one app", kind: minus }
+  - { k: "Publish", v: "inject ApplicationEventPublisher and call publishEvent(event); the event can be any object, such as a record" }
+  - { k: "Listen", v: "put @EventListener on a bean method; its parameter type decides which events it receives" }
+  - { k: "Synchronous", v: "by default publishEvent() waits until every listener has finished, on the caller's thread", kind: default }
+  - { k: "After commit", v: "@TransactionalEventListener runs only after the publisher's transaction commits (AFTER_COMMIT)", kind: default }
+  - { k: "One app only", v: "events never leave the running application; other services need a broker such as Kafka", kind: minus }
 trap:
-  wrong: "Publishing an event makes the listener run in the background."
-  right: "Listeners are synchronous by default: same thread, same transaction. Add @Async to the listener for another thread."
-sayIt: "Events decouple beans inside one app: a service publishes, listeners react. Listeners run synchronously by default; I add @Async for background work and @TransactionalEventListener to react only after the commit."
+  wrong: "Publishing an event makes the listeners run in the background."
+  right: "Listeners run synchronously by default: same thread, same transaction, and the publisher waits. Add @Async to a listener to run it on another thread."
+  why: "\"Event\" sounds like a message queue, where the sender drops a message and moves on. Spring's events are plain method calls that Spring routes for you."
+sayIt: "Application events decouple beans inside one app: a service publishes an event and listeners react. Listeners run synchronously by default; I add @Async for background work and use @TransactionalEventListener to react only after the commit."
+buildsOn: [async-scheduling]
+scenarios:
+  - q: "PaymentService.complete() publishes PaymentCompleted inside a transaction. A plain @EventListener that e-mails the receipt throws because the mail server is down. What happens to the payment?"
+    a: "The listener runs on the same thread, so its exception travels back through publishEvent() into complete(). If it escapes complete(), the transaction rolls back, and a mail problem has undone the payment. Use @TransactionalEventListener, @Async, or catch the error in the listener."
+  - q: "A @TransactionalEventListener never fires when you publish the event from a scheduled job. Why?"
+    a: "The job runs without a transaction. With no transaction there is no commit to wait for, so Spring discards the event for that listener. Publish inside a transaction, or set fallbackExecution = true on the listener."
+  - q: "Should the payment service use a Spring event or Kafka to tell the separate accounting service about a payment?"
+    a: "Kafka. A Spring event is only delivered to beans inside the same running application. Another service needs a message broker that carries the message over the network and keeps it until that service reads it."
 confusedWith: []
 tags: [events, listeners, decoupling]
 visual: flow
 sources:
-  - title: "Standard and Custom Events (Spring Framework 7.0 reference)"
+  - title: "Standard and Custom Events, Annotation-based Event Listeners (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Transaction-bound Events (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/event.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "TransactionalEventListener: no transaction, data access after commit (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/event/TransactionalEventListener.html"
+    verifiedOn: "2026-10-21"
+  - title: "RestrictedTransactionalEventListenerFactory: @Transactional only with REQUIRES_NEW or NOT_SUPPORTED (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/annotation/RestrictedTransactionalEventListenerFactory.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+An application event is an object that one bean publishes to say "this happened", such as `PaymentCompleted`. Other beans that want to react declare a listener method, and Spring calls each matching listener. The publisher does not know who listens. Publishing goes through `ApplicationEventPublisher`, an object the [container](card:ioc-container) can inject into any bean.
 
 ## Why it exists
 
-After an order is paid, mail, stock and loyalty code must react. If the payment service calls them all, it depends on all of them. With events it only says "payment done".
+When a payment completes, a receipt must be e-mailed, loyalty points added and an audit row written. If `PaymentService` calls `NotificationService`, `LoyaltyService` and `AuditService` directly, it depends on all three, and every new reaction means editing the payment code. Such direct calls, made in both directions, are also how [circular dependencies](card:circular-dependencies) start. With an event, `PaymentService` only says "payment completed", and each reaction lives in its own listener.
 
 ## How it works
 
-<Steps label="An event from publish to listener">
-  <Step title="Publish">`PaymentService` calls `publisher.publishEvent(new PaymentCompleted(id))`.</Step>
-  <Step title="Match">Spring finds every `@EventListener` method whose parameter type fits the event.</Step>
-  <Step title="Run">By default each listener runs now, on the same thread, inside the publisher's transaction.</Step>
-  <Step title="Return">`publishEvent` returns only after all listeners finish.</Step>
-</Steps>
+<Mermaid
+  alt="PaymentService calls publishEvent with a PaymentCompleted object. Spring passes it to every matching listener, ReceiptListener and LoyaltyListener, one after another on the same thread. Only when both have finished does publishEvent return to PaymentService."
+  chart={`flowchart LR
+  P[PaymentService] -- "publishEvent(PaymentCompleted)" --> S[Spring]
+  S -- "1. same thread" --> R[ReceiptListener]
+  S -- "2. same thread" --> L[LoyaltyListener]
+  S -. "returns after both finish" .-> P`}
+/>
 
-- An `@Async` listener's exception does not reach the publisher, and it cannot publish a new event by returning one.
-- `@TransactionalEventListener` phases: `BEFORE_COMMIT`, `AFTER_COMMIT` (default), `AFTER_ROLLBACK`, `AFTER_COMPLETION`.
-- `@Order` sets which listener runs first.
+1. A bean calls `publishEvent()` with any object as the event.
+2. Spring looks for listener methods, marked `@EventListener`, whose parameter type matches that object.
+3. It calls them one by one, on the same thread. If the publisher runs inside a transaction (a group of database changes saved together, which you will meet in [@Transactional](card:transactional)), the listeners run inside it too.
+4. `publishEvent()` returns, and the publisher continues.
+
+So an event is a decoupled method call, not a background job. To change when a listener runs, you change the listener, not the publisher.
 
 ## Example
 
+The receipt must go out only if the payment is really saved. The event is a record, `record PaymentCompleted(long paymentId, long amount) {}`, and a `@TransactionalEventListener` waits for the commit:
+
 ```java
-public record PaymentCompleted(long orderId) {}
-
 @Service
-class PaymentService {
+public class PaymentService {
     private final ApplicationEventPublisher events;
-    PaymentService(ApplicationEventPublisher events) { this.events = events; }
+    public PaymentService(ApplicationEventPublisher events) { this.events = events; }
     @Transactional
-    public void pay(long id) { /* save */ events.publishEvent(new PaymentCompleted(id)); }
+    public void complete(Payment payment) {
+        payment.setStatus("PAID");                       // saved when the transaction commits
+        events.publishEvent(new PaymentCompleted(payment.getId(), payment.getAmount()));
+    }
 }
-
 @Component
-class ReceiptMailer {
-    @TransactionalEventListener   // only after the payment commits
-    void on(PaymentCompleted e) { /* send the receipt */ }
+class ReceiptListener {
+    @TransactionalEventListener   // AFTER_COMMIT by default
+    void onPaid(PaymentCompleted event) { /* send the receipt e-mail */ }
 }
 ```
+
+What to notice:
+
+- `PaymentCompleted` is a plain record; it does not need to extend any Spring class.
+- `PaymentService` knows nothing about `ReceiptListener`. A new loyalty listener needs no change here.
+- With a plain `@EventListener`, the e-mail would go out before the commit, even for a payment that later rolls back.
+- `onPaid` still runs on the caller's thread, after the commit. Add `@Async` to it if the caller must not wait for the e-mail.
+
+## Rules and defaults
+
+- **Any object can be an event:** since Spring Framework 4.2, events need not extend `ApplicationEvent`.
+- **Order:** `@Order` on listener methods sets which runs first. `condition = "..."` (a SpEL expression) filters events.
+- **Chaining:** a listener that returns an object publishes it as a new event. This does not work for `@Async` listeners.
+- **`@Async` listeners:** their exceptions do not reach the publisher, and they run outside its transaction.
+- **Transaction phases:** `BEFORE_COMMIT`, `AFTER_COMMIT` (the default), `AFTER_ROLLBACK` and `AFTER_COMPLETION`. With no transaction running, a `@TransactionalEventListener` is skipped unless `fallbackExecution = true`.
+- **Writing data after commit:** the original transaction is already committed, so a listener's own database writes need `@Transactional(propagation = REQUIRES_NEW)`. Since Spring Framework 6.1, Spring rejects `@Transactional` on such a listener unless it uses `REQUIRES_NEW` or `NOT_SUPPORTED`.
+
+## Not to be confused with
+
+A Spring event is delivered in memory, to beans in the same running application, and is gone if the app stops. A message broker such as [Kafka](card:spring-kafka), which you will see later, stores messages and delivers them to other services over the network. Rule: inside one app = event; between services = broker.
+
+## Common mistakes
+
+- **"A listener failure cannot affect the publisher."** A synchronous listener's exception is thrown out of `publishEvent()`, so it can fail, and roll back, the publisher's work.
 
 ## Interview Qs
 
 ### Are Spring events asynchronous?
 
-No. By default `publishEvent` blocks until every listener has run, on the same thread. Add `@Async` (with `@EnableAsync`) to a listener to run it on another thread.
+No. By default `publishEvent()` blocks until every listener has finished, on the same thread and inside the publisher's transaction. Add `@Async` to a listener, with `@EnableAsync`, to run it on another thread. To make every listener asynchronous, define an `applicationEventMulticaster` bean with a task executor.
 
 ### Why use @TransactionalEventListener instead of @EventListener?
 
-A plain listener runs before the commit, so it may email a receipt for a payment that later rolls back. `@TransactionalEventListener` waits for the commit by default; with no transaction it is skipped, unless `fallbackExecution = true`.
+A plain listener runs at once, before the commit, so it may e-mail a receipt for a payment that later rolls back. `@TransactionalEventListener` waits for the commit by default, so it reacts only to changes that were really saved. You can also choose `AFTER_ROLLBACK` to react to failures.
 
-### Spring events vs Kafka?
+### Why use events at all, instead of calling the other beans?
 
-Spring events are delivered inside one running app, between its beans. Use a broker such as Kafka when other services must receive the message.
+Events remove the publisher's dependency on every reaction. `PaymentService` stays small, new reactions are new listener classes, and it avoids cycles between services. The cost is that the flow is harder to follow, because the call site does not show who reacts.

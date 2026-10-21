@@ -5,17 +5,27 @@ title: HTTP Methods, Status Codes and Idempotency
 topic: web
 level: beginner
 heat: 2
-hook: "Nouns in the path, verbs in the method: POST creates, GET reads, PUT replaces, PATCH changes part, DELETE removes."
+hook: "Nouns in the path, verbs in the HTTP method: POST creates, GET reads, PUT replaces, PATCH changes part, DELETE removes, and the status code says how it went."
 points:
-  - { k: "Safe", v: "read-only by meaning: GET, HEAD, OPTIONS, TRACE" }
-  - { k: "Idempotent", v: "repeating has the same effect: PUT, DELETE, safe methods" }
-  - { k: "POST, PATCH", v: "not idempotent by definition: a retry can repeat the work", kind: minus }
-  - { k: "Idempotency-Key", v: "a client key that makes a retried POST run once; IETF draft" }
-  - { k: "201 Created", v: "send a Location header naming the new resource" }
+  - { k: "Safe method", v: "only reads, never changes server state: GET, HEAD, OPTIONS and TRACE" }
+  - { k: "Idempotent method", v: "sending it twice leaves the server as sending it once: PUT, DELETE and all safe methods" }
+  - { k: "POST and PATCH", v: "not idempotent by definition, so a blind retry can create or change something twice", kind: minus }
+  - { k: "Idempotency-Key", v: "a unique key the client sends with a POST, so the server runs a retried request only once" }
+  - { k: "201 Created", v: "the answer to a successful create, with a Location header holding the new resource's URL" }
+  - { k: "4xx vs 5xx", v: "4xx means the client sent something wrong; 5xx means the server failed on a valid request" }
 trap:
-  wrong: "DELETE is not idempotent: the second call returns 404, not 204."
-  right: "Idempotency is about the effect on the server, not the response. The resource is gone either way."
-sayIt: "GET, PUT and DELETE are idempotent, so clients may retry them; POST is not. For payments I require an Idempotency-Key, so a retried POST returns the first result instead of charging twice."
+  wrong: "DELETE is not idempotent, because the second call returns 404 instead of 204."
+  right: "Idempotency is about the effect on the server, not the response. After one or two DELETEs, the payment is gone either way."
+  why: "People compare the responses of the two calls, and they really do differ, so it looks as if the operation behaved differently."
+sayIt: "GET, PUT and DELETE are idempotent, so clients and proxies may retry them; POST is not. For payments I require an Idempotency-Key header, so a retried POST returns the first result instead of charging the customer twice."
+buildsOn: [request-mapping, rest-controller]
+scenarios:
+  - q: "A mobile app sends POST /payments, the network drops before the answer arrives, and the app retries. Without any extra design, what can happen, and how do you prevent it?"
+    a: "The first request may have succeeded, so the retry creates a second payment and charges twice. Have the client send an Idempotency-Key header; the server stores the key with the first result and returns that stored result for any repeat."
+  - q: "Should updating only the status of a payment be PUT /payments/42 or PATCH /payments/42?"
+    a: "PATCH. PUT means 'replace the whole payment with this body', so a body with only status would wipe the other fields. PATCH sends just the change."
+  - q: "A request has valid JSON, but the amount exceeds the customer's limit. 400 or 422?"
+    a: "Both are used in practice. 400 says the request is bad. 422 Unprocessable Content says the syntax was fine but the content cannot be processed, which describes a business rule failure more precisely. Pick one and use it everywhere."
 confusedWith: []
 tags: [web, rest, http, idempotency]
 visual: table
@@ -27,13 +37,20 @@ sources:
     url: "https://www.rfc-editor.org/rfc/rfc5789.html"
     verifiedOn: "2026-10-19"
   - title: "The Idempotency-Key HTTP Header Field (IETF Internet-Draft 07, expired)"
-    url: "https://www.ietf.org/archive/id/draft-ietf-httpapi-idempotency-key-header-07.html"
-    verifiedOn: "2026-10-19"
+    url: "https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/"
+    verifiedOn: "2026-10-21"
+  - title: "Idempotent requests: the Idempotency-Key header (Stripe API reference)"
+    url: "https://docs.stripe.com/api/idempotent_requests"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+REST API design here means using HTTP the way its standard, RFC 9110, defines it. The path names a thing, such as `/payments/42`. The HTTP method says what to do with it: create, read, replace, change or remove. The status code in the answer says how it went. Two properties of methods matter most: safe (the method only reads) and idempotent (sending it twice has the same effect as sending it once).
 
 ## Why it exists
 
-Clients, proxies and caches all read the HTTP method and status code. Using them as the standard defines lets everyone know what is safe to retry or cache, and what went wrong.
+Your controller is not the only program reading these requests. Browsers, proxies, caches, API gateways and client libraries all look at the method and the status code. If GET changes data, a cache or a prefetch can trigger the change. If errors come back as 200 with an error message inside, monitoring sees no failures. Following the standard tells every program in between what is safe to retry, what can be cached, and what went wrong.
 
 ## How it works
 
@@ -45,10 +62,14 @@ Clients, proxies and caches all read the HTTP method and status code. Using them
 | Change part | `PATCH /payments/42` | 200 or 204 | Not by default |
 | Remove | `DELETE /payments/42` | 204 | Yes |
 
-- Errors: 400 bad input, 401 [not authenticated](card:authentication-flow), 403 not allowed, 404 not found, 409 conflict, 422 valid syntax but cannot process.
-- 5xx means the server failed: 500 bug, 502 bad gateway, 503 unavailable.
+1. Choose the path as a noun for the resource, plural for the collection: `/payments`, then `/payments/42` for one payment.
+2. Choose the method by its meaning, using the table above. The verb is never in the path, so not `/createPayment`.
+3. Answer with a status from the right class: 2xx success, 4xx the client's fault, 5xx the server's fault.
+4. For a method that is not idempotent and moves money, such as POST, make retries safe yourself with an idempotency key.
 
 ## Example
+
+A retried payment request that is made safe with an `Idempotency-Key` header:
 
 ```text
 POST /payments
@@ -56,20 +77,34 @@ Idempotency-Key: 8e03978e-40d5-43e8-bc93-6894a57f9324
 {"amount": 1000, "currency": "INR"}
 
 -> 201 Created, Location: /payments/42
-(network drops; client retries with the same key)
--> the server returns the stored result: no second payment
+(the network drops; the client retries with the same key)
+-> the server finds the key and returns the stored 201 result: no second payment
 ```
+
+What to notice:
+
+- The client creates the key, a random UUID, once per payment attempt and reuses it for every retry of that attempt.
+- The server stores the key together with the first result. A repeat with the same key gets the stored answer and does not run the payment again.
+- Without the key, the server cannot tell a retry from a new payment of the same amount, so it would charge twice.
+
+## Rules and defaults
+
+- **Common success codes:** 200 OK with a body, 201 Created after a create, 204 No Content when there is nothing to return.
+- **Common client errors:** 400 bad input, 401 not authenticated, 403 authenticated but not allowed (you will see both in [Authentication vs Authorization](card:authentication-flow)), 404 not found, 409 conflict with the current state, 422 valid syntax but content that cannot be processed.
+- **Common server errors:** 500 an unexpected failure, 502 a bad answer from a server behind this one, 503 temporarily unavailable.
+- **PUT can create:** if the client chooses the id and the resource does not exist yet, PUT may create it and answer 201.
+- **Idempotency-Key status:** it is an IETF draft, not an RFC, and the draft has expired. Payment providers such as Stripe use the same idea.
 
 ## Interview Qs
 
 ### Which HTTP methods are idempotent?
 
-GET, HEAD, OPTIONS, TRACE, PUT and DELETE. POST is not, and PATCH is not by default. Idempotent means repeating the same request leaves the server in the same state.
+GET, HEAD, OPTIONS, TRACE, PUT and DELETE. POST is not, and PATCH is not by default. Idempotent means that repeating the same request leaves the server in the same state as sending it once, which is why clients may retry these methods safely after a timeout.
+
+### What is the difference between PUT and PATCH?
+
+PUT replaces the whole resource with the representation you send, so repeating it changes nothing more. PATCH sends a set of changes to apply, so whether a repeat is harmless depends on the change. "Set status to PAID" is harmless to repeat; "add 100 to the amount" is not.
 
 ### How do you stop a retried payment request from charging twice?
 
-Have the client send an Idempotency-Key header. The server stores the key with the first result and returns that result for a repeat. The header is an IETF draft; Stripe and Adyen use it.
-
-### PUT vs PATCH?
-
-PUT replaces the whole resource with the state you send, so repeating it changes nothing more. PATCH sends a set of changes to apply, so it is not idempotent unless you design it to be.
+Ask the client to send an Idempotency-Key header with each payment attempt. The server stores the key with the first result, for example in a table with a unique constraint, and returns that stored result for any repeat. A new attempt gets a new key.

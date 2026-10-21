@@ -5,88 +5,131 @@ title: Bean Lifecycle and Lazy Init
 topic: beans-di
 level: intermediate
 heat: 3
-hook: "Create, inject, @PostConstruct, use, @PreDestroy. Singletons are built at startup, unless @Lazy delays them to first use."
+hook: "Create, inject, @PostConstruct, use, @PreDestroy. Singletons are created at startup, unless @Lazy delays one to its first use."
 points:
-  - { k: "@PostConstruct", v: "runs once dependencies are injected; keep it light" }
-  - { k: "@PreDestroy", v: "runs when the context closes, such as on shutdown" }
-  - { k: "@Lazy", v: "create the bean on first use, not at startup" }
-  - { k: "Global lazy init", v: "spring.main.lazy-initialization is false by default (Boot 4.1)", kind: default }
-  - { k: "Changed in 4.0", v: "javax.annotation.PostConstruct is ignored; use jakarta.annotation" }
+  - { k: "Order", v: "constructor, then dependencies set, then @PostConstruct; @PreDestroy runs when the context closes" }
+  - { k: "@PostConstruct", v: "runs once, after all dependencies are set; use it for light setup, not slow work" }
+  - { k: "@PreDestroy", v: "runs once when the context closes; Spring never calls it for prototype beans", kind: minus }
+  - { k: "@Lazy", v: "creates the bean on first use instead of at startup, unless an eager bean needs it" }
+  - { k: "Global lazy init", v: "spring.main.lazy-initialization is false by default (Spring Boot 4.1)", kind: default }
+  - { k: "Changed in 4.0", v: "javax.annotation.PostConstruct is ignored; import jakarta.annotation instead", kind: minus }
 trap:
   wrong: "A @Lazy bean is never created until my code calls it."
-  right: "If an eager singleton depends on it, Spring must create it at startup anyway. @Lazy only delays beans that nothing eager needs."
-sayIt: "Spring creates the bean, injects its dependencies, runs @PostConstruct, uses it, and runs @PreDestroy when the context closes. Singletons are eager by default, so wiring errors fail at startup; @Lazy delays one."
+  right: "If an eager singleton depends on it, Spring must create it at startup anyway. @Lazy only delays beans that no eager bean needs."
+  why: "The annotation's name promises laziness, and the rule that an eager bean's dependencies must exist at startup is easy to forget."
+sayIt: "Spring creates the bean, injects its dependencies, runs @PostConstruct, uses it, and runs @PreDestroy when the context closes. Singletons are eager by default, so wiring errors fail at startup; @Lazy or spring.main.lazy-initialization delays creation to first use."
+buildsOn: [ioc-container, dependency-injection, bean-scopes]
+scenarios:
+  - q: "ReportService is marked @Lazy, but PaymentController, which is not lazy, takes it in its constructor. When is ReportService created?"
+    a: "At startup. The controller is created eagerly and needs a ReportService, so Spring must create it then. @Lazy only delays beans that no eager bean needs."
+  - q: "You stop the app with kill -9. Does the @PreDestroy method that closes the fraud-check connection run?"
+    a: "There is no guarantee. kill -9 ends the JVM without a clean shutdown, so the shutdown hook that closes the context may never run. A normal stop, such as Ctrl+C or SIGTERM, closes the context, and @PreDestroy runs."
 confusedWith: []
 tags: [lifecycle, postconstruct, predestroy, lazy]
 visual: flow
 sources:
   - title: "Customizing the Nature of a Bean: lifecycle callbacks (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/factory-nature.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Lazy-initialized Beans (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-lazy-init.html"
-    verifiedOn: "2026-10-19"
-  - title: "SpringApplication: lazy initialization and shutdown hook (Spring Boot 4.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "SpringApplication: lazy initialization and application exit (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/features/spring-application.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Runtime.addShutdownHook: the JVM may abort on SIGKILL (Java SE 17 API)"
+    url: "https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/lang/Runtime.html"
+    verifiedOn: "2026-10-21"
   - title: "Spring Framework 7.0 Release Notes: javax.annotation support removed"
     url: "https://github.com/spring-projects/spring-framework/wiki/Spring-Framework-7.0-Release-Notes"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+The bean lifecycle is the fixed series of steps the [container](card:ioc-container) takes with each bean: create the object, inject its dependencies, run its setup method, hand it out, and finally run its cleanup method. You hook into it with two annotations: `@PostConstruct` marks the setup method and `@PreDestroy` marks the cleanup method. Lazy initialisation changes only when the first step happens: on first use instead of at startup.
+
 ## Why it exists
 
-Some beans need setup after their dependencies arrive, such as starting a thread pool, and cleanup before the app stops. Lifecycle callbacks give fixed places for both.
+Some beans must do work once they are complete, such as opening a connection to the fraud-check service, and must undo it before the app stops, such as closing that connection. The constructor is too early when setter or field dependencies are still missing, and plain Java has no reliable "the app is stopping" method on your object. Lifecycle callbacks give fixed places for both.
 
 ## How it works
 
-<Steps label="One singleton bean">
-<Step title="Instantiate">
-The constructor runs; constructor dependencies are passed in.
-</Step>
-<Step title="Inject">
-Setter and field dependencies are set.
-</Step>
-<Step title="Initialise">
-`@PostConstruct` runs. AOP proxies are added around here.
-</Step>
-<Step title="In use">
-The bean serves calls until the app stops.
-</Step>
-<Step title="Destroy">
-The context closes and `@PreDestroy` runs. Spring Boot closes it on JVM shutdown.
-</Step>
-</Steps>
+<Mermaid
+  alt="Lifecycle of one singleton bean: the constructor runs, then dependencies are set, then the @PostConstruct method runs, then the bean is in use. When the context closes, the @PreDestroy method runs."
+  chart={`flowchart LR
+  A[1. Constructor] --> B[2. Dependencies set]
+  B --> C["3. @PostConstruct"]
+  C --> D[4. In use]
+  D -- context closes --> E["5. @PreDestroy"]`}
+/>
 
-- Making every bean lazy speeds up startup but finds wiring errors only on first use.
+1. **Create:** Spring calls the constructor and passes the constructor dependencies.
+2. **Inject:** it sets any setter or field dependencies.
+3. **Initialise:** it runs the `@PostConstruct` method. After this step Spring may also wrap the bean in a proxy, a wrapper object that adds behaviour, which is how features like `@Transactional` work; you will see this in [Proxies and Self-Invocation](card:aop-proxies).
+4. **In use:** the bean serves calls until the app stops.
+5. **Destroy:** when the context closes, Spring runs the `@PreDestroy` method. Spring Boot registers a JVM shutdown hook, so a normal shutdown closes the context for you.
+
+So `@PostConstruct` runs once, after every dependency is set, and `@PreDestroy` runs once, when the container closes.
 
 ## Example
 
+`FraudCheckClient` opens its connection after creation and closes it on shutdown.
+
 ```java
 @Component
-public class FileArchiver {
-    private final ExecutorService pool = Executors.newFixedThreadPool(2);
+class FraudCheckClient {
+    FraudCheckClient() { System.out.println("1. constructor"); }
+    @PostConstruct void connect() { System.out.println("2. @PostConstruct: open the connection"); }
+    @PreDestroy void disconnect() { System.out.println("4. @PreDestroy: close the connection"); }
+}
 
-    @PostConstruct   // jakarta.annotation.PostConstruct
-    void start() { pool.submit(this::warmUp); }
-
-    @PreDestroy      // runs when the context closes
-    void stop() { pool.shutdown(); }
-
-    void warmUp() { }
+public class Main {
+    public static void main(String[] args) {
+        var context = new AnnotationConfigApplicationContext(FraudCheckClient.class);
+        System.out.println("3. app is running");
+        context.close();
+    }
 }
 ```
+
+```text output
+1. constructor
+2. @PostConstruct: open the connection
+3. app is running
+4. @PreDestroy: close the connection
+```
+
+What to notice:
+
+- `@PostConstruct` runs during startup, before "app is running". A slow method here makes the whole startup slow.
+- `context.close()` triggers `@PreDestroy`. In a Boot app the shutdown hook makes this call for you on a normal stop.
+- The annotations come from `jakarta.annotation`. Spring Framework 7.0 (Boot 4.0) ignores the old `javax.annotation` ones.
+- Make `FraudCheckClient` a prototype and `@PreDestroy` would never run.
+
+## Rules and defaults
+
+- **Eager by default:** singletons are created at startup, so a wiring mistake stops startup at once.
+- **`@Lazy`:** on a bean, or on a `@Configuration` class for all its beans, it delays creation to first use. A lazy bean that an eager bean needs is still created at startup.
+- **Global switch:** `spring.main.lazy-initialization=true` makes every bean lazy; it is false by default (Spring Boot 4.1). `@Lazy(false)` keeps one bean eager.
+- **Other init and destroy hooks:** if a bean uses several, the order is `@PostConstruct`, then `InitializingBean.afterPropertiesSet()`, then a `@Bean(initMethod = ...)`. Destroy follows the same pattern: `@PreDestroy`, `DisposableBean.destroy()`, then `destroyMethod`.
+- **`@Bean` objects with `close()`:** a public `close` or `shutdown` method on an object from a `@Bean` method is called at shutdown automatically.
+
+## Common mistakes
+
+- **"Making every bean lazy is a free speed-up."** Startup gets faster, but a broken bean now fails on its first use, perhaps hours later in production, instead of at startup.
+- **"I can use the constructor for everything."** Setter and field dependencies are still null inside the constructor. Setup that needs them belongs in `@PostConstruct`.
 
 ## Interview Qs
 
 ### Explain the Spring bean lifecycle.
 
-Spring instantiates the bean, injects its dependencies, runs init callbacks such as @PostConstruct, then hands it out. When the context closes, it runs destroy callbacks such as @PreDestroy.
+Spring instantiates the bean, injects its dependencies, runs init callbacks such as `@PostConstruct`, and may wrap it in a proxy. The bean is then used. When the context closes, Spring runs destroy callbacks such as `@PreDestroy`.
 
 ### Eager or lazy: which is the default, and why?
 
-Eager: the ApplicationContext creates all singletons at startup, so configuration mistakes fail early. @Lazy or spring.main.lazy-initialization delays creation to first use, at the cost of finding errors later.
+Eager: the `ApplicationContext` creates all singletons at startup, so configuration mistakes fail early, not on a user's request. `@Lazy` or `spring.main.lazy-initialization` delays creation to first use, which speeds up startup but finds errors later.
 
 ### Why is my @PreDestroy method not called?
 
-Either the bean is a prototype, whose destroy callbacks Spring never calls, or the context was not closed, for example the process was killed.
+Either the bean is a prototype, whose destroy callbacks Spring never calls, or the context was never closed, for example because the process was killed with `kill -9`. With Boot 4, also check that you import `jakarta.annotation.PreDestroy`, not the old `javax` one.

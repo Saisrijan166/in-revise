@@ -5,17 +5,25 @@ title: DispatcherServlet and the Request Flow
 topic: web
 level: intermediate
 heat: 3
-hook: "Every request enters one servlet, DispatcherServlet: it finds the controller method, calls it, and writes the result."
+hook: "Every HTTP request to a Spring MVC app enters one servlet, DispatcherServlet, which finds the right controller method, calls it and writes the result back."
 points:
-  - { k: "Front controller", v: "one servlet takes every request; helper beans do the work" }
-  - { k: "HandlerMapping", v: "finds the controller method for the request" }
-  - { k: "HandlerAdapter", v: "binds the arguments and calls the method" }
-  - { k: "HttpMessageConverter", v: "reads the JSON body in and writes the result out" }
-  - { k: "Boot default", v: "registered for you at path /", kind: default }
+  - { k: "Front controller", v: "one central servlet receives every request and runs the shared steps; helper beans do the real work" }
+  - { k: "HandlerMapping", v: "looks at the HTTP method and path and picks the controller method that should handle the request" }
+  - { k: "HandlerAdapter", v: "builds the method's arguments from the request, then calls the controller method" }
+  - { k: "HttpMessageConverter", v: "turns the JSON body into a Java object on the way in, and the return value into JSON on the way out" }
+  - { k: "Errors", v: "an exception from a controller goes to HandlerExceptionResolver beans, which turn it into an error response" }
+  - { k: "Boot default", v: "Spring Boot 4.1 registers DispatcherServlet for you at path / (spring.mvc.servlet.path)", kind: default }
 trap:
   wrong: "Add @EnableWebMvc to a Spring Boot app to turn on Spring MVC."
-  right: "Boot already configures MVC; @EnableWebMvc turns that off. Customise with a WebMvcConfigurer bean instead."
-sayIt: "Filters run first. DispatcherServlet asks a HandlerMapping for the method, a HandlerAdapter calls it, and a message converter writes the result as JSON. Errors go to exception resolvers."
+  right: "Boot already configures MVC, and @EnableWebMvc switches that off. To customise MVC, add a WebMvcConfigurer bean without @EnableWebMvc."
+  why: "Many plain Spring MVC tutorials start with @EnableWebMvc, because without Boot that annotation is how you switch MVC on."
+sayIt: "DispatcherServlet is Spring MVC's front controller. After the filters, it asks a HandlerMapping for the controller method, a HandlerAdapter binds the arguments and calls it, and a message converter writes the result as JSON. Exceptions go to HandlerExceptionResolvers."
+buildsOn: [embedded-server, auto-configuration]
+scenarios:
+  - q: "A client sends POST /payments with a JSON body. Name, in order, the parts of Spring MVC that touch this request before your PaymentController.create method runs."
+    a: "The servlet filters run first. DispatcherServlet then asks a HandlerMapping, which matches POST /payments to create. A HandlerAdapter prepares the arguments, using an HttpMessageConverter to read the JSON into a PaymentRequest, and only then calls the method."
+  - q: "A teammate adds @EnableWebMvc to a Boot app to register one interceptor. Suddenly some Boot defaults, such as static resource handling, stop working. Why?"
+    a: "@EnableWebMvc tells Spring 'I configure MVC myself', so Boot's MVC auto-configuration backs off. The interceptor should be added in a WebMvcConfigurer bean without @EnableWebMvc, which keeps Boot's defaults."
 confusedWith: []
 tags: [web, spring-mvc, request-flow]
 visual: flow
@@ -26,56 +34,105 @@ sources:
   - title: "Special Bean Types (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/special-bean-types.html"
     verifiedOn: "2026-10-19"
-  - title: "Servlet Web Applications: Spring MVC auto-configuration (Spring Boot 4.1 reference)"
+  - title: "Processing: the request sequence (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/sequence.html"
+    verifiedOn: "2026-10-21"
+  - title: "Exceptions: HandlerExceptionResolver (Spring Framework 7.0 reference)"
+    url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-servlet/exceptionhandlers.html"
+    verifiedOn: "2026-10-21"
+  - title: "Servlet Web Applications: Spring MVC auto-configuration, @EnableWebMvc (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/web/servlet.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Common Application Properties: spring.mvc.servlet.path (Spring Boot 4.1 appendix)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
   - title: "Spring MVC Interview Questions (Baeldung)"
     url: "https://www.baeldung.com/spring-mvc-interview-questions"
     verifiedOn: "2026-10-17"
 ---
 
+## What it is
+
+DispatcherServlet is the single entry point of a Spring MVC web app. A servlet is a Java class that a web server such as Tomcat calls for each HTTP request. Spring Boot registers one servlet, DispatcherServlet, in the [embedded server](card:embedded-server), and that servlet hands each request to the right controller method. This design is called the front controller pattern.
+
 ## Why it exists
 
-Every request needs the same steps: find the code, convert the input, call it, write the output, handle errors. Spring MVC does these once, in one servlet, so controllers hold only business logic.
+Every request needs the same chores: find the code for this URL, turn the JSON body into an object, call the code, turn the result back into JSON, and handle errors. Without a front controller, each endpoint would repeat these chores. DispatcherServlet does them once, for every request, so a controller method holds only the logic for its own endpoint.
 
 ## How it works
 
 <Mermaid
-  alt="Request flow in a Spring Boot web app. The client request passes the servlet filters, including security, and reaches DispatcherServlet. A HandlerMapping finds the controller method. A HandlerAdapter calls the controller, which calls the service, which calls the repository, which talks to the database. On the way back, an HttpMessageConverter writes the result as JSON."
-  chart={`flowchart TD
-  C([Client]) --> F["Filters (incl. security)"]
-  F --> DS[DispatcherServlet]
-  DS --> HM["HandlerMapping: which method?"]
-  HM --> HA["HandlerAdapter: bind args, call"]
-  HA --> CT[Controller]
-  CT --> SV["Service (business logic)"]
-  SV --> RP[Repository]
-  RP --> DB[(Database)]
-  CT -. "return value" .-> MC["HttpMessageConverter: JSON"]
-  MC -.-> C`}
+  alt="Sequence of one POST /payments request. The client sends it to Tomcat; it passes the servlet filters and reaches DispatcherServlet. DispatcherServlet asks HandlerMapping which method handles it and gets PaymentController.create. HandlerAdapter reads the JSON into a PaymentRequest with a message converter and calls create. The controller calls PaymentService, which saves through PaymentRepository to the database. The PaymentResponse returned is written as JSON and sent back to the client."
+  chart={`sequenceDiagram
+  participant C as Client
+  participant D as DispatcherServlet
+  participant A as HandlerAdapter
+  participant P as PaymentController
+  participant S as PaymentService
+  participant R as PaymentRepository
+  C->>D: POST /payments (after the filters)
+  D->>D: HandlerMapping picks create()
+  D->>A: call create()
+  A->>P: JSON read into PaymentRequest
+  P->>S: create(request)
+  S->>R: save(payment)
+  R-->>S: saved Payment
+  S-->>P: PaymentResponse
+  P-->>A: return value
+  A-->>C: PaymentResponse written as JSON`}
 />
 
-- Keep each layer to one job: the controller handles HTTP, the service holds the rules, the repository talks to the database.
-- Filters run before DispatcherServlet; interceptors run inside it ([Filters, Interceptors and AOP](card:filters-interceptors)).
-- Cross-cutting work such as [transactions](card:transactional) wraps service methods through [AOP](card:spring-aop).
+Follow one request, `POST /payments` with the body `{"amount": 500.00, "currency": "INR"}`:
 
-## Defaults
+1. Tomcat receives the request and passes it through the servlet filters, such as security. You will see filters in [Filters, Interceptors and AOP](card:filters-interceptors).
+2. DispatcherServlet asks a HandlerMapping which method handles `POST /payments`. The answer is `PaymentController.create`.
+3. A HandlerAdapter prepares the arguments. An HttpMessageConverter (Jackson, for JSON) reads the body into a `PaymentRequest` object. Then the adapter calls the method.
+4. The controller calls `PaymentService`, which saves a `Payment` through `PaymentRepository`.
+5. The method returns a `PaymentResponse`. The converter writes it as JSON in the response body.
+6. If any step throws an exception, HandlerExceptionResolver beans turn it into an error response, as you will see in [Global Exception Handling](card:exception-handling).
 
-| What | Default | Where |
-| --- | --- | --- |
-| DispatcherServlet path | `/` (`spring.mvc.servlet.path`) | Spring Boot 4.1 |
-| JSON library | Jackson 3 | Spring Boot 4.0+ |
+So each layer has one job: the controller speaks HTTP, the service holds the business rules, and the repository talks to the database.
+
+## Example
+
+This is the controller method that the request above reaches. Later web concepts build on this same class.
+
+```java
+@RestController
+@RequestMapping("/payments")
+class PaymentController {
+    private final PaymentService service;
+    PaymentController(PaymentService service) { this.service = service; }
+
+    @PostMapping                                       // HandlerMapping: POST /payments lands here
+    PaymentResponse create(@RequestBody PaymentRequest request) {   // converter: JSON -> object
+        return service.create(request);                // converter: object -> JSON
+    }
+}
+```
+
+What to notice:
+
+- The method never touches the raw request or response. DispatcherServlet and its helpers do the reading and writing.
+- `@PostMapping` plus `@RequestMapping("/payments")` is what the HandlerMapping matches. A `GET /payments` would not reach this method.
+- `@RequestBody` tells the HandlerAdapter to use a message converter for this argument. Without it, Spring would not read the JSON body into the object.
+
+## Rules and defaults
+
+- **Registered for you:** Spring Boot's auto-configuration creates DispatcherServlet and maps it to `/`, so it receives every request path (`spring.mvc.servlet.path`, Spring Boot 4.1).
+- **Customising MVC:** add a `WebMvcConfigurer` bean for interceptors, CORS or formatters. Boot's defaults stay in place.
+- **Not allowed together:** `@EnableWebMvc` and Boot's MVC auto-configuration. With `@EnableWebMvc` you take full control and Boot backs off.
 
 ## Interview Qs
 
 ### What is the front controller pattern in Spring MVC?
 
-One central servlet, DispatcherServlet, receives every request and runs the shared steps. Helper beans such as HandlerMapping, HandlerAdapter and the message converters do the actual work.
+One central servlet, DispatcherServlet, receives every request and runs the shared steps of request handling. It does not do the work itself. It delegates to helper beans: HandlerMapping finds the method, HandlerAdapter calls it, message converters read and write bodies, and exception resolvers handle errors.
 
-### Walk me through a request to a REST endpoint.
+### Walk me through what happens when a REST endpoint is called.
 
-Filters run, then DispatcherServlet. A HandlerMapping finds the method, a HandlerAdapter binds the arguments and calls it. The controller calls the service and repository. A message converter writes the result as JSON.
+The filters run first. DispatcherServlet asks a HandlerMapping for the matching controller method. A HandlerAdapter binds the arguments, reading the JSON body through a message converter, and calls the method. The controller calls the service and the repository. The return value is written as JSON by a message converter.
 
-### HandlerMapping vs HandlerAdapter?
+### Why are HandlerMapping and HandlerAdapter separate?
 
-HandlerMapping decides which handler serves the request. HandlerAdapter knows how to call that kind of handler, so DispatcherServlet does not depend on any handler type.
+HandlerMapping decides which handler serves a request. HandlerAdapter knows how to call that kind of handler. Keeping them apart means DispatcherServlet does not depend on any handler type, so annotated controllers and other handler styles can share the same flow.

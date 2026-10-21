@@ -5,16 +5,24 @@ title: Config Server
 topic: spring-cloud
 level: intermediate
 heat: 2
-hook: "One server hands every service its config from Git, picked by app name, profile and branch."
+hook: "One server hands every service its configuration from a Git repository, chosen by the app's name, its active profile and a Git branch."
 points:
-  - { k: "Server", v: "@EnableConfigServer on a Boot app; reads a Git repo" }
-  - { k: "Client", v: "spring.config.import=optional:configserver:<url>" }
-  - { k: "Without optional:", v: "the client fails to start if the server is down", kind: minus }
-  - { k: "Live change", v: "POST /actuator/refresh on one instance; Spring Cloud Bus for all" }
+  - { k: "Server", v: "a Boot app with @EnableConfigServer that reads config files from a Git repository" }
+  - { k: "Client", v: "spring.config.import=optional:configserver:<url> loads the config at startup" }
+  - { k: "Without optional:", v: "the client fails to start when the Config Server cannot be reached", kind: minus }
+  - { k: "Change a value live", v: "POST /actuator/refresh on one instance, or Spring Cloud Bus for all instances" }
+  - { k: "What refresh changes", v: "only @RefreshScope beans and @ConfigurationProperties beans (not records) pick up new values" }
 trap:
   wrong: "After a Git commit, running services pick up the new values by themselves."
-  right: "A refresh must be triggered; then only @RefreshScope and @ConfigurationProperties beans get the new values."
+  right: "Someone must trigger a refresh. Even then, only @RefreshScope and @ConfigurationProperties beans get the new values; other beans keep the old ones."
+  why: "The Config Server itself does read the latest commit on each request, so people assume the clients follow."
 sayIt: "Config Server serves config from Git by application, profile and label. Clients import it with spring.config.import. For live changes I trigger a refresh, and Spring Cloud Bus spreads it to every instance."
+buildsOn: [spring-cloud-overview, externalized-configuration, profiles]
+scenarios:
+  - q: "You change payment.fraud-limit in payment-service-prod.yml and push to Git. Five payment-service instances are running. What do you do so all five use the new limit?"
+    a: "Trigger a refresh. With Spring Cloud Bus, one POST to /actuator/busrefresh tells every instance through the message broker. Without the Bus you must POST /actuator/refresh on each instance. The value must be read by a @RefreshScope or @ConfigurationProperties bean."
+  - q: "The Config Server is down when a payment-service instance starts. What happens?"
+    a: "It depends on the import. With optional:configserver: the instance starts on its local configuration only. Without optional: it fails to start, which is what you want when the remote config is essential, such as database passwords."
 confusedWith: []
 tags: [spring-cloud, configuration, git, refresh]
 visual: flow
@@ -22,62 +30,98 @@ sources:
   - title: "Spring Cloud Config 5.0.5: Quick Start and Server"
     url: "https://docs.spring.io/spring-cloud-config/reference/quickstart.html"
     verifiedOn: "2026-10-19"
-  - title: "Spring Cloud Config 5.0.5: Config Client"
+  - title: "Spring Cloud Config 5.0.5: Server (port 8080 by default, 8888 by convention)"
+    url: "https://docs.spring.io/spring-cloud-config/reference/server.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Cloud Config 5.0.5: Git Backend (default label main, refreshRate)"
+    url: "https://docs.spring.io/spring-cloud-config/reference/server/environment-repository/git-backend.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Cloud Config 5.0.5: Config Client (import, optional, default location)"
     url: "https://docs.spring.io/spring-cloud-config/reference/client.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Cloud Config 5.0.5: Sharing Configuration With All Applications"
+    url: "https://docs.spring.io/spring-cloud-config/reference/server/environment-repository/sharing-configuration-with-all-applications.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Cloud Config 5.0.5: Encryption and Decryption ({cipher})"
+    url: "https://docs.spring.io/spring-cloud-config/reference/server/encryption-and-decryption.html"
+    verifiedOn: "2026-10-21"
   - title: "Spring Cloud Commons 5.0.3: refresh scope and rebinding"
     url: "https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/application-context-services.html"
     verifiedOn: "2026-10-19"
+  - title: "Spring Cloud Bus 5.0.3: overview (AMQP broker or Kafka transport)"
+    url: "https://docs.spring.io/spring-cloud-bus/reference/index.html"
+    verifiedOn: "2026-10-21"
   - title: "Spring Cloud Bus 5.0.3: bus endpoints"
     url: "https://docs.spring.io/spring-cloud-bus/reference/spring-cloud-bus/bus-endpoints.html"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Config Server is a small Spring Boot app, from Spring Cloud Config, that serves configuration to all your other services over HTTP. It reads the files from a Git repository, so config is versioned like code. Each service is a **config client**: at startup it asks the server for its own settings, found by its `spring.application.name`, its active [profile](card:profiles) and a **label**, which is a Git branch, tag or commit.
+
 ## Why it exists
 
-Config packed inside each jar is hard to change and keep in step across many services and environments. Config Server keeps it in one versioned Git repo and serves it to all.
+You already know [externalized configuration](card:externalized-configuration): properties outside the code. With ten services in three environments, those properties live in thirty places. Changing the fraud limit means editing files on many servers and restarting, with no record of who changed what. Config Server keeps them in one Git repository: a change is a commit, you can see its history and roll it back, and no service needs a rebuild.
 
 ## How it works
 
 <Mermaid
-  alt="Config Server flow. The Config Server reads orders-prod.yml from a Git repository. Two orders instances ask it for /orders/prod/main at startup. Later Spring Cloud Bus sends a refresh to both instances."
+  alt="Config Server flow. The Config Server reads payment-service-prod.yml from a Git repository. Two payment-service instances ask it for /payment-service/prod/main at startup. Later Spring Cloud Bus sends a refresh to both instances."
   chart={`flowchart LR
-  G[(Git repo)] -- "orders-prod.yml" --> CS[Config Server]
-  CS -- "/orders/prod/main" --> A[orders 1]
-  CS -- "/orders/prod/main" --> B[orders 2]
+  G[(Git repo)] -- "payment-service-prod.yml" --> CS[Config Server]
+  CS -- "/payment-service/prod/main" --> A[payment 1]
+  CS -- "/payment-service/prod/main" --> B[payment 2]
   BUS[[Spring Cloud Bus]] -. "busrefresh" .-> A
   BUS -. "busrefresh" .-> B`}
 />
 
-- Requests are `/{application}/{profile}/{label}`: app name, active profile, Git branch.
-- A refresh rebuilds `@RefreshScope` beans and rebinds `@ConfigurationProperties` beans, but not constructor-bound ones such as records.
+1. The payment service starts with the `prod` profile and finds `spring.config.import=configserver:...`.
+2. It calls the server at `/{application}/{profile}/{label}`, here `/payment-service/prod/main`.
+3. The server reads `payment-service-prod.yml` from that branch, plus the `application*` files that are shared by all clients, and returns their properties.
+4. The client adds them to its environment before the beans are created, so beans see them like local properties.
+5. Later, after a commit, a refresh event makes the client fetch again and update the beans that support it.
 
 ## Example
 
+The payment service's own `application.properties` needs only these lines:
+
 ```properties
-spring.application.name=orders
+spring.application.name=payment-service
 spring.config.import=optional:configserver:http://config:8888
-management.endpoints.web.exposure.include=refresh
+management.endpoints.web.exposure.include=health,refresh
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Client looks for the server at | `http://localhost:8888` | Spring Cloud Config 5.0 |
-| Server port | 8080; 8888 is the usual choice | Spring Cloud Config 5.0 |
-| Git label | `main` | Spring Cloud Config 5.0 |
+- `spring.application.name` decides which files the server returns, so it must match the file names in Git.
+- `optional:` lets the service start on local config when the server is down. Remove it to fail fast instead.
+- `refresh` is an [Actuator](card:actuator) endpoint and is not exposed by default, so it must be listed before `POST /actuator/refresh` works.
+
+## Rules and defaults
+
+- **Client default:** with no URL in the import, the client looks for the server at `http://localhost:8888`.
+- **Server port:** the server uses 8080 like any Boot app unless you set `server.port`; 8888 is the usual choice.
+- **Label:** the Git backend uses `main` as the default label.
+- **Refresh scope:** a `@RefreshScope` bean is a lazy proxy. A refresh throws away its target, and the next call builds a new one with the new values.
+- **Rebinding:** a refresh also rebinds `@ConfigurationProperties` beans, but not constructor-bound ones, such as records.
+- **Bus:** Spring Cloud Bus sends the refresh to every instance over a broker, such as RabbitMQ or Kafka, through `/actuator/busrefresh`.
+
+## Common mistakes
+
+- **Reading a value with `@Value` in a normal singleton and expecting it to change.** That bean was built once; mark it `@RefreshScope` or use `@ConfigurationProperties`.
+- **Storing passwords in plain text in the Git repository.** Anyone with repository access can read them. Store them as `{cipher}` values, which the server decrypts before sending, or use a secret store such as Vault.
 
 ## Interview Qs
 
 ### Why use a Config Server?
 
-All services' config lives in one place under version control, per environment. You change a value with a commit, can see who changed it and roll back, and need no rebuild.
+All services' config lives in one place, under version control, per environment. You change a value with a commit, can see who changed it and roll it back, and need no rebuild. Services fetch their own part by name and profile.
 
 ### How does @RefreshScope work?
 
-The bean is a lazy proxy that caches its target. A refresh clears that cache, so the next method call builds a new bean with the new values.
+The bean is a lazy proxy that caches its target object. A refresh event clears that cache. The next method call through the proxy creates a fresh target, built with the new property values.
 
 ### What happens if the Config Server is down?
 
-At startup, with `optional:` the app starts on its local config; without it, the app fails to start. That fail-fast is useful when the remote config is essential.
+At startup, with `optional:` the app starts on its local config; without it, the app fails to start, which is useful when the remote config is essential. Already running apps keep the values they loaded.
