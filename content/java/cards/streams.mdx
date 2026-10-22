@@ -5,28 +5,41 @@ title: "Stream API"
 topic: functional
 level: intermediate
 heat: 3
-hook: "A stream is a one-time pipeline over a source: lazy steps like filter and map run only when a terminal operation asks for a result."
+hook: "A stream carries elements from a source, such as a List, through steps like filter and map to one result. Nothing runs until the last step asks for it."
 points:
-  - { k: "No storage", v: "it reads from a source and never changes the source" }
-  - { k: "Lazy", v: "intermediate operations wait for the terminal operation" }
-  - { k: "Single use", v: "after the terminal operation, get a new stream from the source", kind: minus }
-  - { k: "Empty stream", v: "allMatch and noneMatch return true; anyMatch returns false", kind: minus }
-  - { k: "reduce", v: "reduce(0, Integer::sum) returns the value; reduce(Integer::sum) an Optional" }
-  - { k: "Side effects", v: "avoid in lambdas; collect results instead of adding to a list", kind: minus }
+  - { k: "Lazy", v: "filter and map only describe steps; nothing runs until a terminal operation such as toList() is called" }
+  - { k: "One element at a time", v: "each element passes through all the steps before the next is read; only a step like sorted() waits for all" }
+  - { k: "Short-circuit", v: "findFirst, anyMatch and limit stop once they have the answer, so the rest is never read", kind: plus }
+  - { k: "Single use", v: "after the terminal operation the stream is used up; another operation on it throws IllegalStateException", kind: minus }
+  - { k: "Empty stream", v: "allMatch and noneMatch return true, and anyMatch returns false, when there are no elements" }
+  - { k: "Side effects", v: "lambdas in a stream should not change outside variables or lists; let the stream build the result", kind: minus }
 trap:
   wrong: "A parallel stream is always faster than a sequential one."
-  right: "Not automatically. It pays off only with enough data and cores, and shared mutable state makes it wrong."
-sayIt: "A stream has a source, lazy intermediate operations like filter and map, and one terminal operation like collect that runs it. It stores nothing, is used once, and its lambdas should have no side effects."
+  right: "Not automatically. It pays off only with lots of CPU-heavy, independent work, and shared mutable state makes it wrong."
+  why: "Parallel sounds like more workers finishing sooner, and on big CPU-heavy jobs it can be. On small lists, splitting the work and merging the results cost more than the work itself."
+sayIt: "A stream has a source, lazy intermediate operations like filter and map, and one terminal operation like toList or collect that runs it. It stores nothing, can be used once, and its lambdas should have no side effects."
+cheat:
+  idea: "A stream is a pipeline over a source. Its lazy steps run only when one terminal operation, such as toList(), asks for the result."
+  flow: "source → filter / map (lazy) → terminal operation → result"
+  remember: "A stream is used once: a second terminal operation throws IllegalStateException."
+buildsOn: [lambdas, collections-framework]
+scenarios:
+  - q: "Stream<Payment> s = payments.stream(); long n = s.count(); List<Payment> all = s.toList(); What happens?"
+    a: "count() works, but s.toList() throws IllegalStateException: stream has already been operated upon or closed. count() was the terminal operation and used the stream up. Call payments.stream() again for a new stream."
+  - q: "payments.stream().filter(p -> { System.out.println(p.id()); return true; }); What does this print?"
+    a: "Nothing. filter is an intermediate operation and there is no terminal operation, so the pipeline never runs and the lambda is never called. Add .toList() at the end and it prints every id."
+  - q: "Your team calls parallelStream().forEach(results::add) to fill an ArrayList. Tests pass on small data. What would you change?"
+    a: "Several threads call add on one ArrayList at the same time, and ArrayList is not thread-safe, so elements can go missing or appear as null on large data. Let the stream build the list: parallelStream().toList()."
 confusedWith: [map-vs-flatmap, stream-vs-collection, findfirst-vs-findany]
 tags: [streams, java-8, parallel-stream]
 visual: flow
 sources:
-  - title: "Package java.util.stream (Java SE 25 API)"
+  - title: "Package java.util.stream: laziness, short-circuiting, side-effects, associativity (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/package-summary.html"
-    verifiedOn: "2026-10-20"
-  - title: "Stream (Java SE 25 API)"
+    verifiedOn: "2026-10-21"
+  - title: "Stream: single use, count() may skip the pipeline, allMatch on empty, peek for debugging (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/stream/Stream.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Parallelism (The Java Tutorials, Oracle)"
     url: "https://docs.oracle.com/javase/tutorial/collections/streams/parallelism.html"
     verifiedOn: "2026-10-19"
@@ -35,52 +48,81 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+A stream is a pipeline that takes elements from a source, such as a `List`, passes them through steps and produces one result. Steps such as `filter` (keep some elements) and `map` (change each element) are intermediate operations: each returns a new stream and does no work yet. The last step, such as `toList()` or `count()`, is the terminal operation: it runs the pipeline and ends the stream. Most steps take a [lambda](card:lambdas). A stream stores nothing and never changes its source.
+
 ## Why it exists
 
-A loop mixes how to step through data with what to compute. A stream states only the what and lets the library run it, even in parallel.
+Without streams, "the amounts of paid payments" is a `for` loop, an `if`, a new list and an `add` call. The how (loop, temporary list) hides the what (keep the paid ones, take their amounts). A stream writes only the what, as a chain of named steps that reads top to bottom. The same pipeline can also run on several threads with one call, `parallelStream()`, although that is not automatically faster.
 
 ## How it works
 
 <Mermaid
-  alt="The source list.stream() feeds lazy filter, map and sorted steps; nothing runs until the terminal collect or toList pulls elements through to the result."
+  alt="payments.stream() is the source. It feeds filter and map, which are lazy. Nothing moves until the terminal operation, findFirst or toList, pulls elements one by one through the steps to the result."
   chart={`flowchart LR
-  S["Source: list.stream()"] --> F["filter (lazy)"] --> M["map (lazy)"] --> O["sorted (lazy)"] --> T["Terminal: collect / toList"] --> R(["Result"])`}
+  S["Source: payments.stream()"] --> F["filter (lazy)"] --> M["map (lazy)"] --> T["Terminal: findFirst / toList"] --> R(["Result"])`}
 />
 
-- Intermediate: `filter`, `map`, `flatMap`, `distinct`, `sorted`, `limit`, `skip`, `peek`. Terminal: `collect`, `toList`, `forEach`, `reduce`, `count` (a `long`), `min`, `max`, `findFirst`, `findAny`, `anyMatch`, `allMatch`, `noneMatch`.
-- `reduce` folds elements into one new value, such as a sum; `collect` is a mutable reduction that adds each element into a container, such as a `List` or `StringBuilder`.
-- Results: [Collectors](card:collectors) build lists, maps and strings; [number streams](card:primitive-streams) give sums and averages; [coding patterns](card:stream-coding-patterns) turn a question into a pipeline.
-- `findFirst`, `anyMatch` and `limit` short-circuit, so they can finish even on an infinite stream.
+1. `payments.stream()` opens a stream on the list. No element is read yet.
+2. Each intermediate call, such as `.filter(...)` and `.map(...)`, adds a step and returns a new stream. Still nothing runs; this is called lazy evaluation.
+3. The terminal operation starts the work. It pulls one element at a time through every step: payment 1 goes through `filter` and `map` before payment 2 is read. A `sorted` step is the exception: it must collect every element before it passes on the first.
+4. A short-circuiting terminal operation, such as `findFirst`, `anyMatch` or a `limit` step, stops once it has its answer. The rest of the source is never read, so it can even finish on an endless stream like `Stream.iterate(1, x -> x + 1)`.
+5. After the terminal operation, the stream is used up. To compute something else, open a new stream from the source.
 
 ## Example
 
+This pipeline finds the amount of the first paid payment. `peek` prints each payment as it passes, so you can watch the laziness.
+
 ```java
-List<String> names = List.of("Ravi", "Asha", "Amit", "Neha");
-String firstA = names.stream()
-        .peek(n -> System.out.println("saw " + n))      // debugging aid
-        .filter(n -> n.startsWith("A"))
-        .map(String::toUpperCase)
-        .findFirst()                                    // short-circuits
-        .orElse("none");
-System.out.println(firstA);                             // Amit and Neha are never read
+List<Payment> payments = List.of(new Payment(1, 20_000, Status.FAILED),
+        new Payment(2, 80_000, Status.PAID), new Payment(3, 90_000, Status.PAID));
+Optional<Long> firstPaid = payments.stream()
+        .peek(p -> System.out.println("read " + p.id()))
+        .filter(p -> p.status() == Status.PAID)
+        .map(Payment::amountPaise)
+        .findFirst();                                 // terminal, short-circuits
+System.out.println(firstPaid.orElse(0L));
 ```
 
 ```text output
-saw Ravi
-saw Asha
-ASHA
+read 1
+read 2
+80000
 ```
+
+What to notice:
+
+- `read 3` never prints. Payment 2 is paid, so `findFirst` has its answer and stops reading.
+- If the chain ended at `.map(...)`, with no terminal operation, nothing would print at all: the pipeline never runs.
+- `findFirst` returns an `Optional<Long>`, a box that is empty when no payment matches. `orElse(0L)` gives 0 in that case; [Optional](card:optional) explains it later in this topic.
+- `peek` exists mainly for debugging. Do not put real work in it.
+
+## Rules and defaults
+
+- **Intermediate operations:** `filter`, `map`, `flatMap`, `distinct`, `sorted`, `limit`, `skip` and `peek`. Each returns a new stream.
+- **Terminal operations:** `toList`, `collect`, `forEach`, `count` (returns a `long`), `reduce`, `min`, `max`, `findFirst`, `findAny`, `anyMatch`, `allMatch` and `noneMatch`.
+- **Single use:** operate on a stream only once. The JDK throws `IllegalStateException` when it detects reuse.
+- **reduce:** `reduce(0L, Long::sum)` returns the value, and the starting value 0 for an empty stream. `reduce(Long::max)` has no starting value, so it returns an `Optional`. The function must be associative, `(a + b) + c == a + (b + c)`, so parallel parts can be combined in any grouping.
+- **count() may skip the steps:** if the count is known from the source, as in `list.stream().peek(...).count()`, the JDK may not run the steps at all, so their side effects never happen.
+- **Do not change the source** while the stream runs, and keep lambdas free of side effects.
+
+## Not to be confused with
+
+A [collection](card:collections-framework) stores elements and can be read and changed many times; a stream stores nothing and computes one result, once. `map` turns each element into exactly one new element; `flatMap` turns each element into a stream and joins those streams into one, for example orders into all their items. `reduce` combines elements into one new value, such as a sum; `collect` adds each element into a container, such as a list or map, which [Collectors](card:collectors) covers.
+
+Rule: keep data in a collection; open a stream when you need a result.
 
 ## Interview Qs
 
 ### Why use a stream if a for loop already works?
 
-A loop gives step-by-step control. A stream describes a filter-map-collect pipeline that reads more clearly and can run in parallel with one call. It is not automatically faster.
+A loop gives explicit, step-by-step control and is fine for many tasks. A stream describes the work as named steps, filter, map, collect, which often reads more clearly and can run in parallel with one call. It is not automatically faster, so pick whichever states the intent best.
 
-### What is lazy evaluation in streams?
+### What is lazy evaluation in streams, and why does it matter?
 
-Intermediate operations only build the pipeline. Nothing runs until the terminal operation, which pulls elements through one by one, so `findFirst` or `limit` can stop early.
+Intermediate operations only build the pipeline; nothing runs until a terminal operation starts it. Then each element flows through all the steps one at a time. So `findFirst` or `limit` can stop early without reading the whole source, and an endless stream can still give an answer.
 
-### What goes wrong with parallelStream().forEach(list::add)?
+### What does allMatch return on an empty stream?
 
-Several threads change a non-thread-safe `ArrayList` at once, so the result is erratic, even with null entries. Let the stream build the result with `collect` or `toList()`.
+`true`, and so does `noneMatch`; `anyMatch` returns `false`. With no elements there is no counter-example, so "all match" holds. A validation such as `payments.stream().allMatch(p -> p.amountPaise() > 0)` therefore passes for an empty list; check `isEmpty()` first if that matters.

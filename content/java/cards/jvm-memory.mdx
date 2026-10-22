@@ -5,77 +5,137 @@ title: "JVM Memory: Stack, Heap and Metaspace"
 topic: jvm
 level: intermediate
 heat: 3
-hook: "Each thread gets its own stack of method frames; all threads share one heap of objects; class data sits in Metaspace."
+hook: "Each thread has its own stack, one frame per method call; all threads share one heap that holds every object; class data sits in Metaspace."
 points:
-  - { k: "Heap", v: "shared by all threads; every object and array; freed by the GC" }
-  - { k: "Stack", v: "one per thread; one frame per call with locals and references" }
-  - { k: "Metaspace", v: "class metadata in native memory (HotSpot, Java 8+)", kind: default }
-  - { k: "PC register", v: "one per thread; points at the current bytecode instruction" }
-  - { k: "When full", v: "deep stack: StackOverflowError; no heap left: OutOfMemoryError", kind: minus }
+  - { k: "Heap", v: "one area shared by all threads; every object and array lives here until the GC frees it" }
+  - { k: "Stack", v: "one per thread; each method call pushes a frame with its local variables, and return pops it" }
+  - { k: "Metaspace (Java 8+)", v: "HotSpot keeps class metadata here, in native memory outside the heap", kind: default }
+  - { k: "Stack size", v: "-Xss sets it; the default is 1024 KB on Linux x64 (JDK 25)", kind: default }
+  - { k: "Heap size", v: "-Xmx sets the maximum; by default it is 1/4 of physical memory (JDK 25)", kind: default }
+  - { k: "When full", v: "too deep a call chain: StackOverflowError; no heap left even after GC: OutOfMemoryError", kind: minus }
 trap:
   wrong: "Primitives always live on the stack and objects on the heap."
-  right: "Local variables live in the frame. A primitive field is part of its object, so it lives on the heap."
-sayIt: "Each thread has a stack of frames for locals and references; objects live on the shared heap, managed by the GC. Class metadata is in Metaspace, which replaced PermGen in Java 8."
-confusedWith: []
+  right: "Local variables live in the frame. A primitive field is part of its object, so it lives on the heap with that object."
+  why: "Most examples show a primitive local next to an object, so the shortcut \"primitives on the stack\" sticks, though it is true only for locals."
+sayIt: "Each thread has a stack of frames for locals and references; objects live on the shared heap, which the GC manages. Class metadata is in Metaspace, which replaced PermGen in Java 8. Deep recursion gives StackOverflowError, a full heap OutOfMemoryError."
+cheat:
+  idea: "Each thread has its own stack, with one frame of locals per method call. All threads share the heap, where every object lives; HotSpot keeps class data in Metaspace."
+  remember: "A local holds only a reference; its object is on the heap and can outlive the frame."
+buildsOn: [classes-objects, threads]
+scenarios:
+  - q: "Two threads call pay() at the same moment. Do they share the local variable paise, or the Payment object each call creates?"
+    a: "Neither. Each call gets its own frame on its own thread's stack, so each has its own paise. Each call also creates its own Payment on the heap; heap objects are shared only when both threads hold a reference to the same one."
+  - q: "A recursive method has no base case and crashes with StackOverflowError. Will raising -Xmx fix it?"
+    a: "No. -Xmx sizes the heap, but the frames are on the thread's stack. A larger -Xss only delays the error; the real fix is a base case that ends the recursion."
+confusedWith: [stack-vs-heap]
 tags: [jvm, memory, heap, stack, metaspace]
-visual: table
+visual: flow
 sources:
   - title: "JVMS SE 25, 2.5 Run-Time Data Areas and 2.6 Frames"
     url: "https://docs.oracle.com/javase/specs/jvms/se25/html/jvms-2.html"
     verifiedOn: "2026-10-19"
-  - title: "JEP 122: Remove the Permanent Generation"
+  - title: "JEP 122: Remove the Permanent Generation (class metadata to native memory, class statics to the heap)"
     url: "https://openjdk.org/jeps/122"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "The java Command (JDK 25): -Xss and -XX:MaxMetaspaceSize"
     url: "https://docs.oracle.com/en/java/javase/25/docs/specs/man/java.html"
     verifiedOn: "2026-10-19"
+  - title: "HotSpot GC Tuning Guide (Java SE 25): Ergonomics, default heap sizes"
+    url: "https://docs.oracle.com/en/java/javase/25/gctuning/ergonomics.html"
+    verifiedOn: "2026-10-21"
+  - title: "JDK-7017732: move static fields into Class (HotSpot, before PermGen removal)"
+    url: "https://bugs.openjdk.org/browse/JDK-7017732"
+    verifiedOn: "2026-10-21"
+  - title: "Error: problems a reasonable application should not try to catch (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Error.html"
+    verifiedOn: "2026-10-21"
   - title: "Java Stack vs Heap Memory Allocation (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/java/java-stack-vs-heap-memory-allocation/"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+JVM memory is the set of areas the [JVM](card:jdk-jre-jvm) uses while your program runs. Each [thread](card:threads) has its own stack, where every method call gets a frame: a small block holding that call's local variables. All threads share one heap, where every object created with `new` lives. Class information, such as each class's methods and fields, sits in a separate area that HotSpot, the usual JVM, calls Metaspace.
+
 ## Why it exists
 
-Some data lives only for one method call, other data must outlive it and be shared. The JVM splits memory so each kind is stored and freed the cheapest way.
+Data lives for very different lengths of time. A loop counter is needed only while one method runs, but a `Payment` object may be passed around and kept for minutes. If everything lived in one area, the JVM would have to search for what it can free after every call. With a stack, a method's locals disappear the moment it returns, at no cost. Only heap objects need the [garbage collector](card:garbage-collection), the next concept, to decide when they can be freed.
 
 ## How it works
 
-<Compare id="stack-vs-heap" />
+<Mermaid
+  alt="JVM memory areas. Shared by all threads: the heap, holding objects and arrays, and Metaspace, holding class metadata. Per thread: a stack of frames, a PC register and a native method stack. Thread 1 and Thread 2 each have their own stack, and both point to objects on the shared heap."
+  chart={`flowchart LR
+  subgraph T1[Thread 1]
+    S1["stack: save() frame, pay() frame, main() frame"]
+  end
+  subgraph T2[Thread 2]
+    S2["stack: main() frame"]
+  end
+  subgraph Shared[Shared by all threads]
+    H[("heap: Payment objects, arrays")]
+    MS[("Metaspace: class metadata")]
+  end
+  S1 -- reference --> H
+  S2 -- reference --> H`}
+/>
 
-- Shared by all threads: the heap and the method area (class data; HotSpot keeps it in Metaspace).
-- Per thread: a stack, a PC register and a native method stack.
+1. When the JVM starts, it creates the heap and the area for class data, shared by every thread.
+2. When a class is first used, its methods, fields and bytecode are stored in Metaspace; you will see this in [class loading](card:class-loading-jit).
+3. Each new thread gets its own stack, plus a PC register that points at the instruction it is running.
+4. Each method call pushes a frame onto that thread's stack, holding the call's local variables: primitive values, and references to objects.
+5. `new Payment(...)` puts the object on the heap. The local variable holds only a reference to it.
+6. When the method returns, its frame is popped and its locals are gone. The object stays on the heap until nothing refers to it, and then the GC can free it.
 
 ## Example
 
+`pay` creates a payment and passes it on. The comments say where each value lives:
+
 ```java
-void order() {
-    int qty = 2;                 // local: in this frame
-    User u = new User("Asha");   // u: reference in the frame; the User: on the heap
-    print(u);                    // pushes a new frame; popped on return
+void pay(PaymentService service) {
+    long paise = 50_000;                     // primitive local: stored in pay's frame
+    Payment p = new Payment(42, paise, Status.PENDING);   // p in the frame; object on the heap
+    service.save(p);                         // pushes a frame for save(); popped on return
 }
 
 int depth(int n) {
-    return depth(n + 1);         // no base case: StackOverflowError
+    return depth(n + 1);                     // no base case: StackOverflowError
 }
 ```
 
-## Defaults
+What to notice:
+
+- `p` is not the object; it is a reference stored in the frame. `save` gets a copy of that reference, so both frames point at the same `Payment` on the heap.
+- When `pay` returns, `paise` and `p` disappear, but the `Payment` survives if `save` stored it somewhere, such as in a list.
+- `depth` pushes a new frame on every call and never returns, so the thread's stack fills up and the JVM throws `StackOverflowError`.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Thread stack size (`-Xss`) | 1024 KB on Linux/x64 | OpenJDK 25 `java` command |
-| Max Metaspace | not limited | OpenJDK 25 `java` command |
+| Thread stack size, `-Xss` | 1024 KB on Linux x64 | JDK 25 `java` command |
+| Maximum heap, `-Xmx` | 1/4 of physical memory | JDK 25 GC ergonomics |
+| Initial heap, `-Xms` | 1/64 of physical memory | JDK 25 GC ergonomics |
+| Maximum Metaspace, `-XX:MaxMetaspaceSize` | no limit, apart from native memory | JDK 25 `java` command |
+
+- **Static fields:** in HotSpot on Java 8 and later, static variables are stored on the heap, with the class's `Class` object; Metaspace holds only class metadata.
+- **Running out:** `StackOverflowError` when one thread's call chain is too deep; `OutOfMemoryError` when the heap, Metaspace or native memory cannot satisfy a request, even after GC.
+
+## Not to be confused with
+
+The JVM stack is the memory for one thread's method calls; `java.util.Stack` and `ArrayDeque` are [collections](card:queue-deque) you create yourself, stored on the heap like any object. The heap is likewise not the heap data structure behind `PriorityQueue`. Rule: memory stack and heap = where the JVM stores calls and objects; Stack and heap collections = data structures in your code.
 
 ## Interview Qs
 
 ### What is the difference between StackOverflowError and OutOfMemoryError?
 
-StackOverflowError: one thread needs a deeper stack than allowed, for example recursion with no base case. OutOfMemoryError: the heap (or Metaspace, or native memory) cannot satisfy a request, even after GC.
+StackOverflowError: one thread needs a deeper stack than allowed, usually because of recursion with no base case. OutOfMemoryError: the heap, Metaspace or native memory cannot satisfy a request, even after garbage collection, for example because a cache keeps every object. Both are `Error` subclasses, which a normal application should not try to catch.
 
 ### Why did Metaspace replace PermGen in Java 8?
 
-PermGen was a part of the heap whose size had to be tuned. HotSpot now keeps class metadata in native memory, limited by what the machine has unless you set `-XX:MaxMetaspaceSize`.
+PermGen was a part of the heap for class metadata, with a maximum fixed by `-XX:MaxPermSize`, so applications that loaded many classes could run out of it. HotSpot now keeps class metadata in native memory, limited only by what the machine has, unless you set `-XX:MaxMetaspaceSize`.
 
 ### Where are static variables stored?
 
-In HotSpot since Java 8, static fields are on the heap, not in Metaspace. Metaspace holds only class metadata.
+In HotSpot on Java 8 and later, static fields are on the heap, inside the class's `Class` object, not in Metaspace. Metaspace holds only class metadata, such as the methods and field descriptions of each class.

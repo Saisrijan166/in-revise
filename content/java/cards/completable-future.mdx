@@ -5,24 +5,39 @@ title: CompletableFuture
 topic: concurrency
 level: intermediate
 heat: 2
-hook: "CompletableFuture chains async steps that run when the previous one finishes, so you react to results instead of blocking."
+hook: "A CompletableFuture is a result that is not ready yet, to which you attach the next steps. Each step runs when the previous one finishes, so no thread sits waiting."
 points:
-  - { k: "Default pool", v: "async methods without an Executor use ForkJoinPool.commonPool()", kind: default }
-  - { k: "thenApply", v: "turn the result into a plain value, like map" }
-  - { k: "thenCompose", v: "chain a step that returns another future, like flatMap" }
-  - { k: "thenCombine / allOf", v: "merge two results / wait for all; allOf gives Void" }
-  - { k: "join() vs get()", v: "join throws unchecked CompletionException; get a checked one" }
+  - { k: "Since", v: "Java 8; it implements Future, so get() still works", kind: default }
+  - { k: "Default pool", v: "async methods without an Executor run on ForkJoinPool.commonPool(), shared by the whole JVM", kind: default }
+  - { k: "thenApply", v: "turns the result into another plain value, like map on a stream" }
+  - { k: "thenCompose", v: "chains a step that itself returns a CompletableFuture and flattens it, like flatMap" }
+  - { k: "thenCombine / allOf", v: "thenCombine merges two independent results; allOf waits for all and gives CompletableFuture<Void>" }
+  - { k: "join() vs get()", v: "join() throws the unchecked CompletionException; get() throws the checked ExecutionException" }
 trap:
   wrong: "Use thenApply when the next step returns a CompletableFuture."
-  right: "That gives CompletableFuture<CompletableFuture<T>>. Use thenCompose, which flattens it."
-sayIt: "I start with supplyAsync on my own executor, transform with thenApply, chain dependent async calls with thenCompose, join independent ones with thenCombine or allOf, and recover with exceptionally or handle."
+  right: "That gives a CompletableFuture<CompletableFuture<T>>. Use thenCompose, which waits for the inner future and gives CompletableFuture<T>."
+  why: "Both methods take a function of the previous result, and the code compiles either way, so the nested type shows up only later."
+sayIt: "I start with supplyAsync on my own executor, transform with thenApply, chain dependent async calls with thenCompose, join independent ones with thenCombine or allOf, add a timeout with orTimeout, and recover with exceptionally or handle."
+cheat:
+  idea: "A CompletableFuture is a result that arrives later. You attach steps that each run when the previous one finishes, so no thread blocks on get()."
+  code: |
+    CompletableFuture.supplyAsync(() -> loadPayment(id), io)
+        .thenCompose(p -> fraudScoreAsync(p, io))    // step returns a future
+        .thenApply(score -> score < 50 ? "APPROVED" : "REVIEW");
+  remember: "thenApply for a plain value, thenCompose when the step returns another CompletableFuture."
+buildsOn: [executors, lambdas]
+scenarios:
+  - q: "You need a payment's fraud score and the customer's limit. The two calls do not depend on each other and each takes 1 second. How do you get both in about 1 second?"
+    a: "Start both with supplyAsync on your executor, then use scoreFuture.thenCombine(limitFuture, (score, limit) -> ...). Both calls run at the same time, and the combine step runs when both are done. Calling one after the other would take about 2 seconds."
+  - q: "The first step of a chain, supplyAsync, throws IllegalStateException(\"db down\"). The chain then has thenCompose, thenApply and exceptionally(ex -> \"RETRY LATER\"). What does join() return?"
+    a: "\"RETRY LATER\". A failure skips every later step until one handles it. exceptionally receives a CompletionException whose cause is the IllegalStateException, and its fallback value becomes the result."
 confusedWith: [future-vs-completablefuture]
 tags: [completablefuture, async, forkjoinpool, thencompose]
 visual: code
 sources:
-  - title: "CompletableFuture (Java SE 25 API)"
+  - title: "CompletableFuture: default executor, join vs get, orTimeout and completeOnTimeout since 9 (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/CompletableFuture.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "CompletionStage (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/CompletionStage.html"
     verifiedOn: "2026-10-19"
@@ -31,44 +46,81 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+`CompletableFuture` (Java 8) is a [Future](card:future-interface) you can build on. A plain `Future` from an [executor](card:executors) offers only one way to use the result: block on `get()` until it is ready. A `CompletableFuture` also lets you attach the next steps, such as "then transform it", "then call another service", "if it fails, use this value". Each step runs when the one before it finishes, and each one returns a new `CompletableFuture`, so the steps form a chain.
+
 ## Why it exists
 
-A plain [Future](card:future-interface) only lets you block on get(). Real work has steps that depend on each other, run in parallel and can fail.
+Approving a payment takes several calls: load the payment, then ask a fraud service for a score, then decide. With plain `Future`s, a thread calls `get()` after each step and sits idle while it waits. Two independent calls are also easy to run one after the other by mistake. With a chain, no thread waits between steps, independent calls run at the same time, and one `exceptionally` step handles a failure from any step.
 
 ## How it works
 
 <Mermaid
-  alt="A CompletableFuture pipeline. supplyAsync loads a user. thenCompose calls an async method to load the user's orders. thenApply counts them. exceptionally returns 0 on any failure. join waits for the final value."
+  alt="A CompletableFuture chain. supplyAsync loads payment 42 on the io pool. thenCompose calls the fraud service, which returns its own future. thenApply turns the score into APPROVED or REVIEW. exceptionally turns any failure into RETRY LATER. join returns the final value."
   chart={`flowchart LR
-  S["supplyAsync: load user"] --> C["thenCompose: load orders async"]
-  C --> A["thenApply: count"]
-  A --> E["exceptionally: 0"]
+  S["supplyAsync: load payment"] --> C["thenCompose: fraud score (async)"]
+  C --> A["thenApply: score to decision"]
+  A --> E["exceptionally: RETRY LATER"]
   E --> J(["join()"])`}
 />
 
-- A failure skips the next steps until `exceptionally` or `handle` deals with it.
-- Pass your own Executor for blocking I/O: the shared common pool may not add threads when tasks block.
+1. `supplyAsync(task, executor)` starts the first task on a pool thread and returns a `CompletableFuture` at once.
+2. Each `thenXxx` call only registers the next step; nothing waits yet.
+3. When a step finishes, its result is passed to the next one. A step that returns a plain value uses `thenApply`; a step that starts another async call uses `thenCompose`.
+4. If a step throws, the later steps are skipped and the failure travels down the chain until `exceptionally` or `handle` turns it into a value.
+5. At the very end, if a thread needs the value, `join()` or `get()` waits for it.
+
+So the key is that you describe the whole flow first, and the steps then run by themselves as results arrive.
 
 ## Example
 
-```java
-CompletableFuture<Integer> orderCount = CompletableFuture
-        .supplyAsync(() -> api.findUser(id), ioPool)   // runs on ioPool
-        .thenCompose(user -> api.ordersAsync(user))    // returns CompletableFuture<List<Order>>
-        .thenApply(orders -> orders.size())            // plain value
-        .exceptionally(ex -> 0);                       // fallback on any failure
+The payment service decides on payment 42 without blocking between steps. `loadPayment` returns a `Payment`, and `fraudScoreAsync` returns a `CompletableFuture<Integer>`.
 
-CompletableFuture<Price> price = CompletableFuture.supplyAsync(() -> api.price(id), ioPool);
-CompletableFuture.allOf(orderCount, price).join();     // wait for both
-int count = orderCount.join();                         // already done: no blocking
+```java
+CompletableFuture<String> decision = CompletableFuture
+        .supplyAsync(() -> loadPayment(id), io)              // step 1 runs on the io pool
+        .thenCompose(p -> fraudScoreAsync(p, io))            // returns CompletableFuture<Integer>
+        .thenApply(score -> score < 50 ? "APPROVED" : "REVIEW")
+        .orTimeout(2, TimeUnit.SECONDS)                      // Java 9+: fail if slower than 2 s
+        .exceptionally(ex -> "RETRY LATER");                 // any failure above lands here
+
+System.out.println(decision.join());
 ```
+
+```text output
+APPROVED
+```
+
+What to notice:
+
+- `io` is the service's own `ExecutorService`. Without it, the tasks run on the common pool that the whole JVM shares.
+- `thenCompose` is needed because `fraudScoreAsync` returns a future. With `thenApply`, the next step would receive a `CompletableFuture<Integer>` instead of an `Integer`.
+- `orTimeout` fails the chain with a `TimeoutException` if no decision arrives within 2 seconds, and `exceptionally` turns that into `"RETRY LATER"` too.
+- `join()` is the only blocking call, at the very end.
+
+## Rules and defaults
+
+- **Default executor:** async methods without an `Executor` use `ForkJoinPool.commonPool()`.
+- **Use your own executor for blocking calls:** the common pool is shared by the whole JVM, so slow I/O there delays unrelated work, and the pool may not add threads when its tasks block.
+- **Which thread runs a non-async step:** `thenApply` and the other non-async methods may run on the thread that completed the previous step, or on the thread that attached the step. Use the `...Async` variants to choose the executor.
+- **Timeouts (Java 9+):** `orTimeout(t, unit)` fails with `TimeoutException`; `completeOnTimeout(value, t, unit)` completes with a fallback value instead.
+- **Errors:** `exceptionally` runs only on failure; `handle` always runs and receives the result and the exception; `whenComplete` sees both but keeps the original outcome.
+
+## Common mistakes
+
+- **"allOf gives me all the results."** `allOf` returns `CompletableFuture<Void>`: it only says when all are done. Read each value afterwards with `join()` on the original futures, which no longer blocks.
 
 ## Interview Qs
 
-### Future vs CompletableFuture?
+### How is CompletableFuture different from Future?
 
-Future can only be checked, waited on or cancelled. CompletableFuture can also be completed by hand, chained, combined and recovered without blocking, and it still implements Future.
+A `Future` can only be checked, waited on with `get()` or cancelled. A `CompletableFuture` can also be chained, combined with other futures, given a timeout, recovered from errors, and completed by hand with `complete(value)`. It still implements `Future`, so old code that calls `get()` keeps working.
 
 ### Which thread runs the steps?
 
-Async methods run on the Executor you pass, or else on ForkJoinPool.commonPool(). Non-async steps like thenApply may run on the thread that completed the previous stage, or on the caller.
+Async methods run on the executor you pass, or on `ForkJoinPool.commonPool()` if you pass none. Non-async steps such as `thenApply` run on whichever thread completed the previous stage, or on the caller if the stage was already done when the step was attached.
+
+### How do you handle an exception in a chain?
+
+Add `exceptionally(ex -> fallback)` to replace a failure with a value, or `handle((result, ex) -> ...)` to deal with success and failure in one place. Without either, `join()` throws a `CompletionException` and `get()` an `ExecutionException`, both with the original exception as the cause.

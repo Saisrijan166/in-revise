@@ -573,3 +573,21 @@ The owner approved the Spring Boot pilot, both the concept rewrite (section Q) a
 - **For the owner:**
   - Big-O costs in key points use `kind: default` (CLAUDE.md reserves it for defaults). Say if you prefer `key`.
   - java-pitfalls repeats `remove(int)` vs `remove(Object)`, which dynamic-array owns.
+
+### R2. Java
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 64 | 31 | 303 | ~2,400 / 32 / 2 | ~14 min |
+
+- **Order:** in OOP, classes, constructors and the keywords now come before the four principles, and nested and anonymous classes come after interfaces. In Collections, generics comes first, and Comparable/Comparator comes before Set and Map.
+- **Examples:** the running example is a `Payment` record with a `Status` enum. Every program ran on JDK 21 and, for Java 22–25 features, on Temurin 25.
+- **Corrections worth knowing:**
+  - `this()` / `super()` need not be the first statement since Java 25 (JEP 513).
+  - The Integer cache is guaranteed only for constants.
+  - `List.of(1, 2)` passed to a `List<Number>` parameter compiles.
+  - The CompletableFuture common-pool fallback is no longer in the Java 25 Javadoc, so it was removed.
+- **Weak sources:**
+  - Association vs aggregation vs composition rests on UML 2.5.1 plus one GeeksforGeeks page; the Java docs do not define these terms.
+  - Some interview questions cite interview-prep sites (GeeksforGeeks, InterviewBit) only to show they are commonly asked.
+- **Left out (no primary source):** which of two equal top earners `Stream.max` returns; a key order for plain `groupingBy`; the GoF "23 patterns" count; the JDBC version that made `Class.forName` unnecessary.

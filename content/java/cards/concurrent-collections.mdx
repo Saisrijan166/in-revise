@@ -5,71 +5,127 @@ title: Concurrent Collections and Atomics
 topic: concurrency
 level: intermediate
 heat: 2
-hook: "When threads share a collection, use ConcurrentHashMap, CopyOnWriteArrayList, BlockingQueue or an atomic class."
+hook: "When threads share a map, list, queue or counter, use the java.util.concurrent versions: they stay correct under sharing without one big lock."
 points:
-  - { k: "HashMap", v: "not synchronised: lock it yourself if any thread writes", kind: minus }
-  - { k: "ConcurrentHashMap nulls", v: "no null keys or values, unlike HashMap", kind: minus }
-  - { k: "compute / merge", v: "each call runs atomically for its key" }
-  - { k: "size(), isEmpty()", v: "only estimates while other threads update" }
-  - { k: "Iterators", v: "never throw ConcurrentModificationException", kind: plus }
+  - { k: "HashMap", v: "not thread-safe: if any thread writes while others use it, you must lock it yourself", kind: minus }
+  - { k: "ConcurrentHashMap nulls", v: "it rejects null keys and null values, unlike HashMap", kind: minus }
+  - { k: "compute / merge", v: "on ConcurrentHashMap each call runs atomically for its key, so add-or-update is safe" }
+  - { k: "size() while updating", v: "size() and isEmpty() are only estimates while other threads change the map", kind: minus }
+  - { k: "Iterators", v: "never throw ConcurrentModificationException; they may or may not show changes made meanwhile", kind: plus }
+  - { k: "AtomicInteger", v: "incrementAndGet() is a safe count++ without a lock; compareAndSet is its basic lock-free step" }
 trap:
   wrong: "On a ConcurrentHashMap, containsKey then put is safe, because each call is thread-safe."
-  right: "Two safe calls are not one atomic step; another thread can act in between. Use putIfAbsent, computeIfAbsent or merge."
-sayIt: "For shared maps I use ConcurrentHashMap with merge or computeIfAbsent, CopyOnWriteArrayList for read-mostly lists, a BlockingQueue for producer-consumer, and AtomicInteger or LongAdder for counters."
+  right: "Two safe calls are not one atomic step: another thread can act in between. Use putIfAbsent, computeIfAbsent or merge."
+  why: "The class name says concurrent, so it feels as if every use of it is safe, not just each single call."
+sayIt: "For shared maps I use ConcurrentHashMap with merge or computeIfAbsent, never check-then-put. CopyOnWriteArrayList for read-mostly lists, a BlockingQueue for producer and consumer threads, and AtomicInteger or LongAdder for counters."
+cheat:
+  idea: "Java has thread-safe collections: ConcurrentHashMap for maps, CopyOnWriteArrayList for read-mostly lists, BlockingQueue to pass work between threads, and atomic classes for counters."
+  code: |
+    countByStatus.merge(p.status(), 1, Integer::sum);   // atomic add-or-insert
+  remember: "Each call is thread-safe, but two calls together are not: use merge, not containsKey then put."
+buildsOn: [synchronization, map-hashmap, executors]
+scenarios:
+  - q: "Many threads count payments per merchant with: if (!map.containsKey(m)) map.put(m, 0); map.put(m, map.get(m) + 1); on a ConcurrentHashMap. Counts come out too low. Why, and what is the fix?"
+    a: "Each call is atomic, but the sequence is not: two threads can both read 4 and both write 5. Replace it with map.merge(m, 1, Integer::sum), which does the read, add and write as one atomic step for that key."
+  - q: "One thread reads payment files and many threads process them. Which collection connects them, and why?"
+    a: "A bounded BlockingQueue such as new ArrayBlockingQueue<>(100). The reader calls put(), which waits when the queue is full, so it cannot run ahead and fill memory. Workers call take(), which waits when it is empty, so no thread spins."
 confusedWith: [hashmap-vs-concurrenthashmap]
 tags: [concurrenthashmap, copyonwritearraylist, blockingqueue, atomicinteger, longadder]
 visual: table
 sources:
-  - title: "ConcurrentHashMap (Java SE 25 API)"
+  - title: "ConcurrentHashMap: non-blocking reads, weakly consistent iterators, no nulls, atomic compute and merge (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/ConcurrentHashMap.html"
+    verifiedOn: "2026-10-21"
+  - title: "HashMap: must be synchronized externally if any thread modifies it (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/HashMap.html"
     verifiedOn: "2026-10-19"
   - title: "java.util.concurrent package summary (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/package-summary.html"
     verifiedOn: "2026-10-19"
+  - title: "AtomicInteger: compareAndSet, incrementAndGet (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/atomic/AtomicInteger.html"
+    verifiedOn: "2026-10-21"
+  - title: "LongAdder: higher throughput than AtomicLong under contention; sum() is not a snapshot (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/atomic/LongAdder.html"
+    verifiedOn: "2026-10-21"
   - title: "Doug Lea on why ConcurrentHashMap rejects null (concurrency-interest, 2006)"
     url: "https://web.archive.org/web/2017/http://cs.oswego.edu/pipermail/concurrency-interest/2006-May/002485.html"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Concurrent collections are the thread-safe collections in `java.util.concurrent`. Many threads can use one of them at the same time without corrupting it, and mostly without waiting for each other. The atomic classes in `java.util.concurrent.atomic`, such as `AtomicInteger`, do the same for a single number. They are the ready-made answer to the race conditions you saw in [synchronization](card:synchronization).
+
 ## Why it exists
 
-HashMap and ArrayList are not thread-safe, and wrapping them in one lock makes every thread wait. These classes stay correct under sharing with far less waiting.
+A [HashMap](card:map-hashmap) is not safe to share: its Javadoc says you must lock it yourself if any thread changes it while others use it. Wrapping it in one lock, as `Hashtable` or `Collections.synchronizedMap` do, is safe, but then every reader waits for every writer. Payment threads that only read a merchant's settings should not queue behind one thread that is updating a different merchant. Concurrent collections let reads and writes on different parts run at the same time.
 
 ## How it works
 
 | Need | Use | Why it fits |
 |---|---|---|
-| Shared map | `ConcurrentHashMap` | Reads do not lock; atomic `merge`, `compute` |
-| Read-mostly list, like listeners | `CopyOnWriteArrayList` | Each write copies the array; iterators use a snapshot |
-| Producer-consumer hand-off | `BlockingQueue` | `put` waits while full, `take` while empty |
-| Shared counter | `AtomicInteger`, `LongAdder` | Atomic without locks; LongAdder for heavy contention |
+| Shared map | `ConcurrentHashMap` | Reads generally do not block; `merge` and `compute` are atomic per key |
+| Read-mostly list, such as listeners | `CopyOnWriteArrayList` | Each write copies the array, so readers never wait |
+| Passing work between threads | `BlockingQueue` | `put` waits while full, `take` waits while empty |
+| Shared counter | `AtomicInteger`, `AtomicLong`, `LongAdder` | Atomic updates without a lock |
 
-- Hashtable and `Collections.synchronizedMap` are thread-safe, but one lock guards everything: see [the comparison](compare:hashmap-vs-concurrenthashmap).
+1. A thread reading a `ConcurrentHashMap` generally does not block, so reads can overlap with writes.
+2. A write such as `merge(key, 1, Integer::sum)` updates only that key's entry, atomically, so writes to different keys rarely wait for each other.
+3. An `AtomicInteger` update such as `updateAndGet(f)` reads the value, computes the new one and calls `compareAndSet(old, new)`, which stores it only if the value is still `old`. If another thread changed it first, it tries again.
+4. A `CopyOnWriteArrayList` write builds a new copy of the array and swaps it in, so an iterator keeps reading the old copy undisturbed.
 
 ## Example
 
+The payment service counts four payments per status (two PAID, one FAILED, one PENDING; 2,400 paise in all) and adds up their amounts, from four threads at once.
+
 ```java
-ConcurrentHashMap<String, Integer> counts = new ConcurrentHashMap<>();
-counts.merge(word, 1, Integer::sum);           // atomic add-or-insert
+var countByStatus = new ConcurrentHashMap<Status, Integer>();
+var totalPaise = new AtomicLong();
 
-BlockingQueue<Job> queue = new ArrayBlockingQueue<>(100);
-queue.put(job);                                // producer: waits while full
-Job next = queue.take();                       // consumer: waits while empty
-
-AtomicInteger hits = new AtomicInteger();
-hits.incrementAndGet();                        // an atomic count++
+try (var pool = Executors.newFixedThreadPool(4)) {
+    for (Payment p : payments) {
+        pool.submit(() -> {
+            countByStatus.merge(p.status(), 1, Integer::sum);   // atomic add-or-insert for this key
+            totalPaise.addAndGet(p.amountPaise());              // atomic +=, no lock
+        });
+    }
+}   // close() waits for all tasks
+System.out.println(new TreeMap<>(countByStatus) + " total=" + totalPaise.get());
 ```
+
+```text output
+{PENDING=1, PAID=2, FAILED=1} total=2400
+```
+
+What to notice:
+
+- `merge` puts 1 for a new status, or adds 1 to the old count, as one atomic step. A plain `HashMap` here could lose counts.
+- `addAndGet` is the atomic version of `total += amount`; with a plain `long` field, updates could be lost as in the race example.
+- `new TreeMap<>(...)` only sorts the output by enum order. `ConcurrentHashMap`, like `HashMap`, promises no iteration order.
+
+## Rules and defaults
+
+- **No nulls:** `ConcurrentHashMap` throws `NullPointerException` for a null key or value. A `get()` that returns null always means "absent".
+- **Keep compute functions short:** while `compute`, `computeIfAbsent` or `merge` runs its function, other updates may wait. The function must not modify the map itself.
+- **Estimates:** `size()`, `isEmpty()` and `containsValue()` reflect a passing state while other threads update. Do not use them to make decisions.
+- **LongAdder:** better than `AtomicLong` when many threads update one counter, at the cost of more memory. Its `sum()` is not an exact snapshot during updates, so use it for statistics, not for control.
+- **CopyOnWriteArrayList:** every write copies the whole array, so it suits lists that are rarely changed.
+
+## Not to be confused with
+
+`Collections.synchronizedMap(map)` wraps any map so that every call takes one shared lock, and you must lock it yourself while iterating. `ConcurrentHashMap` is built for sharing: reads generally do not block and iteration never throws `ConcurrentModificationException`. Rule: synchronizedMap = one lock for everything; ConcurrentHashMap = shared access by design.
 
 ## Interview Qs
 
 ### Why is ConcurrentHashMap faster than Hashtable?
 
-Hashtable guards the whole map with a single lock, so threads queue up. ConcurrentHashMap has no single exclusion lock: any number of reads and many writes run at the same time.
+`Hashtable` guards the whole map with one lock, so every call, even a read, waits for the current one. `ConcurrentHashMap` reads generally do not block, and it never locks the whole table, so many readers and writers on different keys run at the same time.
 
 ### Why does ConcurrentHashMap not allow null?
 
-If get() returns null, you could not tell "absent" from "mapped to null". In a single thread you check containsKey; with other threads the map may change between the two calls.
+If `get()` returned null, you could not tell "absent" from "mapped to null". In one thread you would check `containsKey` afterwards, but with other threads the map may change between the two calls, so the answer would be unreliable. Banning null removes the doubt.
 
-### When would you use CopyOnWriteArrayList?
+### How does AtomicInteger work without a lock?
 
-When reads and iteration far outnumber writes, like a list of listeners. Iterators see a snapshot and never fail; every write copies the whole array, so frequent writes are costly.
+It uses lock-free atomic operations. The basic one is `compareAndSet(expected, new)`: store the new value only if the current value still equals `expected`. Methods such as `updateAndGet` loop on it: read, compute, compare-and-set, and retry if another thread changed the value first. No thread ever blocks.

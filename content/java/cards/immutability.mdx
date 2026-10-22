@@ -5,17 +5,28 @@ title: Immutable Classes
 topic: oop
 level: intermediate
 heat: 2
-hook: "An immutable object never changes after construction: final class, private final fields, no setters, copies of anything mutable."
+hook: "An immutable object never changes after its constructor finishes. To \"change\" it, you create a new object with the new values."
 points:
-  - { k: "Fields", v: "private final, set once in the constructor" }
-  - { k: "No subclasses", v: "final class, or private constructor plus factory methods" }
-  - { k: "Defensive copy", v: "copy mutable inputs in; never return the internal object" }
-  - { k: "Gains", v: "thread-safe without locks; share freely without copying", kind: plus }
-  - { k: "Cost", v: "every change creates a new object", kind: minus }
+  - { k: "Fields", v: "every field is private final and set once, in the constructor; there are no setters" }
+  - { k: "No subclasses", v: "the class is final, or has only private constructors, so no subclass can add changeable state" }
+  - { k: "Defensive copy", v: "copy mutable inputs in and never hand out a mutable internal object, or callers can change it" }
+  - { k: "Thread-safe", v: "threads can share the object with no locks, because nobody can change it after construction", kind: plus }
+  - { k: "Safe map key", v: "its hashCode() can never change, so a HashMap or HashSet always finds it again", kind: plus }
+  - { k: "Cost", v: "every change creates a new object, which costs memory and time on large, often-changed data", kind: minus }
 trap:
   wrong: "A class with no setters is immutable."
-  right: "A subclass can add mutable state, and a stored or returned List can be changed outside. Make the class final and copy mutable parts."
-sayIt: "I make the class final, the fields private final and set in the constructor, add no setters, and copy mutable inputs and outputs. Immutable objects are thread-safe and make safe HashMap keys."
+  right: "A subclass can add changeable state, and a stored or returned List can be changed from outside. Make the class final and copy mutable parts."
+  why: "Setters are the obvious way to change an object, so removing them feels like enough; the leaks through subclasses and shared lists are less visible."
+sayIt: "I make the class final, the fields private final and set in the constructor, add no setters, and copy mutable inputs and outputs. Immutable objects are thread-safe without locks and make safe HashMap keys; String, BigDecimal and LocalDate work this way."
+cheat:
+  idea: "An immutable object's state is fixed once its constructor finishes. A change returns a new object, as with String and LocalDate."
+  remember: "final on a field fixes the reference, not the object: copy lists in with List.copyOf and never return a mutable one."
+buildsOn: [final-keyword, object-class-equals-hashcode]
+scenarios:
+  - q: "A final class has private final List<String> tags = the list passed to its constructor, and a getter returns it. Is the class immutable?"
+    a: "No. The caller still holds the same list and can add to it, and anyone who calls the getter can change it too. final only stops the field pointing to another list. Store List.copyOf(tags) instead."
+  - q: "You return Collections.unmodifiableList(tags) from a getter, but the class keeps adding to tags internally. Will a caller see the new items?"
+    a: "Yes. An unmodifiable view is a read-only window on the same list, so later changes show through it. If callers should get a fixed snapshot, return List.copyOf(tags)."
 confusedWith: [list-of-vs-unmodifiable-list]
 tags: [immutability, defensive-copy, thread-safety]
 visual: flow
@@ -26,50 +37,95 @@ sources:
   - title: "Immutable Objects (The Java Tutorials)"
     url: "https://docs.oracle.com/javase/tutorial/essential/concurrency/immutable.html"
     verifiedOn: "2026-10-19"
-  - title: "List.copyOf (Java SE 25 API)"
+  - title: "List.copyOf and unmodifiable lists (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/List.html#copyOf(java.util.Collection)"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "JLS SE 25, 17.5 final Field Semantics"
+    url: "https://docs.oracle.com/javase/specs/jls/se25/html/jls-17.html#jls-17.5"
+    verifiedOn: "2026-10-21"
+  - title: "BigDecimal: immutable, arbitrary-precision decimal numbers (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/math/BigDecimal.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+An immutable object is one whose state cannot change after its constructor finishes. A mutable object, by contrast, has methods that change its fields, such as a setter. To "change" an immutable object you create a new one with the new values. `String`, `BigDecimal` and `LocalDate` from the JDK work this way: `amount.add(fee)` returns a new `BigDecimal` and leaves `amount` as it was.
 
 ## Why it exists
 
-Objects that can change cause bugs when threads share them or when they are map keys. An object that never changes needs no locks and no copies.
+`PaymentService` hands one `Payment` to a logger thread, a cache and a report. If any of them can change its amount, the others may see a value they did not expect, or a half-finished update from another thread. If the payment is a `HashMap` key, a change can make it impossible to find, as you saw in [hashCode()](card:object-class-equals-hashcode). An immutable payment removes all three problems: nobody can change it, so it is safe to share with no locks and no copies.
 
 ## How it works
 
-<Steps label="Make a class immutable">
-<Step title="Block subclasses">Declare the class `final`, or make constructors private and use factory methods.</Step>
-<Step title="Lock the fields">Make every field `private final` and set it once in the constructor.</Step>
-<Step title="No setters">A change returns a new object, like `withItem(...)`.</Step>
-<Step title="Copy mutable parts">Copy mutable inputs in, and never hand out the internal object.</Step>
-</Steps>
+<Mermaid
+  alt="Defensive copy. The caller's ArrayList is copied by List.copyOf into the payment's own unmodifiable list. When the caller later adds to its ArrayList, the payment's list does not change."
+  chart={`flowchart LR
+  C["caller's ArrayList: upi"] -- "List.copyOf" --> P["payment.tags: upi (unmodifiable)"]
+  C -- "later: add refund" --> C2["caller's list: upi, refund"]
+  P -. unchanged .-> P2["payment.tags: upi"]`}
+/>
 
-- A [record](card:records-sealed) does steps 1–3 for you; step 4 is still yours.
-- Equal-by-value immutable objects make safe keys: see [hashCode()](card:object-class-equals-hashcode).
+1. Declare the class `final`, so no subclass can add setters or changeable fields.
+2. Make every field `private final`. The compiler then forces each field to be set exactly once, by the time the constructor ends.
+3. In the constructor, copy every mutable input, such as a `List`. The caller keeps its own list, and changing it later cannot reach inside your object.
+4. Add no setters. A method that "changes" something, such as `withAmount`, builds and returns a new object.
+5. Never return a mutable internal object. Return an unmodifiable list, or a copy.
+
+So the key is: `final` fixes the fields, and copies stop anyone reaching the objects those fields point to.
 
 ## Example
 
+An immutable `Payment` with a list of tags. The caller changes its own list after building the payment.
+
 ```java
-public final class Order {
-    private final List<String> items;
-    public Order(List<String> items) {
-        this.items = List.copyOf(items);   // copy in (Java 10+; rejects nulls)
+public final class Payment {                         // final: no subclass can add state
+    private final long id, amountPaise;
+    private final List<String> tags;
+    public Payment(long id, long amountPaise, List<String> tags) {
+        this.id = id; this.amountPaise = amountPaise;
+        this.tags = List.copyOf(tags);               // copy in (Java 10+)
     }
-    public List<String> items() { return items; }   // unmodifiable: safe to share
-    public Order withItem(String item) {             // a change = a new object
-        var next = new ArrayList<>(items);
-        next.add(item);
-        return new Order(next);
-    }
+    public List<String> tags() { return tags; }      // unmodifiable: safe to hand out
+    public Payment withAmount(long paise) { return new Payment(id, paise, tags); }
 }
+var input = new ArrayList<>(List.of("upi"));
+var p = new Payment(42, 10_000, input);
+input.add("refund");                                 // the caller changes its own list
+System.out.println(p.tags());
 ```
+
+```text output
+[upi]
+```
+
+What to notice:
+
+- The payment still has only `upi`. Replace `List.copyOf(tags)` with `tags` and it prints `[upi, refund]`: the caller changed your object.
+- `p.tags().add("x")` throws `UnsupportedOperationException`, because the list from `List.copyOf` is unmodifiable. So the getter can return it without copying again.
+- `withAmount` does not touch `p`. It returns a second `Payment` that shares the same, unchangeable tag list.
+
+## Rules and defaults
+
+- **List.copyOf (Java 10):** returns an unmodifiable list and throws `NullPointerException` if any element is null. If its input is already unmodifiable, it usually returns the same list without copying.
+- **Shallow, not deep:** an unmodifiable list of mutable objects still lets each object change. The whole thing is immutable only if the elements are immutable too.
+- **Visibility to other threads:** once the constructor finishes, other threads are guaranteed to see the correct values of `final` fields, provided the constructor did not leak `this` to them first.
+- **Records:** a [record](card:records-sealed) gives you steps 1, 2 and 4 automatically; copying mutable components is still your job.
+
+## Not to be confused with
+
+A `final` field cannot be pointed at another object, but the object it points to may still change: `final List<String> tags` can still get new items. Immutability is about the object's whole state. Rule: `final` = the reference is fixed; immutable = nothing reachable from the object can change. For read-only lists, `List.copyOf` gives a fixed snapshot, while `Collections.unmodifiableList` gives a read-only view of a list that may still change.
 
 ## Interview Qs
 
+### How do you make a class immutable?
+
+Make the class `final`, every field `private final` and set in the constructor, and add no setters. Copy mutable inputs in the constructor and never return a mutable internal object. Methods that need a different value return a new object.
+
 ### Why are immutable objects thread-safe?
 
-Their state is fixed once the constructor finishes, so threads can only read it. No thread can see a half-done update, so no locking is needed.
+Their state is fixed once the constructor finishes, so threads can only read it. No thread can see a half-done update, so no locking is needed, and the Java memory model guarantees other threads see the final fields correctly.
 
 ### How do you return a mutable field safely?
 
-Return a copy, or an unmodifiable list such as one from `List.copyOf`. Returning the internal `ArrayList` or `Date` lets the caller change your object.
+Return a copy, or an unmodifiable list such as one from `List.copyOf`. Returning the internal `ArrayList` lets the caller change your object without calling any of its methods.

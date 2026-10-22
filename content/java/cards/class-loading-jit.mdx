@@ -5,17 +5,28 @@ title: Class Loading and JIT Compilation
 topic: jvm
 level: interview
 heat: 2
-hook: "A class is loaded, linked and initialised on first use. Bytecode is interpreted at first; the JIT compiles hot methods to machine code."
+hook: "A class is loaded, linked and initialised the first time it is used. The JVM interprets its bytecode at first, and the JIT compiles hot methods to machine code."
 points:
-  - { k: "Loaders", v: "bootstrap, then platform, then application (system)" }
-  - { k: "Delegation", v: "ask the parent first; load it yourself only if the parent cannot" }
-  - { k: "First active use", v: "new, a static method call, or a non-constant static field" }
-  - { k: "Tiered JIT", v: "on by default in HotSpot: C1 compiles fast, C2 optimises", kind: default }
-  - { k: "Warm-up", v: "code gets faster once hot methods are compiled", kind: plus }
+  - { k: "Built-in loaders", v: "bootstrap loads core JDK classes, platform loads other Java SE classes, application loads your class path" }
+  - { k: "Parent delegation", v: "a loader asks its parent first, and loads the class itself only if the parent cannot find it" }
+  - { k: "First active use", v: "new, a static method call, or reading a static field that is not a constant initialises the class" }
+  - { k: "Tiered JIT (HotSpot)", v: "on by default: C1 compiles hot methods quickly, C2 recompiles the hottest ones fully optimised", kind: default }
+  - { k: "Warm-up", v: "a Java service gets faster some time after start-up, once its hot methods are compiled", kind: plus }
 trap:
   wrong: "A custom class loader can load its own java.lang.String."
-  right: "Delegation finds the real String first, and only the platform loader or its ancestors may define java.* classes; others get a SecurityException."
-sayIt: "Loaders delegate to the parent first; a class is then linked and initialised on first use. HotSpot interprets bytecode and its tiered JIT compiles hot methods to native code."
+  right: "Delegation finds the JDK's String first, and only the platform loader or its ancestors may define java.* classes; others get a SecurityException."
+  why: "A class loader looks as if it can turn any bytes into a class, and delegation never shows in normal code, so people assume nothing protects core classes."
+sayIt: "Class loaders delegate to their parent first; the class is then linked and initialised on first active use. HotSpot interprets bytecode at first and its tiered JIT compiles hot methods to native code, which is why a service speeds up after warm-up."
+cheat:
+  idea: "On first use, a class is loaded, verified and prepared, and its static initialisers run once. The JVM then interprets bytecode and compiles hot methods to machine code."
+  flow: "load → verify → prepare → resolve → initialise → interpret → JIT"
+  remember: "A loader asks its parent first, so java.* classes always come from the JDK."
+buildsOn: [jdk-jre-jvm, static-keyword, jvm-memory]
+scenarios:
+  - q: "Config has static final int MAX_RETRIES = 3 and a static block that prints. main prints Config.MAX_RETRIES, then calls Config.load(). What is printed?"
+    a: "3, then Config initialised. MAX_RETRIES is a constant, so javac copies the value 3 into main and Config is not initialised. Calling the static method load() is a first active use, so the static block runs then, once."
+  - q: "Class Lazy has a static block that prints. You call loader.loadClass(\"Lazy\"), then Class.forName(\"Lazy\"). When does the block run?"
+    a: "Only on Class.forName. loadClass loads the class but does not initialise it. Class.forName(name) loads and initialises it, so the static block runs then."
 confusedWith: [jvm-vs-jit-vs-gc]
 tags: [jvm, class-loader, jit, hotspot]
 visual: flow
@@ -26,6 +37,9 @@ sources:
   - title: "ClassLoader (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/ClassLoader.html"
     verifiedOn: "2026-10-19"
+  - title: "Class.forName(String): initialises the class (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Class.html#forName(java.lang.String)"
+    verifiedOn: "2026-10-21"
   - title: "Java Virtual Machine Guide (Java SE 25): HotSpot Performance Enhancements, Tiered Compilation"
     url: "https://docs.oracle.com/en/java/javase/25/vm/java-hotspot-virtual-machine-performance-enhancements.html"
     verifiedOn: "2026-10-19"
@@ -34,55 +48,84 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Class loading is how the [JVM](card:jdk-jre-jvm) brings a class into memory the first time your program needs it. A class loader, an object that finds class files, reads the class's bytes; the JVM checks and prepares them, then runs the class's [static](card:static-keyword) initialisers. JIT (just-in-time) compilation comes next: the JVM first runs bytecode with an interpreter, one instruction at a time, and compiles the methods that run often into machine code for the CPU.
+
 ## Why it exists
 
-Loading every class at start-up wastes time, and interpreting bytecode forever is slow. So the JVM loads classes when needed and compiles only hot code.
+A payment service has thousands of classes on its class path, from your code and its libraries, and one run uses only some of them. Loading all of them at start-up would waste time and memory, so the JVM loads each class when it is first needed. Interpreting bytecode keeps Java portable, but it is slow. Compiling everything before the program starts would make start-up slow, so the JIT compiles only the hot methods, using what it saw while they ran.
 
 ## How it works
 
-<Steps label="From .class file to fast machine code">
-  <Step title="Load">A class loader finds the bytes and creates the class.</Step>
-  <Step title="Verify">The bytecode is checked for a correct, safe structure.</Step>
-  <Step title="Prepare">Static fields are created with default values (0, null).</Step>
-  <Step title="Resolve">Symbolic names become real references, possibly later, on first use.</Step>
-  <Step title="Initialise">Static initialisers run, superclass first, once.</Step>
-  <Step title="Run">The interpreter runs bytecode; the JIT compiles hot methods.</Step>
-</Steps>
+<Mermaid
+  alt="From class file to machine code. Load: a class loader reads the bytes. Link: verify, prepare, resolve. Initialise: static initialisers run once. Then the interpreter runs the bytecode, and the JIT compiles hot methods, first with C1 and then with C2."
+  chart={`flowchart LR
+  L[Load] --> V[Verify] --> P[Prepare] --> R[Resolve] --> I[Initialise]
+  I --> INT[Interpreter runs bytecode]
+  INT -- "hot method" --> C1[C1: quick compile]
+  C1 -- "still hot" --> C2[C2: optimised machine code]`}
+/>
 
-- A class is identified by its name plus its defining loader, so two loaders can load two different `Config` classes.
+1. Your code uses a class for the first time, for example `new PaymentService()`. The application class loader is asked for it.
+2. The application loader first asks its parent, the platform loader, which first asks the bootstrap loader. Only if no parent can find the class does the application loader read it from your class path. This is parent delegation.
+3. The JVM links the class. Verification checks that the bytecode is well formed and safe; preparation creates the static fields with default values (0, false, null); resolution turns names in the bytecode into real references, either now or on first use.
+4. The JVM initialises the class: it runs the static field assignments and `static` blocks once, after initialising the superclass.
+5. The interpreter runs the class's methods and counts how often each one runs.
+6. A method that runs often enough is compiled by C1, which compiles fast. If it stays hot, C2 recompiles it into highly optimised machine code. This two-step scheme is called tiered compilation.
 
 ## Example
 
+`Config` prints when it is initialised, which shows that a constant does not trigger initialisation but a static method call does:
+
 ```java
 class Config {
-    static final int MAX = 10;                   // a constant variable
-    static { System.out.println("Config init"); }
+    static final int MAX_RETRIES = 3;                // a constant variable
+    static { System.out.println("Config initialised"); }
     static void load() { }
 }
 class Main {
     public static void main(String[] args) {
-        System.out.println(Config.MAX);  // a constant: Config not initialised
-        Config.load();                   // first use: Config initialises now
-        Config.load();                   // already initialised
+        System.out.println(Config.MAX_RETRIES);      // constant: copied in at compile time
+        Config.load();                               // first active use: initialise now
+        Config.load();                               // already initialised: nothing printed
     }
 }
 ```
 
 ```text output
-10
-Config init
+3
+Config initialised
 ```
+
+What to notice:
+
+- `3` prints before `Config initialised`. `MAX_RETRIES` is a constant variable, a `static final` primitive or String set to a compile-time constant, so javac copies its value into `Main`.
+- Remove `final` and `MAX_RETRIES` becomes an ordinary static field: reading it is then a first active use, and `Config initialised` prints first.
+- The second `load()` prints nothing, because a class is initialised only once.
+
+## Rules and defaults
+
+- **Built-in loaders:** bootstrap, built into the JVM, loads core classes such as `String` and is shown as `null` by `getClassLoader()`; platform loads the other Java SE and JDK classes, such as `java.sql`; application loads the class path and module path.
+- **Class identity:** a class is identified by its name plus the loader that defined it, so two loaders can each load a different `Config`.
+- **Core classes:** only the platform loader or its ancestors may define classes in `java.*` packages; any other loader gets a `SecurityException`.
+- **Class.forName vs loadClass:** `Class.forName(name)` loads and initialises the class; `ClassLoader.loadClass(name)` only loads it.
+- **Tiered compilation:** on by default in HotSpot; you rarely tune it.
+
+## Not to be confused with
+
+javac compiles your `.java` source into bytecode before the program runs; see [JDK, JRE and JVM](card:jdk-jre-jvm). The JIT compiles bytecode into machine code while the program runs, and only for hot methods. Rule: javac = source to bytecode, ahead of time; JIT = bytecode to machine code, at run time.
 
 ## Interview Qs
 
 ### What is parent delegation, and why is it used?
 
-Each loader asks its parent before loading a class itself. So a class the parent can see is loaded once, by the parent, and core `java.*` classes always come from the JDK, never from application code.
+Each class loader asks its parent before loading a class itself. So a class that the parent can see is loaded once, by the parent, and core `java.*` classes always come from the JDK, never from application code. Without it, two copies of a class could exist, or an application could replace `String`.
 
 ### ClassNotFoundException vs NoClassDefFoundError?
 
-ClassNotFoundException (checked): loading a class by name, as with `Class.forName`, finds nothing. NoClassDefFoundError (an Error): a class present at compile time is missing at run time.
+ClassNotFoundException is a checked exception: code asked for a class by name, as with `Class.forName("app.Plugin")`, and no loader found it. NoClassDefFoundError is an Error: a class that was present when the code was compiled is missing, or failed to initialise, when the JVM needs it at run time.
 
-### What does the JIT compiler do?
+### What does the JIT compiler do, and why does Java get faster after start-up?
 
-HotSpot first interprets bytecode and profiles it. Hot methods are compiled to native code, first by C1, then by C2, so the program speeds up after warm-up.
+HotSpot first interprets bytecode and records how often each method runs. Hot methods are compiled to machine code, first quickly by C1, then with full optimisation by C2, using the profile it gathered. Until that happens the code runs slower, so a freshly started service needs a warm-up before it reaches full speed.

@@ -5,66 +5,114 @@ title: "Optional"
 topic: functional
 level: intermediate
 heat: 2
-hook: "Optional is a return type that says 'there may be no result', so the caller must handle the empty case instead of meeting null."
+hook: "Optional is a return type that says 'there may be no result', so the caller must decide what to do when it is empty instead of meeting a null later."
 points:
-  - { k: "Meant for", v: "method return values that may be missing" }
-  - { k: "get()", v: "throws NoSuchElementException when empty; prefer orElseThrow()", kind: minus }
-  - { k: "Never null", v: "a method that returns Optional returns Optional.empty(), not null", kind: minus }
-  - { k: "Fields", v: "a poor fit: Optional is not Serializable", kind: minus }
+  - { k: "Meant for", v: "method return values that may be missing, such as findById for an id that does not exist" }
+  - { k: "Create", v: "Optional.ofNullable(v) is empty when v is null; Optional.of(v) throws NullPointerException for null" }
+  - { k: "Unwrap", v: "orElse, orElseGet or orElseThrow decide what an empty result means: a default or an exception" }
+  - { k: "get()", v: "throws NoSuchElementException when empty; the API prefers orElseThrow(), which says so in its name", kind: minus }
+  - { k: "Never null", v: "a method that returns Optional must return Optional.empty(), never null", kind: minus }
+  - { k: "Not for fields", v: "Optional is meant for return types; it is not Serializable and is a poor fit for fields or parameters", kind: minus }
 trap:
   wrong: "Optional.of(value) is safe for a value that might be null."
-  right: "of(null) throws NullPointerException. Use Optional.ofNullable(value) when the value may be null."
-sayIt: "Optional makes a missing result explicit in the return type. I create it with ofNullable, chain map or filter, and finish with orElse, orElseGet or orElseThrow, not a bare get()."
+  right: "Optional.of(null) throws NullPointerException. Use Optional.ofNullable(value) when the value may be null."
+  why: "The whole point of Optional is handling a missing value, so people assume every way of creating one accepts null. Only ofNullable does."
+sayIt: "Optional makes a missing result explicit in the return type. I create it with ofNullable, chain map or filter, and finish with orElse, orElseGet or orElseThrow, not a bare get(). A method that returns Optional never returns null."
+cheat:
+  idea: "Optional<T> is a box that holds one value or nothing. A method returns it when there may be no result, so the caller must decide what empty means."
+  remember: "Create with ofNullable, finish with orElse, orElseGet or orElseThrow; never return null from a method that returns Optional."
+buildsOn: [lambdas, streams]
+scenarios:
+  - q: "findById(1) returns a present Optional. What does findById(1).orElse(loadFromDatabase(1)) do?"
+    a: "It still calls loadFromDatabase(1). Java computes every argument before calling a method, so the database call runs, and orElse then throws its result away. Use orElseGet(() -> loadFromDatabase(1)): the supplier runs only when the Optional is empty."
+  - q: "A method is declared to return Optional<Payment>, and a teammate writes return null; for a cold cache. What breaks?"
+    a: "Callers write findById(id).map(...) or .isPresent(), which throws NullPointerException on null: the very bug Optional is meant to prevent. Return Optional.empty() instead."
 confusedWith: [orelse-vs-orelseget]
 tags: [optional, null-safety, java-8]
-visual: table
+visual: flow
 sources:
-  - title: "Optional (Java SE 25 API)"
+  - title: "Optional: return-type intent, never null, empty() not a singleton, get() vs orElseThrow(), @since versions (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/Optional.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+`Optional<T>` is a small box that holds either one non-null value or nothing; a box with nothing is called empty. A method returns `Optional<Payment>` instead of `Payment` when it may have no result, such as `findById` for an id that does not exist. The return type then tells every caller "handle the empty case". Optional's methods take [lambdas](card:lambdas), so callers handle both cases without writing `if (x != null)`. You met it already: `findFirst` on a [stream](card:streams) returns one.
 
 ## Why it exists
 
-A `null` return looks like any other value, so callers forget to check it and get a `NullPointerException` later, far from the cause.
+When `findById` returns `null` for a missing payment, its signature looks exactly like one that never returns `null`. Callers forget to check, and a `NullPointerException` appears later, far from the cause. With `Optional<Payment>` the caller cannot call payment methods directly; they must unwrap the box and say what an empty result means: a default value, an exception, or nothing. Java 8 added Optional mainly for this purpose, as a method return type.
 
 ## How it works
 
-| Step | Methods |
-|---|---|
-| Create | `Optional.of(v)`, `Optional.ofNullable(v)`, `Optional.empty()` |
-| Transform (skipped when empty) | `map`, `flatMap`, `filter` |
-| Get the value out | `orElse`, `orElseGet`, `orElseThrow()` (Java 10+), `ifPresentOrElse` (Java 9+) |
-| Test | `isPresent()`, `isEmpty()` (Java 11+) |
+<Mermaid
+  alt="findById returns an Optional. If it holds a payment, map transforms the value and orElse returns it. If it is empty, map is skipped and orElse returns the fallback value."
+  chart={`flowchart LR
+  F["findById(id)"] --> O{"Optional"}
+  O -- "has a payment" --> M["map(p -> ...)"] --> V(["the mapped value"])
+  O -- "empty" --> E["map skipped"] --> D(["orElse fallback"])`}
+/>
 
-- Test with `isEmpty()`, not `== Optional.empty()`: the empty instance is not promised to be a singleton.
-- `map` wraps the result; use `flatMap` when the function already returns an Optional.
+1. The method creates the Optional. `Optional.ofNullable(v)` gives an empty Optional when `v` is null; `Optional.of(v)` requires a non-null value; `Optional.empty()` says "no result" directly.
+2. The caller transforms the value with `map`, `filter` or `flatMap`. Each one runs its lambda only when a value is present; on an empty Optional it returns empty and skips the lambda.
+3. The caller ends the chain by deciding what empty means: `orElse(default)`, `orElseGet(supplier)`, `orElseThrow(...)` or `ifPresentOrElse(action, emptyAction)`.
+4. Only at that last step does a plain value, or an exception, come out of the box.
 
 ## Example
 
+A small payment store and a lookup that may find nothing.
+
 ```java
-Optional<User> findUser(String id) {
-    return Optional.ofNullable(users.get(id));         // empty, never null
+static Map<Long, Payment> store = Map.of(1L, new Payment(1, 80_000, Status.PAID));
+
+static Optional<Payment> findById(long id) {
+    return Optional.ofNullable(store.get(id));           // empty, never null
 }
 
-String city = findUser("42")
-        .map(User::address)
-        .map(Address::city)
-        .orElse("unknown");
-
-User u = findUser("7").orElseThrow(() -> new IllegalArgumentException("no user 7"));
+String s1 = findById(1).map(p -> p.status().name()).orElse("UNKNOWN");
+String s2 = findById(9).map(p -> p.status().name()).orElse("UNKNOWN");
+System.out.println(s1 + " " + s2);
+findById(9).ifPresentOrElse(p -> System.out.println("found " + p.id()),
+        () -> System.out.println("no payment 9"));
 ```
+
+```text output
+PAID UNKNOWN
+no payment 9
+```
+
+What to notice:
+
+- `store.get(9L)` returns null, and `ofNullable` turns that into an empty Optional, so `findById` never returns null.
+- For id 9 the `map` lambda never runs; the empty Optional passes through and `orElse` supplies `"UNKNOWN"`.
+- Replace `ofNullable` with `Optional.of` and `findById(9)` throws `NullPointerException`, because `of` does not accept null.
+- When a missing payment is an error, `findById(9).orElseThrow(() -> new IllegalArgumentException("no payment 9"))` reports it at the right place.
+
+## Rules and defaults
+
+- **Versions:** `of`, `ofNullable`, `map`, `orElse`, `orElseGet` and `isPresent` came in Java 8; `ifPresentOrElse`, `or` and `stream()` in Java 9; `orElseThrow()` with no arguments in Java 10; `isEmpty()` in Java 11.
+- **get():** returns the value or throws `NoSuchElementException`. The API names `orElseThrow()` as the preferred alternative: same behaviour, clearer name.
+- **map returning null:** if the `map` function returns null, the result is an empty Optional, not an error.
+- **Testing for empty:** use `isEmpty()` or `isPresent()`. Do not compare with `== Optional.empty()`, because the empty instance is not promised to be a single shared object.
+- **Primitive versions:** `OptionalInt`, `OptionalLong` and `OptionalDouble`, which [number streams](card:primitive-streams) return.
+
+## Not to be confused with
+
+`orElse(value)` takes a ready value, and Java computes that value before the call, even when the Optional is not empty. `orElseGet(supplier)` takes a lambda that runs only when the Optional is empty. `map` wraps its result in an Optional; `flatMap` is for a function that already returns an Optional.
+
+Rule: a constant default: `orElse`; a costly default, such as a database call: `orElseGet`.
 
 ## Interview Qs
 
 ### Why Optional if null already exists?
 
-Null can mean "absent" too, but nothing forces a check. Optional puts absence in the method's type, so the caller has to decide what happens when there is no value.
-
-### What is the difference between orElse and orElseGet?
-
-`orElse` takes a value that is always computed; `orElseGet` takes a supplier that runs only when empty. See [orElse vs orElseGet](compare:orelse-vs-orelseget).
+`null` can mean "absent" too, but nothing in the method's type says it might be null, and nothing forces a check. Optional puts absence into the return type, so the caller has to decide what happens when there is no value. It does not remove every `NullPointerException`; it makes this one case explicit.
 
 ### Where should you not use Optional?
 
-The API says it is mainly for return types. Avoid it as a field (it is not Serializable) or a parameter, and never return `null` from a method declared to return Optional.
+The API says it is mainly for return types. Avoid it as a field, since it is not Serializable, and as a method parameter, where callers would have to wrap every argument. Never return `null` from a method declared to return Optional.
+
+### When do you use flatMap on an Optional?
+
+When the function you apply itself returns an Optional. If `Payment.refund()` returns `Optional<Refund>`, `findById(id).map(Payment::refund)` gives `Optional<Optional<Refund>>`. `flatMap(Payment::refund)` gives a plain `Optional<Refund>`, which is empty if either step finds nothing.

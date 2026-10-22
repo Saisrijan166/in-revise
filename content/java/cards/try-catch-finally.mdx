@@ -5,17 +5,30 @@ title: try-catch-finally and try-with-resources
 topic: exceptions
 level: intermediate
 heat: 3
-hook: "try runs the risky code, the first matching catch handles it, finally cleans up on every exit; try-with-resources closes for you."
+hook: "try holds code that may fail, the first matching catch handles the exception, and finally runs on every exit. try-with-resources closes files and connections for you."
 points:
-  - { k: "Catch order", v: "subclass before superclass, or it does not compile", kind: minus }
-  - { k: "finally", v: "runs after normal exit, exception or return; not if the JVM exits" }
-  - { k: "Multi-catch", v: "catch (A | B e) since Java 7; A and B must be unrelated" }
-  - { k: "try-with-resources", v: "Java 7: closes AutoCloseable resources, last opened first" }
-  - { k: "Suppressed", v: "a close() failure is attached to the main exception, not lost", kind: plus }
+  - { k: "Catch order", v: "put a subclass before its superclass; the other way round does not compile", kind: minus }
+  - { k: "finally", v: "runs after a normal end, an exception or a return; it does not run if the JVM stops, as on System.exit" }
+  - { k: "Multi-catch (Java 7)", v: "catch (A | B e) handles two types in one block; A and B must not be subclasses of each other" }
+  - { k: "try-with-resources (Java 7)", v: "closes every AutoCloseable it opened, last opened first, before catch and finally run" }
+  - { k: "Suppressed", v: "if close() also throws, that exception is attached to the main one, not lost", kind: plus }
 trap:
   wrong: "A return inside finally is harmless."
-  right: "It discards any exception or earlier return from try or catch, so the error is lost without a trace."
-sayIt: "try holds risky code, the first matching catch handles the exception, and finally runs on every exit for cleanup. For anything closeable I use try-with-resources: it closes in reverse order and keeps close errors as suppressed."
+  right: "It throws away any exception or earlier return from try or catch, so the failure disappears without a trace."
+  why: "finally looks like a place for any last step, and in a quick test without an exception the return works as expected."
+sayIt: "try holds risky code, the first matching catch handles the exception, and finally runs on every exit for cleanup. For anything closeable I use try-with-resources: it closes in reverse order, before catch and finally, and keeps close() errors as suppressed exceptions."
+cheat:
+  idea: "try runs code that may fail; the first catch whose type matches handles the exception; finally runs on every exit. try-with-resources closes what it opened automatically."
+  flow: "try → close resources → matching catch → finally"
+  remember: "Never return from finally: it discards the exception, and catch a subclass before its parent."
+buildsOn: [exception-hierarchy]
+scenarios:
+  - q: "A method is try { return \"from try\"; } finally { System.out.println(\"finally first\"); }. The caller prints the result. What appears, in which order?"
+    a: "finally first, then from try. The return value is ready, but finally runs before the method actually returns, so its line prints first."
+  - q: "static int lost() { try { throw new IllegalStateException(); } finally { return 1; } }. What does lost() do?"
+    a: "It returns 1, and the IllegalStateException is gone. A return in finally replaces the pending exception. javac -Xlint:finally warns that the finally clause cannot complete normally."
+  - q: "Inside try (var receipt = new Receipt()) the write throws IllegalArgumentException, and a catch for it prints a message. Which runs first: receipt.close() or the catch?"
+    a: "close(). try-with-resources closes its resources as soon as the try block ends, so the catch and finally blocks see the resource already closed."
 confusedWith: [final-vs-finally-vs-finalize]
 tags: [exceptions, try-catch, finally, try-with-resources]
 visual: flow
@@ -35,60 +48,118 @@ sources:
   - title: "JEP 213: Milling Project Coin (effectively final resources, Java 9)"
     url: "https://openjdk.org/jeps/213"
     verifiedOn: "2026-10-19"
+  - title: "JEP 421: Deprecate Finalization for Removal (JDK 18)"
+    url: "https://openjdk.org/jeps/421"
+    verifiedOn: "2026-10-19"
   - title: "Exception Handling Interview Questions (InterviewBit)"
     url: "https://www.interviewbit.com/exception-handling-interview-questions/"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+A try-catch-finally statement is how you handle the [exceptions](card:exception-hierarchy) from the previous concept. The `try` block holds code that may throw. A `catch` block names an exception type and runs only when that type, or a subclass, is thrown. The `finally` block runs last, whatever happened. try-with-resources (Java 7) is a form of try that opens resources, such as files or database connections, in brackets and closes them for you.
+
 ## Why it exists
 
-Code must recover from failures and still release files, sockets and locks. catch handles the failure; finally and try-with-resources make sure cleanup is not skipped.
+A payment service opens a receipt file, writes to it and must close it, whether the write works or fails. If the close call sits at the end of the try block, an exception skips it and the file stays open; enough of those and the process runs out of file handles. catch lets you recover from the failure, and finally or try-with-resources makes sure the cleanup always runs. try-with-resources also removes the long, easy-to-get-wrong finally code that closing by hand needs.
 
 ## How it works
 
-<Steps label="What runs, in order">
-<Step title="try">
-The block runs until it ends or something is thrown.
-</Step>
-<Step title="Close resources">
-try-with-resources only: resources close, last opened first.
-</Step>
-<Step title="catch">
-Only the first catch whose type matches runs; the rest are skipped.
-</Step>
-<Step title="finally">
-Runs on every exit. If no catch matched, the exception then moves up to the caller.
-</Step>
-</Steps>
+<Mermaid
+  alt="Flow of a try statement. The try block runs. If it is try-with-resources, its resources close first. If an exception was thrown, Java picks the first catch whose type matches and runs it. Then finally runs in every case. If no catch matched, the exception continues to the caller after finally."
+  chart={`flowchart TD
+  T[try block runs] --> R[resources close, last opened first]
+  R --> Q{exception thrown?}
+  Q -- no --> F[finally runs]
+  Q -- yes --> C{a catch type matches?}
+  C -- yes --> H[that one catch runs] --> F
+  C -- no --> F
+  F --> E[method continues, or the unmatched exception goes to the caller]`}
+/>
 
-- Since Java 9 an existing effectively final variable can be the resource: `try (in) { }`.
+1. The try block runs from the top until it ends or something throws. The lines after the throwing line are skipped.
+2. In try-with-resources, each resource is closed as soon as the try block ends, in reverse order of opening. This happens before any catch or finally.
+3. If an exception was thrown, Java checks the catch blocks from top to bottom and runs only the first whose type matches. The others are skipped.
+4. The finally block runs next, in every case: after a normal end, after a catch, and even after a `return` in try or catch.
+5. If no catch matched, the exception continues up to the calling method once finally has run.
+
+So the key is: catch is for recovering, and finally or try-with-resources is for cleanup that must not be skipped.
 
 ## Example
 
+`Receipt` stands for any resource. It prints when it opens and closes, so the order is visible:
+
 ```java
-int firstByte(String path) {
-    try (var in = new FileInputStream(path)) {   // closed automatically
-        return in.read();
-    } catch (FileNotFoundException e) {          // subclass first
-        return -1;
-    } catch (IOException e) {                    // then its parent
-        throw new UncheckedIOException(e);
+class Receipt implements AutoCloseable {
+    Receipt() { System.out.println("open receipt"); }
+    void write(long paise) {
+        if (paise <= 0) throw new IllegalArgumentException("amount " + paise);
+        System.out.println("write " + paise);
+    }
+    @Override public void close() { System.out.println("close receipt"); }
+}
+```
+
+`record` writes one amount and handles a bad one. It is called with 500 and then with 0:
+
+```java
+static void record(long paise) {
+    try (var receipt = new Receipt()) {
+        receipt.write(paise);
+    } catch (IllegalArgumentException e) {
+        System.out.println("caught " + e.getMessage());
     } finally {
-        System.out.println("after close, even after return");
+        System.out.println("finally");
     }
 }
 ```
+
+```text output
+open receipt
+write 500
+close receipt
+finally
+open receipt
+close receipt
+caught amount 0
+finally
+```
+
+What to notice:
+
+- There is no `receipt.close()` in the code. try-with-resources calls it on both runs, even when `write` throws.
+- In the second run, `close receipt` prints before `caught amount 0`: the resource is closed before the catch block runs, so a catch must not try to use it.
+- `finally` prints on both runs. With a plain try and no resources, you would need `receipt.close()` inside finally, with a null check, to get the same safety.
+
+## Rules and defaults
+
+- **Valid forms:** a try needs at least one catch, a finally, or resources. A bare `try { }` does not compile.
+- **Catch order:** a catch for a subclass after a catch for its superclass is a compile error, for example `FileNotFoundException` after `IOException`, because it could never run.
+- **Multi-catch (Java 7):** `catch (IOException | SQLException e)` handles both types in one block. The variable `e` is implicitly final.
+- **Resources:** must implement `AutoCloseable`, an interface with one method, `close()`. Since Java 9 an existing final or effectively final variable can be the resource: `try (in) { }`.
+- **Suppressed exceptions:** if the try block throws and `close()` also throws, the try block's exception is the one thrown. The close exception is attached to it; `getSuppressed()` returns it.
+- **When finally does not run:** if the JVM stops first, for example on `System.exit` or a crash.
+
+## Not to be confused with
+
+`finally` is a block that runs on every exit from a try. `final` is a keyword that stops a variable from being reassigned, a method from being overridden, or a class from being extended; see [final](card:final-keyword). `finalize()` is an `Object` method the garbage collector might call before freeing an object; it is deprecated, and marked for removal since Java 18. Rule: finally = cleanup block, final = cannot change, finalize = do not use.
+
+## Common mistakes
+
+- **"I close the file at the end of the try block."** An exception earlier in the block skips that line, so the file stays open. Use try-with-resources.
+- **"catch (Exception e) at the top, the specific ones below."** That does not compile, because the broad catch already covers the specific types. Specific first, broad last.
 
 ## Interview Qs
 
 ### Does finally always run? Why not clean up in catch?
 
-catch runs only when a matching exception occurs; finally runs on every exit, including return and break. It may not run if the JVM exits first, for example on System.exit or a crash.
+catch runs only when a matching exception is thrown, so cleanup there is skipped on success and on other exception types. finally runs on every exit, including return and break. It is skipped only if the JVM stops first, for example on System.exit or a crash.
 
 ### Why use try-with-resources when finally exists?
 
-It is shorter and you cannot forget close(). It closes in reverse order, and if both the body and close() throw, the body's exception wins and the close() one is kept as suppressed.
+It is shorter, and you cannot forget to close. It closes resources in reverse order, and if both the body and close() throw, it keeps the body's exception and attaches the close() one as suppressed. A hand-written finally that calls close() can throw and replace the original exception.
 
 ### Can a try have no catch?
 
-Yes: try-finally, or try-with-resources on its own. A try with neither catch, finally nor resources is a compile error.
+Yes: try-finally, or try-with-resources on its own, which then only closes its resources and lets any exception continue to the caller. A try with no catch, no finally and no resources is a compile error.

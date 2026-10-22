@@ -5,24 +5,43 @@ title: throw, throws and Custom Exceptions
 topic: exceptions
 level: beginner
 heat: 2
-hook: "throw raises one exception now; throws in the signature warns callers. A custom exception extends Exception or RuntimeException."
+hook: "throw raises one exception now; throws in the signature warns callers what may escape. A custom exception is your own class extending Exception or RuntimeException."
 points:
-  - { k: "throw", v: "a statement: throw new IllegalStateException(\"closed\")" }
-  - { k: "throws", v: "in the signature; required for checked, optional for unchecked" }
-  - { k: "Custom checked", v: "extends Exception; callers must catch or declare it" }
-  - { k: "Custom unchecked", v: "extends RuntimeException; no compile-time check" }
-  - { k: "Keep the cause", v: "add a (String, Throwable) constructor and pass it to super" }
+  - { k: "throw", v: "a statement that throws one exception object at once: throw new IllegalArgumentException(\"amount\")" }
+  - { k: "throws", v: "a list in the method signature; required for checked exceptions that escape, optional for unchecked ones" }
+  - { k: "Custom checked", v: "a class that extends Exception; every caller must catch it or declare it in throws" }
+  - { k: "Custom unchecked", v: "a class that extends RuntimeException; callers are not forced to handle it" }
+  - { k: "Keep the cause", v: "give your exception a (String, Throwable) constructor and pass both to super", kind: plus }
+  - { k: "Propagation", v: "an exception nobody catches moves up to the caller, then its caller, until a catch matches" }
 trap:
-  wrong: "Wrap a low-level error with new ServiceException(e.getMessage())."
-  right: "Pass the exception itself as the cause: new ServiceException(msg, e). Otherwise its type and stack trace are lost."
-sayIt: "throw raises an exception object; throws declares what may escape a method. For custom exceptions I extend Exception or RuntimeException and always pass the original exception on as the cause."
-confusedWith: []
+  wrong: "Wrap a low-level error with new PaymentFailedException(e.getMessage())."
+  right: "Pass the exception itself as the cause: new PaymentFailedException(msg, e). Otherwise its type and stack trace are lost."
+  why: "The message often looks like all the information there is, and the wrapped exception prints fine until someone needs to find where the original failure happened."
+sayIt: "throw raises an exception object; throws declares what may escape a method, and the compiler requires it for checked ones. For custom exceptions I extend Exception or RuntimeException and always pass the original exception on as the cause."
+cheat:
+  idea: "throw raises an exception; throws lists in the signature what a method may pass on. Custom exceptions extend Exception (checked) or RuntimeException (unchecked)."
+  code: |
+    throw new PaymentFailedException("charge failed", e);   // e = the cause
+  remember: "Pass the original exception as the cause, not just its message, to keep its type and stack trace."
+buildsOn: [exception-hierarchy, try-catch-finally]
+scenarios:
+  - q: "pay() catches an IOException from the gateway and throws new PaymentFailedException(\"charge failed\", e). Nothing catches it, so the stack trace is printed. What does it show?"
+    a: "First PaymentFailedException: charge failed with its call lines, then a Caused by: java.io.IOException line with the gateway's call lines. Because the cause was passed on, you can see both what failed and where it started."
+  - q: "PaymentService.pay() can fail because the bank is unreachable, which a caller can retry, and because the amount is negative, which is a bug in the caller. Which exception types do you use?"
+    a: "A checked custom exception, such as PaymentFailedException extends Exception, for the unreachable bank, because the caller can recover by retrying. The standard unchecked IllegalArgumentException for a negative amount, because the caller must fix its code, not handle it."
+confusedWith: [throw-vs-throws]
 tags: [exceptions, throw, throws, custom-exception, chaining]
-visual: table
+visual: code
 sources:
   - title: "JLS SE 25, 8.4.6 Method Throws"
     url: "https://docs.oracle.com/javase/specs/jls/se25/html/jls-8.html#jls-8.4.6"
     verifiedOn: "2026-10-19"
+  - title: "JLS SE 25, 14.18 The throw Statement"
+    url: "https://docs.oracle.com/javase/specs/jls/se25/html/jls-14.html#jls-14.18"
+    verifiedOn: "2026-10-19"
+  - title: "JLS SE 25, 11.3 Run-Time Handling of an Exception"
+    url: "https://docs.oracle.com/javase/specs/jls/se25/html/jls-11.html#jls-11.3"
+    verifiedOn: "2026-10-21"
   - title: "Chained Exceptions (The Java Tutorials)"
     url: "https://docs.oracle.com/javase/tutorial/essential/exceptions/chained.html"
     verifiedOn: "2026-10-19"
@@ -34,43 +53,103 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+`throw` is the statement that raises an exception: `throw new IllegalArgumentException("amount must be positive")` creates the object and throws it at once. `throws` is a list in a method's signature, such as `void pay(long paise) throws PaymentFailedException`, that tells callers which [checked exceptions](card:exception-hierarchy) may come out of it. A custom exception is a class you write yourself, extending `Exception` for a checked one or `RuntimeException` for an unchecked one.
+
 ## Why it exists
 
-Code must report problems it finds, and callers must know what may go wrong. Platform exceptions cannot name every business failure, so you write your own.
+Your own code finds problems that only it can see, such as a negative amount or a declined payment, so it needs a way to raise them: that is `throw`. Callers need to know which expected failures to plan for, and the compiler checks this through `throws`. The JDK's exceptions describe technical failures, like `IOException`. A name such as `PaymentFailedException` tells a caller what went wrong in business terms, and lets it catch that failure apart from all others.
 
 ## How it works
 
-<Compare id="throw-vs-throws" />
+<Mermaid
+  alt="Exception propagation with chaining. main calls pay, pay calls gateway.charge. charge throws IOException. pay catches it and throws PaymentFailedException with the IOException as its cause. main catches PaymentFailedException and can read the cause with getCause."
+  chart={`flowchart LR
+  M[main] -- calls --> P["pay(500)"]
+  P -- calls --> G["gateway.charge(500)"]
+  G -. "1. throws IOException" .-> P
+  P -. "2. throws PaymentFailedException, cause = IOException" .-> M
+  M --> C["3. catch: getMessage(), getCause()"]`}
+/>
 
-- An uncaught exception moves up the call stack to the nearest matching catch.
-- The stack trace prints each wrapped cause as a `Caused by:` line.
+1. `gateway.charge` fails and throws an `IOException`. The rest of `charge` is skipped.
+2. Java looks for a matching catch in `charge`, finds none, and passes the exception up to its caller, `pay`. This moving up the calls is called propagation.
+3. `pay` catches the `IOException` and throws a new `PaymentFailedException`, passing the `IOException` as its cause. This wrapping is called exception chaining.
+4. `pay` declares `throws PaymentFailedException`, because that checked exception now leaves the method. Without it, `pay` does not compile.
+5. `main` catches `PaymentFailedException`. `getCause()` returns the original `IOException`, and a printed stack trace shows it as a `Caused by:` line.
+
+So the key is: `throw` acts, `throws` declares, and the cause links the new exception to the old one.
 
 ## Example
 
+`PaymentService` raises a standard exception for a bad argument and its own checked exception for a gateway failure:
+
 ```java
-class PaymentException extends Exception {                    // checked
-    PaymentException(String msg, Throwable cause) {
-        super(msg, cause);                                    // keep the cause
+class PaymentFailedException extends Exception {             // checked
+    PaymentFailedException(String message, Throwable cause) {
+        super(message, cause);                               // keep the cause
     }
 }
-void pay(long amount) throws PaymentException {
-    try { ledger.debit(amount); }
-    catch (SQLException e) {
-        throw new PaymentException("debit failed", e);         // chain it
+
+void pay(long paise) throws PaymentFailedException {
+    if (paise <= 0) throw new IllegalArgumentException("amount must be positive");
+    try {
+        gateway.charge(paise);                               // may throw IOException
+    } catch (IOException e) {
+        throw new PaymentFailedException("charge failed for " + paise, e);
     }
 }
 ```
+
+With a gateway that always times out, the caller prints the message and the cause:
+
+```java
+try {
+    service.pay(500);
+} catch (PaymentFailedException e) {
+    System.out.println(e.getMessage());
+    System.out.println("cause: " + e.getCause());
+}
+```
+
+```text output
+charge failed for 500
+cause: java.io.IOException: gateway timeout
+```
+
+What to notice:
+
+- `throws PaymentFailedException` is required, because the exception is checked and leaves `pay`. `IllegalArgumentException` is unchecked, so it needs no entry in `throws`.
+- `super(message, cause)` hands both values to `Throwable`, which stores them. Drop the cause argument and `getCause()` prints `null`, so the gateway's real error is lost.
+- The caller catches the business-level exception only; it does not need to know that the gateway uses I/O.
+
+## Rules and defaults
+
+- **throw:** takes exactly one object whose class is `Throwable` or a subclass. A statement right after it in the same block is unreachable, which is a compile error.
+- **throws:** must list every checked exception that can escape the method or constructor; unchecked ones may be listed for documentation, but need not be.
+- **Overriding:** an overriding method cannot declare broader checked exceptions than the parent method; see [polymorphism](card:polymorphism).
+- **Naming:** by convention a custom exception's name ends in `Exception`.
+
+## Not to be confused with
+
+`throw` is an action inside a method body that raises one exception object now. `throws` is a declaration in the signature, naming exception classes that may leave the method later. Rule: throw = do it, throws = warn about it.
+
+## Common mistakes
+
+- **"Every business error needs its own exception class."** Reuse standard ones when they fit: `IllegalArgumentException` for a bad argument, `IllegalStateException` for a call at the wrong time. Write your own only when callers must tell your failure apart.
+- **"Catch, then throw new RuntimeException()."** With no cause, the original exception and its stack trace are gone. Write `throw new RuntimeException("context", e)`.
 
 ## Interview Qs
 
 ### Why do we need both throw and throws?
 
-They do different jobs. throw is the action that raises one exception. throws is part of the method's contract, listing what may escape so callers can handle it; the compiler requires it for checked exceptions.
+They do different jobs. `throw` is the action that raises one exception at a specific line. `throws` is part of the method's contract: it lists what may escape so callers can handle it, and the compiler requires it for checked exceptions. One method can throw without declaring, if the exception is unchecked.
 
 ### When should you write a custom exception?
 
-When no platform exception fits, or when callers need to tell your failures apart from others. Otherwise reuse standard ones such as IllegalArgumentException.
+When no standard exception describes the failure, or when callers need to catch your failure separately from others, such as `PaymentFailedException`. Make it checked if the caller can reasonably recover, unchecked if it signals a bug. Otherwise reuse standard ones such as `IllegalArgumentException`.
 
-### What is exception chaining?
+### What is exception chaining, and why does it matter?
 
-Wrapping a low-level exception as the cause of a higher-level one, through a constructor or initCause(). getCause() returns the original, so its stack trace is kept.
+Wrapping a low-level exception as the cause of a higher-level one, through a constructor that takes a `Throwable`, or through `initCause()`. `getCause()` returns the original, and the stack trace prints it as `Caused by:`. Without it, you see where the wrapper was thrown, but not what really failed.

@@ -5,27 +5,51 @@ title: Garbage Collection
 topic: jvm
 level: intermediate
 heat: 3
-hook: "The GC frees every object that no chain of references from a GC root can reach. You never free memory, and you cannot force a GC."
+hook: "The garbage collector frees every heap object that no chain of references from a running method, static field or live thread can reach. You never free memory yourself."
 points:
-  - { k: "Garbage", v: "not reachable from GC roots: live locals, static fields, threads" }
-  - { k: "Cycles", v: "objects that only point at each other are still collected", kind: plus }
-  - { k: "Generations", v: "most objects die young: collect the young part often, cheaply" }
-  - { k: "Pause", v: "stop-the-world: the app halts while the GC works", kind: minus }
-  - { k: "Leak", v: "unneeded objects still referenced: the GC cannot free them", kind: minus }
+  - { k: "Garbage", v: "an object that no chain of references from a GC root, such as a running method's local, can reach" }
+  - { k: "Cycles", v: "two objects that point only at each other, with no root reaching them, are still freed", kind: plus }
+  - { k: "Generations", v: "new objects start in the young generation, which is collected often and cheaply because most objects die young" }
+  - { k: "Stop-the-world", v: "during some GC phases every application thread is paused, which adds delay to requests", kind: minus }
+  - { k: "Default (JDK 25)", v: "G1 on machines with 2 or more CPUs and at least 1792 MB; Serial otherwise", kind: default }
+  - { k: "Leak", v: "an object you no longer need but still reference, for example from a static list, is never freed", kind: minus }
 trap:
   wrong: "System.gc() runs the garbage collector right away."
-  right: "It only suggests a collection. The JVM makes a best effort with no guarantee, so never rely on GC timing."
-sayIt: "The GC keeps what is reachable from GC roots and frees the rest, mostly in the young generation. G1 is the usual default; ZGC suits very low pauses. A leak is a reference we forgot to drop."
+  right: "It only suggests a collection. The JVM makes a best effort with no guarantee, so never rely on when the GC runs."
+  why: "The method name sounds like a command, and on a small test program a collection often does happen right after the call."
+sayIt: "The GC keeps what is reachable from GC roots and frees the rest, mostly in the cheap young-generation collections. G1 is the usual default; ZGC suits very low pauses. A memory leak in Java is a reference we forgot to drop."
+cheat:
+  idea: "The garbage collector frees heap objects nothing can reach. It starts from GC roots (running methods' locals, static fields) and keeps all it reaches."
+  flow: "eden → survivor space → old generation"
+  remember: "Java can still leak: an object held in a static list stays reachable forever."
+buildsOn: [jvm-memory]
+scenarios:
+  - q: "Payment p = new Payment(42, 500, Status.PAID); audit.add(p); p = null; Can the GC now free that Payment?"
+    a: "No, as long as the audit list itself is reachable. Setting p to null removes one reference, but the list still holds another, so a GC root still reaches the object."
+  - q: "A payment API runs on the Parallel collector, and every few minutes some requests take over a second. What would you try first?"
+    a: "Look at the GC logs, then try G1, which aims at a pause goal of 200 ms by default, or ZGC, which keeps pauses under a millisecond. Parallel stops the application for the whole collection, and the Oracle guide says to choose it when pauses of a second or more are acceptable."
 confusedWith: [jvm-vs-jit-vs-gc]
 tags: [gc, memory-leak]
-visual: table
+visual: flow
 sources:
   - title: "HotSpot GC Tuning Guide (Java SE 25): Garbage Collector Implementation"
     url: "https://docs.oracle.com/en/java/javase/25/gctuning/garbage-collector-implementation.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "HotSpot GC Tuning Guide (Java SE 25): Available Collectors"
     url: "https://docs.oracle.com/en/java/javase/25/gctuning/available-collectors.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "HotSpot GC Tuning Guide (Java SE 25): Ergonomics (server-class machine, default collector)"
+    url: "https://docs.oracle.com/en/java/javase/25/gctuning/ergonomics.html"
+    verifiedOn: "2026-10-21"
+  - title: "HotSpot GC Tuning Guide (Java SE 25): Garbage-First Garbage Collector (regions, eden, survivor, MaxGCPauseMillis=200)"
+    url: "https://docs.oracle.com/en/java/javase/25/gctuning/garbage-first-g1-garbage-collector1.html"
+    verifiedOn: "2026-10-21"
+  - title: "Garbage Collection Roots (Eclipse Memory Analyzer help)"
+    url: "https://help.eclipse.org/latest/topic/org.eclipse.mat.ui.help/concepts/gcroots.html"
+    verifiedOn: "2026-10-21"
+  - title: "ThreadLocal: a thread keeps its copy while the thread is alive (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/ThreadLocal.html"
+    verifiedOn: "2026-10-21"
   - title: "System.gc() (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/System.html#gc()"
     verifiedOn: "2026-10-19"
@@ -34,47 +58,91 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Garbage collection is the JVM freeing heap memory used by objects your program can no longer reach. An object is reachable if a chain of references leads to it from a GC root: a local variable of a method that is still running, a static field, or a live thread. The garbage collector (GC) is the part of the JVM that finds unreachable objects and reuses their memory. You never free memory yourself; you only stop referring to objects.
+
 ## Why it exists
 
-Freeing memory by hand causes crashes and leaks. The JVM finds objects nothing can reach and reuses their memory.
+In languages like C, you free memory by hand. Free it too early and the program later reads memory that now holds something else; forget it and memory fills up slowly. Both bugs are hard to find. Java removes them: when no reference reaches a `Payment` any more, the GC frees it. The price is CPU time for the GC, and short pauses while it works, which is why there are several collectors to choose from.
 
 ## How it works
 
-| Collector | How it pauses | Choose it for | Flag |
-|---|---|---|---|
-| Serial | one GC thread, app stopped | data up to about 100 MB, or one CPU | `-XX:+UseSerialGC` |
-| Parallel | many GC threads, app stopped | throughput; 1 s pauses are fine | `-XX:+UseParallelGC` |
-| G1 | mostly concurrent, meets a pause goal | general use; default on most machines | `-XX:+UseG1GC` |
-| ZGC | concurrent, pauses under 1 ms | low latency, heaps up to 16 TB | `-XX:+UseZGC` |
+<Mermaid
+  alt="Reachability. GC roots, a local variable and a static field, point to objects A and B, and B points to C. These three are kept. Objects X and Y point only at each other and no root reaches them, so both are garbage."
+  chart={`flowchart LR
+  R1[GC root: local variable] --> A((A))
+  R2[GC root: static field] --> B((B))
+  B --> C((C))
+  X(("X: garbage")) --> Y(("Y: garbage"))
+  Y --> X`}
+/>
 
-- New objects start in the young generation; survivors of a few minor GCs move to the old generation.
+1. New objects are created in the young generation, in an area called eden.
+2. When eden fills up, the GC runs a minor collection. It starts at the GC roots, follows every reference, and marks each object it reaches.
+3. It copies the reached objects to a survivor space. Everything left in eden is garbage, so eden is reused as a whole. Most objects die young, so this step is cheap.
+4. An object that survives several minor collections is moved, or promoted, to the old generation.
+5. As the old generation fills up, the GC cleans it too, which takes longer than a minor collection. During some phases it stops every application thread, a stop-the-world pause, so collectors differ mainly in how long and how often these pauses are.
+
+So the key is: the GC keeps what it can reach from the roots; it does not look for objects you "forgot".
 
 ## Example
 
+`PaymentAudit` leaks memory, and `cycle` shows that a cycle is not a leak:
+
 ```java
-class Demo {
-    static final List<byte[]> CACHE = new ArrayList<>();
-    void handle() {
-        CACHE.add(new byte[1_000_000]);   // never removed: leak
-    }
-    void cycle() {
-        Node a = new Node(), b = new Node();
-        a.next = b; b.next = a;           // a cycle
-        a = null; b = null;               // no root reaches them: both can go
+class PaymentAudit {
+    static final List<Payment> SEEN = new ArrayList<>();      // lives as long as the class
+    void record(Payment p) {
+        SEEN.add(p);                                          // never removed: a leak
     }
 }
+
+void cycle() {
+    Node a = new Node(), b = new Node();
+    a.next = b; b.next = a;                // a cycle: each points at the other
+    a = null; b = null;                    // no root reaches them: both can be freed
+}
 ```
+
+What to notice:
+
+- `SEEN` is a static field, which is a GC root. Every payment added to it stays reachable, so the list grows until `OutOfMemoryError`, although no code reads those payments again.
+- After `a = null; b = null`, the two nodes still point at each other, but no root leads to them, so the GC can free both.
+- The fix for the leak is to remove entries, cap the list, or not keep it at all. Calling `System.gc()` does not help, because the payments are still reachable.
+
+## Rules and defaults
+
+| Collector | How it pauses | Choose it for | Flag |
+|---|---|---|---|
+| Serial | one GC thread, application stopped | small data, up to about 100 MB, or one CPU | `-XX:+UseSerialGC` |
+| Parallel | many GC threads, application stopped | throughput, when pauses of a second or more are acceptable | `-XX:+UseParallelGC` |
+| G1 | mostly concurrent, aims at a pause goal | general use; the default on most machines | `-XX:+UseG1GC` |
+| ZGC | concurrent, pauses under a millisecond | low latency, heaps from a few hundred MB to 16 TB | `-XX:+UseZGC` |
+
+- **Default collector (JDK 25):** G1 on a server-class machine, which means 2 or more CPUs and at least 1792 MB of memory; Serial otherwise.
+- **G1 pause goal:** `-XX:MaxGCPauseMillis` is 200 ms by default. It is a goal G1 meets with high probability, not a guarantee.
+- **System.gc():** only a suggestion; the JVM may ignore it.
+
+## Not to be confused with
+
+The [JVM](card:jdk-jre-jvm) is the whole program that runs your bytecode. The GC is one part of it that frees heap memory. The JIT compiler is another part, which turns frequently run methods into machine code; you will see it in [class loading and JIT](card:class-loading-jit). Rule: JVM runs, JIT speeds up, GC cleans up.
+
+## Common mistakes
+
+- **"Setting a variable to null frees the object."** It removes one reference. The object is freed later, by the GC, and only if no other reference reaches it.
+- **"Java cannot leak memory because it has a GC."** The GC frees only unreachable objects. Growing static collections and `ThreadLocal` values never removed on pooled threads keep objects reachable for ever.
 
 ## Interview Qs
 
 ### How does the JVM decide that an object is garbage?
 
-It follows references from the GC roots: locals of running methods, static fields, live threads. Anything not reached is garbage.
+It follows references from the GC roots: local variables of running methods, static fields and live threads. Every object it reaches is live; everything else is garbage, including groups of objects that point at each other but that no root reaches.
 
 ### Can a Java program have a memory leak?
 
-Yes: objects still referenced but no longer needed. Usual causes: static collections or caches that only grow, and `ThreadLocal` values never removed on pooled threads.
+Yes. A leak in Java is an object the program no longer needs but still references, so the GC cannot free it. Usual causes are static collections or caches that only grow, and `ThreadLocal` values that are never removed on pooled threads, which live as long as the thread.
 
 ### Which collector would you choose?
 
-Start with the JVM's choice, usually G1. Use Parallel for throughput-first batch jobs, ZGC when response time matters most.
+Start with the JVM's choice, which is usually G1, and measure. Use Parallel for batch jobs where total throughput matters and long pauses are acceptable, and ZGC when response time matters most, since its pauses stay under a millisecond. Serial suits small heaps and single-CPU containers.

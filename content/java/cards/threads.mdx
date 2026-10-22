@@ -5,24 +5,36 @@ title: Threads and Their Lifecycle
 topic: concurrency
 level: beginner
 heat: 3
-hook: "A thread is one path of work inside a process. start() runs it on a new thread; run() is just a call on yours."
+hook: "A thread is one line of work inside a running program. Calling start() runs a task on a new thread; calling run() just runs it on yours."
 points:
-  - { k: "Process vs thread", v: "a process has its own memory; its threads share heap and files" }
-  - { k: "Create", v: "pass a Runnable lambda to new Thread(...), or extend Thread" }
-  - { k: "start()", v: "once only; a second call throws IllegalThreadStateException", kind: minus }
-  - { k: "join()", v: "the caller waits until that thread ends" }
-  - { k: "Daemon thread", v: "JVM shutdown does not wait for it; set it before start()" }
+  - { k: "Process vs thread", v: "a process is a running program with its own memory; its threads share that memory and its objects" }
+  - { k: "Create a thread", v: "pass a Runnable, often a lambda, to new Thread(...) and call start(); extending Thread also works" }
+  - { k: "start() once", v: "a thread can be started only once; a second start() throws IllegalThreadStateException", kind: minus }
+  - { k: "join()", v: "the thread that calls t.join() waits until thread t has finished" }
+  - { k: "Daemon thread", v: "a background thread the JVM does not wait for at exit; call setDaemon(true) before start()" }
+  - { k: "RUNNABLE", v: "means running or ready to run; Java has no separate RUNNING state" }
 trap:
   wrong: "Calling run() starts a new thread."
-  right: "run() is an ordinary method call on the current thread. Only start() schedules a new one."
-sayIt: "A thread is a unit of execution inside a process, sharing its memory. I give it a Runnable and call start(); it moves from NEW to RUNNABLE, may block or wait, and ends TERMINATED."
+  right: "run() is an ordinary method call on the current thread. Only start() asks the JVM to run the task on a new thread."
+  why: "A Thread object has a run() method that holds the task, so calling it looks like running the thread. The code even runs, just on the wrong thread."
+sayIt: "A thread is a path of execution inside a process, sharing the process's memory. I give it a Runnable and call start(), never run(). It moves from NEW to RUNNABLE, may be BLOCKED or WAITING for a while, and ends TERMINATED."
+cheat:
+  idea: "A thread is one line of work inside a program. Threads share the program's objects, so one can wait for slow work while another keeps busy."
+  flow: "NEW → start() → RUNNABLE ⇄ BLOCKED / WAITING → TERMINATED"
+  remember: "start() runs the task on a new thread; run() is a plain call on yours."
+buildsOn: [lambdas]
+scenarios:
+  - q: "Thread worker = new Thread(task, \"worker\"); worker.run(); worker.start(); The task prints the current thread's name. What is printed, and in what order?"
+    a: "\"main\", then \"worker\". run() is a normal call, so the task runs on main first. start() then runs it on the new thread called worker."
+  - q: "A thread has finished its task. You call start() on the same Thread object again to repeat the work. What happens?"
+    a: "It throws IllegalThreadStateException. A thread can be started at most once, even after it has terminated. Create a new Thread, or better, submit the task to a thread pool again."
 confusedWith: [sleep-vs-wait, runnable-vs-callable]
 tags: [thread, lifecycle, runnable, daemon]
 visual: flow
 sources:
-  - title: "Thread (Java SE 25 API)"
+  - title: "Thread: start(), join(), daemon threads, interrupt(), platform and virtual threads (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Thread.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Thread.State (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Thread.State.html"
     verifiedOn: "2026-10-19"
@@ -34,14 +46,18 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+A thread is one sequence of steps that the computer runs, one instruction after another. A running Java program is a process: the operating system gives it its own memory. Inside it, the JVM starts with one thread, called `main`, and you can start more. All threads of a process share the same objects, but each one runs its own sequence of method calls.
+
 ## Why it exists
 
-One thread does one thing at a time. Several threads let a program wait for I/O and use many cores at once, sharing the same objects.
+With one thread, a program does one thing at a time. If the payment service waits two seconds for the bank to answer, it can do nothing else in those two seconds. With several threads, one thread waits for the bank while another sends a receipt, and on a machine with several CPU cores, threads can run at the same instant. The price is that threads share objects, which the next concepts make safe.
 
 ## How it works
 
 <Mermaid
-  alt="Thread states. start() moves NEW to RUNNABLE. RUNNABLE goes to BLOCKED to enter synchronized code, to WAITING on wait() or join(), to TIMED_WAITING on sleep(ms) or wait(ms); each returns to RUNNABLE. When run() ends the thread is TERMINATED."
+  alt="Thread states. start() moves NEW to RUNNABLE. From RUNNABLE a thread goes to BLOCKED while it waits to enter synchronized code, to WAITING on wait() or join(), or to TIMED_WAITING on sleep(ms) or wait(ms); each returns to RUNNABLE. When run() ends, the thread is TERMINATED."
   chart={`flowchart LR
   N([NEW]) -- "start()" --> R[RUNNABLE]
   R -- "enter synchronized" --> B[BLOCKED]
@@ -53,36 +69,63 @@ One thread does one thing at a time. Several threads let a program wait for I/O 
   R -- "run() ends" --> X([TERMINATED])`}
 />
 
-- RUNNABLE means running or ready to run; Java has no separate RUNNING state.
-- A woken `wait()` goes through BLOCKED: it must get the monitor back first.
-- In real code, hand tasks to an [executor](card:executors) instead of creating threads yourself.
+1. You create a `Thread` and give it a task, a `Runnable`. The thread is NEW: it exists but runs nothing.
+2. You call `start()`. The thread becomes RUNNABLE, and the operating system schedules it onto a CPU core when one is free.
+3. While running, it may pause. It is BLOCKED while it waits for a lock that another thread holds (you will see locks in [synchronization](card:synchronization)), WAITING while it waits for another thread with no time limit, and TIMED_WAITING during `sleep(ms)`.
+4. When the pause ends, it goes back to RUNNABLE.
+5. When the task's `run()` method returns, the thread is TERMINATED and cannot run again.
+
+So the key is that `start()` creates the new line of work; everything else is the thread moving between running and waiting.
 
 ## Example
 
-```java
-Runnable task = () -> System.out.println(Thread.currentThread().getName());
-Thread worker = new Thread(task, "worker");
+The payment service sends a receipt on a separate thread. The program shows the difference between `run()` and `start()`.
 
-worker.run();     // a plain method call on main
-worker.start();   // a new thread
-worker.join();    // main waits until worker ends
+```java
+Runnable sendReceipt = () ->
+        System.out.println("receipt sent by " + Thread.currentThread().getName());
+Thread worker = new Thread(sendReceipt, "worker");   // state: NEW
+
+worker.run();      // a plain method call: runs on main
+worker.start();    // a new thread runs sendReceipt
+worker.join();     // main waits until worker is TERMINATED
+System.out.println(worker.getState());
 ```
 
 ```text output
-main
-worker
+receipt sent by main
+receipt sent by worker
+TERMINATED
 ```
+
+What to notice:
+
+- `Thread.currentThread().getName()` names the thread that runs the line, so the output proves where each call ran.
+- `worker.run()` printed `main`: no new thread was created. Only `start()` gave the task its own thread.
+- Without `join()`, `main` could print the state before `worker` had finished, and you might see `RUNNABLE` instead of `TERMINATED`.
+
+## Rules and defaults
+
+- **Start once:** `start()` on a thread that was already started throws `IllegalThreadStateException`, even after it has ended.
+- **JVM exit:** the JVM begins to shut down when every started non-daemon thread has ended. Daemon threads do not keep it alive.
+- **Daemon setting:** a new thread copies the daemon status of the thread that creates it. Change it with `setDaemon(true)` before `start()`; on a running thread it throws `IllegalThreadStateException`.
+- **Interrupt:** `t.interrupt()` asks thread `t` to stop. If `t` is in `sleep()`, `wait()` or `join()`, it receives an `InterruptedException`; otherwise only its interrupt flag is set, and the task must check it.
+- **In real code:** hand tasks to a thread pool instead of creating threads by hand; you will see this in [executors](card:executors).
+
+## Not to be confused with
+
+A process is a running program with its own memory; a thread is a line of work inside it that shares that memory. Concurrency means several tasks make progress in overlapping time, even on one core by taking turns. Parallelism means tasks run at the same instant on different cores. Rule: process = own memory, thread = shared memory; concurrency = overlapping, parallelism = simultaneous.
 
 ## Interview Qs
 
 ### What is the difference between a process and a thread?
 
-A process is a running program with its own memory space. Its threads share that heap and its open files: cheap to communicate, but shared data needs synchronisation.
+A process is a running program with its own memory space. Its threads share that memory and its open files, so they communicate cheaply by sharing objects. That same sharing is the risk: two threads changing one object at the same time need synchronisation.
 
-### Why are wait() and notify() in Object, not in Thread?
+### Should you implement Runnable or extend Thread?
 
-They act on an object's monitor, and every object has one. A thread waits on the object it locked, and another thread notifies through that same object.
+Implement `Runnable`, usually as a lambda. The task stays separate from the thread that runs it, so the same task can go to a thread pool, and your class is still free to extend another class. Extending `Thread` mixes the job with the worker and uses up Java's single inheritance.
 
 ### Can you start a thread twice?
 
-No, even after it ends: the second start() throws IllegalThreadStateException. Create a new Thread, or submit the task to a pool again.
+No. A second `start()` throws `IllegalThreadStateException`, even after the thread has terminated. To repeat the work, create a new `Thread` with the same `Runnable`, or submit the task to an executor again.

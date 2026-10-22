@@ -5,17 +5,27 @@ title: Reflection and Annotations
 topic: design-io
 level: intermediate
 heat: 2
-hook: "Annotations are labels on code; reflection reads classes and labels at run time. Frameworks combine the two to do work for you."
+hook: "An annotation is a label on code; reflection is code that reads classes and their labels while the program runs. Frameworks combine the two to do work for you."
 points:
-  - { k: "Reflection", v: "inspect and call classes, fields, methods at run time" }
-  - { k: "Used by", v: "frameworks, test tools, debuggers, serialisers, persistence" }
-  - { k: "Cost", v: "slower, no compile-time checks, breaks encapsulation", kind: minus }
-  - { k: "Annotation", v: "metadata; does nothing until a compiler, tool or framework reads it" }
-  - { k: "Default retention", v: "CLASS: in the .class file, not visible at run time", kind: default }
+  - { k: "Reflection", v: "lets code list and call the fields, methods and constructors of a class it only meets at run time" }
+  - { k: "Annotation", v: "metadata such as @Override; it does nothing by itself until a compiler, tool or framework reads it" }
+  - { k: "Default retention", v: "CLASS: the annotation is kept in the .class file but is not visible to reflection", kind: default }
+  - { k: "Used by", v: "frameworks, test tools such as JUnit, serialisers and debuggers, to find and run your code", kind: plus }
+  - { k: "Cost", v: "slower than direct calls, errors appear only at run time, and private access breaks encapsulation", kind: minus }
 trap:
   wrong: "Any custom annotation can be read with reflection."
-  right: "Only with @Retention(RUNTIME). The default, CLASS, keeps it in the .class file but not at run time."
-sayIt: "Reflection lets code inspect and call classes at run time; frameworks use it to find annotated classes and inject or invoke them. An annotation needs RUNTIME retention to be seen that way. I avoid reflection in normal code: it is slower and unchecked."
+  right: "Only one marked @Retention(RetentionPolicy.RUNTIME). The default, CLASS, keeps it in the .class file but hides it at run time."
+  why: "Framework annotations such as @Test or @Deprecated are all readable at run time, so it looks as if every annotation is. The retention line on their declarations is easy to miss."
+sayIt: "Reflection lets code inspect and call classes at run time; frameworks use it to find annotated classes and methods and run them. A custom annotation needs RUNTIME retention to be seen that way. I keep reflection out of normal code: it is slower and the compiler cannot check it."
+cheat:
+  idea: "An annotation is a label on code that does nothing by itself. Reflection reads classes, methods and their labels at run time, so a framework can find methods marked @Test and call them."
+  remember: "Only RUNTIME annotations are visible to reflection; the default retention, CLASS, is not."
+buildsOn: [class-loading-jit, access-modifiers]
+scenarios:
+  - q: "You write @interface Audit {} with no @Retention, put @Audit on a method, and check method.isAnnotationPresent(Audit.class). What does it return?"
+    a: "false. With no @Retention, the policy is CLASS: the compiler keeps the annotation in the .class file, but the JVM does not expose it to reflection. Add @Retention(RetentionPolicy.RUNTIME)."
+  - q: "PaymentService has a private method refund(). Which call finds it: getMethods() or getDeclaredMethods()?"
+    a: "getDeclaredMethods(). It returns every method declared in that class, private ones included, but not inherited ones. getMethods() returns only public methods, inherited ones included, so a private method never appears."
 confusedWith: []
 tags: [reflection, annotations, metadata]
 visual: code
@@ -26,62 +36,96 @@ sources:
   - title: "Class: getDeclaredMethods, getMethods, forName (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Class.html"
     verifiedOn: "2026-10-19"
-  - title: "AccessibleObject (Java SE 25 API)"
+  - title: "AccessibleObject: setAccessible and module rules (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/reflect/AccessibleObject.html"
     verifiedOn: "2026-10-19"
   - title: "RetentionPolicy (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/annotation/RetentionPolicy.html"
     verifiedOn: "2026-10-19"
+  - title: "JLS SE 25, 9.6 Annotation Interfaces: no @Target means any declaration; the value element"
+    url: "https://docs.oracle.com/javase/specs/jls/se25/html/jls-9.html#jls-9.6"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+An annotation is a label you attach to code, such as `@Override` on a method. It is metadata: information about the code that changes nothing by itself. Reflection is the API in `java.lang.reflect` that lets a running program look at a class it did not know when it was compiled: list its methods and fields, read their annotations, and call them. Each loaded class is described by a `Class` object, which is where reflection starts.
 
 ## Why it exists
 
-Frameworks must work with classes they have never seen, such as your controllers and entities. Annotations mark what to do; reflection finds and runs it, with no hand-written wiring.
+A test tool such as JUnit must run your test methods, but it was compiled long before your classes existed, so it cannot call `testRefund()` by name. Without reflection, you would register every test by hand. With annotations and reflection, you mark the method `@Test`, and the tool lists the class's methods at run time, finds the label and calls the method. Dependency injection frameworks and JSON libraries work the same way.
 
 ## How it works
 
-| Step | API | Note |
-|---|---|---|
-| Get the class | `User.class`, `obj.getClass()`, `Class.forName("app.User")` | `forName` also initialises the class |
-| List members | `getDeclaredMethods()` | all declared here, private too, not inherited |
-| | `getMethods()` | public only, inherited included |
-| Open private ones | `setAccessible(true)` | across modules only if the package is open |
-| Read a label | `isAnnotationPresent`, `getAnnotation` | needs `RUNTIME` retention |
+<Mermaid
+  alt="Reflection flow. Start from the Class object of PaymentService. getDeclaredMethods lists its methods. For each method, getAnnotation(Audit.class) checks for the label. If the label is present, setAccessible(true) opens a private method and invoke calls it."
+  chart={`flowchart LR
+  C["PaymentService.class"] -- "getDeclaredMethods()" --> M[each Method]
+  M -- "getAnnotation(Audit.class)" --> Q{label present?}
+  Q -- yes --> A["setAccessible(true)"] --> I["invoke(target)"]
+  Q -- no --> S[skip]`}
+/>
 
-- `@Target` limits where an annotation may go; without it, any declaration.
-- Built-ins: `@Override` (checked by the compiler), `@Deprecated`, `@SuppressWarnings`, `@FunctionalInterface`.
+1. Get the `Class` object: `PaymentService.class`, `payment.getClass()`, or `Class.forName("app.PaymentService")`, which also initialises the class.
+2. List its members. `getDeclaredMethods()` returns every method declared in that class, private ones included, but not inherited ones. `getMethods()` returns only public ones, inherited included.
+3. Read each member's labels with `getAnnotation` or `isAnnotationPresent`. This works only for annotations kept until run time.
+4. For a private member, call `setAccessible(true)` to skip the access check.
+5. Call `invoke(target, args)` on a method, or `get` and `set` on a field.
 
 ## Example
 
-```java
-@Retention(RetentionPolicy.RUNTIME) @Target(ElementType.METHOD)
-@interface Audit { String value() default ""; }
+A custom `@Audit` label marks the payment methods to log, and a small loop finds and runs them.
 
-class OrderService {
-    @Audit("create") private void create() { System.out.println("created"); }
+```java
+@Retention(RetentionPolicy.RUNTIME) @Target(ElementType.METHOD)   // run time; methods only
+@interface Audit { String value(); }
+class PaymentService {
+    @Audit("refund") private void refund() { System.out.println("refund done"); }
+    public void pay() { System.out.println("pay done"); }
 }
 
-for (Method m : OrderService.class.getDeclaredMethods())
-    if (m.isAnnotationPresent(Audit.class)) {
-        m.setAccessible(true);                // private, same module: allowed
-        m.invoke(new OrderService());
+for (Method m : PaymentService.class.getDeclaredMethods()) {
+    Audit audit = m.getAnnotation(Audit.class);      // null if absent
+    if (audit != null) {
+        System.out.println("audit: " + audit.value());
+        m.setAccessible(true);                       // open the private method
+        m.invoke(new PaymentService());
     }
+}
 ```
 
 ```text output
-created
+audit: refund
+refund done
 ```
+
+What to notice:
+
+- `pay()` never runs: it has no `@Audit` label, so the loop skips it.
+- Delete `@Retention(RetentionPolicy.RUNTIME)` and the program prints nothing, because `getAnnotation` then returns `null`.
+- `setAccessible(true)` works here because both classes are in the same module. For a private member of another module, its package must be opened to yours.
+
+## Rules and defaults
+
+- **Retention:** `SOURCE` is dropped by the compiler (`@Override`, `@SuppressWarnings`). `CLASS`, the default, is kept in the `.class` file but not at run time. `RUNTIME` is readable by reflection (`@Deprecated`, `@FunctionalInterface`, framework annotations).
+- **Target:** `@Target` limits where the annotation may go. Without it, the annotation is allowed on any declaration.
+- **Elements:** an annotation can have elements written like methods, with `default` values. An element named `value` can be set without its name: `@Audit("refund")`.
+- **Modules (Java 9+):** deep access to another module's private members throws `InaccessibleObjectException` unless that package is opened. Since Java 17 (JEP 403), JDK internals are closed this way too.
+
+## Common mistakes
+
+- **"An annotation adds behaviour to a method."** `@Audit` on its own does nothing. Some code must read it, such as the loop above, a framework, or the compiler for `@Override`.
 
 ## Interview Qs
 
 ### What is reflection, and why avoid it in normal code?
 
-It inspects and uses classes, fields and methods at run time. The JVM cannot optimise it as well, errors move from compile time to run time, and private access breaks encapsulation. Keep it for frameworks and tools.
+Reflection inspects and uses classes, fields and methods at run time. The JVM cannot optimise reflective calls as well as direct ones, mistakes such as a wrong method name appear only at run time, and private access breaks encapsulation. Keep it for frameworks and tools.
 
 ### What are the three retention policies?
 
-SOURCE: dropped by the compiler (`@Override`). CLASS, the default: kept in the .class file, not at run time. RUNTIME: readable by reflection (`@Deprecated`, framework annotations).
+`SOURCE`: the compiler drops it, as with `@Override`. `CLASS`, the default: kept in the `.class` file, not visible at run time. `RUNTIME`: kept by the JVM and readable by reflection, as with `@Deprecated` and framework annotations.
 
-### Why does setAccessible fail with InaccessibleObjectException?
+### How do frameworks use annotations?
 
-Since Java 9 modules decide deep access. A private member of another module is reachable only if its package is opened to your module.
+They scan your classes with reflection, look for their annotations, and act on them. A test runner calls each method marked `@Test`; a dependency injection framework creates classes marked as components and passes in their dependencies. The annotation is only the label; the framework's code does the work.

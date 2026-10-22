@@ -1,5 +1,5 @@
 # Coverage: Java
-Reference: reference/java.md  ·  Last updated: 20-10-2026
+Reference: reference/java.md  ·  Last updated: 21-10-2026
 
 Every numbered section (1–156) and every "why do we need X if Y already exists?" question (why-Q1 to why-Q30) appears in exactly
 one of Mapped, Corrected or Dropped. Items of section 155 ("20 things to remember") are folded into the row for 155. Baseline for
@@ -694,3 +694,294 @@ Independently verified on 20-10-2026.
 |---|---|
 
 (none)
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass then checked about 2,400 claims and fixed 32, removing 2.
+
+### Unit basics
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 1. Java flow (.java → javac → .class → JVM), compilation vs execution | jdk-jre-jvm (What it is, How it works steps 2–4) |
+| 1. main(): public / static / void / String[] args meaning | jdk-jre-jvm (Example "What to notice", Rules and defaults) |
+| 1. Platform independent / WORA | jdk-jre-jvm (Why it exists, point, Interview Q "What makes Java platform independent?") |
+| 3. Local vs field defaults | data-types (Rules and defaults, Interview Q) |
+| 4. Literal types and L / F suffixes; reference types hold a reference | data-types (What it is, How it works step 1) |
+| 101. null: primitives cannot hold null | data-types (point "8 primitives", What it is) |
+| 28. Immutability trap: s.concat / s.toUpperCase without reassigning | strings (Example, cheat remember, scenario 1) |
+| 135. "Java" + 1 + 2 is Java12 | strings (Example, scenario 2) |
+| 32. Unboxing null danger | wrapper-classes (How it works step 3, scenario 1, Interview Q) |
+| 89. Arrays as arguments; reassigning the reference | pass-by-value (Rules, scenario 1, Interview Q 3 on lists) |
+| 66. Pick the class by meaning (LocalDate / Instant / Duration / Period) | date-time (How it works, Interview Q "Duration vs Period?") |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft "Integer cache" rule (JLS guarantee) stated only for Integer | JLS 5.1.7 guarantees one object for boxed true/false, char \u0000–\u007f and integers -128 to 127; Integer.valueOf always caches -128 to 127 | https://docs.oracle.com/javase/specs/jls/se25/html/jls-5.html#jls-5.1.7 ; Integer API |
+| Integer constructors: checked current status | In the Java SE 25 API they are @Deprecated(since="9") and not marked for removal; the site says "deprecated since Java 9" only | https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Integer.html |
+| "No separate JRE" could read as "no JRE exists anywhere" | Oracle has offered only the JDK since JDK 11; other vendors (Eclipse Temurin) still publish JRE packages for Java 25 (checked via the Adoptium API) | https://adoptium.net/temurin/releases/ |
+| String pool wording "when a class loads" (draft-style) avoided | "Java keeps one pooled object for each distinct literal" (JLS 3.10.5 does not tie it to class loading) | JLS 3.10.5 |
+| SimpleDateFormat explanation | Stated as the API does: not synchronised; create a separate instance per thread | SimpleDateFormat API |
+| Hash-code caching in String | Not in the String API; sourced to the OpenJDK jdk25u String.java (`/** Cache the hash code for the string */ private int hash;`) and worded "OpenJDK's String" | OpenJDK jdk25u source |
+New facts added and checked on 21-10-2026: compact source files and instance main (JEP 512, JDK 25: IO in java.lang; launcher creates an instance via the no-arg constructor); source-file mode (JEP 330, JDK 11); widening int/long to float and long to double may lose precision (JLS 5.1.2); `return` not allowed inside a switch expression (javac: "attempt to return out of a switch expression"); null switch throws even with default; `case 1, 7:` in classic switches; JLS 15.7 left-to-right evaluation; JLS 15.18.1 string `+`; JLS 15.21.1 Integer == int unboxes; Map.getOrDefault; Period vs Duration across DST (Period API); `uuuu` vs `mm` pattern letters (DateTimeFormatter API); Date.toInstant / Date.from; jlink (JEP 282, JDK 9).
+
+### Unit coding
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| C0 six questions, turned into ordered steps | coding-method (How it works steps 1-5) |
+| C6 return vs print, as an interview question | coding-method (new Q "Why return the result instead of printing it?") |
+| C91 practice rounds | coding-method (Steps kept; now introduced as "repeat for every program") |
+| C70.6 swap without a temp | number-programs (new Q, with the advice to prefer a temp variable) |
+| C70.7 factorial: overflow follow-up | number-programs (Rules: Math.multiplyExact, BigInteger; scenario) |
+| C71.4 max: why not start at 0 | array-programs (new Q) |
+| C71.1 print array | array-programs (scenario: `[I@...` explained via Object.toString) |
+| C72.9 anagram: case | string-programs (scenario; Q now says lowercase first) |
+| C72.6 first non-repeating: int[26] limits | string-programs (scenario: 'S' - 'a' is -14) |
+| C73.11 priority queue: print order | collection-programs (scenario, Rules) |
+| C73.10 TreeMap for sorted output | collection-programs (scenario) |
+| C22 default method; C21 static method call | functional-interface-programs (What to notice, link to abstract-classes-interfaces) |
+| C19-C21 @FunctionalInterface check | functional-interface-programs (scenario, Rules) |
+| C24 second highest: empty result | stream-coding-patterns (scenario, Rules "Empty results") |
+| C76.5 average per department | employee-stream-questions (new Q) |
+| C76.7 maxBy Optional values | employee-stream-questions (scenario) |
+| C79 `x = x++` | output-prediction (scenario, Rules) |
+| C83 Integer == for 127 | output-prediction (scenario; rule stays owned by wrapper-classes) |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| oop-programs draft said nothing wrong, but a first rewrite line "super(name) must run first" would be outdated: Java 25 allows statements before super() (flexible constructor bodies) | "Dog must call super(name), because Animal has no no-argument constructor" | JLS SE 25 ch. 8 (already cited); constructors concept owns the Java 25 rule |
+| coding-method hook said "four questions" while the table and tree say six | Hook no longer counts the questions | (internal consistency) |
+| stream-coding-patterns example 1 used `emps` without defining it and had no output | Now defines `Emp` and four employees and shows the real output `[Asha, Ravi]` | real run |
+| Tree note `string-stream-pattern` recommends `split(" ")`, which this unit's string trap calls a bug | See tree note proposal below | String.split (Java SE 25 API) |
+
+### Unit collections
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 45. "Why 0.75?" | map-hashmap (Interview Q on load factor; Rules table row) |
+| 50. Collections helpers reverse, shuffle, max, min, frequency | collections-framework (point "Collections (class)", Not to be confused with) |
+| 51. Arrays utility class (Arrays.sort) vs Collections vs Collection | collections-framework (Not to be confused with) |
+| 136 / why-Q9. Array vs ArrayList (length vs size(), primitives) | list-arraylist (Not to be confused with) |
+| C89 HashSet vs HashMap | set-hashset-treeset (Not to be confused with); why-Q11 "Why HashMap if HashSet exists" folded here, removed from map-hashmap Qs to keep one place |
+| C89 Queue vs Stack, peek vs poll, push vs pop | queue-deque (Not to be confused with) |
+| 49. Stack / LIFO with Deque | queue-deque (Example undo stack, scenario on bracket matching) |
+| 124. Modifying while iterating | collections-framework (Example now shows the broken loop and the Iterator fix with the payment list) |
+
+**Added beyond the reference (verified)**
+
+- generics: diamond `<>` (Java 7); type parameter vs type argument; `List<?>` vs `List<Object>` (Interview Q); arrays are covariant and fail with ArrayStoreException (trap.why); bounded type parameter vs wildcard (Not to be confused with); "no adds into ? extends" (compile error checked).
+- collections-framework: fail-fast check is best effort; a for-each that removes the second-last item ends silently and skips the last one (scenario, run on JDK 21); Arrays.asList set works / add throws (scenario, run); "Why declare List rather than ArrayList?" Q; Big-O explained in one line before the cost table.
+- list-arraylist: why remove(1) picks remove(int) (JLS 15.12.2 phase 1, no boxing); size vs capacity, trimToSize, `new ArrayList<>(n)`; "What happens inside ArrayList when it is full?" Q.
+- comparable-comparator: how a sort uses the comparison result (steps); Collections.sort is stable; `list.sort(null)` uses natural order; naturalOrder / reverseOrder / nullsFirst; "compareTo must return -1/0/1" mistake; TreeSet with an amount-only comparator drops a payment (scenario, run); thenComparing(key, reverseOrder()) for one descending field (compiled and run).
+- set-hashset-treeset: add() as the "already seen?" check (payment gateway duplicate callbacks); LinkedHashSet re-insert does not change order; Set.of rejects duplicates with IllegalArgumentException; remove duplicates but keep order Q; equals without hashCode gives size 2 (scenario, run).
+- map-hashmap: put returns the previous value (scenario, run: `null 10 20`); TreeMap sorts enum keys in declaration order (Enum.compareTo); `HashMap.newHashMap(n)` (Java 19); LRU Interview Q now in words (code removed from Example, run on JDK 21: keys [a, c]).
+- queue-deque: NoSuchElementException from remove()/element() on an empty queue (run); PriorityQueue ties are arbitrary; PriorityQueue time costs from the Javadoc implementation note; LinkedList allows null, which makes poll() ambiguous (Deque Javadoc); `Arrays.sort(pq.toArray())` for an ordered view.
+
+**Corrections**
+
+- comparisons/hashmap-vs-concurrenthashmap: explain text avoids "updates lock only part of the map" (an OpenJDK implementation detail); uses the Javadoc wording "reads do not block", "high expected concurrency for updates", and merge/compute "performed atomically". Source: https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/ConcurrentHashMap.html
+- list-arraylist: dropped an unsourced claim from the draft-in-progress that an ArrayList is more compact in memory than LinkedList (never shipped).
+- No new reference errors found beyond those already in reference/java.coverage.md (subtraction compareTo, TreeSet/TreeMap log(n) guarantee, treeify version and condition, load factor wording).
+
+### Unit concurrency
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| 67. Concurrency vs parallelism | threads, "Not to be confused with" |
+| 68. Runnable vs extending Thread | threads, Interview Q |
+| 69. Each thread state explained | threads, How it works steps |
+| 72. Race condition, count++ not atomic | synchronization, Why it exists, Example (lost updates shown) |
+| 73. Visibility problem (stale value) | synchronization, Why it exists, scenario (stop flag) |
+| 75. Four deadlock conditions, each explained | locks-deadlock, How it works |
+| 75. Prevention: avoid unnecessary nested locks | locks-deadlock, Interview Q "How do you prevent a deadlock?" |
+| 77. Single-thread executor, cached pool | executors, Rules and defaults |
+| 79. runAsync / supplyAsync, thenAccept, handle, thenCombine | completable-future, How it works, Rules, scenario |
+| 96. Happens-before examples (start, join, volatile, unlock) | synchronization, How it works |
+| 149. Virtual threads do not make CPU work faster | virtual-threads trap, scenario |
+Also added (beyond the reference, verified): Thread.interrupt behaviour; daemon status inherited and setDaemon after start throws; wait() in a while loop (spurious wakeups); lockInterruptibly, Condition, untimed tryLock ignores fairness; fair locks slower (Javadoc); ReadWriteLock Interview Q; jstack deadlock report; all four rejection policies; keep-alive and allowCoreThreadTimeOut; shutdown vs awaitTermination vs shutdownNow; ExecutorService.close (Java 19); orTimeout / completeOnTimeout (Java 9); common pool fallback when parallelism < 2; whenComplete; ConcurrentHashMap compute functions must be short and not touch other keys; LongAdder sum() is not a snapshot; compareAndSet; virtual threads preview in 19 and 20; daemon and NORM_PRIORITY; ThreadLocal caching caution; JFR jdk.VirtualThreadPinned; Semaphore to limit; virtual threads vs CompletableFuture Interview Q; pool sizing Interview Q.
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| synchronization listed `synchronized-vs-reentrantlock` in confusedWith, before ReentrantLock is taught, and embedded `synchronized-vs-volatile` | confusedWith is now `[synchronized-vs-volatile]` (the real confusion of this concept); `synchronized-vs-reentrantlock` stays on locks-deadlock; the embed was replaced by a Mermaid sequence of the monitor hand-off | - |
+| synchronization `visual: table` | `visual: flow` (the picture is now a Mermaid sequence) | - |
+| concurrent-collections: "HashMap ... can break its internal structure" (draft idea) not in the docs | Says only what the HashMap Javadoc says: lock it yourself if any thread modifies it | https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/HashMap.html |
+| "AtomicInteger is built on compareAndSet" is an implementation detail not stated for incrementAndGet | Worded as: compareAndSet is the basic lock-free step; updateAndGet loops on it and retries | AtomicInteger Javadoc (Java SE 25) |
+| virtual-threads: platform-thread count limit as a number | No number; "a limited number" (JEP 444: OS threads are costly) | https://openjdk.org/jeps/444 |
+| Reference 149: platform thread "mapped more directly" to an OS thread | Already corrected earlier (1:1, Thread Javadoc); kept | Thread Javadoc (Java SE 25) |
+
+### Unit design-io
+
+**Added from the reference**
+
+- 109 SOLID: each letter now its own key point with a full sentence; steps for applying it; DIP vs DI "Not to be confused with" (the reference's 110 DI section sits next to it) -> solid-principles.
+- 110 / why-Q21 Why dependency injection (UPI vs card) -> design-patterns Interview Q 3, using the running example's PaymentGateway; solid-principles example shows the constructor injection and links to the tree node.
+- 111 Design patterns commonly asked (Singleton, Factory, Builder, Strategy, Observer, Adapter, Decorator) -> design-patterns How it works table with JDK examples (Repository still dropped, as in the coverage file).
+- 112 Singleton concerns (private constructor, static access, thread safety, lazy vs eager, enum) -> design-patterns steps, Rules and defaults (eager, holder, enum, breaking it), example.
+- 113 / 114 / 115 I/O, buffered I/O, NIO -> java-io (decorator stack as numbered steps, Path/Files table, BufferedWriter flush rule).
+- 97 Serialization, transient, "prefer JSON" -> serialization (steps, rules, Interview Q 3).
+- 98 / 99 Reflection uses and drawbacks; annotations do nothing by themselves -> reflection-annotations (Why with JUnit, Common mistakes).
+- 116-119 JDBC flow, Statement vs PreparedStatement, try-with-resources -> jdbc steps and example; comparison.
+- New (not in reference, verified): Connection.close with an active transaction is implementation-defined; setAutoCommit mid-transaction commits; ResultSet closes with its statement; Class.forName not needed (DriverManager loads service providers); readAllBytes/readString also "not for large files"; enums serialise by name; records rebuilt through the canonical constructor; enum reflective creation throws IllegalArgumentException (ran it).
+
+**Corrections**
+
+- None to the reference beyond those already in the coverage file. Draft fixes: SOLID "named by Robert C. Martin" avoided (attribution of the acronym itself was not verified, so the wording is now "made popular by"). The draft's ReadOnlyList scenario idea was dropped because List.add is documented as an optional operation, so it is not a clean Liskov example.
+
+### Unit exceptions
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 34. "An event that disrupts normal program execution" (what an exception is) | exception-hierarchy (What it is, Why it exists: error codes vs exceptions) |
+| 35. ArithmeticException as an unchecked example | exception-hierarchy (Example with real output, Rules) |
+| 36. Divide-by-zero try-catch-finally example | try-catch-finally (Example rewritten as a resource with visible close order; output from a real run) |
+| 39. Custom exception with message constructor | throw-throws-custom (Example keeps the cause constructor; scenario on checked custom vs IllegalArgumentException) |
+| Uncaught exception: thread stops, stack trace printed (JLS 11.3) | exception-hierarchy (point, step 4), throw-throws-custom (propagation steps) |
+| Common mistakes: catch (Exception e) everywhere, empty catch | exception-hierarchy (Common mistakes) |
+| Close at end of try is skipped on exception; broad catch before specific | try-catch-finally (Common mistakes) |
+| Reuse standard exceptions; rethrow without cause | throw-throws-custom (Common mistakes) |
+| Overriding and checked exceptions | link only to polymorphism (owner of that rule) |
+
+**Corrections**
+
+- None to the reference in this unit. Own draft: removed the claim "Exception and Throwable are exempt because they also cover unchecked exceptions" (the reason is not in JLS 11.2.3; the exemption itself is). Removed "finally may not run if the thread is killed" (not in the current Java tutorial); kept "JVM exits first, e.g. System.exit or a crash".
+
+### Unit functional
+
+**Added from the reference**
+
+| Item | Concept |
+|---|---|
+| 58/59 functional interfaces, @FunctionalInterface (optional) | lambdas (How table, Rules) |
+| 60 method reference forms | lambdas (Interview Q 3) |
+| 61-63 stream flow source → intermediate → terminal, laziness | streams (What it is, Mermaid, steps 1-5) |
+| 64 stream vs collection; reuse throws IllegalStateException | streams (step 5, Rules, scenario 1), comparison stream-vs-collection (explain, example, sayIt) |
+| 141 map vs filter | streams (What it is: filter keeps, map changes) |
+| 142 reduce "many to one" | streams (Rules: two forms, associativity; Not to be confused: reduce vs collect) |
+| 143/144 parallel not automatically faster; forEach(list::add) | streams (trap + why, scenario 3) |
+| 145 Optional.of(null); avoid Optional everywhere | optional (trap, Interview Q 2) |
+| 146 orElse vs orElseGet | optional (Not to be confused, scenario 1), comparison (explain, example, sayIt) |
+| why-Q24 stream vs for loop; why-Q25 Optional vs null | streams Interview Q 1; optional Why + Interview Q 1 |
+| S12/S15-S20 sum, groupingBy, counting, summing, partitioningBy, joining | primitive-streams, collectors (table, steps, example) |
+New beyond the draft (verified, 2026-10-21):
+- lambdas: target type (JLS 15.27: lambda allowed only in assignment, invocation or cast context); evaluating a lambda does not run its body; checked exceptions in a lambda body must be allowed by the interface method's throws clause (JLS 11.2.3); classic `for` loop variable cannot be captured, enhanced-for variable can (JLS 15.27.2); default methods such as Predicate.and do not break the one-abstract-method rule.
+- streams: elements flow one at a time (peek demo); count() may skip the pipeline when the size is known (Stream.count API note; observed on JDK 21 and 25: `peek` did not run); reduce identity returned for empty; reduce function must be associative (package docs); empty-stream allMatch as Interview Q.
+- primitive-streams: LongStream / LongSummaryStatistics used for paise; overflow scenario with the real wrapped value 705032704.
+- collectors: groupingBy has no entry for absent keys (get returns null); partitioningBy keeps both keys with empty list / zero; empty input gives 0 / 0.0; plain groupingBy key order differed between JDK 21 and JDK 25 in a real run (supports "no order promised").
+- optional: map returning null gives an empty Optional; `or` and `stream()` are Java 9; get() API note names orElseThrow() as preferred; flatMap on Optional as Interview Q (avoids Optional<Optional<T>>).
+- Glossary: target-type, short-circuiting-operation, stream-side-effect (add/java/functional.glossary.yaml).
+
+**Corrections**
+
+- None needed to the reference in this unit beyond what the coverage file already records (144: the "better" code's no-op `.map(x -> x)`; S14: Collectors.toList is not promised mutable, Stream.toList is unmodifiable).
+- Draft fix: collectors step 5 no longer prints a fixed map order for plain groupingBy (order is not promised; JDK 21 and 25 differ).
+- Draft fix: Optional "Fields: not Serializable" kept; also "Avoid Optional<List<T>>" was considered and left out (not in the API docs).
+
+### Unit jvm
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 82. Stack vs heap example (local, reference, object) | jvm-memory (Example, steps 4-6) |
+| 83. u = null makes an object eligible | garbage-collection (Common mistake, scenario: another reference keeps it alive) |
+| 84. Memory leak causes | garbage-collection (Example, Common mistakes); listeners/callbacks still left out (no primary source, as before) |
+| 85. Linking = verify, prepare, resolve | class-loading-jit (Mermaid, step 3) |
+| 86. Interpreter then JIT | class-loading-jit (steps 5-6, Interview Q on warm-up) |
+| 87. Collectors | garbage-collection (Rules table, with corrected G1/ZGC wording already recorded in coverage) |
+| 150. JVM vs JIT vs GC | garbage-collection (Not to be confused with) |
+| C85 Java 8+ list | modern-java (Interview Q "big changes in Java 8"; Example combining features with releases) |
+| New: default heap sizes (-Xmx 1/4, -Xms 1/64 of RAM) | jvm-memory (point, Rules table) |
+| New: server-class rule for the default collector (2+ CPUs and 1792 MB) | garbage-collection (point, Rules) |
+| New: G1 pause goal MaxGCPauseMillis = 200 ms, a goal not a guarantee | garbage-collection (Rules, scenario) |
+| New: eden, survivor spaces, promotion by age | garbage-collection (How it works steps) |
+| New: Class.forName initialises, ClassLoader.loadClass does not | class-loading-jit (Rules, scenario) |
+| New: javac vs JIT confusion | class-loading-jit (Not to be confused with) |
+| New: JVM stack vs java.util.Stack, heap vs PriorityQueue heap | jvm-memory (Not to be confused with) |
+| New: feature lifecycle JEP, preview, final (records preview 14-15, final 16) | modern-java (steps) |
+| New: non-LTS is superseded after six months | modern-java (Rules, scenario) |
+
+**Corrections**
+
+- Own draft (modern-java): the claim that the Java 25 example fails on Java 21 "at void main() and IO" was replaced with what javac 21 really reports: compact source files are a preview feature there, disabled by default (real run).
+- GC roots now cite Eclipse Memory Analyzer's root list (Oracle's GC guide does not list roots); "static fields" is phrased as a root through loaded classes.
+
+### Unit oop-a
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| 3. Variables: instance vs parameter vs local | classes-objects (What it is, Rules: field defaults, link to data-types) |
+| 8. Object creation steps (new, reference, =) | classes-objects (How it works, numbered) |
+| 14. this: pass and return the current object | this-super (table, Interview Q) |
+| 16. Constructor rules: no return type, overloading, not inherited | constructors (points, Rules, Common mistakes) |
+| 24. Getter without setter makes a field read-only | oop-principles (point, example, Interview Q) |
+| 106. Static vs instance | static-keyword (Not to be confused with) and comparison explain/example |
+| 107/108. Composition, association, aggregation | inheritance (Example, Interview Q), comparison explain/example |
+| 130. Initialisation order (static once, instance per object) | constructors (diagram, steps, Interview Q, scenario with this(...)) |
+| 153. Can/cannot: static method overloaded yes, overridden no, hidden yes | static-keyword (Rules: overloading) |
+| 153. Constructor: one this(...) or super(...), not both | this-super (point, Interview Q) |
+
+**Added beyond the reference (verified)**
+
+- Default constructor has the same access as the class, package access if the class has none (JLS 25, 8.8.9): constructors, Rules.
+- Class initialisation triggers: new instance, static method call, static field use that is not a constant (JLS 25, 12.4.1): constructors step 1, static-keyword Rules.
+- With this(...) chaining, instance initialisers run once, in the constructor that calls super (JLS 25, 12.5; run): constructors scenario.
+- JEP 513 detail: prologue statements may assign fields without initialisers but may not read fields or call methods; previews in JDK 22 to 24 (JEP 447, 482, 492).
+- javac requires a public top-level class in a file named after it (JLS 25, 7.6, "host system may enforce"; javac error confirmed by a run): access-modifiers, Rules.
+- Provider / Hashtable story made concrete: JDK 1.2 added Hashtable.entrySet, Provider did not override it, so entries could be removed without Provider.remove's checks (Secure Coding Guideline 4-6): inheritance, Common mistakes.
+- ArrayList.addAll does not call add (run on JDK 21): inheritance scenario on extending vs holding a list.
+- Interface methods with a body: default and static since Java 8, private since Java 9 (JEP 213): comparison abstract-class-vs-interface rows.
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Reference 14/15: "this() / super() must be the first statement in a constructor" | True up to Java 24; since Java 25 statements may come before the call if they do not use this (trap in this-super, Rules in constructors) | https://openjdk.org/jeps/513 |
+| Draft constructors listed only static, final, abstract as forbidden | JLS 8.8.3 also forbids native, strictfp, synchronized; kept the three interview-relevant ones only (no change in meaning) | JLS 25, 8.8.3 |
+
+### Unit oop-b
+
+**Added from the reference**
+
+| Reference item | Concept (part) |
+|---|---|
+| 11. Constructors and static methods can be overloaded | polymorphism (Rules) |
+| 12. Cannot reduce visibility; private methods are not overridden | polymorphism (Rules, Interview Q) |
+| why-Q30. Why upcasting | polymorphism (How step 4, Interview Q reworded) |
+| 128. Exception rules in overriding | polymorphism (Rules, scenario) |
+| 19. A class with an abstract method must be abstract; abstract class may have static and final methods | abstract-classes-interfaces (Rules) |
+| 20. An interface can extend several interfaces | abstract-classes-interfaces (Rules) |
+| 95. Interface static methods are not inherited | abstract-classes-interfaces (Rules) |
+| why-Q1 / Q2 / Q3 / Q20 | abstract-classes-interfaces (Why it exists, Not to be confused with, Interview Qs) |
+| 90/91. Kinds of nested class; anonymous class for one-off use | inner-classes (What it is, table, steps) |
+| 25. Object methods (toString, getClass, clone, wait/notify) | object-class-equals-hashcode (Rules) |
+| why-Q8. hashCode finds the bucket, equals confirms | object-class-equals-hashcode (How it works diagram and steps, Interview Q) |
+| 88. Immutable JDK examples, recipe | immutability (What it is, How steps) |
+| 55. Enum fields, methods, constructors | enums (Example) |
+| 56/57. Record auto-generated members, sealed purpose | records-sealed (What it is, How steps) |
+Beyond the reference (verified now): field hiding (fields are not polymorphic); a private parent method keeps running from parent code; captured locals must be final or effectively final; anonymous classes pass arguments to the parent constructor and extend one type only; inner-class memory leak; hashCode may use fewer fields than equals, never more; List.copyOf rejects nulls and may return the same list; final-field visibility after construction (JLS 17.5); final reference vs immutable object; enum implicitly final or sealed; public enum constructor is an error; == between an enum and an unrelated type does not compile; adding an enum constant breaks a switch expression with no default; sealed subtypes must be in the same module or package, permits optional in one file; records forbid instance initialisers; a switch on null throws NPE without case null (Java 21); enum vs sealed vs record.
+Count: about 30 facts added or made explicit, 0 reference corrections needed beyond those already in the coverage file.
+
+**Corrections**
+
+- Reference 20 says interface abstract methods are "traditionally" public abstract. Fixed to: an interface method is implicitly public unless private, and implicitly abstract unless default, static or private (JLS SE 25, 9.4).
+- Reference 88 lists wrapper classes among immutable examples; kept to String, BigDecimal and LocalDate, whose API docs say immutable (as in the earlier coverage decision).
+- Structure changes: abstract-classes-interfaces now lists `abstract-class-vs-interface` in confusedWith (was `inheritance-vs-composition`, which the inheritance concept owns) and uses a Mermaid class picture instead of embedding the comparison; object-class-equals-hashcode lists `equals-vs-double-equals` in confusedWith instead of embedding it, and uses a hash-lookup diagram. `visual` changed to match: abstract-classes-interfaces flow, object-class-equals-hashcode flow, enums code.

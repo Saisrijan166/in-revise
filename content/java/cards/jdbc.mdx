@@ -5,24 +5,48 @@ title: JDBC
 topic: design-io
 level: intermediate
 heat: 2
-hook: "JDBC: get a Connection, run a PreparedStatement with ? values, read the ResultSet, close it all with try-with-resources."
+hook: "JDBC is Java's standard way to run SQL: get a Connection, run a PreparedStatement with ? values, read the ResultSet, and close it all with try-with-resources."
 points:
-  - { k: "JDBC", v: "Java's standard SQL API; a vendor driver implements it" }
-  - { k: "DataSource", v: "preferred over DriverManager; can hand out pooled connections" }
-  - { k: "Indexes", v: "parameters and columns start at 1, not 0" }
-  - { k: "Auto-commit", v: "on: each statement commits by itself", kind: default }
-  - { k: "Transaction", v: "setAutoCommit(false), then commit() or rollback()" }
+  - { k: "JDBC", v: "a set of Java interfaces for SQL; each database vendor's driver implements them" }
+  - { k: "DataSource", v: "the API docs call it the preferred way to get connections; it can hand out pooled ones" }
+  - { k: "Numbering", v: "? parameters and result columns are numbered from 1, not from 0" }
+  - { k: "Auto-commit", v: "a new Connection commits each statement on its own as soon as it runs", kind: default }
+  - { k: "Transaction", v: "call setAutoCommit(false), run the statements, then commit() or, on error, rollback()" }
+  - { k: "Leaks", v: "a Connection that is never closed stays open, and a pool soon runs out", kind: minus }
 trap:
   wrong: "Statements on one Connection stay in one transaction until you call commit()."
-  right: "A new connection is in auto-commit mode, so each statement commits at once. Call setAutoCommit(false) to group them."
-sayIt: "I get a Connection from a pooled DataSource, run a PreparedStatement with ? placeholders, loop over the ResultSet with next(), and close everything in try-with-resources. For several writes I turn off auto-commit and commit or roll back."
+  right: "A new Connection is in auto-commit mode, so each statement commits at once. Call setAutoCommit(false) to group statements into one transaction."
+  why: "In Spring code, a method marked @Transactional runs its statements in one transaction with no commit() call, so people expect a plain Connection to group statements too."
+sayIt: "I get a Connection from a pooled DataSource, run a PreparedStatement with ? placeholders, loop over the ResultSet with next(), and close everything in try-with-resources. For several writes that belong together, I turn off auto-commit and commit or roll back."
+cheat:
+  idea: "JDBC is Java's standard API for SQL databases, and each vendor's driver implements it."
+  flow: "DataSource → Connection → PreparedStatement → ResultSet → close"
+  remember: "Auto-commit is on by default: turn it off, then commit() or rollback(), to make two writes one transaction."
+buildsOn: [try-catch-finally, throw-throws-custom]
+scenarios:
+  - q: "A payment debits the wallet and then marks the payment PAID, as two executeUpdate calls on a new Connection. The second one fails. What is in the database?"
+    a: "The wallet is debited but the payment is still PENDING. In auto-commit mode the first UPDATE committed the moment it ran. Turn auto-commit off, run both, then commit, and call rollback() in the catch block."
+  - q: "Your loop calls rs.getString(1) right after executeQuery(), without calling rs.next(). What happens?"
+    a: "It throws SQLException. A new ResultSet's cursor sits before the first row, so there is no current row to read. Call rs.next() first; it moves to the first row and returns false when there are no rows."
 confusedWith: [statement-vs-preparedstatement]
 tags: [jdbc, sql, database, transactions]
 visual: flow
 sources:
-  - title: "Connection (Java SE 25 API, java.sql)"
+  - title: "Connection: auto-commit default, setAutoCommit, close with an active transaction (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.sql/java/sql/Connection.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "DriverManager: drivers loaded as service providers; DataSource preferred (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.sql/java/sql/DriverManager.html"
+    verifiedOn: "2026-10-21"
+  - title: "ResultSet: cursor before the first row, columns from 1, forward-only default (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.sql/java/sql/ResultSet.html"
+    verifiedOn: "2026-10-21"
+  - title: "A Short Guide to Hibernate 7 (7.4): Hibernate works over JDBC connections"
+    url: "https://docs.hibernate.org/orm/7.4/introduction/html_single/"
+    verifiedOn: "2026-10-21"
+  - title: "Using @Transactional (Spring Framework reference)"
+    url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html"
+    verifiedOn: "2026-10-21"
   - title: "DataSource (Java SE 25 API, javax.sql)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.sql/javax/sql/DataSource.html"
     verifiedOn: "2026-10-19"
@@ -31,49 +55,82 @@ sources:
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+JDBC (Java Database Connectivity) is the standard Java API, in the `java.sql` package, for talking to relational databases with SQL. It is mostly interfaces: `Connection` (an open session with the database), `PreparedStatement` (SQL to run) and `ResultSet` (the rows that come back). A JDBC driver is the database vendor's library that implements these interfaces for PostgreSQL, MySQL or Oracle.
+
 ## Why it exists
 
-Databases differ. JDBC gives Java one set of interfaces and each vendor's driver implements them, so the same code works with PostgreSQL, MySQL or Oracle.
+Every database speaks its own network protocol. Without a common API, code written for PostgreSQL would have to be rewritten for MySQL. JDBC fixes the Java side: your code calls the same interfaces, and you change only the driver jar and the connection URL. Libraries such as Hibernate, which map Java objects to tables, also send their SQL through JDBC.
 
 ## How it works
 
-<Steps label="Running a query with JDBC">
-  <Step title="Get a Connection">`dataSource.getConnection()`, or `DriverManager.getConnection(url, user, password)`.</Step>
-  <Step title="Prepare the SQL">`con.prepareStatement("SELECT name FROM users WHERE id = ?")`, then `ps.setLong(1, id)`.</Step>
-  <Step title="Execute">`executeQuery()` returns a ResultSet; `executeUpdate()` returns the changed row count.</Step>
-  <Step title="Read rows">`while (rs.next()) rs.getString("name")`: the cursor starts before the first row.</Step>
-  <Step title="Close">Open all three in [try-with-resources](card:try-catch-finally), so they close even on errors.</Step>
-</Steps>
+<Mermaid
+  alt="JDBC call flow. Your code asks the DataSource for a Connection. The Connection prepares a PreparedStatement. Executing it sends SQL through the vendor's JDBC driver to the database, which returns rows as a ResultSet."
+  chart={`flowchart LR
+  A[Your code] -- "getConnection()" --> DS[DataSource]
+  DS --> C[Connection]
+  C -- "prepareStatement(sql)" --> PS[PreparedStatement]
+  PS -- "executeQuery()" --> D[JDBC driver] --> DB[(Database)]
+  DB -- rows --> RS[ResultSet]`}
+/>
 
-- Opening a connection is costly, so apps use a connection pool. `close()` returns a pooled connection to the pool.
+1. Get a `Connection` from a `DataSource`, an object set up once with the database URL and login, by calling `getConnection()`. `DriverManager.getConnection(url, user, password)` also works, and finds the driver on the classpath by itself.
+2. Prepare the SQL with `?` placeholders: `con.prepareStatement("SELECT id, status FROM payment WHERE status = ?")`, then set each value by its number: `ps.setString(1, "PAID")`.
+3. Execute it. `executeQuery()` returns a `ResultSet`; `executeUpdate()` returns the number of rows changed.
+4. Read the rows with `while (rs.next())`. The cursor starts before the first row, and `next()` returns `false` when the rows run out. Read columns with `rs.getString("status")` or `rs.getString(2)`.
+5. Close the `ResultSet`, statement and connection, best by opening all of them in [try-with-resources](card:try-catch-finally), so they close even after an exception.
 
 ## Example
 
+A transaction is a group of SQL statements that are made permanent together at commit, or undone together at rollback. `markPaid` debits the user's wallet and marks the payment `PAID` as one transaction, on a `Connection con` from the `DataSource`.
+
 ```java
-String sql = "UPDATE account SET balance = balance + ? WHERE id = ?";
-try (Connection con = dataSource.getConnection();
-     PreparedStatement ps = con.prepareStatement(sql)) {
-    con.setAutoCommit(false);                      // one unit of work
-    try {
-        ps.setLong(1, -500); ps.setLong(2, 1); ps.executeUpdate();
-        ps.setLong(1, 500);  ps.setLong(2, 2); ps.executeUpdate();
-        con.commit();                              // both or neither
-    } catch (SQLException e) {
-        con.rollback(); throw e;
-    }
+con.setAutoCommit(false);                                   // group the next statements
+try (PreparedStatement debit = con.prepareStatement(
+         "UPDATE wallet SET balance = balance - ? WHERE user_id = ?");
+     PreparedStatement mark = con.prepareStatement(
+         "UPDATE payment SET status = 'PAID' WHERE id = ?")) {
+    debit.setLong(1, amount);                               // first ?
+    debit.setString(2, userId);                             // second ?
+    debit.executeUpdate();
+    mark.setString(1, paymentId);
+    mark.executeUpdate();
+    con.commit();                                           // both changes become permanent
+} catch (SQLException e) {
+    con.rollback();                                         // undo the debit too
+    throw e;
 }
 ```
+
+What to notice:
+
+- In a test on PostgreSQL 18, a second payment larger than the balance broke the wallet's `balance >= 0` check. `rollback()` ran, and that payment stayed `PENDING` with the wallet unchanged.
+- Remove `setAutoCommit(false)` and each `executeUpdate` commits at once, so a failure in `mark` would leave the wallet debited.
+- Values go in through `setLong` and `setString`, never by joining strings into the SQL; see [Statement vs PreparedStatement](compare:statement-vs-preparedstatement).
+
+## Rules and defaults
+
+- **Auto-commit:** on for every new `Connection`. Calling `setAutoCommit` in the middle of a transaction, with a change of mode, commits that transaction.
+- **Closing with an open transaction:** the result depends on the driver, so the API docs strongly recommend calling `commit()` or `rollback()` before `close()`.
+- **ResultSet:** forward-only and read-only by default. It closes by itself when its statement is closed or run again.
+- **Drivers:** `DriverManager` loads drivers on the classpath as service providers, so `Class.forName("org.postgresql.Driver")` is not needed with current drivers.
+- **Connection pool:** opening a connection is slow, so apps use a pool, for example HikariCP, behind a `DataSource`. Calling `close()` on a pooled connection returns it to the pool.
+
+## Common mistakes
+
+- **"close() on a pooled connection is wasteful, so skip it."** For a pooled connection, `close()` is what hands it back. Without it the connection stays borrowed, and the pool soon has none left.
 
 ## Interview Qs
 
 ### What are the steps to query a database with JDBC?
 
-Get a Connection, create a PreparedStatement with ? placeholders, set the values, call executeQuery, loop with rs.next() and read columns, then close everything, best with try-with-resources.
+Get a `Connection` from a `DataSource`, create a `PreparedStatement` with `?` placeholders, set the values by number from 1, call `executeQuery()`, loop with `rs.next()` and read the columns, then close everything. try-with-resources does the closing, even when an exception is thrown.
 
 ### How do you run two updates as one transaction?
 
-Call setAutoCommit(false), run both updates, then commit(). On any SQLException call rollback(), so neither change stays.
+Call `setAutoCommit(false)` on the connection, run both updates, then call `commit()`. In the `catch` block call `rollback()`, so neither change stays if one fails. Without this, auto-commit makes each update permanent the moment it runs.
 
 ### Why use a connection pool?
 
-Opening a database connection is slow. A pool keeps connections open and lends them out; closing a pooled connection returns it to the pool for the next request.
+Opening a database connection is slow, because it needs a network connection and a login. A pool keeps a set of connections open and lends them out. When code calls `close()`, the connection goes back to the pool for the next request instead of being shut.

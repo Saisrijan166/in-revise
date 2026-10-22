@@ -5,82 +5,120 @@ title: Serialisation
 topic: design-io
 level: intermediate
 heat: 2
-hook: "Serialisation turns an object into bytes and back; only Serializable classes qualify, and transient and static fields are skipped."
+hook: "Serialisation turns an object into bytes so it can be saved or sent; deserialisation rebuilds it. Only Serializable classes qualify, and transient fields are skipped."
 points:
-  - { k: "Serializable", v: "a marker interface: no methods, just permission" }
-  - { k: "serialVersionUID", v: "a version number; a mismatch fails with InvalidClassException" }
-  - { k: "Skipped", v: "transient and static fields are not written" }
-  - { k: "Field types", v: "every object reached must be Serializable, or NotSerializableException", kind: minus }
-  - { k: "Untrusted bytes", v: "deserialising them is dangerous; filter or avoid", kind: minus }
+  - { k: "Serializable", v: "a marker interface with no methods; implementing it only gives permission to serialise the class" }
+  - { k: "What is written", v: "the non-static, non-transient fields, and every object they point to, as one graph" }
+  - { k: "serialVersionUID", v: "the class's version number; reading bytes with a different one fails with InvalidClassException" }
+  - { k: "No constructor runs", v: "the class's constructors and field initialisers are skipped, so transient fields get 0, false or null" }
+  - { k: "Every object reached", v: "must be Serializable too, or writeObject throws NotSerializableException", kind: minus }
+  - { k: "Untrusted bytes", v: "the API docs call deserialising them inherently dangerous; avoid it, or allow only known classes with a filter", kind: minus }
 trap:
   wrong: "After deserialisation a transient field gets its initial value back."
-  right: "It gets the type's default (null, 0, false). The class's constructors and field initialisers do not run."
-sayIt: "A class implements Serializable and ObjectOutputStream writes its non-transient, non-static fields as bytes. I declare a serialVersionUID, mark secrets transient, and never deserialise untrusted data; for data exchange I use JSON."
+  right: "It gets the type's default: null, 0 or false. The class's constructors and field initialisers do not run on reading."
+  why: "Every other way of making an object runs its field initialisers, so people expect `transient String otp = \"4821\"` to come back as \"4821\"."
+sayIt: "A class implements Serializable and ObjectOutputStream writes its non-transient, non-static fields as bytes. I declare a serialVersionUID, mark secrets transient, and never deserialise untrusted data. For data exchange I prefer an explicit format such as JSON."
+cheat:
+  idea: "Serialisation writes an object's fields as bytes with ObjectOutputStream, and deserialisation rebuilds it with ObjectInputStream. The class must implement Serializable; transient and static fields are not written."
+  remember: "Declare a private serialVersionUID; a transient field reads back as null, 0 or false."
+buildsOn: [java-io, abstract-classes-interfaces]
+scenarios:
+  - q: "Payment implements Serializable and has a field PaymentGateway gateway, where the gateway class does not implement Serializable. What happens when you write a Payment?"
+    a: "writeObject throws NotSerializableException naming the gateway class. Serialisation writes the whole object graph, so every object a field reaches must be Serializable. Mark the field transient if it should not be saved."
+  - q: "You add a new field to Payment, which has no serialVersionUID, and then read a file written by the old version. What happens?"
+    a: "It likely fails with InvalidClassException. With no declared serialVersionUID, Java computes one from the class's details, and the new field changes it. Declaring private static final long serialVersionUID = 1L keeps old data readable."
 confusedWith: []
 tags: [serialization, transient, security]
 visual: flow
 sources:
-  - title: "Serializable (Java SE 25 API)"
+  - title: "Serializable: superclass no-arg constructor, serialVersionUID, NotSerializableException, untrusted data (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/io/Serializable.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
   - title: "Java Object Serialization Specification 3: Object Input Classes (Java SE 25)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/specs/serialization/input.html"
     verifiedOn: "2026-10-19"
+  - title: "Java Object Serialization Specification 1.13: Serialization of Records (Java SE 25)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/specs/serialization/serial-arch.html"
+    verifiedOn: "2026-10-21"
   - title: "Towards Better Serialization (Brian Goetz, OpenJDK Project Amber, 2019)"
     url: "https://openjdk.org/projects/amber/design-notes/towards-better-serialization"
     verifiedOn: "2026-10-19"
 ---
 
+## What it is
+
+Serialisation is turning an object into a sequence of bytes, so it can be written to a file or sent over a network. Deserialisation is the reverse: reading those bytes and building a new object with the same field values. In Java, `ObjectOutputStream` and `ObjectInputStream`, two of the [byte streams](card:java-io), do this work. A class takes part only if it implements `Serializable`, an interface with no methods that only marks the class as allowed.
+
 ## Why it exists
 
-Objects live only in memory. To save one to a file, cache it, or send it to another JVM, Java needs a byte form it can turn back into an object.
+Objects live only in the memory of one running JVM. When the program stops, a pending `Payment` is gone, and another JVM cannot read it from your memory. Without serialisation you would write each field to a file by hand and parse it back. Java serialisation does both steps for the whole object, including the objects its fields point to.
 
 ## How it works
 
 <Mermaid
-  alt="Serialisation flow. An object goes into ObjectOutputStream, which writes its non-transient, non-static fields as bytes to a file or the network. ObjectInputStream reads the bytes back and rebuilds the object without running its class's constructors; transient fields get default values."
+  alt="Serialisation flow. A Payment object goes into ObjectOutputStream.writeObject, which writes its non-transient, non-static fields as bytes to a file or the network. ObjectInputStream.readObject reads the bytes back and builds a copy without running the class's constructors, so transient fields get default values."
   chart={`flowchart LR
-  O([Object]) --> OOS[ObjectOutputStream.writeObject]
+  O([Payment object]) --> OOS[ObjectOutputStream.writeObject]
   OOS --> B[(Bytes: file or network)]
   B --> OIS[ObjectInputStream.readObject]
   OIS --> C([Copy: no constructor run, transient = default])`}
 />
 
-- With no serialVersionUID, Java computes one from class details, so a small change breaks old data.
-- [Records](card:records-sealed) are different: they are rebuilt through the canonical constructor (Java 16+).
-- Untrusted input: the API docs say avoid it; if you must, set a [serialisation filter](card:serialization-filter).
+1. `writeObject(payment)` checks that the class implements `Serializable`, and writes a description of the class, including its `serialVersionUID`.
+2. It writes every field that is not `static` and not `transient`. A field that points to another object writes that object too, so the whole graph is saved.
+3. `readObject()` reads the class description and compares its `serialVersionUID` with the loaded class. A mismatch throws `InvalidClassException`.
+4. It creates the object without calling the class's constructors, then fills the saved fields from the bytes. Fields that were not saved keep their default value.
 
 ## Example
 
+A `Payment` is written to a file and read back; its one-time password is marked `transient`.
+
 ```java
-class User implements Serializable {
-    private static final long serialVersionUID = 1L;
-    String name = "Asha";
-    transient String token = "secret";               // not written
+class Payment implements Serializable {
+    private static final long serialVersionUID = 1L;    // version of this class's byte form
+    String id = "P1";
+    long amount = 50_000;                               // paise
+    PaymentStatus status = PaymentStatus.PAID;
+    transient String otp = "4821";                      // never written
 }
-try (var out = new ObjectOutputStream(new FileOutputStream("u.bin"))) {
-    out.writeObject(new User());
+try (var out = new ObjectOutputStream(new FileOutputStream("payment.bin"))) {
+    out.writeObject(new Payment());                     // object -> bytes
 }
-try (var in = new ObjectInputStream(new FileInputStream("u.bin"))) {
-    User copy = (User) in.readObject();
-    System.out.println(copy.name + " " + copy.token);   // token was not written
+try (var in = new ObjectInputStream(new FileInputStream("payment.bin"))) {
+    Payment copy = (Payment) in.readObject();           // bytes -> new object
+    System.out.println(copy.id + " " + copy.amount + " " + copy.status + " " + copy.otp);
 }
 ```
 
 ```text output
-Asha null
+P1 50000 PAID null
 ```
+
+What to notice:
+
+- `otp` prints `null`, not `"4821"`: it was not written, and the field initialiser does not run on reading.
+- `status` is an [enum](card:enums), which serialises by its constant name, so the copy holds the same `PAID` constant.
+- Remove `implements Serializable` and `writeObject` throws `NotSerializableException`.
+
+## Rules and defaults
+
+- **serialVersionUID:** if you do not declare one, Java computes it from the class's details, so a small change breaks old data. The API docs strongly recommend declaring it, `private` where possible.
+- **Static fields:** never written, because they belong to the class, not to the object.
+- **Non-serialisable superclass:** its fields are not written. On reading, its no-arg constructor runs, and it must be accessible to the subclass.
+- **Records (Java 16):** a serialisable [record](card:records-sealed) is rebuilt through its canonical constructor, so its checks still run.
+- **Custom control:** `Externalizable` lets the class write and read its own state. `readResolve()` replaces the object that was read, which keeps a [singleton](card:design-patterns) single.
+- **Untrusted data:** the API docs say deserialising it is inherently dangerous and should be avoided. If you must, set an [ObjectInputFilter](card:serialization-filter) (Java 9) to allow only known classes.
 
 ## Interview Qs
 
-### What is serialVersionUID and why declare it?
+### What is serialVersionUID and why should you declare it?
 
-It is the class's serial version. Reading data written by a different version fails with InvalidClassException. The computed default changes with small edits or compilers, so the API docs strongly recommend declaring it, ideally private.
+It is the version number of a serialisable class. Reading bytes written with a different version fails with `InvalidClassException`. The computed default changes with small edits and can differ between compilers, so the API docs strongly recommend declaring it yourself, ideally `private static final long`.
 
-### What is not serialised?
+### Which fields are not serialised?
 
-Static fields (they belong to the class) and transient fields. Fields of a non-serialisable superclass are also skipped; that superclass needs an accessible no-arg constructor, which runs on reading.
+Static fields, because they belong to the class, and transient fields, which you mark to skip. Fields inherited from a superclass that is not serialisable are also skipped; that superclass needs an accessible no-arg constructor, which runs on reading.
 
 ### Why is Java serialisation discouraged today?
 
-It rebuilds objects outside normal constructors, so crafted bytes can break invariants or attack the app. Prefer an explicit format like JSON; if Java serialisation stays, use a filter.
+It builds objects without running their constructors, so crafted bytes can create objects that break the class's rules, or trigger dangerous code during reading. It is also tied to Java class details. Explicit formats such as JSON are safer and readable by other languages.

@@ -5,73 +5,131 @@ title: Locks and Deadlock
 topic: concurrency
 level: intermediate
 heat: 2
-hook: "ReentrantLock is synchronized with extras like tryLock and timeouts; deadlock is threads waiting on each other's locks forever."
+hook: "ReentrantLock is a lock object you take and release yourself, with extras such as a time limit. Deadlock is threads waiting for each other's locks forever."
 points:
-  - { k: "Unlock in finally", v: "lock(), then try; unlock() first in finally: no automatic release", kind: minus }
-  - { k: "tryLock(timeout)", v: "give up after a wait instead of blocking forever", kind: plus }
-  - { k: "Fairness", v: "default non-fair; new ReentrantLock(true) serves the longest waiter", kind: default }
-  - { k: "ReadWriteLock", v: "many readers together, or one writer alone" }
-  - { k: "Deadlock needs all 4", v: "mutual exclusion, hold and wait, no preemption, circular wait" }
+  - { k: "Unlock in finally", v: "call lock() just before try and unlock() inside finally; nothing releases a ReentrantLock for you", kind: minus }
+  - { k: "tryLock(timeout)", v: "waits at most the given time for the lock and returns false if it did not get it", kind: plus }
+  - { k: "Fairness", v: "new ReentrantLock() is non-fair; new ReentrantLock(true) favours the longest-waiting thread", kind: default }
+  - { k: "ReadWriteLock", v: "many threads can hold the read lock together; the write lock is held by one thread alone" }
+  - { k: "Deadlock needs all 4", v: "mutual exclusion, hold and wait, no preemption and circular wait; remove one and it cannot happen" }
+  - { k: "Fixed lock order", v: "if every thread takes locks in the same order, no waiting cycle can form", kind: plus }
 trap:
   wrong: "A fair lock prevents deadlock."
-  right: "Fairness only orders waiters and avoids starvation. Prevent deadlock with one fixed lock order, or tryLock with a timeout."
-sayIt: "Deadlock needs four conditions; I break circular wait by always taking locks in one global order. Where that is hard, ReentrantLock.tryLock with a timeout lets a thread back off."
+  right: "Fairness only decides which waiting thread gets a free lock next. Prevent deadlock with one fixed lock order, or tryLock with a timeout."
+  why: "Fairness sounds like \"no thread waits forever\", and a fair lock does prevent starvation, so people stretch it to deadlock too."
+sayIt: "Deadlock needs four conditions at once; I break circular wait by always taking locks in one global order, for example by id. Where that is hard, ReentrantLock.tryLock with a timeout lets a thread give up and retry instead of waiting forever."
+cheat:
+  idea: "ReentrantLock is a lock you take with lock() and release with unlock(), plus extras like a timeout. Deadlock is two threads each holding a lock the other needs, so both wait forever."
+  remember: "Prevent deadlock: all threads take locks in one fixed order, such as lower id first."
+buildsOn: [synchronization, try-catch-finally]
+scenarios:
+  - q: "transfer(from, to) locks from, then to. Thread A runs transfer(wallet1, wallet2) while thread B runs transfer(wallet2, wallet1). What can happen, and how do you fix it?"
+    a: "Deadlock: A holds wallet1 and waits for wallet2, while B holds wallet2 and waits for wallet1. Neither lets go. Fix it by always locking the wallet with the lower id first, so both threads ask for the locks in the same order."
+  - q: "A production service hangs and CPU is near zero. You suspect a deadlock. How do you confirm it?"
+    a: "Take a thread dump with jstack <pid> (or jcmd <pid> Thread.print). It shows each thread's state and the locks it holds and waits for, and jstack also runs deadlock detection and reports any cycle. In code, ThreadMXBean.findDeadlockedThreads() returns the ids of the deadlocked threads."
 confusedWith: [synchronized-vs-reentrantlock]
 tags: [reentrantlock, deadlock, livelock, starvation, readwritelock]
 visual: flow
 sources:
-  - title: "ReentrantLock (Java SE 25 API)"
+  - title: "ReentrantLock: fairness, tryLock, lock/try/finally idiom, Condition (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/locks/ReentrantLock.html"
-    verifiedOn: "2026-10-19"
+    verifiedOn: "2026-10-21"
+  - title: "ReadWriteLock (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/util/concurrent/locks/ReadWriteLock.html"
+    verifiedOn: "2026-10-21"
   - title: "Common Concurrency Problems: deadlock conditions and prevention (OSTEP, chapter 32)"
     url: "https://pages.cs.wisc.edu/~remzi/OSTEP/threads-bugs.pdf"
     verifiedOn: "2026-10-19"
   - title: "ThreadMXBean.findDeadlockedThreads (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.management/java/lang/management/ThreadMXBean.html"
     verifiedOn: "2026-10-19"
+  - title: "jstack: print the stack traces of a running process's threads (JDK 25 tool reference)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/specs/man/jstack.html"
+    verifiedOn: "2026-10-21"
+  - title: "Troubleshooting Guide (Java SE 25): Diagnostic Tools, jstack performs deadlock detection"
+    url: "https://docs.oracle.com/en/java/javase/25/troubleshoot/diagnostic-tools.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+`ReentrantLock`, in `java.util.concurrent.locks`, is a lock you hold as an object. You call `lock()` to take it and `unlock()` to release it. It gives the same one-thread-at-a-time rule and the same visibility as [synchronized](card:synchronization), and adds choices such as waiting only for a limited time. Deadlock is the danger that comes with any lock: two or more threads each hold a lock and wait for a lock another one holds, so none of them can ever continue.
 
 ## Why it exists
 
-synchronized cannot give up, time out or be interrupted while waiting. Explicit locks add that control, and every lock brings the risk of a deadlock.
+A thread waiting to enter `synchronized` code waits with no limit and cannot be interrupted. If the lock is never released, it waits forever. `ReentrantLock` lets the thread try for a while and then give up, or stop waiting when interrupted. Deadlock matters because it gives no error: the service just stops responding, so you must design it away before it happens.
 
 ## How it works
 
 <Mermaid
-  alt="Deadlock cycle. Thread A holds lock 1 and waits for lock 2. Thread B holds lock 2 and waits for lock 1. Neither can continue."
+  alt="Deadlock cycle. Thread A holds the lock of wallet 1 and waits for the lock of wallet 2. Thread B holds the lock of wallet 2 and waits for the lock of wallet 1. Neither can continue."
   chart={`flowchart LR
-  A[Thread A] -- holds --> L1[(Lock 1)]
-  A -. waits for .-> L2[(Lock 2)]
+  A[Thread A] -- holds --> L1[(Wallet 1 lock)]
+  A -. waits for .-> L2[(Wallet 2 lock)]
   B[Thread B] -- holds --> L2
   B -. waits for .-> L1`}
 />
 
-- **Fix:** take locks in one global order, so no cycle can form.
-- Or use `tryLock` with a timeout: release what you hold and retry. Retrying in step can cause [livelock](card:livelock).
-- **Find it:** a thread dump (`jstack <pid>`) shows who holds what; `ThreadMXBean.findDeadlockedThreads()` reports the cycle.
+A transfer between two wallets locks both of them. Follow two transfers that run at the same time:
+
+1. Thread A runs `transfer(wallet1, wallet2)` and locks wallet 1.
+2. Thread B runs `transfer(wallet2, wallet1)` and locks wallet 2.
+3. A tries to lock wallet 2, which B holds, so A waits.
+4. B tries to lock wallet 1, which A holds, so B waits. Each waits for the other, and neither will release first: this is deadlock.
+
+All four conditions hold here: a lock has one owner (mutual exclusion), each thread holds one lock while waiting for another (hold and wait), nobody can take a lock away (no preemption), and the waiting forms a circle (circular wait). So the key is to remove one condition; the easiest is circular wait.
 
 ## Example
 
-```java
-private final ReentrantLock lock = new ReentrantLock();
+The fix makes every transfer lock the wallet with the lower id first, so the circle in step 4 cannot form.
 
-boolean update() throws InterruptedException {
-    if (!lock.tryLock(1, TimeUnit.SECONDS)) return false;   // back off, no deadlock
+```java
+static void transfer(Wallet from, Wallet to, long paise) {
+    Wallet first = from.id < to.id ? from : to;     // always lock the lower id first
+    Wallet second = (first == from) ? to : from;
+    first.lock.lock();
     try {
-        // critical section
-        return true;
-    } finally {
-        lock.unlock();                                       // always release
-    }
+        second.lock.lock();
+        try {
+            from.balancePaise -= paise;
+            to.balancePaise += paise;
+        } finally { second.lock.unlock(); }
+    } finally { first.lock.unlock(); }
 }
 ```
+
+What to notice:
+
+- Each `Wallet` has its own `final ReentrantLock lock`. Two threads moving money in opposite directions now both lock wallet 1 first, so one simply waits for the other.
+- With `first = from` and `second = to`, two threads sending 100,000 transfers each in opposite directions hung on our test run: a real deadlock.
+- Every `unlock()` sits in a `finally` block. If the code inside throws and skips `unlock()`, the lock stays held and every later transfer on that wallet waits forever.
+
+## Rules and defaults
+
+- **Idiom:** call `lock()` just before `try`, and `unlock()` as the first line of `finally`.
+- **Fairness (Java SE 25):** the default is non-fair, with no order promised among waiting threads. A fair lock favours the longest waiter and prevents starvation, but the Javadoc warns it can be much slower. The untimed `tryLock()` ignores fairness and takes a free lock at once.
+- **Interruptible wait:** `lockInterruptibly()` waits for the lock but stops with `InterruptedException` if the thread is interrupted.
+- **Conditions:** `newCondition()` gives `await()` and `signal()`, which work like `wait()` and `notify()`, and one lock can have several of them.
+- **Reentrant:** the thread that holds the lock can call `lock()` again; it must call `unlock()` once for each `lock()`.
+
+## Not to be confused with
+
+Deadlock: threads are blocked forever, each waiting for a lock another holds. Livelock: threads are not blocked but keep reacting to each other, for example both releasing and retrying in step, so no one progresses. Starvation: one thread rarely gets a resource because others keep taking it. Rule: deadlock = stuck and waiting; livelock = busy but stuck; starvation = one thread left out.
+
+## Common mistakes
+
+- **"Nested locks are fine as long as each one is released in finally."** Release does not help if two threads take the same locks in opposite orders. Order matters as much as release.
 
 ## Interview Qs
 
 ### When would you choose ReentrantLock over synchronized?
 
-When you need tryLock, a timeout, an interruptible wait, fairness, or several Condition objects. Otherwise synchronized is simpler and cannot forget to unlock.
+When you need something `synchronized` lacks: `tryLock` with or without a timeout, an interruptible wait, a fair order, or several `Condition` objects on one lock. Otherwise `synchronized` is simpler and cannot leak a lock, because the JVM releases it at the end of the block.
 
-### Deadlock vs livelock vs starvation?
+### How do you prevent a deadlock?
 
-Deadlock: threads blocked forever, each waiting for another. Livelock: threads are active but keep reacting to each other, so none progresses. Starvation: one thread rarely gets a resource because greedy threads hold it.
+Take locks in one global order, for example by account id, so no cycle can form. Hold as few locks as possible, and for as short a time. Where an order is hard to keep, use `tryLock` with a timeout: if a thread cannot get the second lock, it releases the first and retries later.
+
+### What is a ReadWriteLock and when does it help?
+
+It is a pair of locks. Any number of threads can hold the read lock at the same time as long as no thread holds the write lock, which one thread holds alone. It helps when data is read far more often than written, such as a cache of exchange rates; `ReentrantReadWriteLock` is the standard implementation.
