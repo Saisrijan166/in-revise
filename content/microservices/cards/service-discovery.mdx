@@ -5,17 +5,28 @@ title: Service Discovery and Registry
 topic: communication
 level: intermediate
 heat: 3
-hook: "Instances come and go with new IPs, so services find each other by name through a registry, not by hardcoded addresses."
+hook: "Instances come and go with new addresses, so services find each other by name through a live registry, not through IP addresses written in config."
 points:
-  - { k: "Registry", v: "the live list of instances; must itself be highly available" }
-  - { k: "Client-side", v: "the caller asks the registry and picks one: Eureka" }
-  - { k: "Server-side", v: "the caller hits a router that picks: Kubernetes Service, AWS ELB" }
-  - { k: "Registration", v: "self (the instance, with heartbeats) or third party (the platform)" }
-  - { k: "Eureka heartbeat", v: "every 30 s (Spring Cloud Netflix 5.0, Spring Cloud 2025.1)", kind: default }
+  - { k: "Instance", v: "one running copy of a service, with its own IP address and port that change when it is replaced" }
+  - { k: "Registry", v: "the live list of instances; it must itself run as several nodes, or it is a single point of failure" }
+  - { k: "Client-side discovery", v: "the caller fetches the instance list and picks one itself, as Eureka with Spring Cloud LoadBalancer does" }
+  - { k: "Server-side discovery", v: "the caller uses one fixed name, and a router picks the instance, as a Kubernetes Service does" }
+  - { k: "Registration", v: "an instance registers itself and sends heartbeats, or the platform registers it for you" }
+  - { k: "Eureka heartbeat", v: "every 30 seconds by default (Spring Cloud Netflix 5.0, in Spring Cloud 2025.1)", kind: default }
 trap:
   wrong: "Service discovery also balances the load."
-  right: "Discovery returns the live instances. Choosing one per call is load balancing, done by the caller or a router."
-sayIt: "Instances register with a registry and renew with heartbeats, so dead ones drop out. With Eureka the caller picks an instance itself; on Kubernetes a Service name resolves via DNS and the platform routes."
+  right: "Discovery returns the live instances. Choosing one of them for each call is load balancing, done by the caller or by a router."
+  why: "Tools such as a Kubernetes Service or @LoadBalanced do both jobs in one step, so the two jobs look like one."
+sayIt: "Instances register with a registry and renew with heartbeats, so dead ones drop out, and callers use a service name instead of an IP. With Eureka the caller picks an instance itself; on Kubernetes the Service name resolves through DNS and the platform routes."
+cheat:
+  idea: "Service discovery turns a service name such as payment-service into the address of a healthy instance. Instances register in a registry and send heartbeats; dead ones drop out."
+  remember: "Discovery finds the live instances; picking one per call is load balancing."
+buildsOn: [scaling-services, rest-apis]
+scenarios:
+  - q: "Payment Service scales from 2 to 5 instances for a sale. Order Service has the 2 old IP addresses in its config. What happens?"
+    a: "Order Service keeps sending everything to the 2 old instances, so the 3 new ones sit idle and the old ones overload. If an old one is replaced, calls to its IP fail. With discovery, the new instances join the registry and start getting traffic."
+  - q: "A Payment instance crashes. For a few seconds Order Service still sends calls to it. Why, and what protects the user?"
+    a: "The registry drops it only after missed heartbeats or failed health checks, and callers also cache the instance list. Until then, calls to it fail. A short timeout and a retry on another instance cover the gap."
 confusedWith: [service-discovery-vs-api-gateway]
 tags: [service-discovery, registry, eureka, kubernetes]
 visual: table
@@ -23,50 +34,84 @@ sources:
   - title: "Pattern: Service registry, client-side and server-side discovery (microservices.io, Chris Richardson)"
     url: "https://microservices.io/patterns/service-registry.html"
     verifiedOn: "2026-10-20"
-  - title: "Spring Cloud Netflix 5.0: Service Discovery with Eureka"
+  - title: "Spring Cloud Netflix 5.0.2: Service Discovery with Eureka (heartbeats, client cache, peers)"
     url: "https://docs.spring.io/spring-cloud-netflix/reference/spring-cloud-netflix.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Spring Cloud Commons 5.0: @LoadBalanced RestClient"
     url: "https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/common-abstractions.html"
     verifiedOn: "2026-10-20"
+  - title: "Spring Cloud LoadBalancer: instance cache TTL 35 s (Spring Cloud Commons 5.0)"
+    url: "https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/loadbalancer.html"
+    verifiedOn: "2026-10-21"
+  - title: "DNS for Services and Pods (Kubernetes documentation)"
+    url: "https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Service discovery is how one service finds the network address of another at the moment it calls it. An instance is one running copy of a service; Payment Service may run as three instances, each with its own IP address and port. A service registry is a live list of those instances. Callers use a stable service name, such as `payment-service`, and discovery turns it into the address of a healthy instance.
 
 ## Why it exists
 
-Instances restart, scale out and move, and each gets a new address. A caller needs the current list of healthy instances, not an IP written in config last month.
+With [horizontal scaling](card:scaling-services), instances start, stop, crash and multiply, and each new one gets a new address. If Order Service has `10.0.3.17:8080` written in its config, it breaks as soon as that instance is replaced, and it never uses the two extra instances added for a sale. Discovery keeps an up-to-date list, so callers always reach instances that exist now.
 
 ## How it works
 
 <Compare id="client-side-vs-server-side-discovery" />
 
-- An instance that stops renewing, or fails its health check, drops out of the registry.
-- On Kubernetes a Service gives a stable DNS name: [Containers and Kubernetes](card:containers-and-kubernetes).
-- Choosing among the instances: [Load Balancing](card:load-balancing).
+1. When a Payment instance starts, it is added to the registry. Either it registers itself (self-registration), or the platform registers it (third-party registration), as Kubernetes does.
+2. While it runs, the instance sends heartbeats, small "I am alive" messages at a fixed interval, or the platform runs health checks on it.
+3. An instance that stops renewing, or fails its health check, is removed from the list.
+4. Order Service asks for `payment-service`. In client-side discovery, it gets the list and picks an instance itself; in server-side discovery, it calls a router, such as a Kubernetes Service, that picks for it.
+5. The call goes to the chosen instance. Choosing well is [load balancing](card:load-balancing), the next concept.
 
 ## Example
 
-```java
-@Bean @LoadBalanced                 // Spring Cloud LoadBalancer resolves names
-RestClient.Builder restClientBuilder() { return RestClient.builder(); }
+Order Service calls Payment Service by name with Spring Cloud LoadBalancer and Eureka:
 
-// In a caller with the builder injected. "payment-service" is a
-// service name, not a host: an instance is picked per call
+```java
+@Configuration
+class ClientConfig {
+    @Bean @LoadBalanced                      // resolve service names through discovery
+    RestClient.Builder restClientBuilder() { return RestClient.builder(); }
+}
+
+// In Order Service, with the builder injected:
 PaymentStatus status = restClientBuilder.build().get()
-        .uri("http://payment-service/payments/{id}", paymentId)
+        .uri("http://payment-service/payments/{id}", paymentId)  // a name, not a host
         .retrieve()
         .body(PaymentStatus.class);
 ```
+
+What to notice:
+
+- `payment-service` is a service name. For each call, Spring Cloud LoadBalancer looks up its instances in the registry and swaps the name for a real host and port.
+- `@LoadBalanced` is what turns this on. Without it, the client would look up a host literally called `payment-service`, which fails outside Kubernetes.
+- On Kubernetes you can leave it out: a Service named `payment-service` resolves through DNS, and the platform picks the instance (server-side discovery).
+- By default the instance is picked in turn (round robin), as [load balancing](card:load-balancing) explains.
+
+## Rules and defaults
+
+- **Eureka heartbeat:** every 30 seconds by default (`eureka.instance.leaseRenewalIntervalInSeconds`, Spring Cloud Netflix 5.0). A new instance can take up to 3 heartbeats to become visible to callers.
+- **Cached lists:** Eureka clients keep the registry in memory, and Spring Cloud LoadBalancer caches each instance list for 35 seconds by default. So a dead instance can still be picked for a short while; timeouts and retries must cover that.
+- **A highly available registry:** run several Eureka servers. They replicate registrations to their peers.
+- **Kubernetes names:** a Service gets the DNS name `payment-service.shop.svc.cluster.local`; inside the same namespace, `payment-service` alone works.
+
+## Not to be confused with
+
+Discovery answers "where are the instances of this service now?". [Load balancing](card:load-balancing) picks one of them for this call. The [API gateway](card:api-gateway) is the front door for outside clients, and it uses discovery to find the services it routes to. Rule: discovery finds, the load balancer chooses, the gateway lets outsiders in.
 
 ## Interview Qs
 
 ### Why not hardcode service IP addresses?
 
-Instances are replaced, scaled and moved, so addresses change all the time. A registry tracks the live ones, and callers use a stable service name.
+Instances are replaced, scaled and moved, so their addresses keep changing. A hardcoded IP breaks when its instance goes away and ignores new instances. A registry tracks the live ones, and callers use a stable service name instead.
 
 ### What happens if the registry goes down?
 
-Clients cache registry data, so calls keep working for a while, but the cache grows stale. Run the registry as several nodes; Eureka servers replicate to their peers.
+Clients keep their cached copy of the registry, so calls keep working for a while, but the copy grows stale: new instances are not seen and dead ones are not removed. That is why the registry runs as several nodes; Eureka servers replicate to their peers.
 
 ### Client-side or server-side discovery?
 
-Client-side has fewer hops but needs discovery code in each language. Server-side keeps clients simple but adds a router that must be highly available. See the comparison above.
+Client-side has one hop less and lets the caller choose smartly, but needs a discovery library in every language you use. Server-side keeps clients simple, since they call one name, but adds a router that must itself be highly available. On Kubernetes, server-side comes built in.

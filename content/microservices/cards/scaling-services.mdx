@@ -5,17 +5,28 @@ title: "Scaling Services: Stateless, Horizontal, Throughput"
 topic: basics
 level: intermediate
 heat: 2
-hook: "Keep services stateless and add instances; then check that the database and its connection limit can keep up."
+hook: "Keep a service stateless and add instances of it; then check that the shared parts behind it, such as the database and its connection limit, can keep up."
 points:
-  - { k: "Stateless", v: "any instance can serve any request; state lives in a DB or Redis" }
-  - { k: "Little's law", v: "requests in flight = throughput × latency" }
-  - { k: "Pool budget", v: "instances × pool size must stay under the DB's connection limit", kind: minus }
-  - { k: "Backpressure", v: "a slow consumer makes producers slow down, not crash it" }
-  - { k: "Measure first", v: "find the real bottleneck before adding instances" }
+  - { k: "Stateless", v: "an instance keeps no user data in its memory between requests, so any instance can serve any request" }
+  - { k: "Scale out", v: "add instances of only the busy service; if one instance dies, the others keep serving", kind: plus }
+  - { k: "Little's law", v: "requests in flight = throughput × latency: 200 requests/s at 50 ms means 10 in flight at once" }
+  - { k: "Pool budget", v: "each instance opens its own connection pool, so instances × pool size must stay under the database limit", kind: minus }
+  - { k: "HikariCP pool", v: "maximumPoolSize defaults to 10 connections per instance (HikariCP, the pool Spring Boot 4.1 picks first)", kind: default }
+  - { k: "Measure first", v: "find what runs out first, CPU, the database or a downstream service, before adding instances" }
 trap:
   wrong: "Add more instances and threads, and the service gets faster."
-  right: "More instances only help if the bottleneck is the instance. If it is the database, they add load and use up its connections."
-sayIt: "I scale out stateless instances behind a load balancer and keep sessions in Redis or a token. Before scaling I find the bottleneck, and I size connection pools so all instances together stay under the database's limit."
+  right: "More instances help only if the instance is the bottleneck. If the database is, they add load and use up its connections."
+  why: "Adding servers is the textbook answer to load, and it works for the first few instances, which hides the shared database behind them."
+sayIt: "I keep services stateless and scale them out behind a load balancer, with sessions in Redis or a token. Before scaling I find the bottleneck, and I size connection pools so that all instances together stay under the database's connection limit."
+cheat:
+  idea: "Scale a stateless service by adding instances behind a load balancer. Give a bigger machine only to parts that cannot be split, such as a single database primary."
+  remember: "Instances × pool size must stay under the database's connection limit: 10 instances × 10 connections = 100."
+buildsOn: [monolith-and-microservices]
+scenarios:
+  - q: "The Order service keeps each shopping cart in a HashMap in memory. You go from 1 to 3 instances behind a load balancer that takes turns between them. What do users see?"
+    a: "Carts seem to vanish: a user's next request often lands on another instance, whose map does not have their cart. Move carts to a shared store such as Redis or the database, so the service is stateless and any instance can serve any request."
+  - q: "Each Order request spends most of its 40 ms waiting for PostgreSQL, and CPU on the 4 instances is at 20%. Will 4 more instances help?"
+    a: "Probably not. The instances are not the bottleneck; the database is. More instances send more queries to the same database and need more connections. Tune the slow queries, add an index or a cache, then measure again."
 confusedWith: []
 tags: [scalability, stateless, throughput, connection-pool]
 visual: table
@@ -23,61 +34,87 @@ sources:
   - title: "Optimize scaling and partitioning (Azure Well-Architected)"
     url: "https://learn.microsoft.com/en-us/azure/well-architected/performance-efficiency/scale-partition"
     verifiedOn: "2026-10-20"
+  - title: "The Twelve-Factor App: VI. Processes (stateless processes, no sticky sessions)"
+    url: "https://12factor.net/processes"
+    verifiedOn: "2026-10-20"
   - title: "JEP 444: Virtual Threads, Little's Law (OpenJDK)"
     url: "https://openjdk.org/jeps/444"
     verifiedOn: "2026-10-20"
   - title: "HikariCP configuration defaults (HikariCP README)"
     url: "https://github.com/brettwooldridge/HikariCP"
     verifiedOn: "2026-10-20"
-  - title: "max_connections (PostgreSQL 18 docs)"
+  - title: "max_connections, superuser_reserved_connections (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/runtime-config-connection.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Availability and reliability definitions (AWS Well-Architected, Reliability Pillar)"
+    url: "https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/availability.html"
+    verifiedOn: "2026-10-22"
   - title: "Supported connection pools (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/data/sql.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Scaling a service means changing how much load it can handle. Vertical scaling gives one instance a bigger machine, with more CPU or memory. Horizontal scaling runs more instances of the same service, with a load balancer, a component that spreads incoming requests across them; you will see it in [load balancing](card:load-balancing). Horizontal scaling works only if the service is stateless: it keeps nothing about a user in its own memory between requests.
+
 ## Why it exists
 
-Load grows unevenly: checkout spikes during a sale while profile pages stay quiet. Microservices let you scale only the busy service, if it keeps no state of its own.
+Load is uneven. During a sale, checkout traffic may grow many times while profile pages stay quiet. A monolith must be copied whole to cope; with [microservices](card:monolith-and-microservices) you add instances of only the Order service. But two things break this. If an instance keeps a user's session in memory, the next request may land on another instance and lose it. And every new instance needs database connections that the database may not have.
 
 ## How it works
 
 <Compare id="vertical-vs-horizontal-scaling" />
 
-- Avoid sticky sessions: keep sessions in Redis or use tokens.
-- Scaling changes capacity; [load balancing](card:load-balancing) spreads requests across it; a deployment changes the version.
-- Track latency as a percentile, not an average ([metrics](card:metrics-and-slos)).
+1. Measure first: find the bottleneck, the part that runs out first. It may be the instance's CPU, the database, or a service it calls.
+2. Make the service stateless: move sessions and carts to a shared store such as Redis or the database, or into a signed token the client sends with each request.
+3. Add instances behind the load balancer. Each new instance gets a share of the requests.
+4. Check the shared parts: every instance opens its own pool of database connections, so the total must stay under the database's limit.
+5. Size with Little's law: requests in flight = throughput × latency. Throughput is requests per second; latency is how long one request takes.
+
+So the key is: adding instances helps only while the instance is the bottleneck.
 
 ## Example
 
-```text
-Order service: 50 ms per request, 200 requests/s
-  in flight = 200 × 0.05 = 10
-Target 2,000 requests/s at 50 ms -> 100 in flight
+The Order service before a sale, with the numbers worked out:
 
-8 instances × 10 connections (HikariCP default) = 80
-PostgreSQL 18 max_connections = 100 (typical default)
-  -> 2 more instances and the database refuses connections
+```text
+Now:    200 requests/s × 0.050 s = 10 requests in flight
+Sale:   2,000 requests/s × 0.050 s = 100 requests in flight
+
+Pools:  8 instances × 10 connections (HikariCP default) = 80
+Limit:  PostgreSQL 18 max_connections = 100, minus 3 reserved = 97
+Scale to 10 instances -> pools want 100 connections -> some are refused
 ```
 
-## Defaults
+What to notice:
+
+- Little's law turns the sale into a concrete number: ten times the throughput at the same latency means ten times the requests in flight.
+- The database limit, not the instance count, is the ceiling. Ten instances with default pools already ask for more connections than the 97 the app may use.
+- Fixes: smaller pools per instance, or faster queries, so each connection is busy for less time. Adding instances alone makes this worse.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Pool size (`maximumPoolSize`) | 10 | HikariCP, the pool Spring Boot 4.1 picks first |
-| Max connections | 100 (typical) | PostgreSQL 18 `max_connections` |
+| Pool size (`maximumPoolSize`) | 10 per instance | HikariCP, the pool Spring Boot 4.1 picks first |
+| Max connections | Typically 100 | PostgreSQL 18 `max_connections` |
+| Reserved for superusers | 3 | PostgreSQL 18 `superuser_reserved_connections` |
+
+- **No sticky sessions:** keep session data in a shared store, so a request can go to any instance.
+- **Backpressure:** when a part cannot keep up, it should make the senders slow down, for example with a bounded queue, instead of accepting work until it crashes.
+- **Scale up what cannot be split:** a single database primary is usually given a bigger machine rather than more copies.
 
 ## Interview Qs
 
-### What is the difference between scaling and load balancing?
+### What is the difference between scaling, load balancing and deployment?
 
-Scaling changes capacity: bigger machines or more instances. Load balancing spreads requests across the instances you have. You need both: new instances get no traffic without a load balancer, and balancing cannot add capacity.
-
-### Availability vs reliability?
-
-Availability is the share of time the service is usable, such as 99.9% a month. Reliability is wider: the service does its intended job correctly and consistently whenever it is expected to.
+Scaling changes capacity: bigger machines or more instances. Load balancing spreads requests across the instances you have. A deployment changes the version that runs. You need scaling and balancing together: new instances get no traffic without a load balancer, and balancing cannot add capacity.
 
 ### Why should a microservice be stateless?
 
-So any instance can take any request. Instances can then be added, removed or restarted freely, and no user loses a session when one instance dies.
+So any instance can take any request. Instances can then be added, removed or restarted freely, and no user loses a session or a cart when one instance dies.
+
+### Availability vs reliability?
+
+Availability is a number: the share of time the service does its job successfully when asked, such as 99.9% in a month. Reliability is the wider goal: the service does its intended job correctly and consistently whenever it is expected to. Availability is the usual way to measure it.

@@ -5,50 +5,87 @@ title: "Migrating a Monolith: Strangler Fig"
 topic: playbook
 level: intermediate
 heat: 2
-hook: "Put a facade in front of the monolith and move one capability at a time to a new service, until the old code can be retired."
+hook: "Put a facade in front of the monolith and move one capability at a time to a new service, until the old code can be switched off."
 points:
-  - { k: "Facade", v: "a proxy or gateway that sends each request to old or new" }
-  - { k: "First service", v: "fairly decoupled, few calls back to the monolith" }
-  - { k: "Move the data too", v: "copy with ETL, sync with CDC, validate, then cut over" }
-  - { k: "Anti-corruption layer", v: "translates between legacy and new models" }
-  - { k: "Facade risk", v: "can become a bottleneck or single point of failure", kind: minus }
+  - { k: "Facade", v: "a proxy or gateway in front of the monolith that sends each request to the old or the new code" }
+  - { k: "One at a time", v: "move one capability with its data, and retire its old code before taking the next", kind: plus }
+  - { k: "First service", v: "pick a fairly decoupled capability with few calls back into the monolith" }
+  - { k: "Move the data too", v: "copy with ETL, keep in sync with change data capture, validate, then switch over" }
+  - { k: "Anti-corruption layer", v: "translates between the legacy and the new model, so the new service never adopts the old schema" }
+  - { k: "Facade risk", v: "every request passes through it, so it can become a bottleneck or a single point of failure", kind: minus }
 trap:
   wrong: "Rewrite the whole monolith as microservices and switch over in one go."
-  right: "Move one capability, with its data, behind a facade. Retire its old code path before taking the next."
-sayIt: "I put a facade in front of the monolith, extract one loosely coupled capability with its data, route its traffic to the new service and retire the old code. Then I repeat."
+  right: "Move one capability, with its data, behind a facade. Retire its old code before taking the next."
+  why: "A clean rewrite feels faster than untangling old code, and it promises to fix everything at once. It hides months of risk until one switch-over day."
+sayIt: "I put a facade in front of the monolith, extract one loosely coupled capability with its data, route its traffic to the new service and retire the old code. Then I repeat. Rollback stays a routing change until the old tables are removed."
+cheat:
+  idea: "The strangler fig replaces a monolith gradually: a facade routes each request to the old or the new code while capabilities move out one at a time."
+  flow: "Facade → move one capability and its data → reroute → retire old code"
+  remember: "No big-bang rewrite; until the old tables are removed, rollback is a route change."
+buildsOn: [monolith-and-microservices, api-gateway, database-per-service]
+scenarios:
+  - q: "You moved /payments/** to the new Payment Service last week. Today it shows a serious bug. What is the fastest safe step?"
+    a: "Point the /payments/** route back at the monolith. That works only while the monolith's payment code and tables still exist and are kept in sync, which is why you remove them only after the new service has proved itself."
+  - q: "The new Payment Service needs customer data that still lives in the monolith's CUSTOMER table, with odd column names. Should it read that table directly?"
+    a: "No. Add an anti-corruption layer that calls the monolith and translates its model into Payment's own. Reading the table ties the new service to the legacy schema, which is the shared-database problem again."
 confusedWith: []
 tags: [migration, strangler-fig, legacy]
 visual: flow
 sources:
-  - title: "Strangler Fig pattern (Azure Architecture Center)"
+  - title: "Strangler Fig pattern: phases, considerations, data cutover (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/strangler-fig"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Strangler Fig Application (Martin Fowler, bliki)"
+    url: "https://martinfowler.com/bliki/StranglerFigApplication.html"
+    verifiedOn: "2026-10-21"
   - title: "How to break a Monolith into Microservices (Zhamak Dehghani, martinfowler.com)"
     url: "https://martinfowler.com/articles/break-monolith-into-microservices.html"
     verifiedOn: "2026-10-20"
   - title: "Anti-Corruption Layer pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/anti-corruption-layer"
     verifiedOn: "2026-10-20"
+  - title: "Gateway request predicates: Path route (Spring Cloud Gateway Server Web MVC 5.0)"
+    url: "https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webmvc/gateway-request-predicates.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+The strangler fig is a way to replace a [monolith](card:monolith-and-microservices) gradually instead of in one rewrite. You put a facade, a proxy such as an [API gateway](card:api-gateway), in front of the old system. Then you move one capability at a time, for example payments, into a new service and point that capability's requests at it. When nothing is left in the monolith, you switch it off.
 
 ## Why it exists
 
-Replacing a large system in one rewrite is slow and risky. Moving it piece by piece keeps the shop running and shows value early.
+Rewriting a large monolith in one go takes months or years. The business keeps changing the old system meanwhile, and the switch-over day is one big risk. With the strangler fig the shop keeps running, every step is small and can be rolled back, and each capability that moves delivers value early.
 
 ## How it works
 
-<Steps label="Strangling a monolith, one capability at a time">
-  <Step title="Facade">Route all traffic through a proxy or [gateway](card:api-gateway); at first it all goes to the monolith.</Step>
-  <Step title="Pick">Choose a fairly decoupled capability, for example Payment.</Step>
-  <Step title="Build">Write the new service and give it its own data: copy, sync, validate.</Step>
-  <Step title="Route">Point that capability's paths at the new service.</Step>
-  <Step title="Retire">Delete the old code and tables, then repeat. At the end, remove the facade.</Step>
-</Steps>
+<Mermaid
+  alt="Clients send every request to a facade. The facade sends /payments requests to the new Payment Service, which has its own database, and all other requests to the monolith, which still uses the old database."
+  chart={`flowchart LR
+  C([Clients]) --> F[Facade or gateway]
+  F -- "/payments/**" --> N[New Payment Service]
+  F -- "everything else" --> M[Monolith]
+  N --> ND[(Payment DB)]
+  M --> MD[(Old database)]`}
+/>
 
-- When old and new must call each other, an [anti-corruption layer](card:anti-corruption-layer) translates. Keep it to translation; no business rules.
-- Rollback stays easy until the legacy tables are removed.
+1. Put the facade in front of the monolith. At first it sends every request to the monolith, and clients notice nothing.
+2. Choose a fairly decoupled capability, one with few calls back into the monolith, such as Payment.
+3. Build the new service with its own database. Copy the existing data with ETL (extract, transform, load), keep it in sync with change data capture, and check that both sides match.
+4. Change the facade so that the capability's paths go to the new service.
+5. Once the new service has proved itself, delete the old code and tables, then repeat with the next capability. At the end, remove the facade or keep it as the gateway.
+
+So the key is: clients keep one address, and only the facade knows which part has moved.
+
+## Analogy
+
+<Analogy title="The strangler fig plant" limit="The plant takes over its host by itself. In software you must move each part and delete the old code yourself, or the monolith never goes away.">
+A strangler fig starts as a vine in a nook of a host tree. It grows around the tree, reaches the ground and grows its own roots. In the end the old tree may die, and the fig stands on its own in the same shape.
+</Analogy>
 
 ## Example
+
+The shop's facade is Spring Cloud Gateway. Payments have moved; orders have not yet.
 
 ```yaml
 spring:
@@ -65,16 +102,32 @@ spring:
               predicates: [ "Path=/orders/**" ]
 ```
 
+What to notice:
+
+- `/payments/**` goes to the new service and `/orders/**` still goes to the monolith. Clients call the same gateway address either way.
+- Moving orders later is a change to one `uri` in this file, not a change in any client.
+- Rolling payments back means pointing `payments-moved` at `legacy-shop` again, which works only while the monolith's payment code and data still exist.
+
+## Rules and defaults
+
+- **Rollback window:** you can go back while the old tables and the sync still exist. After you remove them, going back means restoring them and replaying the changes, so remove legacy parts only after the new service is validated.
+- **Facade:** run it with enough instances and capacity, because every request passes through it; it must not become a single point of failure.
+- **Not a fit:** when requests to the old system cannot be intercepted, when the system is small enough to replace in one step, or when it must be switched off quickly.
+
+## Not to be confused with
+
+The facade decides **where** a request goes: to the old code or to the new service. An [anti-corruption layer](card:anti-corruption-layer) **translates** between the old and the new model when one side must call the other, so the new service never adopts the legacy schema or API. It holds translation only, no business rules. Rule: the facade routes; the anti-corruption layer translates.
+
 ## Interview Qs
 
 ### How would you move a monolith to microservices?
 
-Incrementally with the strangler fig: a facade routes traffic, one capability moves at a time with its data, and the old path is retired before the next. Avoid a big-bang rewrite.
+Step by step with the strangler fig: a facade routes traffic, one capability moves at a time with its data, and its old path is retired before the next. I avoid a big-bang rewrite, because it delivers nothing until the end and puts all the risk on one day.
 
 ### Which service do you extract first?
 
-A fairly decoupled one with few calls back to the monolith, so the team learns to run services at low risk. Next, take parts that change often or matter most.
+A fairly decoupled one with few calls back into the monolith, so the team learns to build, deploy and run a service at low risk. After that, take the parts that change most often or matter most to the business.
 
-### What is an anti-corruption layer?
+### How do you move a capability's data?
 
-An adapter between two models, from Eric Evans' Domain-Driven Design. It translates calls so the new service never adopts the legacy schema or API.
+Copy the existing rows to the new database with ETL, keep both in sync with change data capture while the old system still writes, check that they match, and then make the new database the system of record. Remove the old tables last.

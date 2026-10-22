@@ -5,20 +5,30 @@ title: Testing Microservices and Contract Tests
 topic: deployment
 level: intermediate
 heat: 2
-hook: "Many unit tests, some integration and contract tests, a few end-to-end tests: catch API breaks in the build, not in production."
+hook: "Many unit tests, some integration and contract tests, and a few end-to-end tests: catch a broken API in the provider's build, not in production."
 points:
-  - { k: "Test pyramid", v: "the higher the level, the fewer the tests" }
-  - { k: "Contract test", v: "the consumer's expectations run in the provider's build", kind: plus }
-  - { k: "Testcontainers", v: "a real PostgreSQL or Kafka in a throwaway container" }
-  - { k: "End-to-end tests", v: "slow and often flaky: keep a few for key journeys", kind: minus }
-  - { k: "Failure tests", v: "timeouts, retries, duplicate messages, a dependency down" }
+  - { k: "Test pyramid", v: "many fast unit tests at the base, fewer integration and contract tests, a few end-to-end tests on top" }
+  - { k: "Contract test", v: "the consumer's expectations are replayed in the provider's build, so a breaking API change fails there", kind: plus }
+  - { k: "Testcontainers", v: "runs a real PostgreSQL or Kafka in a throwaway container while the test runs" }
+  - { k: "End-to-end tests", v: "slow and often flaky because many deployed parts must all work; keep a few for key journeys", kind: minus }
+  - { k: "Failure tests", v: "also test timeouts, retries, duplicate messages and a dependency that is down" }
 trap:
   wrong: "Our unit tests mock Payment Service, so the integration is covered."
   right: "A mock only proves your own assumption. A contract test checks that assumption against the real provider."
-sayIt: "I follow the test pyramid: many unit tests, integration tests with Testcontainers, consumer-driven contract tests between services, and a few end-to-end tests. I also test failures such as timeouts."
-confusedWith: []
+  why: "The mocked tests are green and cover the calling code line by line, so the integration feels tested. But the mock returns what you believe Payment sends, not what it really sends."
+sayIt: "I follow the test pyramid: many unit tests, integration tests against real infrastructure with Testcontainers, consumer-driven contract tests between services, and a few end-to-end tests. I also test failures such as timeouts and duplicate messages."
+cheat:
+  idea: "Test each service alone with many unit and integration tests, and check that services agree on their APIs with contract tests. Keep only a few slow end-to-end tests."
+  remember: "A mock proves only your own assumption; a contract test checks it against the real provider, in the provider's build."
+buildsOn: [rest-apis, timeouts-and-retries]
+scenarios:
+  - q: "Payment Service adds a new field, refundedAmount, to GET /payments/{id}. Order Service's contract does not mention it. Does Payment's build fail?"
+    a: "No. The contract lists only the fields Order Service reads, and a provider may return extra fields. Renaming or removing paymentStatus would fail the build, because Order Service relies on it."
+  - q: "Your end-to-end suite of 400 tests takes 2 hours and fails at random once a day. What do you change?"
+    a: "Move most checks down the pyramid: unit tests for logic, Testcontainers integration tests for SQL and messaging, contract tests for API agreement. Keep a few end-to-end tests for the critical journeys, such as placing and paying for an order."
+confusedWith: [contract-vs-integration-vs-e2e-test]
 tags: [testing, contract-testing, pact, testcontainers]
-visual: table
+visual: flow
 sources:
   - title: "The Practical Test Pyramid (Ham Vocke, martinfowler.com)"
     url: "https://martinfowler.com/articles/practical-test-pyramid.html"
@@ -26,27 +36,50 @@ sources:
   - title: "Introduction to contract testing (Pact docs)"
     url: "https://docs.pact.io/"
     verifiedOn: "2026-10-20"
+  - title: "Matching gotchas: the provider may return fields not in the contract (Pact docs)"
+    url: "https://docs.pact.io/getting_started/matching/gotchas"
+    verifiedOn: "2026-10-21"
+  - title: "Testcontainers"
+    url: "https://testcontainers.com/"
+    verifiedOn: "2026-10-20"
   - title: "A New Home for Spring Cloud Contract: Stubborn.sh (Spring blog, 06-07-2026)"
     url: "https://spring.io/blog/2026/07/06/spring-cloud-contract-transition-to-stubbornsh"
-    verifiedOn: "2026-10-20"
-  - title: "Stubborn Contract: the continuation of Spring Cloud Contract"
+    verifiedOn: "2026-10-22"
+  - title: "Stubborn Contract: the official continuation of Spring Cloud Contract (stubborn.sh)"
     url: "https://stubborn.sh/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+Testing microservices means checking each service on its own, and also checking that the services still fit together. A unit test checks one class in memory, with its collaborators replaced by test doubles such as mocks. An integration test runs the service's code against real infrastructure, such as its PostgreSQL database. A contract test checks that a consumer, the service that calls an API, and a provider, the service that offers it, agree on that API. An end-to-end test drives a whole user journey across deployed services.
 
 ## Why it exists
 
-Each service is tested alone, but bugs hide between services. A field renamed in Payment Service can pass every Payment test and still break Order Service.
+Each team tests its own service, but many bugs live between services. If Payment Service renames the field `paymentStatus` to `status`, every Payment test still passes, and Order Service breaks in production. Running all services together for every change would find this, but such tests are slow and fail for unrelated reasons. A contract test catches the break in Payment's own build, in seconds.
 
 ## How it works
 
-<Compare id="contract-vs-integration-vs-e2e-test" />
+<Mermaid
+  alt="The test pyramid. At the top, a few end-to-end tests: slow, across deployed services. In the middle, some integration tests and contract tests. At the base, many unit tests: fast, in memory."
+  chart={`flowchart TB
+  E["A few end-to-end tests: slow, across deployed services"]
+  M["Some integration tests and contract tests"]
+  U["Many unit tests: fast, in memory"]
+  E --- M --- U`}
+/>
 
-- Consumer-driven: the consumer writes the contract and the provider's build verifies it, with Pact for example.
-- Spring Cloud Contract left the Spring Cloud release trains in July 2026; it continues as Stubborn Contract.
-- Chaos engineering injects real failures to prove the resilience you designed.
+1. On every change, unit tests check the service's logic in memory in a few seconds.
+2. Integration tests start real infrastructure, such as PostgreSQL or Kafka in a throwaway container with Testcontainers, and check SQL, mappings and messaging.
+3. Order Service's tests record a contract: the requests it sends to Payment Service and the fields it reads from the answers.
+4. Payment Service's build replays that contract against the real Payment code. If a field Order Service needs is missing, Payment's build fails before deploy.
+5. After deploying to a test environment, a few end-to-end tests walk the key journeys, such as placing and paying for an order.
+
+So each level catches what the level below cannot, and the higher the level, the fewer tests it has.
 
 ## Example
+
+The contract that Order Service's tests record, and what happens when Payment Service renames a field:
 
 ```text
 Contract written by Order Service tests:
@@ -55,15 +88,35 @@ Contract written by Order Service tests:
 Payment Service renames the field to "status".
 Payment's build replays the contract:
   FAILED  body.paymentStatus is missing
-The break is caught before deploy, not in production.
 ```
+
+What to notice:
+
+- The contract is written from the consumer's side and holds only the fields Order Service really reads.
+- The failure happens in Payment's build, before deploy, so the team that made the change sees it at once.
+- Adding a new field would not fail: the provider may return fields that the contract does not mention. Only removing or renaming a field the consumer relies on breaks it.
+
+## Rules and defaults
+
+- **Consumer-driven:** the consumer writes the contract and the provider's build verifies it; Pact is a common tool for HTTP and messages.
+- **Real infrastructure:** prefer Testcontainers with the real database or broker over an in-memory fake, which can behave differently.
+- **Failure paths:** test timeouts, retries that cause duplicates, repeated or out-of-order messages, and a dependency that is down. Chaos engineering injects such failures on purpose to prove the resilience you designed.
+- **Spring Cloud Contract:** in July 2026 Spring announced it is removed from future Spring Cloud release trains; it continues as Stubborn Contract, led by its original author.
+
+## Not to be confused with
+
+A contract test checks that two services agree on one API, each side in its own build. An integration test checks one service against its real database or broker. An end-to-end test checks a whole journey across many deployed services. Rule: contract = do we agree; integration = do I work with my infrastructure; end-to-end = does the journey work.
 
 ## Interview Qs
 
 ### Why use contract tests instead of end-to-end tests to catch API breaks?
 
-Each side is checked alone, fast, in its own build, without deploying every service. End-to-end tests find the break later, run slowly and fail for unrelated reasons.
+Each side is checked alone, fast, in its own build, without deploying every service. The team that breaks the API finds out at once. End-to-end tests find the break later, run slowly and often fail for unrelated reasons.
+
+### What is consumer-driven contract testing?
+
+The consumer records its expectations: the requests it sends and the fields it reads. The provider's build replays them against the real provider code. The provider may change anything that no consumer relies on, and learns at once when a change would break one.
 
 ### What do you test beyond the happy path?
 
-Timeouts, retries that cause duplicates, repeated or out-of-order messages, and a dependency that is down. Chaos engineering runs such experiments on purpose.
+Timeouts, retries that cause duplicates, repeated or out-of-order messages, and a dependency that is down. Chaos engineering runs such failures on purpose in a running system to check that timeouts, retries and circuit breakers really work.

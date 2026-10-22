@@ -5,17 +5,29 @@ title: Distributed Tracing and OpenTelemetry
 topic: security-observability
 level: intermediate
 heat: 3
-hook: "A trace is one request's tree of timed spans; each service passes the trace ID on in the traceparent header."
+hook: "A trace is one request's tree of timed steps, called spans. Each service passes the trace ID on in the traceparent header so the steps join up."
 points:
-  - { k: "Span", v: "one timed step: name, parent, start, end, attributes" }
-  - { k: "Trace ID", v: "32 hex characters, shared by every span of one request" }
-  - { k: "traceparent", v: "W3C header: version-traceid-parentid-flags" }
-  - { k: "OpenTelemetry", v: "vendor-neutral APIs, SDKs and Collector; not a backend" }
-  - { k: "Sampling", v: "Spring Boot 4.1 keeps 10% of traces by default", kind: default }
+  - { k: "Span", v: "one timed step, such as one HTTP call or one database query, with a name, a parent, a start and an end" }
+  - { k: "Trace ID", v: "32 hex characters shared by every span of one request; the backend groups spans by it" }
+  - { k: "traceparent header", v: "the W3C standard header that carries version, trace ID, parent span ID and flags to the next service" }
+  - { k: "OpenTelemetry", v: "vendor-neutral APIs, SDKs and a Collector that produce and send telemetry; it does not store or show it" }
+  - { k: "Sampling", v: "Spring Boot 4.1 keeps 10% of traces by default (management.tracing.sampling.probability = 0.1)", kind: default }
 trap:
-  wrong: "Add a tracing library to each service and traces join up by themselves."
-  right: "Every outgoing call must forward the context. In Spring Boot, build clients from the auto-configured builders, or the trace breaks."
+  wrong: "Add a tracing library to each service and the traces join up by themselves."
+  right: "Every outgoing call must forward the trace context. In Spring Boot, build HTTP clients from the auto-configured builders, or the trace breaks at that call."
+  why: "Incoming requests are traced automatically, so it looks complete. The gap only shows on the call you built by hand, which starts a new, separate trace."
 sayIt: "Each request gets a trace ID. Every service records spans and forwards the context in the W3C traceparent header. With OpenTelemetry I export spans to a backend like Jaeger and see which hop was slow."
+cheat:
+  idea: "A trace records one request across services as a tree of timed spans. Each service sends the trace ID on to the next in the traceparent header."
+  code: |
+    traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
+  remember: "A hand-built HTTP client drops the header and splits the trace; Spring Boot keeps only 10% of traces by default."
+buildsOn: [observability]
+scenarios:
+  - q: "In the trace for a slow checkout, the gateway span is 1,640 ms, Order is 1,610 ms, Inventory is 80 ms and Payment is 1,500 ms. Where do you look first?"
+    a: "The Payment Service. Parent spans include the time of their children, so the gateway and Order look slow only because they wait for Payment. The deepest slow span is the real source."
+  - q: "You test one request in a Spring Boot 4.1 service, but its trace is missing in the backend. Tracing is set up. What is the likely reason?"
+    a: "Sampling. By default Spring Boot keeps only 10% of traces, so this one was probably not kept. Set management.tracing.sampling.probability to 1.0 while testing."
 confusedWith: [logs-vs-metrics-vs-traces]
 tags: [tracing, opentelemetry, w3c-trace-context, sampling]
 visual: flow
@@ -25,21 +37,28 @@ sources:
     verifiedOn: "2026-10-20"
   - title: "Tracing (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/actuator/tracing.html"
-    verifiedOn: "2026-10-20"
-  - title: "Application properties: management.tracing (Spring Boot 4.1)"
-    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "TracingProperties: default sampling 0.10, W3C propagation produced (Spring Boot 4.1.1 source)"
+    url: "https://github.com/spring-projects/spring-boot/blob/v4.1.1/module/spring-boot-micrometer-tracing/src/main/java/org/springframework/boot/micrometer/tracing/autoconfigure/TracingProperties.java"
+    verifiedOn: "2026-10-21"
   - title: "What is OpenTelemetry? (OpenTelemetry docs)"
     url: "https://opentelemetry.io/docs/what-is-opentelemetry/"
     verifiedOn: "2026-10-20"
+  - title: "Collector (OpenTelemetry docs)"
+    url: "https://opentelemetry.io/docs/collector/"
+    verifiedOn: "2026-10-21"
   - title: "Sampling (OpenTelemetry docs)"
     url: "https://opentelemetry.io/docs/concepts/sampling/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Distributed tracing records the journey of one request through all the services it touches. The record is called a trace. A trace is made of spans: a span is one timed step, such as the Order Service handling a call, with a start, an end and a parent span. All spans of one request share one trace ID. OpenTelemetry is the open standard and set of libraries most services use to create and send this data.
+
 ## Why it exists
 
-A slow checkout could be slow in any of five services. Logs from each service cannot show the order and timing of the calls; a trace can.
+A checkout takes 1.6 seconds, and the cause could be in any of four services. [Logs and metrics](card:observability) from each service show that service alone; they cannot tell you which call waited on which, or how long each took. A trace puts all the calls of that one request in one picture, in order and with their times, so the slow hop is plain to see.
 
 ## How it works
 
@@ -51,32 +70,57 @@ A slow checkout could be slow in any of five services. Logs from each service ca
   O --> P["Payment Service 1,500 ms (slow)"]`}
 />
 
-- The root span covers the whole request; child spans are its steps, so find the deepest slow one.
-- Head sampling decides at the start (cheap); tail sampling decides after the trace ends, so it can keep every error.
-- Spring Boot 4.1 uses Micrometer Tracing over OpenTelemetry (`spring-boot-starter-opentelemetry`) or Brave: [Spring stack](card:spring-cloud-stack).
+1. The gateway receives the checkout, creates a new trace ID and starts the root span.
+2. When it calls the Order Service, it adds a `traceparent` header holding the trace ID and its own span ID.
+3. The Order Service reads the header and starts a child span with the same trace ID and the gateway span as its parent. It does the same for its calls to Inventory and Payment.
+4. Each service sends its finished spans to a tracing backend, often through the OpenTelemetry Collector, which receives, processes and forwards the data.
+5. The backend groups spans by trace ID and draws the tree. A parent span includes its children's time, so you look for the deepest slow span.
 
 ## Example
 
+The header the Order Service sends to the Payment Service, and the Spring Boot code that makes it happen.
+
 ```text
-POST /payments HTTP/1.1
-Host: payment-service
 traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
-# 00 = version, then trace ID, parent span ID, 01 = sampled
 ```
 
-## Defaults
+```java
+@Configuration
+class PaymentClientConfig {
+    @Bean
+    RestClient paymentClient(RestClient.Builder builder) {   // Boot's builder: adds tracing
+        return builder.baseUrl("http://payment-service").build();
+    }
+}
+```
+
+What to notice:
+
+- The header has four parts: version `00`, the 32-character trace ID, the 16-character ID of the calling span, and flags `01`, meaning "sampled".
+- The `RestClient.Builder` parameter is the one Spring Boot auto-configures, so every call through this client adds the header.
+- Replace it with `RestClient.create("http://payment-service")` and the header is not sent. Payment then starts a new trace, and the checkout splits in two.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| `management.tracing.sampling.probability` | 0.1 (10% of traces) | Spring Boot 4.1 |
-| Header it sends | W3C `traceparent` | Spring Boot 4.1 |
+| `management.tracing.sampling.probability` | 0.1 (10% of traces kept) | Spring Boot 4.1 |
+| Propagation format it sends | W3C (`traceparent`) | Spring Boot 4.1 |
+
+- **Clients:** build `RestClient`, `RestTemplate` and `WebClient` from Boot's auto-configured builders; clients made without them do not propagate traces.
+- **Libraries:** Spring Boot 4.1 traces through Micrometer Tracing, over OpenTelemetry (`spring-boot-starter-opentelemetry`) or Brave.
+- **Head sampling** decides at the start of a trace, which is cheap. **Tail sampling** decides after the trace ends, so it can keep every trace with an error, but a component must store all the spans until it decides.
 
 ## Interview Qs
 
 ### Why does a trace split in two at the Payment Service?
 
-The Order Service did not forward the context on that call, for example its RestClient was built by hand, not from the auto-configured builder. Payment then starts a new trace.
+The Order Service did not forward the trace context on that call, so Payment saw no `traceparent` header and started a new trace. A common cause in Spring Boot is a `RestClient` built by hand instead of from the auto-configured builder.
 
 ### What is OpenTelemetry?
 
-A vendor-neutral CNCF project with APIs, SDKs, the OTLP protocol and a Collector for traces, metrics and logs. It is not a backend; you send the data to Jaeger, Prometheus or a vendor.
+A vendor-neutral open-source project with APIs, SDKs, a wire protocol (OTLP) and a Collector for traces, metrics and logs. It produces and sends telemetry but is not a backend: you send the data to a tool such as Jaeger, Prometheus or a vendor's service.
+
+### Head sampling or tail sampling?
+
+Head sampling decides at the first span, for example "keep 10%", so it is cheap but may drop the one failing request. Tail sampling waits until the trace is complete and can keep all errors and slow traces, but the component that decides must store large amounts of span data and is harder to run.

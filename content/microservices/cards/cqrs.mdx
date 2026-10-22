@@ -5,35 +5,56 @@ title: "CQRS: Separate Reads from Writes"
 topic: data
 level: interview
 heat: 2
-hook: "One model changes the data; other models, shaped for reading, answer queries. Events usually keep the read side up to date."
+hook: "One model changes the data and checks the rules; separate read views, shaped for each screen, answer the queries. Events usually keep the views up to date."
 points:
-  - { k: "Command side", v: "validates and changes data; holds the business rules" }
-  - { k: "Query side", v: "denormalised views built for screens; no business logic" }
-  - { k: "Cross-service queries", v: "one view can join data from many services' events", kind: plus }
-  - { k: "Stale reads", v: "the read side lags the write side: eventual consistency", kind: minus }
-  - { k: "Overkill for CRUD", v: "simple domains pay the cost and get nothing back", kind: minus }
+  - { k: "Command side", v: "takes commands such as PlaceOrder, checks the business rules and saves the change; it is the truth" }
+  - { k: "Query side", v: "serves ready-made views shaped for screens, with no business logic; a query never changes data" }
+  - { k: "Sync by events", v: "the write side publishes an event after each change, and a projector updates the view" }
+  - { k: "Cross-service views", v: "one view can combine data from many services' events, so a page needs no joins or fan-out calls", kind: plus }
+  - { k: "Stale reads", v: "the view lags the write side for a moment, so a user may not see their change at once", kind: minus }
+  - { k: "Overkill for CRUD", v: "for simple create, read, update and delete screens it adds moving parts for no gain", kind: minus }
 trap:
   wrong: "CQRS means you must also use event sourcing."
-  right: "CQRS only splits the read and write models; both can sit on ordinary databases. Event sourcing is optional."
-sayIt: "CQRS splits the write model from read models. The write side publishes events and consumers update denormalised views. It suits cross-service queries and uneven read and write loads, but reads lag a little."
+  right: "CQRS only splits the read and write models; both can sit on ordinary databases, even the same one. Event sourcing is optional."
+  why: "The two are often taught together, and many CQRS diagrams show an event store on the write side, so they look like one pattern."
+sayIt: "CQRS splits the write model from read models. The write side publishes events, and consumers update views shaped for each screen. It suits cross-service queries and uneven read and write loads, but reads lag a little."
+cheat:
+  idea: "CQRS splits the model that changes data from the read views that answer queries; events from the write side keep the views up to date."
+  flow: "Command → write DB → event → projector → read view ← query"
+  remember: "CQRS needs neither event sourcing nor two databases, and the view lags the write side for a moment."
+buildsOn: [database-per-service, cap-and-consistency]
+scenarios:
+  - q: "A customer places an order and is sent straight to 'My orders', where the new order is missing. Two seconds later it appears. Is this a bug?"
+    a: "No, it is the expected lag of a CQRS view, which is updated from an event after the write commits. Show the new order from the command's response on the confirmation page, or mark it as processing, so the user is not confused."
+  - q: "An admin screen edits product descriptions: one table, a few users, no complex rules. Would you use CQRS?"
+    a: "No. This is simple CRUD, so one model on one table is enough. CQRS would add a second model, a sync path and stale reads, and give nothing back."
+  - q: "Kafka delivers the same OrderCreated event to the projector twice. What happens if the projector saves by orderId, and what if it inserts a new row each time?"
+    a: "Saving by orderId overwrites the same row, so the view stays correct: the projector is idempotent. Inserting each time creates a duplicate order in the view, because events can arrive more than once."
 confusedWith: [cqrs-vs-event-sourcing]
 tags: [cqrs, read-model, materialized-view]
 visual: flow
 sources:
   - title: "CQRS (Martin Fowler, bliki)"
     url: "https://martinfowler.com/bliki/CQRS.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "CQRS pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cqrs"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Pattern: Command Query Responsibility Segregation (microservices.io, Chris Richardson)"
     url: "https://microservices.io/patterns/data/cqrs.html"
     verifiedOn: "2026-10-20"
+  - title: "Introduction: events are not deleted after consumption (Apache Kafka docs)"
+    url: "https://kafka.apache.org/intro"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+CQRS, Command Query Responsibility Segregation, means using one model to change data and a different model to read it. A command asks to change something, such as PlaceOrder; a query only asks for data, such as "show my orders". The write side checks the business rules and saves the change. The read side keeps ready-made views shaped for each screen, often in a separate store.
 
 ## Why it exists
 
-One screen may need data from several services, and their databases cannot be joined. A read model built for that screen answers in one query.
+The shop's "My orders" page shows each order with its payment status. With [database per service](card:database-per-service), orders and payments live in two services, so one SQL join is impossible, and calling both services on every page load is slow and fails when one is down. CQRS keeps a view that already holds the combined row, updated each time one of the services reports a change. The page then runs one simple query.
 
 ## How it works
 
@@ -49,11 +70,17 @@ One screen may need data from several services, and their databases cannot be jo
   R --> V`}
 />
 
-- The write side stays the truth; nobody updates the view directly.
-- The view is disposable: rebuild it from the events or the source data.
-- Just after a write, the view may not show it yet; design the UI for that.
+1. The client sends the command PlaceOrder to the Order service, which checks it and saves the order in its own database.
+2. After the commit, the Order service publishes an OrderCreated event through a message broker such as Kafka, the middleman you met in [asynchronous communication](card:sync-and-async-communication), which delivers it to every interested listener.
+3. A projector, a small consumer whose only job is to keep a view up to date, receives the event and writes a row into the order summary view. A PaymentCompleted event from the Payment service later updates the same row's status.
+4. The client's query, `GET /my-orders`, reads only the view: one table, no joins, no calls to other services.
+5. For a moment after the command, the view may not show the new order yet. This lag is the eventual consistency you met in [CAP](card:cap-and-consistency).
+
+So the key is that the write side is the truth, and the view is a copy you can delete and rebuild.
 
 ## Example
+
+The projector in the Order service listens to order events and keeps one summary row per order:
 
 ```java
 @Component
@@ -62,18 +89,43 @@ class OrderSummaryProjector {
     OrderSummaryProjector(OrderSummaryRepository views) { this.views = views; }
 
     @KafkaListener(topics = "order-events", groupId = "order-summary")
-    void on(OrderCreated e) {   // save by orderId: a replayed event overwrites, no duplicate
+    void on(OrderCreated e) {   // save by orderId: a repeated event overwrites the same row
         views.save(new OrderSummary(e.orderId(), e.customerName(), e.totalInr(), "CREATED"));
     }
 }
 ```
 
+What to notice:
+
+- The projector has no business rules. It only copies event data into the shape the screen needs.
+- The row is saved by `orderId`, so if Kafka delivers OrderCreated twice the second save overwrites the same row. An insert here would show the order twice; this is [idempotency](card:idempotency) again.
+- Kafka does not delete events when they are read. If the projector is down for a minute, the view falls behind and then catches up from the waiting events; meanwhile the page shows slightly old data.
+
+## Rules and defaults
+
+- **Same or separate store:** the two models may share one database. Separate stores let each side scale and use its own technology, but then the write side must keep the read store in sync.
+- **Sync safely:** the database write and the event publish usually cannot share one transaction, so use a [transactional outbox](card:outbox-and-inbox) (later in the messaging topic) and an idempotent projector.
+- **Queries never change data:** the read side returns data only and holds no business logic.
+- **Use it for parts, not the whole system:** apply CQRS to the one area that needs it, such as order history. For most systems it adds risky complexity.
+
+## Not to be confused with
+
+CQRS changes **who** writes and who reads: two models instead of one. [Event sourcing](card:event-sourcing), the next concept, changes **what** you store: the list of events instead of the current row. They are often combined, but either one can be used alone. Rule: CQRS = two models; event sourcing = events as the truth.
+
+## Common mistakes
+
+- **"CQRS needs two databases."** The read and write models can share one database with different tables or queries. Separate stores are an option for scale, not a requirement.
+
 ## Interview Qs
 
 ### When would you use CQRS?
 
-When reads and writes differ a lot in shape or load, or a query needs data from several services. For simple CRUD it adds moving parts and stale reads for no gain.
+When reads and writes differ a lot in shape or load, or a query needs data from several services. Reads often far outnumber writes, so the read side can scale on its own. For simple CRUD it adds moving parts and stale reads for no gain.
 
 ### How is the read model kept in sync?
 
-The write side publishes an event after each change, safely through an [outbox](card:outbox-and-inbox). A consumer updates the view. Make it idempotent, because events can arrive twice.
+The write side publishes an event after each change, safely through an outbox. A consumer updates the view. Make it idempotent, because events can arrive twice, and expect a short lag between the write and the view.
+
+### Why not just add a read replica of the database?
+
+A plain replica copies the same tables in the same shape, from one database. A CQRS view can have its own shape, built for one screen, and can combine data from several services' events, which a replica of one service's database cannot do.

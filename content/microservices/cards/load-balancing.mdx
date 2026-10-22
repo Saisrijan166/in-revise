@@ -5,17 +5,28 @@ title: Load Balancing Between Instances
 topic: communication
 level: intermediate
 heat: 2
-hook: "Spread calls across healthy instances so none is swamped; the algorithm decides who gets the next request."
+hook: "Spread requests across the healthy instances of a service so that none is swamped; the algorithm decides which instance gets the next request."
 points:
-  - { k: "Round robin", v: "each instance in turn; fine when requests cost about the same" }
-  - { k: "Least connections", v: "fewest active requests wins; better when request costs vary" }
-  - { k: "Hashing", v: "same key, same instance; consistent hashing moves few keys" }
-  - { k: "Layer 4 vs layer 7", v: "L4 forwards TCP or UDP by IP and port; L7 reads HTTP, routes by header" }
-  - { k: "Sticky sessions", v: "pin a user to one instance; avoid them, keep services stateless", kind: minus }
+  - { k: "Round robin", v: "each instance gets the next request in turn; good when requests cost about the same" }
+  - { k: "Least connections", v: "the instance with the fewest active requests gets the next one; better when request costs vary" }
+  - { k: "Hashing", v: "the same key, such as a user id, always goes to the same instance" }
+  - { k: "Health checks", v: "instances that fail checks get no traffic, so one crash does not fail a share of requests", kind: plus }
+  - { k: "Layer 4 vs layer 7", v: "layer 4 forwards connections by IP and port; layer 7 reads HTTP and can route by path or header" }
+  - { k: "Sticky sessions", v: "pinning a user to one instance spreads load unevenly; keep services stateless instead", kind: minus }
 trap:
   wrong: "Putting a load balancer in front makes the service fault tolerant."
-  right: "Only if health checks pull failed instances out. Even a healthy instance can be overloaded."
-sayIt: "A load balancer spreads requests over healthy instances: round robin by default, least connections when costs vary, hashing when one key must reach one instance. Health checks take failed instances out."
+  right: "Only if health checks take failed instances out of rotation. And a healthy instance can still be overloaded."
+  why: "With several instances behind one address, it looks as if one dying cannot matter. Without health checks, the balancer keeps sending the dead one its share."
+sayIt: "A load balancer spreads requests over healthy instances: round robin by default, least connections when request costs vary, hashing when one key must reach one instance. Health checks take failed instances out; without them it is not fault tolerant."
+cheat:
+  idea: "Load balancing spreads requests across the healthy instances of a service. An algorithm picks the instance: round robin, least connections, or hashing by a key."
+  remember: "Health checks are what remove a dead instance; without them the balancer keeps sending it traffic."
+buildsOn: [scaling-services, service-discovery]
+scenarios:
+  - q: "Payment Service has 3 instances behind round robin. Instance 2 hangs, but its port still accepts connections, and nothing checks its health. What do users see?"
+    a: "About one in three payment calls goes to instance 2 and hangs until the caller's timeout. Round robin keeps sending it its share, because nothing marks it unhealthy. A health check, or counting failed requests, would take it out."
+  - q: "Report requests take 5 seconds and normal reads take 10 ms, and both go to the same instances. Round robin or least connections?"
+    a: "Least connections. Round robin can stack several slow reports on one instance while others are free. Least connections sees that instance's many active requests and sends new ones elsewhere."
 confusedWith: [api-gateway-vs-load-balancer]
 tags: [load-balancing, round-robin, health-checks]
 visual: flow
@@ -23,6 +34,12 @@ sources:
   - title: "HTTP load balancing (NGINX documentation)"
     url: "https://docs.nginx.com/nginx/admin-guide/load-balancer/http-load-balancer/"
     verifiedOn: "2026-10-20"
+  - title: "HTTP health checks: passive checks, max_fails and fail_timeout defaults (NGINX documentation)"
+    url: "https://docs.nginx.com/nginx/admin-guide/load-balancer/http-health-check/"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Cloud LoadBalancer: RoundRobinLoadBalancer default (Spring Cloud Commons 5.0)"
+    url: "https://docs.spring.io/spring-cloud-commons/reference/spring-cloud-commons/loadbalancer.html"
+    verifiedOn: "2026-10-21"
   - title: "Elastic Load Balancing features: layer 4 and layer 7 load balancers (AWS)"
     url: "https://aws.amazon.com/elasticloadbalancing/features/"
     verifiedOn: "2026-10-20"
@@ -31,9 +48,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Load balancing is spreading requests across the instances of a service so that no single instance is overloaded. A load balancer is the part that does it: a separate program, such as NGINX or a cloud load balancer, or a library inside the caller. For each request it picks one instance using an algorithm, such as taking turns. It also stops sending to instances that fail their health checks.
+
 ## Why it exists
 
-One instance has a limit. Several instances only help if each request goes to one that is alive and not too busy.
+Adding instances helps only if the requests reach them evenly. If Order Service sent every payment call to the first instance in its [discovery](card:service-discovery) list, that one would overload while the others sat idle, and a crashed instance would keep receiving calls. A load balancer shares the work by a rule and takes failed instances out, so three instances really carry about three times the load.
 
 ## How it works
 
@@ -46,32 +67,62 @@ One instance has a limit. Several instances only help if each request goes to on
   LB -.->|"failed health check, no traffic"| P3[Payment 3]`}
 />
 
-- Least-connections trap: an instance that fails fast looks idle and draws more traffic. Count recent errors as load.
-- Sticky sessions block even spreading: keep [services stateless](card:scaling-services).
+1. A request for Payment Service reaches the load balancer, or the load-balancing library inside Order Service.
+2. The balancer takes the current list of healthy instances, from discovery or from its own health checks.
+3. It applies its algorithm. Round robin takes each instance in turn; least connections picks the one with the fewest active requests; hashing sends the same key, such as a user id, to the same instance.
+4. It forwards the request to the chosen instance.
+5. When an instance fails its health checks, or too many requests to it fail, the balancer takes it out of the list until it recovers.
 
 ## Example
 
+An NGINX load balancer in front of two Payment instances:
+
 ```nginx
 upstream payment_service {
-    least_conn;                       # without it: round robin
-    server payment-1:8080 weight=2;   # gets twice the share
-    server payment-2:8080;            # weight defaults to 1
+    least_conn;                                   # without this line: round robin
+    server payment-1:8080 weight=2;               # gets about twice the share
+    server payment-2:8080 max_fails=3 fail_timeout=30s;
 }
 ```
 
-## Defaults
+What to notice:
+
+- `least_conn` switches the algorithm to least connections. Remove the line and NGINX uses round robin, its default.
+- `weight=2` makes `payment-1` count double, for example because it runs on a bigger machine; a server without a weight counts 1.
+- `max_fails=3 fail_timeout=30s`: if 3 attempts to `payment-2` fail within 30 seconds, NGINX stops sending it requests for 30 seconds. This is a passive health check, based on real traffic.
+- Without any health check, a hung `payment-2` would keep receiving its share of calls.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
-| Algorithm | round robin | NGINX upstream |
+| Algorithm | round robin | NGINX upstream; Spring Cloud LoadBalancer |
 | Server weight | 1 | NGINX upstream |
+| Passive check | `max_fails=1`, `fail_timeout=10s` | NGINX upstream |
+
+- **Active health checks:** in NGINX, periodic checks of an endpoint need NGINX Plus; the open-source version has only passive checks.
+- **Layer 4 or layer 7:** a layer 4 balancer, such as AWS NLB, forwards TCP or UDP connections by IP and port without reading them. A layer 7 balancer, such as AWS ALB, reads each HTTP request and can route by path or header.
+- **Sticky sessions:** pinning a user to one instance spreads load unevenly and loses the session when that instance dies. Keep [services stateless](card:scaling-services) instead.
+
+## Not to be confused with
+
+A load balancer spreads requests over the instances of one service. An [API gateway](card:api-gateway) decides which service handles an API call and applies policies such as authentication; it often runs behind a load balancer itself. Scaling changes how many instances exist; load balancing shares requests among the instances that exist. Rule: gateway = which service; load balancer = which instance.
+
+## Common mistakes
+
+- **"Least connections always picks the best instance."** An instance that fails fast finishes its requests quickly, looks idle, and draws even more traffic. Count recent errors as load, too.
+- **"A healthy instance can take any load."** A health check says the instance is alive, not that it has spare capacity.
 
 ## Interview Qs
 
 ### Round robin or least connections?
 
-Round robin when requests cost about the same. Least connections when costs vary widely, like slow reports beside quick reads, because busy instances get fewer new calls.
+Round robin when requests cost about the same, because it is simple and even. Least connections when costs vary widely, such as slow reports next to quick reads, because busy instances get fewer new requests.
 
 ### What is the difference between layer 4 and layer 7 load balancing?
 
-Layer 4 sees only IPs and ports and forwards TCP or UDP traffic, so it is fast and protocol-agnostic. Layer 7 reads each HTTP request, so it can route by its headers.
+Layer 4 sees only IP addresses and ports and forwards TCP or UDP connections, so it is fast and works for any protocol. Layer 7 reads each HTTP request, so it can route by path, header or cookie, but it does more work per request.
+
+### Does a load balancer make a service fault tolerant?
+
+Only partly. It survives a crashed instance only if health checks remove it quickly. It does not help when every instance shares a failing database, and a healthy but overloaded instance still slows requests down.

@@ -5,17 +5,30 @@ title: CAP Theorem and Consistency Models
 topic: data
 level: intermediate
 heat: 3
-hook: "When the network splits, replicated data must choose: refuse some requests (CP) or answer with maybe stale data (AP)."
+hook: "When the network between copies of the data breaks, each node must either refuse some requests (CP) or keep answering with possibly old data (AP)."
 points:
-  - { k: "C in CAP", v: "linearizable: every read sees the latest write" }
-  - { k: "A in CAP", v: "every request to a working node gets a response" }
-  - { k: "P is not optional", v: "partitions happen; the choice is C or A while one lasts" }
-  - { k: "Eventual", v: "copies converge once updates stop; reads may be stale until then", kind: minus }
-  - { k: "PACELC", v: "with no partition, the trade-off is latency vs consistency" }
+  - { k: "C in CAP", v: "linearizable: every read returns the latest completed write, as if only one copy existed" }
+  - { k: "A in CAP", v: "every request to a node that has not crashed gets a real answer, not an error" }
+  - { k: "P is not optional", v: "networks do split, so during a partition you choose C or A; with no partition you can have both" }
+  - { k: "Eventual", v: "copies may disagree for a while, and reach the same value once updates stop and messages get through", kind: minus }
+  - { k: "Read-your-writes", v: "a client always sees its own completed writes, while other clients may still see old data" }
+  - { k: "PACELC", v: "with no partition the trade-off is latency against consistency: waiting for copies makes writes slower" }
 trap:
   wrong: "CAP means you pick any two of the three, for example a CA system."
-  right: "Partitions cannot be ruled out, so you choose C or A during one. With no partition you can have both."
-sayIt: "CAP says that during a network partition replicated data cannot be both linearizable and always available. I choose per operation: stock reservation stays consistent; review counts can be eventually consistent."
+  right: "Partitions cannot be ruled out, so you choose C or A while one lasts. With no partition you can have both."
+  why: "CAP is usually taught as 'pick two of three'. Brewer, who stated it, later wrote that this framing oversimplifies the real trade-off."
+sayIt: "CAP says that during a network partition replicated data cannot be both linearizable and always available. I choose per operation: stock reservation stays consistent and may fail for a moment; review counts can be eventually consistent."
+cheat:
+  idea: "CAP says that when the network between copies of the data breaks, the system cannot be both consistent (every read sees the latest write) and available (every node answers)."
+  remember: "P is not optional: during a partition choose C or A per operation, such as C for stock and A for review counts."
+buildsOn: [distributed-systems-fallacies, scaling-services]
+scenarios:
+  - q: "During a partition, both replicas of the Inventory service's stock data receive 'reserve the last phone'. Which choice would you make, and why?"
+    a: "CP: only the side that still has a quorum accepts the reservation, and the other side returns an error. Selling one phone twice costs money and trust; a short error the customer can retry costs much less."
+  - q: "A product's review count shows 41 on one page and 42 on another for a few seconds. Is this a bug?"
+    a: "Not if the design accepts eventual consistency for review counts. The copies will converge, and a count that is a few seconds old harms nobody, so answering fast from any copy is the right choice there."
+  - q: "A three-node cluster splits into a group of two nodes and a single node. Which side can keep accepting writes?"
+    a: "The two-node side, because 2 of 3 is a majority, called a quorum. The single node cannot reach a quorum, so it stops accepting writes. Only one side can ever hold a majority, which prevents split brain."
 confusedWith: [strong-vs-eventual-consistency]
 tags: [cap, consistency, partition, quorum]
 visual: flow
@@ -25,15 +38,37 @@ sources:
     verifiedOn: "2026-10-20"
   - title: "CAP Twelve Years Later: How the Rules Have Changed (Eric Brewer, InfoQ)"
     url: "https://www.infoq.com/articles/cap-twelve-years-later-how-the-rules-have-changed/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Consistency Tradeoffs in Modern Distributed Database System Design (Daniel Abadi, PACELC)"
     url: "https://www.cs.umd.edu/~abadi/papers/abadi-pacelc.pdf"
     verifiedOn: "2026-10-20"
+  - title: "CAP theorem: every request receives a non-error response (AWS whitepaper, Availability and Beyond)"
+    url: "https://docs.aws.amazon.com/whitepapers/latest/availability-and-beyond-improving-resilience/cap-theorem.html"
+    verifiedOn: "2026-10-22"
+  - title: "Eventually Consistent, Revisited: read-your-writes, causal, eventual (Werner Vogels)"
+    url: "https://www.allthingsdistributed.com/2008/12/eventually_consistent.html"
+    verifiedOn: "2026-10-22"
+  - title: "Linearizability (Jepsen consistency models)"
+    url: "https://jepsen.io/consistency/models/linearizable"
+    verifiedOn: "2026-10-20"
+  - title: "FAQ: quorum is (n/2)+1, odd cluster sizes (etcd v3.6 docs)"
+    url: "https://etcd.io/docs/v3.6/faq/"
+    verifiedOn: "2026-10-21"
+  - title: "Failure modes: network partition, the minority side is unavailable (etcd v3.6 docs)"
+    url: "https://etcd.io/docs/v3.6/op-guide/failures/"
+    verifiedOn: "2026-10-21"
+  - title: "High availability, load balancing and replication (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/18/high-availability.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A replica is a copy of the same data kept on another node, which is another server, so the data survives one machine failing and more reads can be served. The CAP theorem says what replicated data can promise when the network between replicas breaks, which is called a network partition. While a partition lasts, the system can stay consistent (every read sees the latest write) or available (every node keeps answering), not both. Consistency models name the promises in between.
 
 ## Why it exists
 
-Data lives as copies on many nodes and in many services. When nodes cannot talk, the system must either wait for the truth or answer anyway.
+Two replicas of the Inventory service's stock data both hold the last unit of a phone. The link between them drops, and one customer reaches each replica. If both sell, the shop sells a phone it does not have. If one refuses until the link is back, that customer sees an error. Without a clear rule the system makes this choice by accident. CAP makes you choose on purpose, operation by operation.
 
 ## How it works
 
@@ -48,20 +83,55 @@ Data lives as copies on many nodes and in many services. When nodes cannot talk,
   Q -- "AP: accept" --> S([Node 2 serves old data])`}
 />
 
-- Choose per operation, not per system: [strong vs eventual](compare:strong-vs-eventual-consistency).
-- A [quorum](card:quorum) lets only the majority side act, which prevents split brain.
-- Across services, a [saga](card:saga) gives eventual, not strong, consistency.
+1. Normally, a write to node 1 is copied to node 2, so both nodes give the same answer.
+2. A partition starts: the two nodes cannot exchange messages, but clients can still reach each of them.
+3. Client A writes to node 1, and node 1 cannot tell node 2 about it.
+4. With the CP choice, the side that cannot confirm the write refuses or waits, so no reader sees old data, but some requests fail.
+5. With the AP choice, both nodes keep answering, and node 2 serves the old value until the partition heals and the copies converge.
+
+So the key is that P is not a choice: while a partition lasts you choose C or A, and when there is none you can have both.
+
+## Example
+
+A cluster of three nodes, such as etcd, makes the CP choice safely with a quorum: a majority, (n/2)+1, which is 2 of 3. A partition cuts node C off from nodes A and B:
+
+| Side of the partition | Nodes | Has a quorum? | What it does |
+|---|---|---|---|
+| A and B | 2 of 3 | Yes | Keeps accepting writes and elects a leader if needed |
+| C alone | 1 of 3 | No | Stops accepting writes; its leader, if it was one, steps down |
+
+What to notice:
+
+- Only one side can hold a majority, so the two sides never both act as the owner of the data. That failure, two sides making conflicting decisions, is called [split brain](term:split-brain).
+- The cluster stays available for clients that reach A or B, and unavailable for those that reach only C. CP does not mean "everything stops".
+- With four nodes split 2 and 2, neither side has a majority and both stop. This is why clusters use an odd number of nodes: three nodes tolerate one failure, like four, with one machine less.
+
+## Rules and defaults
+
+- **C in CAP is linearizability:** each operation appears to take effect at one instant, in real-time order, as if there were a single copy.
+- **A in CAP:** every request that reaches a node that has not crashed gets a non-error response.
+- **No partition (PACELC):** the trade-off moves to latency against consistency. Waiting for other replicas to confirm a write keeps reads fresh but makes each write slower.
+- **Choose per operation:** the choice between C and A can differ by operation, data or user inside one system, so a shop can keep stock reservation consistent and review counts available.
+- **Weaker models between the two ends:** read-your-writes (a client always sees its own writes), causal (operations linked by cause are seen in the same order by everyone) and eventual (copies converge once updates stop).
+
+## Not to be confused with
+
+The C in ACID means a transaction keeps the database's rules, such as unique keys and constraints, true. The C in CAP means every read sees the latest write across replicas; Brewer notes it is a much narrower idea than ACID's C. Rule: ACID C = the rules hold inside one database; CAP C = all copies agree.
+
+## Common mistakes
+
+- **"PostgreSQL is CP" or "Cassandra is AP", full stop.** Real systems give different guarantees depending on how they are configured and which operation you run. Say what happens to reads and writes during a partition instead.
 
 ## Interview Qs
 
 ### Explain CAP with an example.
 
-Two Inventory replicas lose contact. If both keep selling the last unit, they disagree (AP). If one refuses until it reaches the other, it is correct but unavailable (CP).
+Two Inventory replicas lose contact. If both keep selling the last unit, they stay available but disagree (AP). If one refuses until it reaches the other, the data stays correct but that replica is unavailable (CP). Without a partition, both can be consistent and available.
 
 ### How do you keep data consistent across microservices?
 
-Use a local ACID transaction inside each service, then spread the change with events or a saga. Accept eventual consistency where the business allows it, and handle duplicate, late and stale data on purpose ([idempotency](card:idempotency)).
+Use a local ACID transaction inside each service, then spread the change with events or a saga. Accept eventual consistency where the business allows it, and handle duplicate, late and stale messages on purpose with [idempotency](card:idempotency). Keep strong consistency inside one service for rules like stock reservation.
 
 ### Does eventual consistency mean the data is wrong?
 
-No. If updates stop and messages get through, all copies reach the same value. Stale reads are a temporary window the design must tolerate.
+No. If updates stop and messages get through, all copies reach the same value. Stale reads are a temporary window that the design must tolerate, such as a review count that is a few seconds old.

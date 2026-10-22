@@ -5,49 +5,80 @@ title: Dead-Letter Queues and Poison Messages
 topic: messaging
 level: intermediate
 heat: 2
-hook: "Retry a failing message a few times, then park it in a dead-letter queue so the rest keep flowing."
+hook: "Retry a failing message a few times, then park it in a dead-letter queue with its error, so the messages behind it keep flowing."
 points:
-  - { k: "Poison message", v: "fails every time; retried forever it blocks the partition", kind: minus }
-  - { k: "Bounded retries", v: "a few attempts with backoff; skip retries for bad data" }
-  - { k: "Retry topics", v: "do not block the partition, but Kafka ordering is lost", kind: minus }
-  - { k: "Spring Kafka", v: "DefaultErrorHandler: 10 attempts, then log (4.1)", kind: default }
-  - { k: "RabbitMQ", v: "quorum queue delivery limit 20 (4.0+), then drop or dead-letter", kind: default }
+  - { k: "Poison message", v: "a message that fails on every attempt; retried forever, it blocks every message behind it", kind: minus }
+  - { k: "Bounded retries", v: "retry a few times with backoff for errors that may pass, and do not retry bad data" }
+  - { k: "Dead-letter topic", v: "a separate topic where failed records are parked with their error, so the consumer moves on" }
+  - { k: "Spring Kafka 4.1", v: "DefaultErrorHandler tries 10 times with no delay, then only logs and skips the record", kind: default }
+  - { k: "RabbitMQ 4.0+", v: "quorum queues allow 20 deliveries, then drop the message or dead-letter it", kind: default }
+  - { k: "Retry topics", v: "delayed retries in separate topics keep the partition moving, but Kafka ordering is lost", kind: minus }
 trap:
   wrong: "A dead-letter queue means the failure is handled."
-  right: "It only parks the message. Alert on it, fix the cause, then replay the messages."
-sayIt: "I retry a failed message a few times with backoff, then send it to a dead-letter topic with the error, commit and move on. We alert on the DLQ, fix the cause and replay."
+  right: "It only parks the message. Alert on it, fix the cause, then replay the messages to the original topic."
+  why: "Once failing messages move to the DLQ, the consumer is healthy and the lag drops, so dashboards look green and the problem seems solved."
+sayIt: "I retry a failed message a few times with backoff, then publish it to a dead-letter topic with the error, commit and move on. Bad data skips the retries. We alert on the DLQ, fix the cause and replay to idempotent consumers."
+cheat:
+  idea: "A poison message fails every time it is processed. After a few retries, the consumer parks it in a dead-letter queue with its error and moves on to the next message."
+  remember: "A DLQ only parks messages: alert on it, fix the cause, then replay. Spring Kafka's default handler logs and skips."
+buildsOn: [kafka-fundamentals, timeouts-and-retries]
+scenarios:
+  - q: "Inventory uses Spring Kafka's default error handler with no recoverer. One OrderCreated makes the listener throw a NullPointerException every time. What happens?"
+    a: "The record is tried 10 times with no delay, then logged and skipped, and its offset is committed. That order never gets its stock, and nobody hears unless someone reads the logs. Add a DeadLetterPublishingRecoverer and alert on the dead-letter topic."
+  - q: "Inventory's database is down for 30 seconds, so every OrderCreated fails. Should these go straight to the dead-letter topic?"
+    a: "No. The data is fine and the error will pass, so retry with backoff, such as a few seconds apart. Sending them to the DLQ at once would fill it with good messages that all need replaying. Send to the DLQ only after the retries are used up."
+  - q: "OrderCreated and OrderCancelled for the same order share a partition. You switch to retry topics. What can go wrong?"
+    a: "If OrderCreated fails once, it moves to a retry topic, while OrderCancelled behind it is processed now. Inventory can see the cancel before the create. Retry topics give up Kafka's ordering, so keep blocking retries where per-key order matters."
 confusedWith: []
 tags: [dlq, poison-message, retry, kafka, rabbitmq]
 visual: flow
 sources:
-  - title: "Container error handlers (Spring for Apache Kafka 4.1)"
+  - title: "Container error handlers, DeadLetterPublishingRecoverer (Spring for Apache Kafka 4.1)"
     url: "https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Non-blocking retries: how the pattern works (Spring for Apache Kafka 4.1)"
     url: "https://docs.spring.io/spring-kafka/reference/retrytopic/how-the-pattern-works.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Apache Kafka support: beans applied to the default listener factory (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/messaging/kafka.html"
+    verifiedOn: "2026-10-21"
   - title: "Quorum queues: poison message handling (RabbitMQ 4.3 docs)"
     url: "https://www.rabbitmq.com/docs/quorum-queues"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A poison message is a message that fails every time a consumer processes it, for example an OrderCreated whose items list is missing. A dead-letter queue (DLQ) is a separate queue or topic where such messages are parked after a fixed number of failed attempts, so the consumer can go on to the next message. In Kafka it is a dead-letter topic; in RabbitMQ it is a dead-letter exchange and the queue behind it.
 
 ## Why it exists
 
-A malformed OrderCreated fails on every try. Retried forever, it stops every message behind it in that partition; dropped silently, the order is lost.
+A Kafka partition is read in order. If Inventory retries a broken OrderCreated forever, every order behind it in that partition waits, and [consumer lag](card:kafka-fundamentals) keeps growing. If it drops the message instead, an order silently never gets its stock. Bounded retries plus a DLQ keep the partition moving and keep the bad message, with its error, for someone to fix and replay.
 
 ## How it works
 
-<Steps label="Handling a message that keeps failing">
-  <Step title="Retry a few times">With backoff, for errors that may pass, such as a timeout.</Step>
-  <Step title="Skip retries for bad data">A message that cannot be read fails the same way every time.</Step>
-  <Step title="Park it">Publish it to a dead-letter topic with the error details, then commit and move on.</Step>
-  <Step title="Alert and replay">Watch the DLQ size, fix the bug or data, then republish the messages.</Step>
-</Steps>
+<Mermaid
+  alt="The consumer processes a record. On success it commits and moves on. On failure, if attempts are left and the error can pass, it waits and retries. If attempts are used up, or the error cannot pass, the record is published to orders-dlt with its error, the offset is committed, and the consumer moves to the next record. An alert on orders-dlt leads to a fix and a replay."
+  chart={`flowchart LR
+  R[Record from orders] --> P{Processed?}
+  P -- yes --> N[Commit, next record]
+  P -- "no, attempts left" --> W[Wait, retry] --> P
+  P -- "no, attempts used up" --> D[[orders-dlt]]
+  D --> N
+  D -. alert .-> F[Fix and replay]`}
+/>
 
-- Spring Kafka names the dead-letter topic `<topic>-dlt` and keeps the same partition.
-- Which errors to retry, and how to back off: [Timeouts and Retries](card:timeouts-and-retries).
+1. Inventory's listener throws while processing a record from `orders`.
+2. The error handler waits (backoff) and delivers the same record again, up to a set number of attempts. Errors that can never pass, such as unreadable data, skip the retries.
+3. After the last failed attempt, a recoverer, the component that decides what happens to a record that has run out of attempts, publishes the record to `orders-dlt`, adding headers with the exception and the original topic, partition and offset.
+4. The record's offset is committed, and the consumer moves on to the next record.
+5. An alert on the dead-letter topic fires. A developer fixes the bug or the data and republishes the parked records to `orders`.
+
+So the key is: retry what may pass, park what will not, and never leave the parked messages unattended.
 
 ## Example
+
+Inventory Service retries twice, one second apart, then parks the record:
 
 ```java
 @Bean
@@ -55,23 +86,43 @@ DefaultErrorHandler errorHandler(KafkaTemplate<Object, Object> template) {
     var toDlt = new DeadLetterPublishingRecoverer(template);   // orders -> orders-dlt
     var handler = new DefaultErrorHandler(toDlt, new FixedBackOff(1000L, 2L));
     handler.addNotRetryableExceptions(IllegalArgumentException.class);
-    return handler;                                // 3 attempts, 1 s apart
+    return handler;
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Retries | `FixedBackOff(0, 9)`: 10 attempts, then log and skip | Spring for Apache Kafka 4.1 `DefaultErrorHandler` |
-| Delivery limit | 20, then drop or dead-letter | RabbitMQ 4.0+ quorum queues |
+- `FixedBackOff(1000L, 2L)` means two retries one second apart, so three attempts in all. During those seconds the partition waits.
+- `DeadLetterPublishingRecoverer` publishes to `orders-dlt` in the same partition number, so the dead-letter topic needs at least as many partitions as `orders`.
+- `IllegalArgumentException` goes to the dead-letter topic on the first failure, because bad data will fail the same way every time.
+- Spring Boot applies this bean to its auto-configured listener container factory. Without the recoverer, failed records would only be logged.
+
+## Rules and defaults
+
+- **Spring for Apache Kafka 4.1 default:** `DefaultErrorHandler` uses `FixedBackOff(0, 9)`: 10 attempts with no delay, then it logs the record at ERROR level and skips it.
+- **Not retried by default:** `DeserializationException`, `MessageConversionException`, `ConversionException`, `MethodArgumentResolutionException`, `NoSuchMethodException` and `ClassCastException` go straight to the recoverer. Add your own with `addNotRetryableExceptions`.
+- **Blocking retries:** `DefaultErrorHandler` retries the record in place, so the records behind it wait, but order is kept.
+- **Retry topics (non-blocking):** a failed record moves to delayed retry topics, such as `orders-retry-1000`, and then to `orders-dlt`. Later records continue at once, but Kafka's ordering for that topic is lost.
+- **RabbitMQ 4.0+ quorum queues:** the delivery limit is 20 by default. After that, the message is dropped, or dead-lettered if a dead-letter exchange is configured.
+
+## Not to be confused with
+
+A transient failure, such as a timeout or a database restart, will pass if you wait, so you retry it with backoff, as in [timeouts and retries](card:timeouts-and-retries). A poison message fails the same way every time, so retrying it only wastes time and blocks the partition. Rule: transient = retry with backoff; poison = straight to the DLQ.
+
+## Common mistakes
+
+- **"Replaying the DLQ is safe because those messages never ran."** A message may have failed half-way, after some of its work was saved. Replay only to idempotent consumers.
 
 ## Interview Qs
 
-### What is a poison message and how do you handle it?
+### What is a poison message, and how do you handle it?
 
-A message that fails every time, often bad data. Detect it by counting attempts, stop retrying, and move it to a dead-letter queue with the error so the consumer continues. Then fix and replay.
+A message that fails every time, often because of bad data or a bug. Count the attempts, stop after a few, and move it to a dead-letter queue with the error so the consumer continues. Skip the retries for errors that cannot pass. Then alert, fix the cause and replay.
 
 ### Why not retry a failed Kafka message until it works?
 
-A Kafka partition is read in order, so one stuck record holds back every record behind it and lag grows. Bound the retries, or use retry topics if you can give up ordering.
+A partition is read in order, so one stuck record holds back every record behind it, and lag grows without limit. Bound the retries, then dead-letter the record. If ordering does not matter for that topic, retry topics let later records continue while the failed one waits.
+
+### How do you reprocess messages from a dead-letter queue?
+
+First fix the cause: deploy the bug fix or correct the data. Then republish the parked messages to the original topic, with a small tool or job, and watch that they succeed. Consumers must be idempotent, because some messages may have been partly processed before they failed.

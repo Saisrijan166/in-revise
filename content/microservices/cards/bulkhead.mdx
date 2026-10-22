@@ -5,16 +5,27 @@ title: "Bulkhead Isolation"
 topic: resilience
 level: intermediate
 heat: 2
-hook: "Give each dependency its own small pool of threads or connections, so one slow service cannot use them all."
+hook: "Give each dependency its own small share of threads or concurrent calls, so one slow service cannot use up everything the caller has."
 points:
-  - { k: "Isolates", v: "threads, connections or instances, per dependency or per client" }
-  - { k: "Full bulkhead", v: "extra calls are rejected at once, not queued forever" }
-  - { k: "Two kinds", v: "a semaphore (a cap on calls in flight) or its own thread pool" }
-  - { k: "Cost", v: "pools are sized apart, so some capacity sits idle", kind: minus }
+  - { k: "Own share", v: "each dependency gets its own limit of threads, connections or calls running at the same time" }
+  - { k: "Full means reject", v: "when a share is full, extra calls are rejected at once instead of queuing forever" }
+  - { k: "Semaphore bulkhead", v: "caps calls in flight on the caller's own thread; Resilience4j 2.x allows 25 at once by default", kind: default }
+  - { k: "Thread-pool bulkhead", v: "runs calls on its own fixed pool of threads with a bounded queue, so the caller's thread is free" }
+  - { k: "Idle capacity", v: "each share is sized separately, so some capacity can sit unused while another share is full", kind: minus }
 trap:
-  wrong: "A bulkhead and a circuit breaker do the same job."
-  right: "A breaker stops calls to a failing service. A bulkhead only caps how many calls run at once, so a slow service cannot drain shared resources."
-sayIt: "Each dependency gets its own limit, say 10 concurrent calls to Payment. If Payment hangs, only those 10 slots fill; Inventory calls still have their own."
+  wrong: "A bulkhead makes the slow Payment calls succeed."
+  right: "It only stops slow Payment calls from taking every thread. Those calls still fail, so they still need a timeout and a fallback."
+  why: "Isolation sounds like protection for the call itself, but what it protects is the rest of the caller."
+sayIt: "A bulkhead gives each dependency its own limit, say 10 concurrent calls to Payment. If Payment hangs, only those 10 slots fill and extra Payment calls are rejected at once, while Inventory calls still have their own slots."
+cheat:
+  idea: "A bulkhead gives each dependency its own small pool of threads or concurrent calls, so one slow service cannot use up the caller's resources."
+  remember: "A full bulkhead rejects extra calls at once (BulkheadFullException); calls to other dependencies keep their own slots."
+buildsOn: [scaling-services, circuit-breaker]
+scenarios:
+  - q: "Payment hangs. Order has a bulkhead of 10 for Payment and 10 for Inventory. 30 users open checkout and 5 open a product page that needs only Inventory. What happens?"
+    a: "10 checkout calls take Payment's slots and hang until their timeout; the other 20 are rejected at once and get an error or a fallback. The 5 product pages work, because Inventory calls use their own 10 slots."
+  - q: "You already have bulkheads around Payment. Do you still need a circuit breaker?"
+    a: "Yes. The bulkhead caps how many Payment calls run at once, but each of those still waits for its full timeout while Payment is down. The breaker notices the failures and stops sending calls, so callers fail fast. Use both."
 confusedWith: [circuit-breaker-vs-bulkhead]
 tags: [bulkhead, isolation, resilience4j]
 visual: flow
@@ -22,64 +33,84 @@ sources:
   - title: "Bulkhead pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/bulkhead"
     verifiedOn: "2026-10-20"
-  - title: "Bulkhead (Resilience4j docs)"
+  - title: "Bulkhead: implementations and default configuration (Resilience4j docs)"
     url: "https://resilience4j.readme.io/docs/bulkhead"
-    verifiedOn: "2026-10-20"
-  - title: "Getting started with Spring Boot (Resilience4j docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Getting started with Spring Boot: bulkhead properties (Resilience4j docs)"
     url: "https://resilience4j.readme.io/docs/getting-started-3"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Resilience4j 2.4.0 BulkheadConfig, ThreadPoolBulkheadConfig, resilience4j-spring-boot4 metadata (Maven Central, run locally)"
+    url: "https://central.sonatype.com/artifact/io.github.resilience4j/resilience4j-bulkhead/2.4.0"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A bulkhead gives each dependency its own limited share of the caller's resources, such as threads, connections or calls running at the same time. In the Order service, calls to Payment may use at most 10 slots and calls to Inventory another 10. When a share is full, extra calls are rejected at once instead of waiting. The name comes from the walls that split a ship's hull into watertight compartments.
 
 ## Why it exists
 
-If all outgoing calls share one pool, a single slow dependency fills it, and calls to healthy services wait behind it.
+Order handles requests with a fixed pool of threads. If Payment hangs and all outgoing calls share those threads, Payment calls soon hold every one, and even requests that need only Inventory cannot get a thread. A [circuit breaker](card:circuit-breaker) reacts only after enough calls have failed or been slow. A bulkhead limits the damage from the first slow call: Payment can block only its own 10 slots.
 
 ## How it works
 
 <Mermaid
-  alt="The Order service has a 10-slot pool for Payment and another for Inventory. Payment is slow, so its pool is full and an 11th call is rejected; Inventory calls still succeed."
+  alt="The Order service has a 10-slot share for Payment and another 10-slot share for Inventory. Payment is slow, so its share is full and an 11th call is rejected at once; Inventory calls still succeed."
   chart={`flowchart LR
-  O[Order service] --> PP["Payment pool: 10 of 10 busy"]
-  O --> IP["Inventory pool: 2 of 10 busy"]
+  O[Order service] --> PP["Payment share: 10 of 10 busy"]
+  O --> IP["Inventory share: 2 of 10 busy"]
   PP --> P[Payment: slow]
   PP -. "11th call" .-> X[Rejected at once]
   IP --> I[Inventory: healthy]`}
 />
 
-- A rejected call goes to a [fallback](card:fallback-and-degradation) or returns a clear error.
-- Pair it with a [circuit breaker](card:circuit-breaker) and retries: the bulkhead limits the damage, the breaker cuts the calls off.
+1. You give each dependency its own limit: 10 concurrent calls for Payment, 10 for Inventory.
+2. A call to Payment takes a slot before it starts and gives it back when it ends.
+3. Payment becomes slow, so its calls hold their slots longer, and all 10 fill up.
+4. The 11th Payment call cannot get a slot. With no waiting allowed, it is rejected at once, and Order returns a fallback or a clear error.
+5. Inventory calls still use their own 10 slots, so pages that need only Inventory keep working.
 
 ## Analogy
 
-<Analogy title="Compartments in a ship's hull" limit="The slow calls still fail; each still needs a timeout.">
-A leak floods one compartment, and the ship stays afloat.
+<Analogy title="Compartments in a ship's hull" limit="Water in a flooded compartment just stays there; a rejected call still needs an answer, an error or a fallback.">
+A leak floods one compartment, and the walls keep the water out of the others, so the ship stays afloat.
 </Analogy>
 
 ## Example
+
+The Order service's Resilience4j settings in a Spring Boot `application.yml`:
 
 ```yaml
 resilience4j:
   bulkhead:
     instances:
       payment:
-        maxConcurrentCalls: 10   # the 11th call at the same time is rejected
-        maxWaitDuration: 0       # do not wait for a free slot
+        maxConcurrentCalls: 10   # an 11th call at the same moment is rejected
+        maxWaitDuration: 0ms     # do not wait for a free slot
+      inventory:
+        maxConcurrentCalls: 10   # its own 10 slots, untouched by Payment
 ```
 
-## Defaults
+What to notice:
+
+- `payment` and `inventory` are two separate instances, so each dependency has its own count of calls in flight.
+- `maxWaitDuration: 0ms` makes a full bulkhead reject at once. A longer wait would hold the caller's thread, which is the problem the bulkhead exists to prevent.
+- These are semaphore bulkheads: the call runs on the caller's own thread, and the bulkhead only counts.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
 | Concurrent calls | 25, no waiting for a slot | Resilience4j 2.x semaphore bulkhead |
-| Thread pool | max threads = CPU count; queue of 100 | Resilience4j 2.x thread-pool bulkhead |
+| Thread pool | max threads = CPU count, core threads = CPU count − 1, queue of 100 | Resilience4j 2.x thread-pool bulkhead |
 | When full | throws `BulkheadFullException` | Resilience4j 2.x |
 
 ## Interview Qs
 
 ### Semaphore bulkhead or thread-pool bulkhead?
 
-A semaphore caps concurrent calls on the caller's own thread and suits any threading model. A thread pool runs calls on its own threads with a bounded queue and returns a `CompletionStage`, so the caller's thread is not held.
+A semaphore bulkhead caps concurrent calls on the caller's own thread and suits any threading model. A thread-pool bulkhead runs calls on its own fixed threads with a bounded queue and returns a `CompletionStage`, so the caller's thread is not held while the call runs.
 
 ### Where else can you apply the bulkhead idea?
 
-A connection pool per downstream service, separate instances for important clients, separate queues per workload, and containers with their own CPU and memory limits.
+A separate connection pool for each downstream service, separate instances for important clients, separate queues for each kind of work, and containers with their own CPU and memory limits. Each one stops a single noisy part from using up a shared resource.

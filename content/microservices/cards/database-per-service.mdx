@@ -5,34 +5,55 @@ title: Database per Service
 topic: data
 level: beginner
 heat: 3
-hook: "Each service owns its data; others get it only through its API or its events, never by reading its tables."
+hook: "Each service owns its data: only it reads and writes its tables, and other services get the data through its API or its events."
 points:
-  - { k: "Owner only", v: "only the owning service reads and writes its tables" }
-  - { k: "Not a new server", v: "private tables, a private schema, or a server per service" }
-  - { k: "Polyglot", v: "each service may pick the store that fits its data", kind: plus }
-  - { k: "No joins, no ACID", v: "queries and writes across services need patterns", kind: minus }
+  - { k: "Owner only", v: "only the Order service reads and writes the orders tables; other services go through its API or events" }
+  - { k: "Private, not separate", v: "private tables, a private schema or a server of its own all count; what matters is that no one else gets in" }
+  - { k: "Change alone", v: "a service can change its schema and deploy alone, because no other service reads its tables", kind: plus }
+  - { k: "Polyglot", v: "each service may pick the database type that fits its data, such as relational or document", kind: plus }
+  - { k: "No cross-service joins", v: "one SQL join or one database transaction cannot span two services; use API composition, a copy or a saga", kind: minus }
 trap:
   wrong: "Database per service means every service needs its own database server."
   right: "It means private data. Separate schemas with their own credentials on one shared server are fine."
+  why: "The name says database, and diagrams draw one database cylinder per service, so people read it as one server each."
 sayIt: "Each service owns its data and shares it only through its API or events, so it can change its schema and deploy alone. Cross-service reads use API composition or a local copy; cross-service writes use a saga."
+cheat:
+  idea: "Database per service means each service owns its data. Only that service reads and writes its tables; other services get the data through its API or its events."
+  remember: "Private data, not a private server: separate schemas with their own database users on one server are enough."
+buildsOn: [monolith-and-microservices, service-boundaries, sync-and-async-communication]
+scenarios:
+  - q: "The Notification service needs the order total, ₹500, to send a confirmation. Its developer wants to read the Order service's orders table directly, since both schemas sit on the same server. What do you advise?"
+    a: "Do not read the table. Take the total from the OrderPlaced event or call the Order service's API. A direct read ties Notification to the Order schema, so renaming one column in the Order service would break Notification."
+  - q: "A report needs orders together with their payment status, but orders and payments live in two services. One SQL join is impossible. What are your options?"
+    a: "For a small, occasional result, call both services and join the results in memory (API composition). For a frequent or large query, keep a read view fed by both services' events, which is CQRS. Both avoid touching another service's tables."
 confusedWith: []
 tags: [data-ownership, shared-database, polyglot-persistence]
 visual: flow
 sources:
   - title: "Pattern: Database per service (microservices.io, Chris Richardson)"
     url: "https://microservices.io/patterns/data/database-per-service.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Pattern: Shared database (microservices.io, Chris Richardson)"
     url: "https://microservices.io/patterns/data/shared-database.html"
     verifiedOn: "2026-10-20"
   - title: "Data sovereignty per microservice (.NET Microservices Architecture guide, Microsoft Learn)"
     url: "https://learn.microsoft.com/en-us/dotnet/architecture/microservices/architect-microservice-container-applications/data-sovereignty-per-microservice"
     verifiedOn: "2026-10-20"
+  - title: "Schemas: search path and privileges (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/18/ddl-schemas.html"
+    verifiedOn: "2026-10-21"
+  - title: "Connection parameters: currentSchema (PostgreSQL JDBC driver docs)"
+    url: "https://jdbc.postgresql.org/documentation/use/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Database per service is the rule that each service owns its data. Only that service reads and writes its tables. Other services get the data by calling its API or by listening to the events it publishes; an event is a message that says something happened, such as PaymentFailed. "Owns" is about access, not hardware: the tables may sit in a private schema on a server that other services also use.
 
 ## Why it exists
 
-If services share tables, one team's schema change can break another team's service, and they can no longer change or deploy on their own.
+In a [monolith](card:monolith-and-microservices) every module can read every table. If the Order and Payment services kept doing that after a split, a column the Payment team renames would break the Order service, and both teams would again have to change and release together. One service's heavy query would also slow the other. With private data, each service hides its tables behind its API, so it can change its schema and deploy alone.
 
 ## How it works
 
@@ -46,30 +67,64 @@ If services share tables, one team's schema change can break another team's serv
   OS -. "never reads directly" .-> PDB`}
 />
 
-- Need data you do not own? Ask the owner ([API composition](card:api-composition)) or keep a [local copy](card:data-duplication) fed by its events.
-- A change across services runs as a [saga](card:saga), not one ACID transaction.
-- Fast views over many services' data: [CQRS](card:cqrs).
+1. Each service gets its own tables, schema or server, and a database user that can reach only those.
+2. When the Order service needs payment data once, it calls the Payment service's API, for example `GET /payments/42`.
+3. When it needs a few payment fields on every request, it keeps a local copy of just those fields and updates the copy from the Payment service's events.
+4. When one business action changes data in two services, each service commits its own local transaction, and a [saga](card:saga) links the steps (you will see it in the messaging topic).
+
+So the key is one owner per table, and everyone else asks the owner.
 
 ## Example
 
+The Order service gets its own schema and database user on the shop's shared PostgreSQL server:
+
+```sql
+CREATE SCHEMA orders;
+CREATE ROLE order_svc LOGIN PASSWORD 'secret';
+GRANT USAGE, CREATE ON SCHEMA orders TO order_svc;   -- nothing on schema payments
+```
+
 ```yaml
-# order-service: its own schema and user on the shared PostgreSQL server
+# order-service application.yaml
 spring:
   datasource:
     url: jdbc:postgresql://db.shop.internal:5432/shop?currentSchema=orders
-    username: order_svc   # granted rights on schema "orders" only
+    username: order_svc
 ```
+
+What to notice:
+
+- `order_svc` has rights only on `orders`. A query such as `select * from payments.payment` fails with "permission denied for schema payments", so the database enforces the ownership, not just a team agreement.
+- `currentSchema=orders` makes table names without a schema resolve inside `orders`, so the service code never names the schema.
+- The server is shared, which keeps cost low. If the Order service later needs its own server, only the URL changes.
+
+## Rules and defaults
+
+- **Three ways to keep data private:** private tables per service, a schema per service, or a database server per service. Only some high-throughput services might need a server of their own.
+- **Enforce it with credentials:** give each service a database user that can reach only its own data. A rule that only lives in a wiki gets broken under deadline pressure.
+- **Queries across services:** the application does the join, by calling each owner (API composition) or by reading a view built from their events ([CQRS](card:cqrs), coming next in this topic).
+- **Writes across services:** no single database transaction spans two services' databases; a saga with local transactions replaces it.
+- **Polyglot persistence is allowed, not required:** each service may choose its own database type, but every extra type is one more thing to run.
+
+## Not to be confused with
+
+A shared database **server** is one machine that several services use, each in its own schema with its own user; that is fine. A [shared database](term:shared-database) means several services read and write the **same tables**; that is the anti-pattern, and it turns the system into a distributed monolith. Rule: sharing the server is fine; sharing the tables is not.
+
+## Common mistakes
+
+- **"Reading another service's tables is harmless if I only read."** A read still depends on that service's column names and meaning, so the owner can no longer change its schema without breaking you.
+- **"Keeping a copy of another service's data breaks the rule."** A local copy fed by the owner's events is allowed. The owner stays the truth, the copy is read-only, and it may be a little behind.
 
 ## Interview Qs
 
 ### Should each microservice have its own database?
 
-It must own its data: no other service touches its tables. A separate server is optional: private schemas with separate credentials on one server cost the least. Only some high-throughput services need their own.
+It must own its data: no other service touches its tables. A separate server is optional. Private schemas with separate credentials on one server cost the least, and only some high-throughput services might need a server of their own.
 
 ### Why is a shared database an anti-pattern?
 
-Services couple through the schema: every change needs all teams to agree, and one service's heavy queries can slow the others. Independent deployment, the main reason for microservices, is lost.
+Services couple through the schema: every change needs all the teams that use those tables to agree, and one service's heavy queries can slow the others. Independent deployment, the main reason for microservices, is lost.
 
 ### Orders need the customer's name, but customers live in another service. What do you do?
 
-Call the Customer service and join in memory (API composition), or keep the name in the Order service, updated from CustomerUpdated events. The copy is eventually consistent.
+Call the Customer service and join the results in memory (API composition), or keep the name in the Order service, updated from CustomerUpdated events. The copy is eventually consistent: for a short time after a change it can show the old name.

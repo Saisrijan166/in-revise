@@ -5,45 +5,77 @@ title: "Deployment Strategies: Rolling, Blue-Green, Canary"
 topic: deployment
 level: intermediate
 heat: 2
-hook: "Rolling swaps Pods a few at a time, blue-green flips all traffic at once, canary tries the new version on a few users first."
+hook: "Rolling swaps Pods a few at a time, blue-green switches all traffic between two full copies at once, and canary tries the new version on a small share of users first."
 points:
-  - { k: "Kubernetes default", v: "RollingUpdate; maxSurge 25%, maxUnavailable 25% (Kubernetes 1.37)", kind: default }
-  - { k: "Zero downtime needs", v: "readiness probes, and changes that work with old and new versions" }
-  - { k: "Feature flag", v: "splits deploy from release: ship the code off, switch it on later", kind: plus }
-  - { k: "Rollback", v: "kubectl rollout undo; 10 old ReplicaSets kept (Kubernetes 1.37)", kind: default }
+  - { k: "Rolling update", v: "replaces old Pods with new ones a few at a time; it is the Kubernetes Deployment default" }
+  - { k: "Blue-green", v: "runs two full copies and switches all traffic at once; switching back is the fastest rollback", kind: plus }
+  - { k: "Canary", v: "a small share of traffic tries the new version first; the share grows only while errors stay low" }
+  - { k: "Surge and unavailable", v: "up to 25% extra Pods and 25% Pods missing during a rolling update (Kubernetes 1.37)", kind: default }
+  - { k: "Two versions at once", v: "during rolling and canary, old and new serve together, so every change must work with both", kind: minus }
+  - { k: "Feature flag", v: "ships new code switched off, so deploying the code and releasing the feature become two steps", kind: plus }
 trap:
   wrong: "A rolling update makes any release zero-downtime."
   right: "Old and new versions run side by side, so APIs, events and the schema must suit both. Without readiness probes, Pods get traffic too early."
-sayIt: "Rolling updates by default, canary for risky changes, blue-green when I need an instant switch back. Readiness probes, backward-compatible changes and feature flags make it zero-downtime."
+  why: "Kubernetes presents rolling updates as the no-downtime default, so it is easy to forget that for some minutes two versions answer the same users and share one database."
+sayIt: "Rolling updates by default, canary for risky changes, blue-green when I need an instant switch back. Readiness probes, backward-compatible changes and feature flags are what make it zero-downtime."
+cheat:
+  idea: "A deployment strategy decides how a new version replaces the old: rolling swaps Pods a few at a time, blue-green flips all traffic between two copies, canary tries a small share first."
+  remember: "Old and new versions run side by side during most rollouts, so API and schema changes must work with both."
+buildsOn: [containers-and-kubernetes, health-probes]
+scenarios:
+  - q: "A new Order Service version has a bug that shows only under real traffic, in 1 order out of 50. Which strategy limits the damage best?"
+    a: "A canary. Send a small share, such as 5% of traffic, to the new version and watch its error rate. Only that share meets the bug, and you route it back. A rolling update reaches every user once it finishes; blue-green moves everyone at once."
+  - q: "With replicas: 4, maxSurge: 1 and maxUnavailable: 0, the new image crashes on start. What happens to users?"
+    a: "Nothing bad. Kubernetes starts one new Pod, which never becomes ready, so it stops no old Pod and all 4 keep serving. The rollout stalls, is reported as failed after 600 s by default, and kubectl rollout undo goes back."
 confusedWith: []
 tags: [deployment, rolling-update, blue-green, canary, feature-flag]
 visual: table
 sources:
-  - title: "Deployments: strategy, rolling update, rollback (Kubernetes 1.37 docs)"
+  - title: "Deployments: strategy, rolling update, progress deadline, rollback (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Parallel Change (Danilo Sato, martinfowler.com)"
     url: "https://martinfowler.com/bliki/ParallelChange.html"
     verifiedOn: "2026-10-20"
   - title: "Feature Toggles (Pete Hodgson, martinfowler.com)"
     url: "https://martinfowler.com/articles/feature-toggles.html"
     verifiedOn: "2026-10-20"
+  - title: "BlueGreenDeployment (Martin Fowler)"
+    url: "https://martinfowler.com/bliki/BlueGreenDeployment.html"
+    verifiedOn: "2026-10-20"
+  - title: "CanaryRelease (Danilo Sato, martinfowler.com)"
+    url: "https://martinfowler.com/bliki/CanaryRelease.html"
+    verifiedOn: "2026-10-20"
   - title: "Microservices interview questions: deployment strategies (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/advance-java/microservices-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A deployment strategy is the plan for replacing the running version of a service with a new one: which users get the new version, and when. A rolling update replaces Pods a few at a time. Blue-green keeps two full copies, blue (the current version) and green (the new one), and switches all traffic from one to the other at once. A canary sends a small share of traffic to the new version first and grows it while the numbers look good.
+
 ## Why it exists
 
-Every release replaces running code. The strategy decides how many users see a bad version, and how fast you can switch back.
+Every release replaces running code, and some releases are bad. If you stop all old Pods and then start the new ones, users get errors in between, and a broken version reaches everybody at once. A strategy keeps enough Pods serving during the change, limits how many users a bad version can hurt, and decides how fast you can go back.
 
 ## How it works
 
 <Compare id="rolling-vs-blue-green-vs-canary" />
 
-- During most rollouts two versions run at once: change APIs and schemas by [expand and contract](card:expand-and-contract).
+A rolling update of Order Service from 1.4.2 to 1.4.3, with the settings in the example below:
+
+1. You change the image tag in the Deployment. Only a change to the Pod template starts a rollout; changing `replicas` only scales.
+2. Kubernetes creates a new ReplicaSet and starts one new Pod, so for a moment 5 Pods exist.
+3. When the new Pod passes its [readiness probe](card:health-probes), it counts as available, and Kubernetes stops one old Pod.
+4. This repeats until all 4 Pods run 1.4.3. If a new Pod never gets ready, no more old Pods are stopped and the rollout stalls.
+5. If 1.4.3 misbehaves, `kubectl rollout undo deployment/order-service` rolls back to the previous revision, whose ReplicaSet was kept.
+
+So during a rolling update, the old and the new version serve users at the same time.
 
 ## Example
+
+Order Service keeps all 4 Pods serving during every update.
 
 ```yaml
 spec:
@@ -55,12 +87,36 @@ spec:
       maxUnavailable: 0    # never fewer than 4 available
 ```
 
+What to notice:
+
+- `maxUnavailable: 0` means capacity never drops: an old Pod stops only after a new one is ready.
+- `maxSurge: 1` allows one extra Pod at a time. The update is slower, but it needs room for only one more Pod.
+- With the defaults (25% each) and 4 replicas, Kubernetes may stop 1 old Pod before a new one is ready, so the service briefly runs on 3.
+- Both settings depend on readiness. A Pod without a readiness probe counts as ready as soon as it starts, so old Pods are removed too early.
+
+## Rules and defaults
+
+- **Default strategy:** `RollingUpdate` with `maxSurge` 25% (rounded up) and `maxUnavailable` 25% (rounded down) (Kubernetes 1.37).
+- **Recreate:** the other built-in type. It stops all old Pods before starting new ones, so there is a short outage.
+- **Rollback history:** 10 old ReplicaSets are kept by default (`revisionHistoryLimit`), so `kubectl rollout undo` can go back.
+- **Stuck rollouts:** after `progressDeadlineSeconds`, 600 s by default, the Deployment reports that it failed to progress. It does not roll back by itself.
+- **Blue-green and canary:** not built into the Deployment. Blue-green uses two Deployments and repoints the Service; a canary uses weighted routes in Gateway API or a service mesh.
+- **Compatible changes:** while two versions run, change APIs, events and columns by [expand and contract](card:expand-and-contract): add the new form, move everyone over, then remove the old form.
+
+## Not to be confused with
+
+Deploying puts new code on the servers. Releasing lets users use the new feature. A feature flag separates the two: the code is deployed switched off, and the feature is switched on later, for some users or for all, without a new deploy. Rule: deploy = the code is running; release = users get the feature.
+
 ## Interview Qs
 
 ### How do you deploy a microservice without downtime?
 
-Roll out gradually with readiness probes, keep APIs and the schema backward compatible, and watch error rates so you can roll back. Zero downtime is a design goal, not a Kubernetes guarantee.
+Roll out gradually with readiness probes, so a Pod gets traffic only once it is ready. Keep APIs, events and the schema backward compatible, because two versions run together. Watch error rates and roll back quickly. Zero downtime is a design goal, not a Kubernetes guarantee.
 
 ### How do you rename a database column with zero downtime?
 
-Expand: add the new column and write to both. Migrate: backfill it and move every reader. Contract: drop the old column once no running version uses it.
+Expand: add the new column and write to both. Migrate: copy the old values over and move every reader to the new column. Contract: drop the old column once no running version uses it. Each step is its own deploy.
+
+### When would you choose canary over blue-green?
+
+Canary when the risk is a bug that only real traffic shows: a small share of users meets it first. Blue-green when you need an instant switch back and can pay for a second full environment; everyone moves at once, so you test green well before switching.

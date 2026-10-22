@@ -5,17 +5,29 @@ title: Securing Microservices
 topic: security-observability
 level: intermediate
 heat: 2
-hook: "Check identity at the gateway, then again in every service: being inside the network earns no trust."
+hook: "Every service checks who is calling and what they may do, even for calls from inside your own network. The gateway check alone is not enough."
 points:
-  - { k: "Edge", v: "the API gateway rejects calls without a valid token" }
-  - { k: "Every service", v: "validates the token and authorises the action itself" }
-  - { k: "Service identity", v: "mTLS certificates or a client-credentials token" }
-  - { k: "Least privilege", v: "each service gets only the scopes and DB rights it needs" }
-  - { k: "Logs", v: "never write tokens, passwords or card data", kind: minus }
+  - { k: "Authentication", v: "proves who is calling, a user or a service, for example by checking a token's signature" }
+  - { k: "Authorisation", v: "decides whether that caller may do this action on this resource, such as cancel order 1001" }
+  - { k: "Gateway and every service", v: "the gateway rejects calls without a valid token; each service still checks the token and its own rules" }
+  - { k: "Service identity", v: "a service proves who it is with an mTLS certificate or an OAuth client-credentials token" }
+  - { k: "Least privilege", v: "each service gets only the scopes and database rights its job needs, so a breach reaches less", kind: plus }
+  - { k: "Logs", v: "never log tokens, passwords or card numbers; anyone who reads the logs could reuse them", kind: minus }
 trap:
-  wrong: "The gateway checked the token, so internal services can trust every call."
-  right: "Each service enforces its own rules, internal calls too. A gateway check only filters what comes in."
-sayIt: "I authenticate at the gateway and pass a signed token on. Each service validates it and authorises the action. Services prove their own identity with mTLS or client-credentials tokens, with least privilege."
+  wrong: "The gateway checked the token, so internal services can trust every call they receive."
+  right: "Each service validates the caller and enforces its own rules, for internal calls too. The gateway check only filters what comes in from outside."
+  why: "In a monolith there was one front door, and code behind it was trusted. Teams carry that picture over and treat the internal network as the inside of the house."
+sayIt: "I authenticate at the gateway and pass a signed token on. Each service validates it again and checks its own business rules. Services prove their identity with mTLS or client-credentials tokens, with least privilege."
+cheat:
+  idea: "Every call is checked for who is calling (authentication) and whether they may do this (authorisation), at the gateway and again in each service."
+  flow: "User token → gateway checks → service checks again → mTLS to the next service"
+  remember: "Zero trust: a call from inside the network gets no free pass."
+buildsOn: [api-gateway, service-mesh]
+scenarios:
+  - q: "A bug in the Notification Service lets an attacker run code there. Notification can reach the Payment Service on the internal network. Payment trusts any internal call. What can the attacker do, and what stops it?"
+    a: "The attacker can ask Payment to charge or refund anything, because Payment checks nothing. If Payment demands an mTLS certificate or token and allows Notification no payment rights (least privilege), the call is refused."
+  - q: "User 42 sends a valid token and asks to cancel order 1001, which belongs to user 77. The gateway let the call through. Who must refuse it?"
+    a: "The Order Service. The gateway only knows the token is valid; it does not know who owns order 1001. Only the Order Service can check ownership, so it returns 403 Forbidden."
 confusedWith: [authentication-vs-authorization]
 tags: [security, zero-trust, mtls, authorization]
 visual: flow
@@ -29,37 +41,91 @@ sources:
   - title: "Pattern: Access token (microservices.io)"
     url: "https://microservices.io/patterns/security/access-token.html"
     verifiedOn: "2026-10-20"
+  - title: "Spring MVC integration: @AuthenticationPrincipal (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/integrations/mvc.html"
+    verifiedOn: "2026-10-21"
+  - title: "OAuth 2.0 Resource Server JWT: the principal is a Jwt, getName is sub (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Securing microservices means checking every call between the user and the services, and between the services themselves. Each check asks two questions: who is calling (authentication) and may they do this (authorisation). The caller usually proves who it is with a token: a signed string that a login server, the identity provider, hands out after login. Traffic between services is also encrypted, and passwords and keys are kept out of the code.
 
 ## Why it exists
 
-A monolith has one door to guard. Microservices make many network calls, so an attacker who gets inside can reach every service that trusts its neighbours.
+A monolith has one door to guard: check the user once, and all code behind it is trusted. In the shop, an order now travels over the network from the [gateway](card:api-gateway) to the Order, Inventory and Payment services. If those services trust any call that comes from inside, one broken service, say Notification, can ask Payment to refund anything. Checking at each service limits the damage to the one service that was broken.
 
 ## How it works
 
 <Mermaid
   alt="The user logs in at the identity provider and gets a token. The user calls the API gateway with the bearer token; the gateway authenticates it and forwards the token to the Order Service, which checks its own rules. The Order Service calls the Payment Service over mTLS with a token, and the Payment Service also checks its rules."
   chart={`flowchart LR
-  IdP[(Identity provider)] -. token .-> U([User])
-  U -- "Bearer token" --> G[API gateway: authenticate]
-  G -- token --> O[Order Service: authorise]
-  O -- "mTLS + token" --> P[Payment Service: authorise]`}
+  IdP[(Identity provider)] -. "1. token" .-> U([User])
+  U -- "2. Bearer token" --> G[API gateway: authenticate]
+  G -- "3. token" --> O[Order Service: authorise]
+  O -- "4. mTLS + token" --> P[Payment Service: authorise]`}
 />
 
-- Zero trust (NIST SP 800-207): network location grants nothing; each request is authenticated and authorised.
-- A [service mesh](card:service-mesh) can add mTLS and rotate certificates without app code.
-- Secrets live in a vault or the platform's secret store, never in code: see [Configuration and Secrets](card:configuration-management).
+1. The user logs in at the identity provider and receives a token.
+2. The user's app sends the token with each call. The gateway rejects calls with no token or an invalid one.
+3. The gateway forwards the call and the token. The Order Service validates the token again and checks its own rule, such as "users cancel only their own orders".
+4. When the Order Service calls the Payment Service, it proves its own identity with a certificate over mTLS (mutual TLS, where both sides show a certificate) or with a service token. Payment checks that Order is allowed to charge.
+5. Each service writes security events, such as a refused call, to an audit log, without the token itself.
+
+So the key is: the gateway filters, but every service decides for itself.
+
+## Example
+
+The Order Service checks ownership before it cancels an order. The gateway cannot do this, because it does not know who owns order 1001.
+
+```java
+@PostMapping("/orders/{id}/cancel")
+ResponseEntity<Void> cancel(@PathVariable long id, @AuthenticationPrincipal Jwt jwt) {
+    Order order = orders.findById(id).orElseThrow();
+    if (!order.customerId().equals(jwt.getSubject())) {   // user 42 may cancel only their own orders
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+    }
+    order.cancel();
+    return ResponseEntity.noContent().build();
+}
+```
+
+What to notice:
+
+- Spring Security has already validated the token before this method runs; `@AuthenticationPrincipal Jwt` hands the method the validated token.
+- `jwt.getSubject()` reads the `sub` claim, the user's ID. A valid token proves who the user is, not that this order is theirs.
+- Remove the `if` and any logged-in user can cancel any order. The token check alone would still pass.
+
+## Rules and defaults
+
+- **Zero trust (NIST SP 800-207):** a call gets no trust from where it comes from on the network; each request is authenticated and authorised.
+- **Edge and service checks:** coarse checks (valid token, right scope, a scope being a permission the token carries) can run at the gateway; business rules run in the service that owns the data.
+- **Service identity:** with mTLS both sides present certificates, which proves identity and encrypts the traffic. A [service mesh](card:service-mesh) can add mTLS and rotate certificates without app code. The token option, the OAuth client credentials flow, comes in [the next concept](card:jwt-and-oauth).
+- **Encryption:** use TLS for every network hop (in transit) and encrypt stored data (at rest).
+- **Secrets:** keep passwords, keys and certificates out of code and out of browser-visible config; you will see where they go in [Configuration and Secrets](card:configuration-management).
+- **Logs:** never log tokens, passwords or personal data.
+
+## Not to be confused with
+
+Authentication answers "who are you?": the token is valid, so this is user 42. Authorisation answers "may you do this?": may user 42 cancel order 1001? Rule: authentication gives an identity; authorisation is checked again for every action.
+
+## Common mistakes
+
+- **"HTTPS at the gateway is enough."** Traffic behind the gateway also crosses the network, so internal hops need TLS too, often as mTLS.
+- **"One shared service account for every service."** If one service is broken, the attacker gets the rights of all. Give each service its own identity and only the rights it needs.
 
 ## Interview Qs
 
 ### How do services authenticate each other?
 
-With mTLS, each service holds a certificate and both sides verify each other. Or the caller gets an OAuth client-credentials token and sends it; the callee validates it. Token calls still run over TLS.
+With mTLS, each service holds a certificate, and both sides check each other's certificate when the connection opens. Or the calling service gets an OAuth client-credentials token for itself and sends it; the receiving service validates it. Token calls still run over TLS, so the token cannot be read on the way.
 
 ### The gateway already checks tokens. Why check again in each service?
 
-A call can bypass the gateway or come from a compromised service inside. Also, only the Order Service knows rules such as "user 42 may cancel only their own order".
+A call can bypass the gateway, or come from a service inside that an attacker has broken into. Also, only the service that owns the data knows its rules: only the Order Service knows that user 42 may cancel order 1001 but not order 1002.
 
 ### What is zero trust?
 
-No implicit trust because a call comes from the internal network. Every request is authenticated and authorised, and you protect resources, not network segments.
+A security model in which no request is trusted because of where it comes from, such as the internal network. Every request is authenticated and authorised, access is the minimum needed, and you protect each resource rather than drawing one wall around the network.

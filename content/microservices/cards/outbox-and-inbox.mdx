@@ -5,70 +5,127 @@ title: Transactional Outbox and Inbox
 topic: messaging
 level: intermediate
 heat: 3
-hook: "Save the change and the event in one local transaction; a relay publishes the event afterwards."
+hook: "Save the business change and its event in one local transaction; a relay publishes the event after commit. On the other side, an inbox skips events already applied."
 points:
-  - { k: "Dual write", v: "DB commit and broker send cannot be one atomic step", kind: minus }
-  - { k: "Outbox row", v: "written in the same transaction as the order row" }
-  - { k: "Relay", v: "polling publisher, or log tailing (CDC) such as Debezium" }
-  - { k: "At-least-once", v: "the relay may publish twice; consumers stay idempotent", kind: minus }
-  - { k: "Inbox", v: "the consumer's table of processed message ids" }
+  - { k: "Dual write", v: "saving to the database and sending to the broker are two separate commits; either can fail alone", kind: minus }
+  - { k: "Outbox row", v: "the event is saved in the same local transaction as the order, so both exist or neither does" }
+  - { k: "Relay", v: "publishes outbox rows after commit, by polling the table or by reading the database log (CDC)" }
+  - { k: "Duplicates remain", v: "the relay can publish an event twice, so consumers must still be idempotent", kind: minus }
+  - { k: "Inbox", v: "the consumer saves each processed eventId with its own change, so a repeated event is skipped", kind: plus }
 trap:
-  wrong: "Save the order, then send to Kafka in the same @Transactional method; a failed send rolls back."
-  right: "The send can succeed and the commit fail, or the reverse. Write an outbox row in the transaction; publish after commit."
-sayIt: "To avoid the dual-write problem I write the business change and an outbox row in one local transaction. A relay, by polling or by CDC with Debezium, publishes it. It may publish twice, so consumers are idempotent."
+  wrong: "Save the order, then send to Kafka in the same @Transactional method; a failed send rolls everything back."
+  right: "The send can succeed and the commit fail, or the reverse. Write an outbox row in the transaction, and let a relay publish it after commit."
+  why: "Inside one method the save and the send look like one unit of work, and @Transactional suggests everything in it is undone together."
+sayIt: "To avoid the dual-write problem I write the business change and an outbox row in one local transaction. A relay, by polling or by change data capture with Debezium, publishes it after commit. It may publish twice, so consumers keep an inbox and are idempotent."
+cheat:
+  idea: "The outbox saves an event as a row in the same local transaction as the business change; a relay publishes it after commit."
+  flow: "order + outbox row (one transaction) → relay → Kafka → consumer + inbox"
+  remember: "The outbox stops lost events, not duplicates: the relay can publish twice, so consumers stay idempotent."
+buildsOn: [delivery-guarantees, database-per-service]
+scenarios:
+  - q: "Kafka is unreachable for 5 minutes while customers place orders. Order Service uses an outbox. What happens to the orders and their events?"
+    a: "Orders are still saved, each with its outbox row, because only the local database is needed for that. The relay keeps retrying, and when Kafka is back it publishes the waiting events. Nothing is lost; the events are only late."
+  - q: "The relay publishes OrderCreated for ord-456 and crashes before marking the row as sent. What happens next?"
+    a: "After restart it finds the row still unsent and publishes OrderCreated again. Inventory Service receives two copies; its inbox already holds the eventId, so the second copy is skipped and stock is reserved once."
+  - q: "The order transaction fails on a database constraint after the outbox row was inserted. Is OrderCreated published?"
+    a: "No. The outbox row was part of the same transaction, so the rollback removes it with the order. The relay never sees it, so no event is sent for an order that does not exist."
 confusedWith: [outbox-vs-inbox]
 tags: [outbox, inbox, cdc, debezium, dual-write]
 visual: flow
 sources:
   - title: "Transactional outbox (microservices.io)"
     url: "https://microservices.io/patterns/data/transactional-outbox.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Transaction log tailing (microservices.io)"
     url: "https://microservices.io/patterns/data/transaction-log-tailing.html"
     verifiedOn: "2026-10-20"
-  - title: "Outbox Event Router (Debezium 3.7 docs)"
+  - title: "Polling publisher (microservices.io)"
+    url: "https://microservices.io/patterns/data/polling-publisher.html"
+    verifiedOn: "2026-10-21"
+  - title: "Outbox Event Router: table columns, message key, topic routing (Debezium 3.7 docs)"
     url: "https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html"
+    verifiedOn: "2026-10-21"
+  - title: "Idempotent consumer (microservices.io)"
+    url: "https://microservices.io/patterns/communication-style/idempotent-consumer.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The transactional outbox is a pattern for publishing an event reliably when a service changes its database. Instead of sending the event to the broker directly, the service saves it as a row in an outbox table, in the same local transaction as the business change. A local transaction is one database's commit-or-rollback unit. A separate relay later reads the outbox and publishes the rows. The inbox is the receiving side: a table of event ids already applied, which makes the consumer [idempotent](card:delivery-guarantees).
+
 ## Why it exists
 
-Order Service saves an order and must publish OrderCreated. If it crashes between the commit and the send, the order exists but nobody hears about it.
+Order Service must save the order and publish OrderCreated, but the database and the broker commit separately. This is the dual-write problem. Publish first, and the save may fail: an event for an order that does not exist. Save first, crash before sending, and the order exists but Inventory never reserves stock. A distributed transaction across the database and the broker, called two-phase commit, is often not supported by one side or the other; you will see it in [distributed transactions](card:distributed-transactions). The outbox turns the two writes into one database write.
 
 ## How it works
 
 <Mermaid
-  alt="Order Service writes the order row and the outbox row in one local transaction. A relay reads the outbox, by polling or by tailing the database log, and publishes to Kafka. Payment Service consumes the event and records its id in an inbox table together with its own change."
+  alt="Order Service writes the order row and the outbox row in one local transaction. A relay reads the outbox, by polling or by tailing the database log, and publishes to Kafka. Inventory Service consumes the event and records its id in an inbox table together with its own change."
   chart={`flowchart LR
   S[Order Service] -- "one transaction" --> DB[(orders + outbox)]
   DB -- "poll or CDC" --> R[Relay]
   R -- OrderCreated --> K[[Kafka]]
-  K --> C[Payment Service]
-  C -- "eventId + change" --> IN[(payments + inbox)]`}
+  K --> C[Inventory Service]
+  C -- "eventId + change" --> IN[(stock + inbox)]`}
 />
 
-- Debezium's outbox router uses `aggregateid` as the Kafka key, so one order's events stay in order.
-- Polling works on any SQL database; log tailing reads the binlog or WAL and is database-specific.
-- The inbox is how an [idempotent consumer](card:delivery-guarantees) remembers what it applied.
+1. In one local transaction, Order Service inserts the order row and an outbox row holding OrderCreated. Both commit, or neither does.
+2. A relay finds the new outbox row. A polling publisher queries the table every few seconds; log tailing, also called change data capture (CDC), reads the database's transaction log, as Debezium does.
+3. The relay publishes the event to Kafka with key = orderId, then marks the row as sent (polling) or saves its position in the log (CDC).
+4. If the relay crashes after publishing but before that mark, it publishes the event again after restart.
+5. Inventory Service consumes the event. In one local transaction it saves the eventId in its inbox table and reserves stock, so a second copy is skipped.
+
+So the outbox stops lost events, and the inbox stops duplicate effects.
 
 ## Example
 
+Order Service places an order without calling Kafka at all:
+
 ```java
 @Transactional
-public Order place(NewOrder cmd) {
-    Order order = orders.save(Order.from(cmd));
-    outbox.save(new OutboxEvent(UUID.randomUUID(), "order", order.id(),
-            "OrderCreated", json.write(order)));   // same transaction
-    return order;                                  // both rows commit, or neither
+public Order placeOrder(NewOrder request) {
+    Order order = orders.save(Order.pending(request));        // business row
+    outbox.save(new OutboxEvent(UUID.randomUUID(), "order",
+            order.id(), "OrderCreated", json.write(order)));   // event row
+    return order;                  // both rows commit together, or neither
 }
 ```
+
+What to notice:
+
+- There is no `kafkaTemplate.send(...)`. The method writes only to its own database, so it cannot half-succeed.
+- The fields match Debezium's outbox router: `id`, `aggregatetype` ("order"), `aggregateid` (the order id), `type` and `payload`. Debezium uses `aggregateid` as the Kafka key, so all events of one order stay in one partition.
+- If the method throws after `outbox.save`, both rows roll back, and no event is ever published for this order.
+- The `UUID` becomes the event's id, which the consumer stores in its inbox.
+
+## Rules and defaults
+
+- **Polling publisher:** simple and works on any SQL database, but each event waits for the next poll, and publishing strictly in commit order is tricky.
+- **Log tailing (CDC):** reads the MySQL binlog or the PostgreSQL write-ahead log (WAL), so it sees each committed insert without querying the table. It needs a CDC tool such as Debezium and database-specific setup.
+- **Debezium outbox router (3.7):** expects the columns `id`, `aggregatetype`, `aggregateid`, `type` and `payload`; it routes events to the topic `outbox.event.<aggregatetype>` by default.
+- **Order:** keying every event by its aggregate id, as Debezium does, keeps the events of one order in one partition and in sequence.
+- **Delivery:** the relay gives at-least-once publishing, never exactly-once. Every consumer still needs an inbox or another idempotency check.
+
+## Not to be confused with
+
+The outbox lives in the sending service's database and makes publishing reliable: a committed change always gets its event. The inbox lives in the receiving service's database and makes consuming safe to repeat: a delivered event is applied once. Rule: outbox = never lose an event; inbox = never apply one twice.
+
+## Common mistakes
+
+- **"Send the event in an after-commit hook, and it is safe."** A crash, or a broker outage, between the commit and the send still loses the event. The outbox row survives the crash, and the relay retries it.
+- **"Sending inside the transaction is fine because KafkaTemplate throws on failure."** `send()` is asynchronous and returns a `CompletableFuture`, so the method can commit before the broker has answered.
 
 ## Interview Qs
 
 ### The database update succeeds but publishing the event fails. What do you do?
 
-Use the transactional outbox. Save the event as a row in the same local transaction as the change, then a relay publishes it after commit and retries until the broker accepts it. No event is lost.
+Use the transactional outbox. Save the event as a row in the same local transaction as the change. A relay publishes it after commit and retries until the broker accepts it, so a committed change never loses its event. Then make consumers idempotent, because the relay may publish twice.
 
 ### Does the outbox remove duplicates?
 
-No. The relay can crash after publishing but before marking the row sent, so it publishes again. The outbox stops lost events; idempotent consumers (an inbox) stop duplicate effects.
+No. The relay can crash after publishing but before marking the row sent, so it publishes again. The outbox prevents lost events; idempotent consumers, usually with an inbox table, prevent duplicate effects. The two patterns are used together.
+
+### Polling publisher or log tailing?
+
+Polling is simple and works on any SQL database, but each event waits for the next poll, and strict ordering is tricky. Log tailing with a CDC tool such as Debezium reads the database's transaction log, so it sees each commit without querying the table, but it is database-specific and is one more system to run.

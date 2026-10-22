@@ -591,3 +591,20 @@ The owner approved the Spring Boot pilot, both the concept rewrite (section Q) a
   - Association vs aggregation vs composition rests on UML 2.5.1 plus one GeeksforGeeks page; the Java docs do not define these terms.
   - Some interview questions cite interview-prep sites (GeeksforGeeks, InterviewBit) only to show they are commonly asked.
 - **Left out (no primary source):** which of two equal top earners `Stream.max` returns; a key order for plain `groupingBy`; the GoF "23 patterns" count; the JDBC version that made `Class.forName` unnecessary.
+
+### R3. Microservices
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 44 | 31 | 291 | ~1,620 / 33 / 3 | ~10.5 min |
+
+- **Running example:** a shop with Order, Payment, Inventory and Notification services. The ₹500 charge flow is used across sagas, outbox, idempotency and the design walkthrough.
+- **Code:** Java examples compile against Spring 7.0.5, Spring Cloud 5.0.x, Resilience4j 2.4.0 and kafka-clients 4.3.x. Two output panels are real runs. Kubernetes YAML passed kubeconform. The kubectl commands and the Spring Cloud Gateway YAML were checked against the docs only, because there is no cluster or gateway app here.
+- **Corrections worth knowing:**
+  - Kafka Streams is exactly-once only with `processing.guarantee=exactly_once_v2`; the default is at-least-once.
+  - The PostgreSQL 18 default leaves 97 app connections, not 100.
+  - Polling outbox relays cannot guarantee strict publish order.
+  - The design-walkthrough diagram was fixed to match the saga order.
+- **Left out (no primary source):** that Istio proxies keep their last configuration when the control plane is down; that a BFF is usually owned by the client team.
+- **Design judgement, not a doc quote:** "retry a timed-out charge with the same idempotency key, or query its status, before compensating" (saga, Common mistakes).
+- **Re-check later:** OAuth 2.1 is described as still an Internet-Draft in 2026 (draft 16).

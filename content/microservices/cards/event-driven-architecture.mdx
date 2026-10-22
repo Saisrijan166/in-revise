@@ -5,70 +5,126 @@ title: Event-Driven Architecture
 topic: messaging
 level: beginner
 heat: 2
-hook: "A service announces what happened; other services decide for themselves how to react."
+hook: "A service announces what has happened, such as OrderCreated, and other services decide for themselves how to react. The announcer never calls or waits for them."
 points:
-  - { k: "Event", v: "a fact in past tense, such as OrderCreated" }
-  - { k: "Producer", v: "publishes and moves on; does not know the consumers" }
-  - { k: "Loose coupling", v: "add a new consumer without changing the producer", kind: plus }
-  - { k: "Hidden flow", v: "no single place shows the whole chain of reactions", kind: minus }
-  - { k: "Versioning", v: "add optional fields; never change a field's meaning" }
+  - { k: "Event", v: "a record of something that already happened, named in the past tense, such as OrderCreated" }
+  - { k: "Producer", v: "the service that publishes the event; it does not know or wait for the services that react" }
+  - { k: "Consumer", v: "a service that subscribes to an event and decides on its own what to do with it" }
+  - { k: "New consumers", v: "a new service can start reacting to OrderCreated without any change to Order Service", kind: plus }
+  - { k: "Hidden flow", v: "no single codebase shows the whole chain of reactions, so you need tracing to follow it", kind: minus }
+  - { k: "Stale copies", v: "consumers update their data a little after the producer, so data is eventually consistent", kind: minus }
 trap:
   wrong: "An event tells another service what to do, like ChargePayment."
-  right: "That is a command. An event only states a fact, OrderCreated; each consumer decides what to do with it."
-sayIt: "In event-driven design a service publishes facts like OrderCreated to a broker, and others react on their own. It decouples services, but the flow is harder to trace and data is eventually consistent."
-confusedWith: [rest-vs-messaging]
+  right: "That is a command: a request to one receiver, which may refuse it. An event states a fact, OrderCreated, and each consumer decides what to do."
+  why: "Commands and events travel through the same broker in the same JSON format, and many tutorials call every message an event, so the two names get mixed up."
+sayIt: "In event-driven architecture a service publishes facts like OrderCreated to a broker, and other services react on their own. A new consumer needs no change to the producer, but the flow is harder to trace and other services' data is eventually consistent."
+cheat:
+  idea: "Services publish events, facts such as OrderCreated, to a broker. Other services subscribe and react on their own, so the producer never calls or waits for them."
+  remember: "Event = a fact with any number of listeners; command = a request to one service, which may refuse it."
+buildsOn: [sync-and-async-communication, database-per-service]
+scenarios:
+  - q: "The business wants a new Loyalty service that gives points for every order. Order Service already publishes OrderCreated. What must change in Order Service?"
+    a: "Nothing. Loyalty subscribes to OrderCreated and reacts on its own. The producer does not know its consumers, which is the main gain of events over direct calls, where Order Service would need a new call to Loyalty."
+  - q: "Notification Service receives an event that holds only orderId, then calls Order Service's API for the email address and total. Which event style is this, and what does it cost?"
+    a: "Event notification. The event stays small, but every consumer calls back, so Order Service must be up and takes the extra load. Event-carried state transfer puts the needed data in the event, so consumers do not call back."
+  - q: "Order Service renames the field totalInr to amount in OrderCreated and deploys. What happens to the consumers?"
+    a: "Consumers that read totalInr now find nothing, so they fail or treat the total as missing. A rename is a breaking change. Add the new field next to the old one, or publish a new event version, and remove the old field only after every consumer has moved."
+confusedWith: [command-vs-event]
 tags: [events, eda, decoupling]
-visual: table
+visual: flow
 sources:
   - title: "What do you mean by Event-Driven? (Martin Fowler)"
     url: "https://martinfowler.com/articles/201701-event-driven.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Publisher-Subscriber pattern: schema evolution, correlation (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/publisher-subscriber"
     verifiedOn: "2026-10-20"
-  - title: "Implementing the microservice application layer: commands (Microsoft .NET microservices guide)"
+  - title: "Domain events: an event happened in the past, so name it with a past-tense verb (Microsoft .NET microservices guide)"
+    url: "https://learn.microsoft.com/en-us/dotnet/architecture/microservices/microservice-ddd-cqrs-patterns/domain-events-design-implementation"
+    verifiedOn: "2026-10-22"
+  - title: "Schema Registry API: registering an incompatible schema returns 409 Conflict (Confluent Platform docs)"
+    url: "https://docs.confluent.io/platform/current/schema-registry/develop/api.html"
+    verifiedOn: "2026-10-22"
+  - title: "Implementing the microservice application layer: a command is a request and may be refused (Microsoft .NET microservices guide)"
     url: "https://learn.microsoft.com/en-us/dotnet/architecture/microservices/microservice-ddd-cqrs-patterns/microservice-application-layer-implementation-web-api"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Event-driven architecture (EDA) is a style in which services work together by publishing and reacting to events. An event is a record of something that already happened, such as OrderCreated. The service that publishes it is the producer, and the services that receive it are consumers. Events travel through a message broker, the middleman you met in [asynchronous communication](card:sync-and-async-communication).
+
 ## Why it exists
 
-If Order Service had to call Inventory, Payment and Notification itself, it would break whenever one is down. Publishing one event lets each service react independently.
+Without events, Order Service would call Inventory, Notification and every future service itself after each order. It would need to know all of them, wait for all of them, and fail when one is down, and every new feature would change Order Service. With an event, Order Service announces the order once. Each interested service reacts in its own time, and a new one joins without touching the producer.
 
 ## How it works
 
-<Compare id="command-vs-event" />
+<Mermaid
+  alt="Order Service publishes OrderCreated to the broker. The broker delivers a copy to Inventory Service and to Notification Service. A Loyalty service, added later, also subscribes, and Order Service does not change."
+  chart={`flowchart LR
+  O[Order Service] -- OrderCreated --> B[[Broker]]
+  B --> I[Inventory Service]
+  B --> N[Notification Service]
+  B -. "added later" .-> L[Loyalty Service]`}
+/>
 
-- **Event notification**: the event carries ids; a consumer calls back for details.
-- **Event-carried state transfer**: the event carries the data, so consumers keep a local copy.
-- The event passes through a [message broker](card:message-brokers); put a correlation id in it so traces connect.
+1. A customer places an order. Order Service saves it in its own database, publishes OrderCreated to the broker, and answers the customer without waiting for anyone.
+2. The broker stores the event and delivers a copy to every service that subscribed to it.
+3. Inventory Service reserves stock, and Notification Service emails "order received". Each works at its own pace, and one being down does not stop the other.
+4. Months later a Loyalty service subscribes to the same event. Order Service is not changed or redeployed.
+
+So the key is: the producer states what happened, and each consumer decides what it means for it.
 
 ## Example
+
+Order Service publishes this OrderCreated event for a ₹500 order:
 
 ```json
 {
   "eventId": "7f3c2a9e-1b4d-4c55-9a0e-2d6f8b1e4c07",
   "type": "OrderCreated",
   "version": 2,
-  "occurredAt": "2026-10-20T10:15:00Z",
+  "occurredAt": "2026-10-21T10:15:00Z",
+  "correlationId": "req-81f2",
   "orderId": "ord-456",
-  "totalInr": 1499.00,
+  "totalInr": 500,
   "currency": "INR"
 }
 ```
 
-Version 2 added `currency` as a new field; version 1 consumers ignore it and keep working.
+What to notice:
+
+- `eventId` is unique per event, so a consumer can spot the same event delivered twice. You will use it in [delivery guarantees](card:delivery-guarantees).
+- The event carries `totalInr`, so Notification can write "₹500 paid" without calling Order Service. This style is event-carried state transfer. An event with only `orderId` is event notification, and every consumer must call back for details.
+- Version 2 added `currency`. Version 1 consumers ignore the unknown field and keep working. Renaming `totalInr` instead would break them.
+- `correlationId` ties the event to the request that caused it, so a trace can follow the order across services.
+
+## Rules and defaults
+
+- **Naming:** name events in the past tense (OrderCreated, PaymentFailed). An event reports a fact, so a consumer cannot refuse it.
+- **Backward-compatible changes:** add optional fields; never rename a field or change its meaning. For a breaking change, publish a new version or event type and keep the old one until every consumer has moved. A schema registry can reject incompatible schema changes before they ship.
+- **Consumers must cope with delivery:** an event can arrive late, more than once, or out of order, so a consumer must not assume it sees each event exactly once and in sequence.
+- **Data copies are eventually consistent:** a service that keeps a local copy from events sees changes a little after the producer makes them.
+
+## Not to be confused with
+
+- **Command:** asks one service to do something, such as ReserveStock, and that service may refuse.
+- **Event:** reports that something happened, such as OrderCreated, and any number of services may react.
+- **[Event sourcing](card:event-sourcing):** stores one service's own state as a list of events. EDA is about services telling each other what happened, and works without event sourcing.
+
+Rule: command = "please do this"; event = "this happened"; event sourcing = how one service stores its data.
 
 ## Interview Qs
 
-### What is the difference between an event and a command?
+### What is event-driven architecture, and when would you use it?
 
-An event says something already happened, any number of services may listen, and it cannot be refused. A command asks one receiver to act, and the receiver may reject it.
+Services publish events, facts such as OrderCreated, to a broker, and other services subscribe and react. Use it when several services must react to the same change, when the producer should not wait for them, and when new reactions will be added later. Use a direct call when the caller needs an answer now.
 
 ### How do you change an event without breaking consumers?
 
-Make backward-compatible changes: add optional fields, never rename or change meaning. For a breaking change publish a new version or topic, and let consumers ignore fields they do not know. A schema registry can enforce this.
+Make only backward-compatible changes: add optional fields, and never rename a field or change its meaning. Consumers ignore fields they do not know. For a breaking change, publish a new version or a new event type alongside the old one, and retire the old one after all consumers have moved. A schema registry can enforce these rules.
 
 ### What are the downsides of event-driven design?
 
-The end-to-end flow is not visible in any one codebase, so you need tracing. Data in other services is eventually consistent, and consumers must handle late, repeated or out-of-order events.
+The end-to-end flow is not written in any one codebase, so you need tracing and good naming to follow it. Data copied by events is eventually consistent. Consumers must handle late, repeated and out-of-order events, and you need a broker to run and monitor.

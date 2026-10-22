@@ -5,70 +5,143 @@ title: Caching in Microservices
 topic: data
 level: intermediate
 heat: 2
-hook: "A cache makes repeated reads fast, but the database stays the truth: every cached copy needs a TTL and an invalidation plan."
+hook: "A cache keeps copies of often-read data in memory so repeat reads skip the database; the database stays the truth, and every copy needs an expiry."
 points:
-  - { k: "Local vs shared", v: "in-process is fastest; Redis is one copy for all instances" }
-  - { k: "Write rule", v: "update the database, then delete the cached key" }
-  - { k: "TTL on every key", v: "catches missed invalidations; add jitter to spread expiry" }
-  - { k: "Not the truth", v: "never keep the only copy of important data in a cache", kind: minus }
+  - { k: "Cache-aside", v: "the service reads the cache first; on a miss it loads from the database and stores the value with a TTL" }
+  - { k: "Write order", v: "update the database first, then delete the cached key, so the next read loads the new value" }
+  - { k: "TTL on every key", v: "a stale copy lives at most until its TTL; random jitter stops many keys expiring together" }
+  - { k: "Local vs shared", v: "an in-process cache is fastest but each instance has its own copy; Redis is one copy for all instances" }
+  - { k: "Not the truth", v: "the database stays the source of truth; never keep the only copy of important data in a cache", kind: minus }
 trap:
   wrong: "Delete the cached key first, then update the database."
   right: "Update the database first, then delete the key. Otherwise a reader can cache the old value again."
+  why: "Deleting first feels safer, because the old copy is gone before the change. But a read between the delete and the update misses, loads the old row and caches it again."
 sayIt: "I use cache-aside with Redis: read the cache; on a miss load from the database and store it with a TTL. On writes I update the database, then delete the key. Hot keys get TTL jitter and one loader at a time."
+cheat:
+  idea: "A cache keeps copies of often-read data in memory, so repeat reads skip the database. With cache-aside the service loads a value on a miss and stores it with a TTL."
+  remember: "On a write, update the database first, then delete the key; never let a cache hold the only copy."
+buildsOn: [scaling-services, cap-and-consistency]
+scenarios:
+  - q: "After a price change, users keep seeing the old price for up to 10 minutes. The write code updates the database and never touches the cache. What is wrong?"
+    a: "Nothing removes the cached copy, so readers get the old price until its TTL runs out. Delete the key right after the database update; the next read then misses and loads the new price."
+  - q: "Four instances of the Inventory service each keep product names in a local in-memory cache. After a rename, some pages still show the old name. Why, and what would you change?"
+    a: "Each instance holds its own copy, and the rename cleared only the copy on the instance that handled it. Use a shared cache such as Redis, which all instances read, or give the local cache a short TTL."
+  - q: "A very popular product's key expires, and 2,000 requests miss at the same moment. What happens, and how do you prevent it?"
+    a: "All 2,000 go to the database at once for the same row, which is a cache stampede. Let one request reload the key while the others wait or get the old value, and spread expiry with TTL jitter."
 confusedWith: []
 tags: [cache-aside, redis, ttl, cache-stampede]
 visual: flow
 sources:
+  - title: "Cache-Aside pattern: order of update and invalidation, local caching (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
+    verifiedOn: "2026-10-21"
   - title: "Caching guidance (Azure Architecture Center, best practices)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/best-practices/caching"
     verifiedOn: "2026-10-20"
   - title: "Caching best practices (AWS)"
     url: "https://aws.amazon.com/caching/best-practices/"
     verifiedOn: "2026-10-20"
+  - title: "Optimal Probabilistic Cache Stampede Prevention: locking, stale values (Vattani et al., VLDB 2015)"
+    url: "https://www.vldb.org/pvldb/vol8/p886-vattani.pdf"
+    verifiedOn: "2026-10-22"
+  - title: "Write-through and write-behind caching with the CacheWriter (Ehcache 2.7 docs)"
+    url: "https://www.ehcache.org/documentation/2.7/apis/write-through-caching"
+    verifiedOn: "2026-10-22"
+  - title: "Bloom filter (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/probabilistic/bloom-filter/"
+    verifiedOn: "2026-10-20"
+  - title: "Distributed locks with Redis: SET NX PX, fencing tokens (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/"
+    verifiedOn: "2026-10-21"
   - title: "How to do distributed locking (Martin Kleppmann)"
     url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"
     verifiedOn: "2026-10-20"
+  - title: "Working with objects through RedisTemplate: StringRedisTemplate (Spring Data Redis 4.1 reference)"
+    url: "https://docs.spring.io/spring-data/redis/reference/redis/template.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A cache is a fast store, usually in memory, that keeps copies of data you read often, so the next read skips the slower database. A read that finds the data in the cache is a hit; a read that does not is a miss. In microservices a cache is either local, inside each instance's own memory, or shared, such as Redis, which all instances use over the network. The database stays the source of truth; the cache only holds copies.
 
 ## Why it exists
 
-Many requests read the same product or price again and again. Serving those from memory cuts latency and protects the database, as long as slightly old data is acceptable.
+On a sale day the Inventory service reads the same product's name and price thousands of times a second. Each read goes to PostgreSQL, so the database becomes the bottleneck you met in [scaling services](card:scaling-services), and every page waits for it. A cache serves those repeat reads from memory, which cuts latency and takes load off the database. The cost is that a copy can be stale, older than the database, just like the eventually consistent replicas in [CAP](card:cap-and-consistency).
 
 ## How it works
 
-<Steps label="Cache-aside (lazy loading)">
-  <Step title="Read">Look up the key in the cache. Hit: return it.</Step>
-  <Step title="Miss">Load from the database, store it with a TTL, return it.</Step>
-  <Step title="Write">Update the database first, then delete the key.</Step>
-</Steps>
+<Mermaid
+  alt="Cache-aside. The Inventory service asks Redis for product 7. On a miss, it reads the row from PostgreSQL and stores it in Redis with a TTL. On a write, it updates PostgreSQL first and then deletes the key in Redis."
+  chart={`flowchart LR
+  S[Inventory service] -- "1. GET product:7" --> C[(Redis)]
+  S -- "2. on a miss: SELECT" --> D[(PostgreSQL)]
+  S -- "3. SET with TTL" --> C
+  S -- "write: a. UPDATE" --> D
+  S -- "write: b. DELETE key" --> C`}
+/>
 
-- [Stampede](card:cache-stampede): let one request reload the key while the others wait or get the old value.
-- [Penetration](card:cache-penetration): check a Bloom filter first; it can say "definitely absent" without asking the database.
-- [Avalanche](card:cache-avalanche): add random jitter to TTLs so keys do not expire together.
+1. To read, the service looks up the key, such as `product:7`, in the cache. On a hit it returns the value at once.
+2. On a miss it loads the row from the database, stores it in the cache with a TTL, and returns it. A TTL (time to live) is an expiry time after which the cache removes the key by itself.
+3. To write, the service updates the database first, then deletes the cached key.
+4. The next read misses and loads the new value. If a delete is ever lost, the TTL still removes the old copy later.
+
+So the key is that the application fills the cache on demand, and a write removes the copy instead of trusting it.
 
 ## Example
 
+The Inventory service caches product names in Redis through Spring's `StringRedisTemplate`:
+
 ```java
 String productName(long id) {
-    String key = "product:" + id, name = redis.opsForValue().get(key);
-    if (name == null) {                                        // miss
+    String key = "product:" + id;
+    String name = redis.opsForValue().get(key);
+    if (name == null) {                                             // miss
         name = repo.findById(id).orElseThrow().getName();
         long ttl = ThreadLocalRandom.current().nextLong(600, 660);  // 10 min + jitter
         redis.opsForValue().set(key, name, Duration.ofSeconds(ttl));
     }
     return name;
 }
-void rename(long id, String name) {                     // 1. database, 2. then the cache
-    repo.updateName(id, name); redis.delete("product:" + id);
+void rename(long id, String name) {
+    repo.updateName(id, name);       // 1. the database first
+    redis.delete("product:" + id);   // 2. then delete the cached copy
 }
 ```
+
+What to notice:
+
+- `get` returns `null` on a miss, and only then does the code touch the database.
+- The TTL is a random 600 to 659 seconds. Keys loaded together at startup then expire at different moments instead of all at once.
+- In `rename`, swap the two lines and a read that arrives between them misses, loads the old name, and caches it until the TTL ends.
+- An id that does not exist throws, so nothing is cached and every request for it reaches the database; that is the penetration problem below.
+
+## Rules and defaults
+
+- **TTL length:** too short and the service keeps reloading from the database; too long and readers see stale data. Caching suits data that changes rarely or is read very often.
+- **Local caches disagree:** each instance has a private copy, so after a write some instances still serve the old value. Expire local entries sooner, or use a shared cache.
+- **The cache is optional:** if Redis is down, the service can still read the database, only slower. Design it so a cache failure is not an outage.
+- **Do not cache:** sensitive data in a cache that many applications share, or data that almost never gets a hit, where the extra lookup only adds work.
+- **Three ways a miss floods the database:** a stampede (a hot key expires and many requests reload it; let one request reload it), penetration (requests for ids that do not exist always miss; a Bloom filter can say "definitely absent" first) and an avalanche (many keys expire together; add TTL jitter).
+
+## Not to be confused with
+
+In **cache-aside** the application fills the cache on a miss and deletes the key on a write. In **write-through** every write updates the database and the cache together, so readers see the new value right after the write. In **write-behind** the cache takes the write first and the database is updated later. Rule: cache-aside loads on a miss; write-through writes both now; write-behind writes the cache now and the database later.
+
+## Common mistakes
+
+- **"The cache can hold data the database does not have."** A cache evicts keys when it runs out of space, and a cache failure can lose them. Keep every important value in the database.
 
 ## Interview Qs
 
 ### Local cache or Redis?
 
-A local cache is fastest, but each instance has its own copy, so instances can disagree after a write. Redis is shared by all instances, at the cost of a network hop. Many systems use both, local in front.
+A local cache is fastest, but each instance has its own copy, so instances can disagree after a write. Redis is shared by all instances, at the cost of a network hop. Many systems use both, with a small local cache with a short TTL in front of Redis.
 
 ### Can a Redis lock make sure only one instance charges a payment?
 
-Not on its own. A lock with an expiry can run out during a long pause, so two holders are possible. For correctness, add a fencing token the database checks, or rely on a unique constraint and [idempotency](card:idempotency).
+Not on its own. A lock set with `SET key value NX PX` expires, and a holder that pauses longer than that keeps working after another instance takes the lock. For correctness, add a fencing token, a number that grows with each new lock so the database rejects an older holder, or rely on a unique constraint and [idempotency](card:idempotency).
+
+### What is a cache stampede, and how do you prevent it?
+
+A hot key expires and many requests miss at once, so they all hit the database for the same row. Let one request reload the key while the others wait or get the old value, and add jitter to TTLs so hot keys do not expire together.

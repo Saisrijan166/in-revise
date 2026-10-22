@@ -5,35 +5,62 @@ title: Kafka Fundamentals
 topic: messaging
 level: intermediate
 heat: 3
-hook: "A topic is split into partitions; the key picks the partition, and order holds only inside one partition."
+hook: "A Kafka topic is split into partitions. The record's key picks the partition, and order holds only inside one partition."
 points:
-  - { k: "Key to partition", v: "same key, same partition: all events of one order stay in order" }
-  - { k: "Consumer group", v: "each partition goes to one consumer of the group" }
-  - { k: "Offset", v: "the consumer commits how far it has read; rewind to replay" }
-  - { k: "acks=all", v: "producer default: wait for every in-sync replica (Kafka 4.3)", kind: default }
-  - { k: "Idle consumers", v: "more consumers than partitions: the extras get nothing", kind: minus }
+  - { k: "Partition", v: "an ordered slice of a topic; records with the same key always go to the same partition" }
+  - { k: "Order", v: "Kafka keeps order inside one partition only; there is no order across partitions" }
+  - { k: "Consumer group", v: "each partition is read by exactly one consumer of the group, so instances share the work" }
+  - { k: "Offset", v: "a record's position in a partition; a consumer commits the offset it reached and resumes there" }
+  - { k: "acks=all", v: "producer default (Kafka 4.3): the leader confirms after every in-sync replica has the record", kind: default }
+  - { k: "Idle consumers", v: "in a group with more consumers than partitions, the extra consumers get no records", kind: minus }
 trap:
   wrong: "Kafka keeps all events of a topic in order."
-  right: "Only within one partition. Give related events the same key, such as orderId, so they land in one partition."
-sayIt: "A Kafka topic has partitions; the record key picks the partition, so order holds per key. In a group each partition has one consumer, which commits its offset. Records stay until retention ends, so others can replay."
+  right: "Only within one partition. Give related events the same key, such as the orderId, so they land in one partition and stay in order."
+  why: "Tools and diagrams show a topic as one stream, and a demo topic with a single partition really does keep everything in order."
+sayIt: "A Kafka topic has partitions; the record key picks the partition, so order holds per key. In a consumer group each partition has one consumer, which commits its offset. Records stay until retention ends, so another group can read them, or replay them later."
+cheat:
+  idea: "Kafka stores records in topics split into partitions. The key picks the partition, and each partition is read by one consumer per group, which tracks its offset."
+  flow: "key → partition → one consumer per group → commit offset"
+  remember: "Order is kept only inside one partition, so give one order's events the same key."
+buildsOn: [message-brokers]
+scenarios:
+  - q: "The topic orders has 3 partitions. To go faster, you scale the payment consumer group from 3 to 5 instances. What happens?"
+    a: "Two instances sit idle. A consumer group gives each partition to exactly one consumer, so at most 3 consumers in the group get records. To read in parallel with more instances, add partitions, or use a share group (Kafka 4.2+) if order does not matter."
+  - q: "Order Service sends OrderCreated and then OrderCancelled for ord-456 without a key. Can Payment Service see the cancel first?"
+    a: "Yes. Without a key, the two records can land in different partitions, and Kafka gives no order across partitions. Send both with key = ord-456: they go to the same partition and are read in the order they were written."
+  - q: "A bug in Notification Service sent wrong emails for the last 2 hours. It is fixed. How can Notification reprocess those orders?"
+    a: "The records are still in Kafka, because reading does not delete them. Stop the Notification instances and reset the group's offsets to 2 hours ago with kafka-consumer-groups.sh --reset-offsets --to-datetime ... --execute. Other groups are not affected, because each group has its own offsets."
 confusedWith: [kafka-vs-rabbitmq, queue-vs-topic]
 tags: [kafka, partition, offset, consumer-group]
 visual: flow
 sources:
   - title: "Introduction (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/getting-started/introduction/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Design: consumer position, replication, share groups (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/design/design/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Producer configs: acks (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/configuration/producer-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Topic configs: min.insync.replicas (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/configuration/topic-configs/"
+    verifiedOn: "2026-10-21"
+  - title: "Upgrading: KRaft only since 4.0, share groups production-ready in 4.2 for records processed one at a time (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/getting-started/upgrade/"
+    verifiedOn: "2026-10-21"
+  - title: "Basic Kafka operations: consumer groups, reset offsets (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Apache Kafka is a broker that stores messages, called records, in a log: an append-only list where each new record goes at the end and stays there after it is read. Records are grouped into topics, such as `orders`. Each topic is split into partitions, so several servers and consumers can work on it in parallel. A record's position in its partition is its offset.
 
 ## Why it exists
 
-Many services need the same order events, in order, and some join later. Kafka keeps events in a replicated log that each reader walks at its own pace.
+Many services need the same order events, in the right order for each order, and some join months later or must reprocess after a bug. A queue that deletes a message once it is acknowledged cannot give that. Kafka keeps the log, so each consumer group reads at its own pace and can rewind. Partitions spread one topic over several brokers, so throughput grows as you add them.
 
 ## How it works
 
@@ -49,20 +76,57 @@ Many services need the same order events, in order, and some join later. Kafka k
   P0 & P1 & P2 -.-> N[notification group]`}
 />
 
-- Each partition has a leader and followers; three copies is a common production setting.
-- Need queue-style reading with more consumers than partitions? Kafka 4.3 has share groups.
-- When to commit the offset decides loss or duplicates: [delivery guarantees](card:delivery-guarantees).
+1. Order Service sends a record to the topic `orders` with key = orderId. Kafka hashes the key to pick a partition, so every record of one order lands in the same partition.
+2. The partition's leader broker appends the record at the next offset and copies it to follower replicas on other brokers. With the default `acks=all`, the producer gets its confirmation once all in-sync replicas, the copies that are fully caught up with the leader, have the record.
+3. Payment Service runs two instances in the consumer group `payment`. Kafka gives each partition to exactly one of them: C1 reads P0 and P1, and C2 reads P2.
+4. Each consumer reads its partitions in offset order and commits the offset it has reached, so after a restart it continues from there.
+5. Notification Service, in its own group, reads all three partitions with its own offsets, unaffected by Payment.
+
+So the key decides the partition, and order is kept only inside a partition.
+
+## Example
+
+Order Service sends with a key, and Payment Service joins a consumer group:
+
+```java
+// Order Service: the key (orderId) decides the partition
+kafka.send("orders", event.orderId(), event);
+
+// Payment Service: every instance joins the consumer group "payment"
+@KafkaListener(topics = "orders", groupId = "payment")
+public void onOrderCreated(OrderCreated event) {
+    payments.charge(event.orderId(), event.totalInr());
+}
+```
+
+What to notice:
+
+- The second argument of `send` is the key. OrderCreated and OrderCancelled for `ord-456` share it, so they reach the same partition and are read in that order.
+- Remove the key and records spread over partitions, so a consumer can see the cancel before the create.
+- Every Payment instance uses `groupId = "payment"`, so they split the partitions between them. A different `groupId` would make a second, independent reader that gets every record.
+- The partition count is the upper limit of useful consumers in one group.
+
+## Rules and defaults
+
+- **Durability:** a replication factor of 3 is a common production setting. The Kafka docs suggest `min.insync.replicas=2` with `acks=all`, so a write needs two copies; the default `min.insync.replicas` is 1. If too few replicas are in sync, the producer gets an error instead of a weak write.
+- **One consumer per partition in a group:** extra consumers sit idle. Share groups (production-ready in Kafka 4.2) let several consumers read one partition and acknowledge each record on its own, for work-queue jobs where order does not matter.
+- **Consumer lag:** the log-end offset minus the consumer's committed offset, per partition. Lag that keeps growing means consumers cannot keep up.
+- **No ZooKeeper:** since Kafka 4.0, Kafka runs only in KRaft mode, where its own controller nodes keep the cluster metadata.
+
+## Not to be confused with
+
+A Kafka topic is not the same as a "topic" in the queue-or-topic sense. Inside one consumer group, Kafka acts like a queue: each record is handled by one instance. Across groups it acts like a topic: every group gets every record. Rule: same group = share the work; different groups = each gets a copy.
 
 ## Interview Qs
 
 ### How does Kafka keep order?
 
-Only inside a partition. The producer sends records with the same key to the same partition, and one consumer in a group reads that partition in order. There is no order across partitions.
+Only inside a partition. The producer sends records with the same key to the same partition, and one consumer in a group reads that partition in offset order. There is no order across partitions, so related events, such as all events of one order, must share a key.
 
 ### You add consumers but throughput does not grow. Why?
 
-A consumer group gives each partition to one consumer, so consumers beyond the partition count sit idle. Add partitions, or use a share group if order does not matter.
+A consumer group gives each partition to exactly one consumer, so consumers beyond the partition count sit idle. Add partitions, keeping in mind that new partitions change which partition a key maps to. If order does not matter, a share group lets more consumers read the same partitions.
 
-### What is consumer lag?
+### What is consumer lag, and why watch it?
 
-How far a consumer is behind: the log-end offset minus its current offset, per partition. Growing lag means consumers cannot keep up.
+Lag is how far a consumer group is behind: the log-end offset minus its committed offset, per partition. Growing lag means consumers process slower than producers write, so events are handled later and later. It is the first metric to check when a consumer seems slow or stuck.

@@ -5,17 +5,31 @@ title: Idempotency and Idempotency Keys
 topic: communication
 level: intermediate
 heat: 3
-hook: "Doing it twice has the same effect as doing it once, so a timed-out request can be retried without a second charge."
+hook: "Doing it twice has the same effect as doing it once, so a request that timed out can be sent again without charging the customer twice."
 points:
-  - { k: "Idempotent", v: "same effect on repeat; the response may differ (RFC 9110)" }
-  - { k: "Idempotency-Key", v: "the client sends a unique key, such as a UUID, with the POST" }
-  - { k: "Server", v: "stores key + result; a repeat gets the saved result back" }
-  - { k: "UNIQUE constraint", v: "on the key column: two racing duplicates cannot both insert", kind: plus }
-  - { k: "Header standard", v: "IETF draft only (draft-07 expired April 2026), not an RFC", kind: minus }
+  - { k: "Idempotent", v: "repeating the request has the same effect on the server as sending it once; the reply may differ (RFC 9110)" }
+  - { k: "Idempotency key", v: "a unique id, such as a UUID, that the client sends with a request and reuses on every retry of it" }
+  - { k: "Stored result", v: "the server saves the key with the first result and returns that result to any repeat" }
+  - { k: "Unique constraint", v: "a unique key column lets the database stop two racing duplicates: only one insert succeeds", kind: plus }
+  - { k: "Natural idempotency", v: "\"set status to PAID\" is safe to repeat; \"add ₹500\" is not and needs a key", kind: plus }
+  - { k: "Not an RFC yet", v: "the Idempotency-Key header is an IETF draft (draft-07 expired April 2026), not a standard", kind: minus }
 trap:
-  wrong: "Idempotent means every repeat returns the identical response."
+  wrong: "Idempotent means every repeat returns exactly the same response."
   right: "It means the effect is the same. A repeated DELETE may answer 404, yet nothing more was deleted."
-sayIt: "Payment requests carry an Idempotency-Key. I store the key and result under a unique constraint; a retry with the same key gets the saved result instead of a second charge, and a different body is rejected."
+  why: "In everyday speech \"the same result\" sounds like \"the same reply\", but RFC 9110 defines idempotency by the effect on the server, not by the response."
+sayIt: "Payment requests carry an Idempotency-Key. I insert the key under a unique constraint before charging and store the result with it, so a retry with the same key gets the saved result instead of a second charge."
+cheat:
+  idea: "An idempotent operation has the same effect run once or twice. An idempotency key lets the server spot a retry and return the first result."
+  flow: "Key arrives → unique insert → new: charge; seen: return the saved result"
+  remember: "Reuse the same key on every retry; a new key per attempt gives no protection."
+buildsOn: [distributed-systems-fallacies, rest-apis]
+scenarios:
+  - q: "A client retries POST /payments after a timeout, but its code creates a new UUID for each attempt. Is the customer protected from a double charge?"
+    a: "No. The server sees a new key, so it treats the retry as a new payment. The key must be created once per business action, such as once per order payment, and reused on every retry."
+  - q: "Two copies of the same payment request, with the same key, reach two Payment Service instances in the same millisecond. What stops a double charge?"
+    a: "The unique constraint on the key column. Both instances try to insert the key, and the database lets only one succeed. The other gets a conflict, so it does not charge; it answers 409 while the first is running, or returns the saved result."
+  - q: "DELETE /orders/9001 returns 204 the first time and 404 the second time. Is DELETE still idempotent?"
+    a: "Yes. Idempotency is about the effect on the server: after the first call the order is gone, and the second removes nothing more. A different status code is allowed."
 confusedWith: [idempotency-vs-deduplication, at-most-vs-at-least-vs-exactly-once]
 tags: [idempotency, retries, payments]
 visual: flow
@@ -28,12 +42,19 @@ sources:
     verifiedOn: "2026-10-20"
   - title: "Idempotent requests (Stripe API reference)"
     url: "https://docs.stripe.com/api/idempotent_requests"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "INSERT ... ON CONFLICT (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/sql-insert.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+An operation is idempotent when doing it twice has the same effect as doing it once. "Set order 9001 to PAID" is idempotent; "charge ₹500" is not, because a second run charges again. An idempotency key is a unique id that the client sends with a request, so the server can tell a repeat from a new request. Together they make a retry, sending the same request again after a failure, safe.
 
 ## Why it exists
 
-Networks drop replies. The client cannot tell "never arrived" from "done, reply lost", so it retries, and a non-idempotent POST could charge ₹2,499 twice.
+Order Service sends "charge ₹500" to Payment Service, and the reply is lost on the network. Order Service cannot tell whether the request never arrived or the charge succeeded and only the reply was lost (the [unknown outcome](card:distributed-systems-fallacies)). If it does not retry, a paid order may stay unpaid; if it retries a plain POST, the customer may pay ₹1,000. With an idempotency key, Payment Service recognises the retry and returns the first result, so the customer pays once.
 
 ## How it works
 
@@ -48,20 +69,75 @@ Networks drop replies. The client cannot tell "never arrived" from "done, reply 
   K -- "seen, different body" --> U([422 Unprocessable Content])`}
 />
 
-- Prefer natural idempotency: "set status = PAID" is safe to repeat; "add ₹500" is not.
-- Purge old keys after a published window; Stripe keeps them at least 24 hours.
-- Messages need the same idea on the consumer side: see [Delivery Guarantees](card:delivery-guarantees).
+1. The client creates a unique key, such as a UUID, for one business action and sends it in the `Idempotency-Key` header. Every retry of that action reuses the same key.
+2. Before doing any work, the server tries to insert the key into a table whose key column is unique.
+3. If the insert succeeds, the key is new: the server charges, stores the result next to the key, and answers `201 Created`.
+4. If the key already exists and the first request has finished, the server returns the stored result without charging again.
+5. If the first request is still running, it answers `409 Conflict`; if the same key arrives with a different body, it answers `422`.
+
+So the key is: the database's unique constraint, not an `if` in the code, decides which request is first.
+
+## Example
+
+Payment Service's key table in PostgreSQL 18, with the first request and its retry:
+
+```sql
+CREATE TABLE idempotency_keys (
+  idem_key     text PRIMARY KEY,   -- unique: the same key cannot be stored twice
+  request_hash text NOT NULL,      -- spots the same key sent with a different body
+  response     jsonb               -- filled in when the charge finishes
+);
+
+-- The first request
+INSERT INTO idempotency_keys (idem_key, request_hash)
+VALUES ('5f1c9a2e-7b3d-4c1a-9e0f-2a6b8c4d1e7f', 'sha256:ab12')
+ON CONFLICT (idem_key) DO NOTHING;
+-- The retry, with the same key
+INSERT INTO idempotency_keys (idem_key, request_hash)
+VALUES ('5f1c9a2e-7b3d-4c1a-9e0f-2a6b8c4d1e7f', 'sha256:ab12')
+ON CONFLICT (idem_key) DO NOTHING;
+```
+
+```text output
+CREATE TABLE
+INSERT 0 1
+INSERT 0 0
+```
+
+What to notice:
+
+- `INSERT 0 1` means one row was inserted: the key is new, so go on and charge. `INSERT 0 0` means a repeat: read `response` and return it instead of charging.
+- `PRIMARY KEY` makes the column unique, so even two copies that arrive at the same moment cannot both insert.
+- `request_hash` lets the server reject the same key with a different body (`422`), which usually means a client bug.
+- Without the unique constraint, two racing retries could both find "no key yet" and both charge.
+
+## Rules and defaults
+
+- **Not a standard yet:** the `Idempotency-Key` header is an IETF draft (draft-07, expired April 2026), not an RFC. Payment providers such as Stripe use it.
+- **Key lifetime:** delete old keys after a window you publish; Stripe (API v1) may remove keys once they are at least 24 hours old.
+- **Prefer natural idempotency:** absolute updates ("set status to PAID") are safe to repeat; relative ones ("add ₹500") need a key.
+- **Pass it on:** when Payment Service calls an outside payment provider, it sends that provider an idempotency key too, if the provider supports one.
+- **Messages too:** a consumer can receive the same message twice; [Delivery Guarantees](card:delivery-guarantees) applies the same idea there.
+
+## Not to be confused with
+
+Deduplication recognises a repeat by its id and skips it, so it needs a stored record of the ids already handled. Idempotency is the property that a repeat does no extra harm, which some operations have by nature. An idempotency key is deduplication used to make a POST idempotent. Delivery guarantees, such as at-least-once, describe how often a message may arrive; idempotency is how the receiver survives the repeats. Rule: idempotency is the goal; deduplication is one way to reach it.
+
+## Common mistakes
+
+- **"A new key for every attempt."** The server then sees each retry as a new payment. Create the key once per business action and reuse it.
+- **"Store the key after charging."** If the service crashes between the charge and the insert, the retry finds no key and charges again. Insert the key first.
 
 ## Interview Qs
 
 ### How do you prevent duplicate payment processing?
 
-The client sends an Idempotency-Key. Payment Service saves the key and payment status under a unique constraint, returns the saved result on a retry, and passes a key to the payment provider too, if it supports one.
+The client sends an Idempotency-Key with the payment request. Payment Service inserts the key under a unique constraint before charging, stores the payment status with it, and returns the saved result to any retry. It also passes a key to the external payment provider, if supported, so that call cannot charge twice either.
 
 ### Is POST idempotent?
 
-Not by definition: two POSTs may create two orders. You make a POST endpoint idempotent with an idempotency key, or by creating with PUT on a client-chosen URI.
+Not by definition: two identical POSTs may create two orders. You make a POST endpoint idempotent with an idempotency key, or design the create as a PUT to a URL the client chooses, such as `PUT /orders/{client-generated-id}`.
 
-### Is idempotency the same as deduplication?
+### How long should you keep idempotency keys?
 
-No. Deduplication spots a repeat by its id and skips it; idempotency makes the repeat harmless. See [Idempotency vs Deduplication](compare:idempotency-vs-deduplication).
+Longer than any client will keep retrying, and publish that window. Stripe (API v1) may remove keys once they are at least 24 hours old. A retry after the window is treated as a new request, so clients must not retry past it.

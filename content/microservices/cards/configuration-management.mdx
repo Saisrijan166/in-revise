@@ -5,17 +5,27 @@ title: Configuration and Secrets
 topic: deployment
 level: intermediate
 heat: 2
-hook: "Build one artifact; inject each environment's settings at runtime, and fetch secrets from a secret manager, never from Git."
+hook: "Build one artifact and give each environment its settings when the service starts. Secrets come from a secret manager, never from Git."
 points:
-  - { k: "Twelve-Factor test", v: "could the code go open source today without leaking a credential?" }
-  - { k: "Same artifact", v: "promote one build through test and prod; only config changes", kind: plus }
-  - { k: "Env vars win", v: "SPRING_DATASOURCE_URL overrides application.properties (Boot 4.1)", kind: default }
-  - { k: "Fail fast", v: "@ConfigurationProperties + @Validated: bad config stops startup" }
-  - { k: "Rotate", v: "a leaked secret then works only for a short time" }
+  - { k: "One artifact", v: "the same image moves from test to production unchanged; only the configuration around it differs", kind: plus }
+  - { k: "Twelve-Factor test", v: "could the code be made public today without leaking a single credential?" }
+  - { k: "Env vars win", v: "SPRING_DATASOURCE_URL overrides spring.datasource.url in application.properties (Spring Boot 4.1)", kind: default }
+  - { k: "Fail fast", v: "@ConfigurationProperties with @Validated stops startup when a required setting is missing" }
+  - { k: "Secrets", v: "come from a secret manager at runtime, reach only the service that needs them, and are rotated" }
 trap:
   wrong: "Passwords can sit in application-prod.properties because the repo is private."
   right: "Everyone with repo access, and the whole Git history, sees them. Inject secrets at runtime and rotate them."
-sayIt: "Config lives outside the code: env vars, ConfigMaps or a config server, with secrets in a secret manager and rotated. The same image runs everywhere and validates its config at startup."
+  why: "A private repository feels like a locked room. But every clone, every past team member and every old commit keeps the password, long after you delete the line."
+sayIt: "Config lives outside the code: environment variables, ConfigMaps or a config server, with secrets from a secret manager and rotated. The same image runs everywhere and validates its config at startup, so a missing value stops it before it takes traffic."
+cheat:
+  idea: "Settings that differ per environment, such as database URLs and timeouts, live outside the code and reach the service when it starts. Secrets come from a secret manager, never from Git."
+  remember: "Promote the same image everywhere; an environment variable such as SPRING_DATASOURCE_URL overrides application.properties."
+buildsOn: [containers-and-kubernetes]
+scenarios:
+  - q: "Production runs order-service 1.4.2 with DB_URL pointing to the production database. Test needs another database. Do you build a test image?"
+    a: "No. Run the same 1.4.2 image in test with a different DB_URL. A rebuild could pick up other code or library versions, and then what you tested is not what you ship."
+  - q: "application.properties sets payment.timeout=5s, and the Pod has the environment variable PAYMENT_TIMEOUT=2s. Which value does the service use?"
+    a: "2 seconds. In Spring Boot's order, OS environment variables come after application.properties, so they override it, and PAYMENT_TIMEOUT maps to payment.timeout by relaxed binding."
 confusedWith: []
 tags: [configuration, secrets, twelve-factor, spring-cloud-config]
 visual: flow
@@ -23,12 +33,15 @@ sources:
   - title: "III. Config (The Twelve-Factor App)"
     url: "https://12factor.net/config"
     verifiedOn: "2026-10-20"
-  - title: "Externalized Configuration (Spring Boot 4.1)"
-    url: "https://docs.spring.io/spring-boot/reference/features/external-config.html"
-    verifiedOn: "2026-10-20"
   - title: "V. Build, release, run (The Twelve-Factor App)"
     url: "https://12factor.net/build-release-run"
     verifiedOn: "2026-10-20"
+  - title: "Externalized Configuration: order, relaxed binding, validation, durations (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/features/external-config.html"
+    verifiedOn: "2026-10-21"
+  - title: "Secrets: stored unencrypted in etcd by default (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/configuration/secret/"
+    verifiedOn: "2026-10-21"
   - title: "Spring Cloud Config Server: Git and Vault backends (Spring Cloud 2025.1)"
     url: "https://docs.spring.io/spring-cloud-config/reference/server.html"
     verifiedOn: "2026-10-20"
@@ -37,9 +50,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Configuration is every setting that changes between environments while the code stays the same: database URLs, pool sizes, timeouts, feature flags. A secret is the sensitive part of it, such as a database password or an API key. Configuration management means keeping both outside the built artifact, the jar or image, and handing them to the service when it starts.
+
 ## Why it exists
 
-URLs, pool sizes and passwords differ per environment. Baking them into code means a rebuild for each environment and credentials in Git.
+If the production database URL and password are written into the code, test and production need different builds, and everyone who can read the Git repository, including its history, can read the password. The Twelve-Factor App sets a simple test: you could make the code public at any moment without leaking a credential. With external configuration, one image moves from test to production unchanged, and only the settings around it differ.
 
 ## How it works
 
@@ -53,10 +70,17 @@ URLs, pool sizes and passwords differ per environment. Baking them into code mea
   V[(Secret manager)] -- "DB password, rotated" --> P`}
 />
 
-- On Kubernetes a [ConfigMap](card:kubernetes-configmap) and a [Secret](card:kubernetes-secret) are built in; Spring Cloud Config adds one Git-backed source for all services.
-- A secret manager can also issue short-lived credentials, so nothing long-lived leaks.
+1. The build produces one artifact, such as the image `order-service:1.4.2`, with no environment values inside.
+2. Each environment supplies settings at startup: environment variables, a mounted [ConfigMap](card:kubernetes-configmap), or a config server such as Spring Cloud Config, which serves settings from Git.
+3. Secrets come from a secret manager such as HashiCorp Vault, or from a [Kubernetes Secret](card:kubernetes-secret), and reach only the service that needs them.
+4. Spring Boot reads all sources in a fixed order, and a later source wins: an environment variable overrides `application.properties`, and a command-line argument overrides both.
+5. The service checks its settings while starting and refuses to start if a required one is missing.
+
+So the key is: the same artifact everywhere, and different configuration around it.
 
 ## Example
+
+Order Service keeps no real values in its repository and checks its payment settings at startup.
 
 ```properties
 # application.properties: no real values in the repo
@@ -66,16 +90,48 @@ spring.datasource.password=${DB_PASSWORD}
 payment.timeout=${PAYMENT_TIMEOUT:2s}
 ```
 
+```java
+@Validated
+@ConfigurationProperties("payment")
+public record PaymentProperties(
+        @NotNull URI baseUrl,         // from the env var PAYMENT_BASEURL
+        @NotNull Duration timeout) {  // "2s" becomes 2 seconds
+}
+```
+
+What to notice:
+
+- `${DB_URL}` has no default, so the value must come from the environment. The repository holds no URL or password.
+- `${PAYMENT_TIMEOUT:2s}` falls back to `2s` when the variable is not set, and Boot turns that text into a `Duration` of 2 seconds.
+- `baseUrl` has no line in the file. Boot binds the environment variable `PAYMENT_BASEURL` to `payment.base-url`, because it matches names loosely (relaxed binding).
+- Start the service without `PAYMENT_BASEURL` and it stops at once with `APPLICATION FAILED TO START` and `Property: payment.baseUrl, Reason: must not be null`, not later on the first payment call.
+
+## Rules and defaults
+
+- **Order (Spring Boot 4.1):** command-line arguments override Java system properties, which override OS environment variables, which override `application.properties`. A profile file such as `application-prod.properties` overrides the base file.
+- **Environment variable names:** replace dots with underscores, remove dashes and use upper case: `spring.datasource.url` becomes `SPRING_DATASOURCE_URL`.
+- **Durations:** `2s` means 2 seconds; a plain number such as `500` means milliseconds.
+- **Validation:** needs `@Validated` on the class and a Jakarta Validation implementation on the classpath, such as Hibernate Validator from `spring-boot-starter-validation`. Register the class with `@ConfigurationPropertiesScan` or `@EnableConfigurationProperties`.
+- **Secrets:** give each service only its own, rotate them so a leaked one works only for a short time, and never log them. A secret manager such as Vault can issue short-lived database credentials.
+
+## Not to be confused with
+
+A ConfigMap holds plain settings and offers no secrecy. A Kubernetes Secret is meant for sensitive values, but its data is only base64-encoded, and by default it is stored unencrypted in etcd, the cluster's database, unless encryption at rest is turned on. Rule: ConfigMap for settings, Secret or a secret manager for credentials, and protect Secrets with access rules and encryption.
+
+## Common mistakes
+
+- **Changing a setting by hand on one running server.** Servers that should be identical slowly start to differ, which is called configuration drift. Change configuration only through its versioned source and roll it out.
+
 ## Interview Qs
 
 ### Config server or Kubernetes ConfigMaps?
 
-On Kubernetes, ConfigMaps and Secrets need no extra service. A config server such as Spring Cloud Config gives every service one Git-backed source with history, and can read secrets from Vault.
+On Kubernetes, ConfigMaps and Secrets need no extra service. A config server such as Spring Cloud Config gives every service one Git-backed source with history, and can read secrets from Vault. Choose the config server when many services share settings or you run outside Kubernetes.
 
 ### How do you handle secrets in microservices?
 
-Never in code or images. Keep them in a secret manager, give each service only its own, inject them at runtime, rotate them, and never log them.
+Never in code, images or Git. Keep them in a secret manager, give each service only its own, inject them at runtime, rotate them, and never log them. On Kubernetes, also turn on encryption at rest for Secrets and limit who can read them.
 
 ### Why promote the same artifact instead of rebuilding per environment?
 
-A rebuild can pick up different code or dependencies, so what you tested is not what you ship. Twelve-Factor keeps build, release and run apart; only the config differs.
+A rebuild can pick up different code or library versions, so what you tested is not what you ship. Twelve-Factor keeps build, release and run apart: the build makes one artifact, and a release combines it with one environment's configuration.

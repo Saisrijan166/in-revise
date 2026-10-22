@@ -5,17 +5,31 @@ title: "Saga Pattern: Orchestration and Choreography"
 topic: messaging
 level: interview
 heat: 3
-hook: "A saga is a chain of local transactions; if a step fails, compensating steps undo the earlier ones."
+hook: "A saga splits one business transaction into local steps, one per service. If a step fails, compensating steps undo the effect of the steps already done."
 points:
-  - { k: "Local steps", v: "each service commits its own step and triggers the next" }
-  - { k: "Compensation", v: "a business correction, like a refund; not a rollback" }
-  - { k: "No isolation", v: "others can see in-between states; use a PENDING status", kind: minus }
-  - { k: "Pivot step", v: "the point of no return; later steps must be retryable" }
-  - { k: "Coordination", v: "orchestration (a central orchestrator) or choreography (events)" }
+  - { k: "Local steps", v: "each service commits its own step in its own database, then triggers the next step" }
+  - { k: "Compensation", v: "a new business action that offsets a finished step, such as releasing stock or refunding a payment" }
+  - { k: "No isolation", v: "other requests can see in-between states; a PENDING status warns them the order is not final", kind: minus }
+  - { k: "Pivot step", v: "the point of no return; steps after it are retried until they succeed, never compensated" }
+  - { k: "Orchestration", v: "one orchestrator sends a command to each service in turn and stores the saga's state" }
+  - { k: "Choreography", v: "no coordinator: each service reacts to the previous event and publishes the next one" }
 trap:
   wrong: "A saga is a distributed ACID transaction, so it rolls back automatically."
-  right: "Every step is already committed. You must write compensating steps, and they can fail too."
-sayIt: "A saga is a chain of local transactions, one per service. If payment fails after stock is reserved, compensations release the stock and cancel the order. Orchestration suits complex flows, choreography simple ones."
+  right: "Every step is already committed. You must write a compensating step for each one, and those steps can fail too."
+  why: "Sagas are taught as the replacement for distributed transactions, so people expect the same automatic all-or-nothing rollback."
+sayIt: "A saga is a chain of local transactions, one per service. If payment fails after stock is reserved, compensations release the stock and cancel the order. Steps must be idempotent; orchestration suits complex flows, choreography short ones."
+cheat:
+  idea: "A saga runs one business transaction as a chain of local transactions, one per service. When a step fails, compensating transactions undo the steps already done."
+  flow: "create order → reserve stock → charge ₹500 → confirm; on failure, compensate"
+  remember: "A saga has no rollback and no isolation: compensations are new transactions, so use PENDING states."
+buildsOn: [distributed-transactions, outbox-and-inbox, event-driven-architecture]
+scenarios:
+  - q: "In the order saga, Inventory finds the item is out of stock at step 2. Which compensations run?"
+    a: "Only Order Service's: it marks the order CANCELLED. Nothing was reserved and Payment was never asked, so there is nothing else to undo. Compensations run only for the steps that completed."
+  - q: "The ₹500 charge succeeded, but sending the confirmation email fails. Should the saga refund the payment?"
+    a: "No. The charge is the pivot step, the point of no return. Steps after it, such as confirming the order and sending the email, are retried until they succeed. Refunding a paid order because an email failed would be the wrong business result."
+  - q: "A new order flow has six services and steps that depend on earlier results. Orchestration or choreography?"
+    a: "Orchestration. One orchestrator holds the whole flow and its state, so the conditional steps are written in one place and are easy to follow. With choreography the logic would be spread over six services' event handlers, which is hard to trace and to test."
 confusedWith: [orchestration-vs-choreography, saga-vs-two-phase-commit]
 tags: [saga, compensation, orchestration, choreography]
 visual: flow
@@ -23,41 +37,98 @@ sources:
   - title: "Pattern: Saga (microservices.io)"
     url: "https://microservices.io/patterns/data/saga.html"
     verifiedOn: "2026-10-20"
-  - title: "Saga design pattern (Azure Architecture Center)"
+  - title: "Saga design pattern: compensable, pivot and retryable steps, data anomalies, countermeasures (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/saga"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Compensating Transaction pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/compensating-transaction"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A saga is one business transaction made of a sequence of local transactions, one per service. Each step commits in its own database and then triggers the next step with an [event](card:event-driven-architecture) or a command. If a step fails, the saga runs compensating transactions: business actions, such as releasing stock or refunding money, that undo the effect of the steps already done. It is the usual replacement for [two-phase commit](card:distributed-transactions) in microservices.
+
 ## Why it exists
 
-Placing an order spans Order, Inventory and Payment, each with its own database, and [2PC](card:distributed-transactions) is not an option. A saga keeps the data consistent with local steps instead.
+Placing an order must reserve stock, charge ₹500 and confirm, across three databases. Two-phase commit would hold locks in all three while messages cross the network, and the broker may not support it. A saga gives up the single atomic commit. Each step commits at once, so no locks are held between services, and when something fails, new transactions bring the data back to a consistent state.
 
 ## How it works
 
-<Steps label="Order saga when the payment fails">
-  <Step title="Order Service">Creates the order with status PENDING.</Step>
-  <Step title="Inventory Service">Reserves the stock.</Step>
-  <Step title="Payment Service">Charging ₹1,499 fails and it publishes PaymentFailed.</Step>
-  <Step title="Inventory Service (compensate)">Releases the reserved stock.</Step>
-  <Step title="Order Service (compensate)">Marks the order CANCELLED. On success it would mark it CONFIRMED.</Step>
-</Steps>
+<Mermaid
+  alt="The order saga. Order Service creates the order as PENDING. Inventory reserves stock. Payment charges 500 rupees. If the charge succeeds, Order Service confirms the order. If the charge fails, Inventory releases the stock and Order Service cancels the order."
+  chart={`flowchart LR
+  A[Create order: PENDING] --> B[Reserve stock]
+  B --> C{Charge ₹500}
+  C -- success --> D[Confirm order]
+  C -- failed --> E[Release stock]
+  E --> F[Cancel order]`}
+/>
 
-- Each step publishes its event through an [outbox](card:outbox-and-inbox) and must be [idempotent](card:delivery-guarantees).
-- Retry a failing step first; compensate only when it cannot move forward.
+1. Order Service saves the order with status PENDING and publishes OrderCreated through its [outbox](card:outbox-and-inbox).
+2. Inventory Service reserves the stock in its own transaction and publishes StockReserved.
+3. Payment Service tries to charge ₹500. The card is declined, so it publishes PaymentFailed.
+4. Compensations run for the finished steps: Inventory releases the reserved stock, and Order Service marks the order CANCELLED.
+5. On the success path, Order Service marks the order CONFIRMED, and Notification sends the confirmation.
+
+So each step commits on its own, and a failure is repaired by new transactions, not by a rollback.
+
+## Example
+
+With orchestration, an orchestrator in Order Service reacts to each reply and decides the next command:
+
+```java
+@KafkaListener(topics = "payment-replies", groupId = "order-saga")
+@Transactional
+public void onPaymentReply(PaymentReply reply) {
+    OrderSaga saga = sagas.findById(reply.orderId()).orElseThrow();
+    if (reply.success()) {
+        saga.confirm();                                   // order CONFIRMED
+        commands.send("notification-commands", new SendConfirmation(saga.orderId()));
+    } else {
+        saga.startCompensation();                         // order CANCELLING
+        commands.send("inventory-commands", new ReleaseStock(saga.orderId()));
+    }
+}
+```
+
+What to notice:
+
+- The saga's state is saved in Order Service's database, so after a crash the orchestrator knows which step it reached.
+- `commands.send` writes to the outbox in the same transaction, so a state change and its next command are never separated.
+- On failure the orchestrator sends `ReleaseStock`, a compensating command. Nothing is rolled back automatically.
+- The reply may arrive twice, so `confirm()` and `startCompensation()` must do nothing when the saga is already in that state.
+
+## Rules and defaults
+
+- **Three kinds of step:** compensable steps come first and can be undone; the pivot step is the point of no return; retryable steps come after it and must be idempotent. In the shop, the ₹500 charge is the pivot.
+- **No isolation:** other requests can see in-between states, such as stock reserved for an order that will be cancelled. A semantic lock, such as the status PENDING, marks a record as part of an unfinished saga. Other countermeasures are updates that work in any order and re-reading a value before changing it.
+- **Idempotent steps:** each step and each compensation may receive its message twice, so each must be safe to repeat.
+- **Compensation is not erasure:** the cancelled order and the refund stay in the history. A refund is a new payment in the other direction, and some actions, such as a sent email, cannot be undone at all, so place them after the pivot.
+
+## Not to be confused with
+
+In orchestration, one orchestrator sends a command to each service and tracks the saga's state, so the flow is visible in one place. In choreography, there is no coordinator: each service reacts to the previous event and publishes its own, so the flow is spread across services. Rule: orchestration for complex or growing flows; choreography for a short flow with few services.
+
+## Common mistakes
+
+- **"The charge call timed out, so compensate."** A timeout means the result is unknown, and the ₹500 may have been taken. Retry with the same [idempotency key](card:idempotency), or ask Payment for the status, before deciding.
+- **"Compensations always succeed."** They can fail too. Make them idempotent, retry them, and flag the saga for manual handling with an alert if they still fail.
 
 ## Interview Qs
 
 ### How do you handle a transaction across several services?
 
-With a saga: each service commits a local transaction and triggers the next step by event or command. On failure, compensating transactions undo the finished steps.
+With a saga. Each service commits a local transaction and triggers the next step by an event or a command. If a step fails, compensating transactions undo the finished steps, such as releasing stock and cancelling the order. A local @Transactional cannot do this, because it covers only one database.
 
 ### Orchestration or choreography?
 
-Orchestration: one orchestrator sends commands and tracks state; clearer for complex flows, but it is one more component that can fail. Choreography: services react to events; fine for short flows, but hard to follow as it grows.
+Orchestration: one orchestrator sends commands and stores the saga's state, which keeps complex flows clear and avoids cyclic dependencies, but it is one more component that can fail. Choreography: services react to each other's events with no coordinator; it suits short flows but becomes hard to follow and to test as it grows.
 
 ### What if a compensating step fails?
 
-Compensations can fail too, so make them idempotent and retry them until they succeed. If they still fail, flag the saga for manual handling and alert; never assume the data fixed itself.
+Compensations can fail too, so make them idempotent and retry them until they succeed. If they keep failing, mark the saga as needing manual action and raise an alert. Never assume the data fixed itself; monitoring sagas that are stuck is part of the design.
+
+### How do you deal with the lack of isolation in a saga?
+
+Use a semantic lock: a status such as PENDING tells other requests that the order is not final, so they can wait or refuse. Order the steps so the risky, irreversible ones come after the pivot, and re-read a value before changing it when another saga may have changed it.

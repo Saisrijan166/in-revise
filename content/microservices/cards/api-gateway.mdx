@@ -5,17 +5,28 @@ title: API Gateway and Backend for Frontend
 topic: communication
 level: beginner
 heat: 3
-hook: "One front door for all clients: it routes each call to the right service and applies shared rules like auth and rate limits."
+hook: "One front door for all outside clients: the gateway sends each call to the service that owns it and applies shared rules such as login checks and rate limits."
 points:
-  - { k: "Routing", v: "/orders goes to Order Service, /payments to Payment Service" }
-  - { k: "Offloading", v: "TLS termination, token checks, rate limits, logging in one place", kind: plus }
-  - { k: "Aggregation", v: "one client call fans out to several services: fewer round trips", kind: plus }
-  - { k: "Extra hop", v: "adds latency; run several instances, or it is a single point of failure", kind: minus }
-  - { k: "BFF", v: "one gateway per client type: web, mobile, partners" }
+  - { k: "Single entry point", v: "outside clients call one address; the gateway hides how many services there are and where they run" }
+  - { k: "Routing", v: "the gateway maps each path to its service, such as /orders to Order Service" }
+  - { k: "Offloading", v: "TLS termination, token checks, rate limits and logging happen once, at the gateway", kind: plus }
+  - { k: "Aggregation", v: "one client call can fan out to several services, so a mobile app makes fewer round trips", kind: plus }
+  - { k: "Extra hop", v: "every request passes through it, so it adds latency and must run as several instances", kind: minus }
+  - { k: "Backend for Frontend", v: "one gateway per client type, such as web or mobile, each with an API shaped for that client" }
 trap:
-  wrong: "Put shared business rules, like discount logic, in the gateway."
+  wrong: "Put shared business rules, such as discount logic, in the gateway, because every request passes through it."
   right: "Keep business logic in the service that owns it. The gateway does routing and cross-cutting policies only."
-sayIt: "An API gateway is the single entry point: it hides where services live, routes requests and centralises TLS, authentication and rate limits. Business logic stays in the services, and I run several gateway instances."
+  why: "The gateway sees every request, so it looks like a handy single place for any rule that several services need."
+sayIt: "An API gateway is the single entry point for outside clients: it hides where services live, routes each request, and applies TLS, authentication and rate limits in one place. Business logic stays in the services, and I run several gateway instances."
+cheat:
+  idea: "An API gateway is the single entry point for outside clients. It routes each request to the service that owns it and applies shared rules such as TLS, token checks and rate limits."
+  remember: "No business logic in the gateway, and run several instances: every request passes through it."
+buildsOn: [rest-apis]
+scenarios:
+  - q: "Marketing wants a 10% festival discount on all orders. Someone suggests adding it in the gateway, because every order passes through it. Good idea?"
+    a: "No. Discounts are business logic that Order Service owns. In the gateway, the rule is hidden from the orders team, tested apart from their code, and skipped by internal calls that do not pass the gateway. The gateway should only route and apply cross-cutting policies."
+  - q: "The mobile app's home screen needs the latest order, its payment status and stock alerts, from three services. How can the gateway help?"
+    a: "With aggregation, the app makes one call; the gateway calls the three services, ideally in parallel, and returns one combined response. On a slow mobile network, one round trip instead of three makes the screen load faster."
 confusedWith: [api-gateway-vs-load-balancer, service-discovery-vs-api-gateway]
 tags: [api-gateway, bff, routing, edge]
 visual: flow
@@ -26,14 +37,24 @@ sources:
   - title: "Gateway Offloading pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/gateway-offloading"
     verifiedOn: "2026-10-20"
+  - title: "Spring Cloud Gateway 5.0: route predicates and lb:// URIs (ReactiveLoadBalancerClientFilter)"
+    url: "https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/global-filters.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Cloud 2025.0.0 released: gateway property prefixes moved to spring.cloud.gateway.server.webflux (spring.io blog)"
+    url: "https://spring.io/blog/2025/05/29/spring-cloud-2025-0-0-is-abvailable"
+    verifiedOn: "2026-10-21"
   - title: "Microservices interview questions: What is an API Gateway? (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/java/microservices-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An API gateway is a single entry point that sits between outside clients, such as a web app or a mobile app, and your services. Every client calls the gateway, and the gateway routes each request to the service that owns it, for example `/orders` to Order Service. On the way, it applies rules that every service would otherwise repeat, such as checking the login token and limiting how many requests a client may send. A Backend for Frontend (BFF) is a separate gateway for one kind of client.
+
 ## Why it exists
 
-Without it, every client must know every service's address and repeat TLS, login checks and throttling. A single entry point hides the split and does those jobs once.
+Without a gateway, the mobile app must know the address of Order, Payment and Inventory services, and each service must handle HTTPS, token checks and throttling on its own. When you split or move a service, every client has to change. A gateway gives clients one address and hides how the system is split, so services can change behind it. Shared rules live in one place, and one client call can be answered from several services.
 
 ## How it works
 
@@ -47,20 +68,61 @@ Without it, every client must know every service's address and repeat TLS, login
   G -- "/stock" --> I[Inventory Service]`}
 />
 
-- Services still check the caller themselves: see [Securing Microservices](card:microservices-security).
-- Lock services so clients cannot bypass the gateway; re-encrypt traffic from the gateway to them.
-- In Spring: Spring Cloud Gateway, in [the Spring Cloud stack](card:spring-cloud-stack).
+1. The mobile app sends `GET /orders/9001`, with its token, to the gateway's one public address.
+2. The gateway ends the HTTPS connection (TLS termination), checks the token and the client's rate limit. A failed check is answered at once, for example with `401` or `429 Too Many Requests`.
+3. It matches the path to a route: `/orders/**` belongs to Order Service.
+4. It forwards the request to a running instance of Order Service and passes the reply back to the client.
+5. For a screen that needs data from several services, it can call them all and combine the results into one response. This is called aggregation.
+
+## Example
+
+The shop's routes in Spring Cloud Gateway (Spring Cloud 2025.1):
+
+```yaml
+spring:
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: orders
+              uri: lb://order-service      # a service name, not a host
+              predicates:
+                - Path=/orders/**
+            - id: payments
+              uri: lb://payment-service
+              predicates:
+                - Path=/payments/**
+```
+
+What to notice:
+
+- Each route maps a path pattern to a service: `/orders/9001` matches the first route, `/payments/77` the second.
+- `lb://` means "a service name": the gateway asks [service discovery](card:service-discovery), the next concept, for a live instance. If none is found, it answers `503` by default.
+- Clients never see `order-service`. You can split or move it and change only this file.
+- The `spring.cloud.gateway.server.webflux` prefix dates from Spring Cloud 2025.0; older guides show `spring.cloud.gateway.routes`.
+
+## Rules and defaults
+
+- **No business logic:** prices, discounts and order rules stay in the service that owns them. The gateway does only routing and cross-cutting concerns, the jobs that every service shares.
+- **Services still check access:** the gateway's token check is not enough; each service also checks its caller, as [Securing Microservices](card:microservices-security) shows later.
+- **No way around it:** services must not be reachable from outside except through the gateway.
+- **Several instances:** every request passes through the gateway, so run several instances behind a load balancer, or it is a single point of failure.
+
+## Not to be confused with
+
+A load balancer spreads requests over the instances of one service; it does not care about API paths or tokens. Service discovery is the internal address book that says where instances run right now. Rule: the gateway decides which service, discovery says where it runs, and the load balancer picks which instance.
 
 ## Interview Qs
 
 ### Why use a gateway if services already have APIs?
 
-Clients get one address and an API shaped for them. It hides how services are split, cuts round trips by aggregating calls, and applies TLS, authentication and throttling in one place.
+Clients get one address and an API shaped for them, instead of knowing every internal service. The gateway hides how services are split, so they can change freely, cuts round trips by aggregating calls, and applies TLS, authentication and throttling once instead of in every service.
 
 ### When would you use Backend for Frontend?
 
-When web, mobile and partner clients need very different data. Each client type gets its own gateway with an API made for it, instead of one gateway full of client-specific code.
+When web, mobile and partner clients need very different data or shapes. Each client type gets its own gateway, with an API made for it. One shared gateway would otherwise fill up with client-specific code that every team has to change.
 
 ### Can the gateway become a bottleneck?
 
-Yes: every request passes through it. Size it for peak traffic, run several instances, and keep it thin, with no business logic.
+Yes: every request passes through it. Size it for peak traffic, run several instances behind a load balancer, set timeouts towards the services, and keep it thin, with no business logic.

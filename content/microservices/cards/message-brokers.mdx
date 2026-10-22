@@ -5,17 +5,30 @@ title: "Message Brokers: Queues, Topics, Kafka vs RabbitMQ"
 topic: messaging
 level: beginner
 heat: 2
-hook: "A broker sits between services: a queue gives each message to one worker, a topic gives it to every subscriber."
+hook: "A broker stores messages between services. A queue gives each message to one worker; a topic gives every subscribing service its own copy."
 points:
-  - { k: "Broker", v: "stores messages so producer and consumer need not be up together", kind: plus }
-  - { k: "Queue", v: "one consumer per message; extra workers share the load" }
-  - { k: "Topic", v: "every subscribing service gets its own copy" }
-  - { k: "Kafka", v: "a log: records stay after reading, so you can replay" }
-  - { k: "RabbitMQ", v: "routes through exchanges; a queue message is gone after ack" }
+  - { k: "Broker", v: "a server that stores messages between producer and consumer, so both need not run at the same time", kind: plus }
+  - { k: "Acknowledgement (ack)", v: "the consumer tells the broker it has finished a message; until then the broker may deliver it again" }
+  - { k: "Queue", v: "each message goes to one consumer, so more consumers on one queue share the work" }
+  - { k: "Topic", v: "each subscribing service gets its own copy of every message" }
+  - { k: "Kafka (4.3)", v: "keeps records after they are read, 7 days by default, so a consumer can read them again", kind: default }
+  - { k: "RabbitMQ queue", v: "removes a message once a consumer acks it; RabbitMQ streams (3.9+) keep messages for replay" }
 trap:
   wrong: "Kafka is always better than RabbitMQ because it is faster."
-  right: "They solve different jobs: Kafka for replayable event streams, RabbitMQ for task queues and flexible routing."
-sayIt: "A broker decouples services in time. A queue spreads work, one consumer per message; a topic broadcasts to every subscriber. I pick Kafka for replayable event streams and RabbitMQ for task queues with routing."
+  right: "They fit different jobs: Kafka for event streams that many services read and replay, RabbitMQ for task queues with flexible routing."
+  why: "Kafka is famous for high throughput, and benchmark numbers get quoted without the use case, so speed looks like the only thing that matters."
+sayIt: "A broker decouples services in time: it stores the message until the consumer is ready. A queue spreads work, one consumer per message; a topic gives every subscriber a copy. I pick Kafka for replayable event streams and RabbitMQ for task queues with routing."
+cheat:
+  idea: "A message broker is a server that stores messages from producers and delivers them to consumers later. A queue gives each message to one consumer; a topic gives every subscriber a copy."
+  remember: "Kafka keeps records after reading, so consumers can replay; a RabbitMQ queue deletes a message once it is acknowledged."
+buildsOn: [event-driven-architecture, scaling-services]
+scenarios:
+  - q: "Sending emails is slow, so you run three Notification instances. Each email must be sent by exactly one of them. Queue or topic?"
+    a: "A queue. The broker gives each message to one of the instances reading it, so three instances share the work and no email goes out three times. In Kafka, the same effect comes from putting all three instances in one consumer group."
+  - q: "Notification Service is down for 10 minutes while orders are placed. What happens to the OrderCreated events published in that time?"
+    a: "The broker keeps them, and Order Service is never blocked. When Notification starts again it reads the waiting events and catches up. Kafka keeps them for the topic's retention time, 7 days by default; a RabbitMQ queue keeps them until they are consumed."
+  - q: "Inventory and Notification both need every OrderCreated event. Which delivery shape do you use?"
+    a: "A topic (publish-subscribe). Each subscribing service gets its own copy. With a single queue, the two services would compete, and each event would reach only one of them."
 confusedWith: [kafka-vs-rabbitmq]
 tags: [broker, queue, pub-sub, kafka, rabbitmq]
 visual: table
@@ -25,34 +38,72 @@ sources:
     verifiedOn: "2026-10-20"
   - title: "Introduction (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/getting-started/introduction/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Topic configs: retention.ms (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/configuration/topic-configs/"
+    verifiedOn: "2026-10-21"
   - title: "AMQP 0-9-1 model explained: exchanges, queues, bindings (RabbitMQ docs)"
     url: "https://www.rabbitmq.com/tutorials/amqp-concepts"
     verifiedOn: "2026-10-20"
+  - title: "RabbitMQ 3.9.0 release: streams added as a new queue type (rabbitmq-server on GitHub)"
+    url: "https://github.com/rabbitmq/rabbitmq-server/releases/tag/v3.9.0"
+    verifiedOn: "2026-10-22"
+  - title: "Streams (RabbitMQ 4.3 docs)"
+    url: "https://www.rabbitmq.com/docs/streams"
+    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+A message broker is a server that receives messages from producers, stores them, and delivers them to consumers. It offers two delivery shapes. A queue gives each message to one consumer, and a topic gives every subscriber its own copy. Apache Kafka and RabbitMQ are two widely used brokers, and they store messages in different ways.
 
 ## Why it exists
 
-Direct calls need both services up at the same moment. A broker holds messages, so a slow or restarting consumer catches up later and the producer is not blocked.
+If Order Service sent OrderCreated straight to Notification Service, both would have to be running at that moment. During a Notification restart, Order Service would have to hold the message and retry, or lose it. A broker stores the message, so the producer hands it over and moves on, and a slow or restarting consumer catches up later. The same broker lets you add workers when the load grows.
 
 ## How it works
 
 <Compare id="queue-vs-topic" />
 
-- A queue with many workers is the **competing consumers** pattern: more instances, more throughput.
-- Kafka covers both: one consumer group behaves like a queue, one group per service like a topic.
-- How Kafka does it inside: [Kafka Fundamentals](card:kafka-fundamentals). Choosing a product: [Kafka vs RabbitMQ](compare:kafka-vs-rabbitmq).
+1. The producer sends a message to the broker, which stores it and can confirm to the producer that it has it.
+2. With a queue, the broker gives each message to one of the consumers reading that queue. Adding consumers shares the work; this is the competing consumers pattern.
+3. With a topic, each subscribing service gets its own copy, so Inventory and Notification both see every OrderCreated.
+4. The consumer processes the message and sends an acknowledgement (ack). A message that is never acknowledged, for example because the consumer crashed, can be delivered again.
+
+So a queue answers "who does this job?" and a topic answers "who needs to know?"
+
+## Example
+
+The shop uses both shapes:
+
+| Message | Shape | Why |
+|---|---|---|
+| OrderCreated | Topic | Inventory and Notification each need every order |
+| SendEmail | Queue | Three Notification instances share the slow email work |
+
+If SendEmail were a topic and each instance subscribed separately, every customer would get three identical emails.
+
+## Rules and defaults
+
+- **Kafka keeps records:** reading does not delete. A record stays until the topic's retention ends, 7 days by default (`retention.ms`, Kafka 4.3), so a consumer can rewind and read again. One consumer group behaves like a queue; one group per service behaves like a topic. Details are in [Kafka Fundamentals](card:kafka-fundamentals).
+- **RabbitMQ routes, then removes:** a producer publishes to an exchange, and bindings route the message to queues. The exchange types are direct, fanout, topic and headers. A queue message is removed once a consumer acknowledges it.
+- **RabbitMQ streams (3.9+):** an append-only log in which reading does not delete, so messages can be replayed.
+- **A broker does not process anything:** it stores and delivers. A message can still arrive late or twice, and a consumer can still fail on it.
+
+## Not to be confused with
+
+Kafka is a log: records stay in order inside partitions, and many consumer groups read the same records at their own pace. RabbitMQ is a router: exchanges send each message to the right queues, and a queue hands it off and forgets it after the ack. Rule: replayable event stream read by many services = Kafka; task queue with routing rules = RabbitMQ.
 
 ## Interview Qs
 
+### Why use a broker instead of calling the other service directly?
+
+A direct call needs both services up at the same time, and the caller waits. A broker stores the message, so the producer moves on, and a consumer that is slow or restarting catches up later. It also spreads work over several consumer instances and lets new consumers subscribe without changing the producer.
+
 ### Kafka or RabbitMQ: how do you choose?
 
-Kafka when many services read the same event stream and need replay or per-key ordering. RabbitMQ when you need task queues, per-message acks and flexible routing. The use case decides, not speed alone.
-
-### What is the difference between a queue and a topic?
-
-In a queue each message is processed by one consumer, so workers share the work. In a topic every subscriber receives every message, so several services react to the same event.
+Kafka when many services read the same event stream and need replay or per-key ordering. RabbitMQ when you need task queues, per-message acknowledgements and flexible routing through exchanges. Both are mature; the use case, the team's experience and what you can operate decide, not raw speed.
 
 ### Does a broker guarantee my message is processed?
 
-No. It stores and delivers it, but delivery can be late or repeated, and a consumer can fail. Consumers must be idempotent and failures need a [dead-letter queue](card:dead-letter-queues).
+No. It stores and delivers the message, but delivery can be late or repeated, and a consumer can fail on it. Consumers must handle repeats, as [delivery guarantees](card:delivery-guarantees) shows, and messages that keep failing need a [dead-letter queue](card:dead-letter-queues).

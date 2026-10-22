@@ -5,17 +5,31 @@ title: JWT, OAuth 2.0 and OpenID Connect
 topic: security-observability
 level: intermediate
 heat: 2
-hook: "OAuth 2.0 gets an app an access token, OIDC adds an ID token for who logged in, and a JWT is the signed format they often use."
+hook: "OAuth 2.0 gets an app an access token for an API, OpenID Connect adds an ID token saying who logged in, and a JWT is the signed format they often use."
 points:
-  - { k: "JWT", v: "header.payload.signature in Base64url: signed, not encrypted" }
-  - { k: "Validate", v: "signature with an allowed alg, then exp, iss and aud" }
-  - { k: "Users", v: "authorization code flow with PKCE" }
-  - { k: "Services", v: "client credentials flow: no user, no refresh token" }
-  - { k: "Revocation", v: "a JWT works until exp, so keep access tokens short", kind: minus }
+  - { k: "JWT", v: "header.payload.signature in Base64url: signed, so the claims cannot be changed, but anyone can read them" }
+  - { k: "Validate a JWT", v: "check the signature with an allowed algorithm, then exp (expiry), iss (issuer) and aud (audience)" }
+  - { k: "Users log in", v: "with the authorization code flow plus PKCE; the app never sees the user's password" }
+  - { k: "Services call services", v: "with the client credentials flow: no user is involved, and RFC 6749 says no refresh token should be issued" }
+  - { k: "No early revocation", v: "a self-contained JWT stays valid until exp, so keep access tokens short-lived", kind: minus }
+  - { k: "Audience check", v: "Spring Security 7.1 checks aud only when you set spring.security.oauth2.resourceserver.jwt.audiences", kind: default }
 trap:
-  wrong: "A JWT is encrypted, so personal data in it is safe."
-  right: "A signed JWT is only encoded; anyone holding it can read the claims. Encryption needs JWE."
-sayIt: "The user logs in with the authorization code flow and PKCE and gets a short-lived JWT access token. Each service checks its signature, exp, iss and aud, then the scopes."
+  wrong: "A JWT is encrypted, so personal data inside it is safe."
+  right: "A signed JWT is only encoded: anyone holding it can decode and read the claims. Only an encrypted JWT (JWE) hides them."
+  why: "The token looks like a long scrambled string, so it seems secret. It is Base64url text, which any tool decodes in one step."
+sayIt: "The user logs in with the authorization code flow and PKCE and gets a short-lived JWT access token. Each service checks the signature, exp, iss and aud, then the scopes. Services calling services use the client credentials flow."
+cheat:
+  idea: "OAuth 2.0 gives an app an access token for APIs; OpenID Connect adds an ID token saying who logged in. A JWT is a signed JSON token."
+  flow: "Log in → access token → check signature, exp, iss, aud"
+  remember: "Signed, not encrypted: anyone can read it. Keep it short-lived; it works until exp."
+buildsOn: [microservices-security]
+scenarios:
+  - q: "The Order Service runs Spring Security 7.1 with only issuer-uri set. A token from the same identity provider arrives with aud set to inventory-service. Is it accepted?"
+    a: "Yes. With only issuer-uri, Spring Security checks the signature, exp, nbf and iss, but not aud. Set the audiences property to order-service so tokens meant for other services are refused."
+  - q: "A nightly job in the Order Service must call the Payment Service. No user is logged in. Which OAuth flow do you use?"
+    a: "The client credentials flow. The Order Service sends its own client ID and secret to the authorization server and gets an access token for itself. There is no user, so there is no login page, and normally no refresh token: when the token expires, the service asks for a new one."
+  - q: "A user's access token expired 30 seconds ago. They call the Order Service, which runs Spring Security 7.1 with default settings. What happens?"
+    a: "It is still accepted. The default clock skew is 60 seconds, which allows for small clock differences between servers. After that, the call fails with 401 and the app must get a new token."
 confusedWith: [oauth2-vs-oidc, api-key-vs-jwt]
 tags: [jwt, oauth2, oidc, pkce, tokens]
 visual: flow
@@ -23,38 +37,68 @@ sources:
   - title: "RFC 6749 The OAuth 2.0 Authorization Framework"
     url: "https://www.rfc-editor.org/rfc/rfc6749"
     verifiedOn: "2026-10-20"
+  - title: "RFC 7636 Proof Key for Code Exchange (PKCE)"
+    url: "https://www.rfc-editor.org/rfc/rfc7636"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 9700 OAuth 2.0 Security Best Current Practice (2025)"
+    url: "https://www.rfc-editor.org/rfc/rfc9700"
+    verifiedOn: "2026-10-21"
+  - title: "The OAuth 2.1 Authorization Framework (IETF Internet-Draft, draft 16)"
+    url: "https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/"
+    verifiedOn: "2026-10-21"
   - title: "REST Security Cheat Sheet: JWT (OWASP)"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html"
     verifiedOn: "2026-10-20"
   - title: "Microservices Security Cheat Sheet: tokens (OWASP)"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/Microservices_Security_Cheat_Sheet.html"
     verifiedOn: "2026-10-20"
-  - title: "RFC 9700 OAuth 2.0 Security Best Current Practice (2025)"
-    url: "https://www.rfc-editor.org/rfc/rfc9700"
-    verifiedOn: "2026-10-20"
   - title: "OAuth 2.0 Resource Server JWT (Spring Security 7.1 reference)"
     url: "https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+These are three standards that work together. OAuth 2.0 is a standard way for an app to get an access token, a credential that lets it call an API with limited permissions called scopes, such as `orders.read`. OpenID Connect (OIDC) adds login on top: it also returns an ID token that tells the app who the user is. A JWT (JSON Web Token) is a token format: a small JSON object of claims, such as the user ID and the expiry time, signed so that any change is detected.
 
 ## Why it exists
 
-Services need to know who is calling and what they may do without asking a login server on every call. A signed token carries that proof.
+The [previous concept](card:microservices-security) said every service checks the caller. If the token were only a random string, the Order Service would have to ask the login server "who is this?" on every call: one extra network hop per request, and the login server becomes a bottleneck. A signed JWT carries the answer inside it, so each service checks it alone. OAuth also means the shop's app never handles the user's password; only the identity provider sees it.
 
 ## How it works
 
-<Steps label="A JWT from login to the Order Service">
-  <Step title="Log in">The user signs in at the identity provider.</Step>
-  <Step title="Get tokens">The app gets an access token, often a refresh token and, with OIDC, an ID token.</Step>
-  <Step title="Call">It sends `Authorization: Bearer <access token>` to the gateway.</Step>
-  <Step title="Validate">The service checks the signature with allowed algorithms only, then exp, iss and aud.</Step>
-  <Step title="Authorise">It checks scopes and business rules, then acts.</Step>
-</Steps>
+<Mermaid
+  alt="The app sends the user to the identity provider to log in. The identity provider returns a one-time code, which the app swaps for tokens. The app sends the access token as a Bearer header to the Order Service. The Order Service checks the token with the identity provider's public keys, which it downloaded once."
+  chart={`flowchart LR
+  A[Shop app] -- "1. user logs in" --> I[(Identity provider)]
+  I -- "2. code, then tokens" --> A
+  A -- "3. Bearer access token" --> O[Order Service]
+  I -. "4. public keys, cached" .-> O`}
+/>
 
-- RFC 9700 (2025): do not use the implicit or password grants. OAuth 2.1, still a draft, builds in these rules.
-- Opaque tokens are checked by introspection: it can reflect revocation, but every call adds a hop.
+1. The shop's app sends the user to the identity provider to log in. This is the authorization code flow. With PKCE, the app first makes a random secret and sends only its hash (method S256).
+2. After login, the identity provider returns a one-time code. The app sends the code and the secret, and gets back a short-lived access token, often a refresh token and, with OIDC, an ID token.
+3. The app sends `Authorization: Bearer <access token>` with every call.
+4. The Order Service checks the signature with the identity provider's public keys, which it downloaded once and caches. It accepts only the algorithms it expects, then checks `exp` (expiry time), `iss` (who issued it) and `aud` (which service it is meant for).
+5. It checks the scopes and its own business rules, then acts.
+6. When the access token expires, the app sends the refresh token to the identity provider for a new one, without a new login.
+
+A service with no user, such as a nightly job, uses the client credentials flow instead: it sends its own client ID and secret and gets a token for itself.
 
 ## Example
+
+A decoded access token for user 42, and the Order Service configuration that validates it.
+
+```json
+{
+  "iss": "https://idp.shop.example",
+  "sub": "42",
+  "aud": "order-service",
+  "scope": "orders.read orders.write",
+  "iat": 1792570200,
+  "exp": 1792570500
+}
+```
 
 ```yaml
 spring:
@@ -66,20 +110,41 @@ spring:
           audiences: order-service
 ```
 
-## Defaults
+What to notice:
+
+- `exp` minus `iat` is 300 seconds, so this token lives five minutes. A stolen copy is useful only until then.
+- The payload is readable by anyone who has the token. Put IDs and scopes in it, never card numbers or passwords.
+- `issuer-uri` makes Spring Security find the identity provider's public keys and check `iss`. Remove `audiences` and a token meant for the Inventory Service would also be accepted here.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Checks with `issuer-uri` set | signature, exp, nbf, iss | Spring Security 7.1 resource server |
-| Audience (aud) check | only when `audiences` is set | Spring Boot 4.1 property |
+| Checks with `issuer-uri` set | signature, `exp`, `nbf` (not before), `iss` | Spring Security 7.1 resource server |
+| `aud` check | only when `audiences` is set | Spring Boot 4.1 property |
 | Clock skew allowed | 60 seconds | Spring Security 7.1 |
+| Public keys (JWK set) cached | in memory, 5 minutes | Spring Security 7.1 |
+
+- **Scopes become authorities:** Spring Security turns scope `orders.write` into the authority `SCOPE_orders.write`.
+- **PKCE (RFC 9700, 2025):** public clients, such as mobile apps, must use it; for server-side apps it is recommended.
+- **Old flows:** RFC 9700 says the password grant must not be used and the implicit grant should not be. OAuth 2.1, still an Internet-Draft in 2026, leaves both out.
+- **Algorithms:** accept only the signing algorithms you expect; never accept `alg: none`, which means "no signature".
+- **Refresh tokens** go only to the identity provider, never to an API.
+
+## Not to be confused with
+
+OAuth 2.0 is about access: it lets an app call an API on your behalf. OIDC is about identity: it tells the app who logged in. A JWT is neither; it is only a token format that both often use. Rule: OAuth = access token for the API; OIDC = ID token for the app; JWT = the envelope.
 
 ## Interview Qs
 
 ### How do you log out a user who holds a JWT?
 
-You cannot delete a self-contained token. Keep access tokens short-lived, revoke the refresh token, and if needed put the token's jti on a denylist until it expires.
+You cannot delete a self-contained token; it stays valid until `exp`. So keep access tokens short-lived, revoke the refresh token so no new access token can be issued, and if you must cut access at once, keep the token's `jti` (its ID) on a denylist until it expires.
 
 ### Access token vs refresh token?
 
-The access token is short-lived and sent to APIs. The refresh token lives longer, goes only to the authorization server, and gets a new access token without a new login.
+The access token is short-lived and sent to APIs with every call. The refresh token lives longer, goes only to the identity provider, and gets a new access token without a new login. Keeping them apart means the long-lived token never travels to every service.
+
+### Why does the authorization code flow use PKCE?
+
+Another app on the device could intercept the one-time code. With PKCE, the app sends a hash of a random secret at the start and the secret itself when it swaps the code. An attacker who stole only the code cannot get tokens.

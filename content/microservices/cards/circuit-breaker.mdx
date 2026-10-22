@@ -5,17 +5,29 @@ title: "Circuit Breaker"
 topic: resilience
 level: intermediate
 heat: 3
-hook: "After too many failures, stop calling the sick service and fail fast; later, let a few test calls through."
+hook: "After too many recent calls to a service fail, stop calling it for a while and fail at once; then let a few test calls through to check whether it has recovered."
 points:
-  - { k: "CLOSED", v: "normal: calls pass, results are counted" }
-  - { k: "OPEN", v: "calls fail at once, nothing is sent; waits a set time" }
-  - { k: "HALF_OPEN", v: "a few trial calls decide: back to CLOSED, or OPEN again" }
-  - { k: "Slow calls", v: "can open it too, not only errors" }
-  - { k: "One per dependency", v: "a breaker for Payment, another for Inventory" }
+  - { k: "CLOSED", v: "the normal state: calls go through, and each result is recorded" }
+  - { k: "OPEN", v: "calls fail at once without being sent, for a set wait time (60 s by default in Resilience4j 2.x)" }
+  - { k: "HALF_OPEN", v: "after the wait, a few trial calls go through; success closes the breaker, failure opens it again" }
+  - { k: "Failure rate", v: "it opens on a rate over many recent calls, such as 50% of the last 100, not on one error" }
+  - { k: "Slow calls", v: "calls slower than a set duration can open it too, not only errors" }
+  - { k: "One per dependency", v: "Payment and Inventory each get a breaker, so one outage does not block the other" }
 trap:
   wrong: "OPEN means calls flow, like an open door."
-  right: "It is named after an electric breaker: OPEN means the circuit is broken and no calls pass. CLOSED is the normal state."
-sayIt: "A circuit breaker counts failures over a sliding window. Past the threshold it opens and fails fast, so callers stop waiting on a dead service. After a wait it lets a few trial calls through to decide."
+  right: "Like an electric circuit breaker, OPEN means the circuit is broken and no calls pass. CLOSED is the normal state."
+  why: "In daily speech an open door lets you through, so OPEN sounds like the healthy state."
+sayIt: "A circuit breaker counts failures over a window of recent calls. Past the threshold it opens and fails fast, so callers stop waiting on a dead service and it can recover. After a wait, a few trial calls decide whether it closes again."
+cheat:
+  idea: "A circuit breaker counts recent failures to one dependency. Past a threshold it opens and fails calls at once; later, trial calls test recovery."
+  flow: "CLOSED → too many failures → OPEN → wait → HALF_OPEN → CLOSED or OPEN"
+  remember: "OPEN means no calls pass. Resilience4j 2.x opens at 50% failures of the last 100 calls."
+buildsOn: [timeouts-and-retries]
+scenarios:
+  - q: "In the example, what does call 5 print, and why is Payment not called at all?"
+    a: "It prints 5: CallNotPermittedException, state OPEN. Call 4 filled the window of 4 calls with 100% failures, at least the 50% threshold, so the breaker opened. While OPEN it rejects calls at once without sending them."
+  - q: "Right after a deploy, Payment fails 9 times in a row, but a Resilience4j breaker with default settings stays CLOSED. Why?"
+    a: "By default it needs at least 100 recorded calls (minimumNumberOfCalls) before it works out a failure rate. With only 9 calls it cannot open, even though all of them failed. Lower minimumNumberOfCalls for a dependency with little traffic."
 confusedWith: [retry-vs-circuit-breaker, circuit-breaker-vs-bulkhead]
 tags: [circuit-breaker, resilience4j, fail-fast]
 visual: flow
@@ -23,63 +35,107 @@ sources:
   - title: "Circuit Breaker pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker"
     verifiedOn: "2026-10-20"
-  - title: "CircuitBreaker (Resilience4j docs)"
+  - title: "CircuitBreaker: states and default configuration (Resilience4j docs)"
     url: "https://resilience4j.readme.io/docs/circuitbreaker"
-    verifiedOn: "2026-10-20"
-  - title: "Getting started with Spring Boot (Resilience4j docs)"
-    url: "https://resilience4j.readme.io/docs/getting-started-3"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Resilience4j 2.4.0 CircuitBreakerConfig defaults (Maven Central jar, run locally)"
+    url: "https://central.sonatype.com/artifact/io.github.resilience4j/resilience4j-circuitbreaker/2.4.0"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A circuit breaker is a guard placed around the calls to one dependency, such as Payment. It records whether recent calls failed or were too slow. When too many did, it stops sending calls for a while and fails them at once, which is called failing fast. After the wait, it lets a few trial calls through to see whether the dependency has recovered.
 
 ## Why it exists
 
-When a service is down, its callers keep waiting, hold threads, and fail too. A breaker stops those calls, so one failure does not cascade.
+When Payment is down, every Order request still waits for its full [timeout](card:timeouts-and-retries), and retries make it wait longer. Threads pile up, Order slows down, and the callers of Order fail next. This chain is a cascading failure. Meanwhile the struggling Payment service keeps receiving traffic it cannot handle. A breaker fixes both: callers get an answer at once, and Payment gets quiet time to recover.
 
 ## How it works
 
 <Mermaid
-  alt="Circuit breaker states. CLOSED moves to OPEN when the failure rate passes the threshold. OPEN moves to HALF_OPEN when the wait ends. HALF_OPEN goes back to CLOSED if trial calls succeed, or to OPEN if they fail."
+  alt="Circuit breaker states. CLOSED moves to OPEN when the failure rate reaches the threshold. OPEN moves to HALF_OPEN when the wait time ends. HALF_OPEN goes back to CLOSED if the trial calls succeed, or to OPEN if they fail."
   chart={`stateDiagram-v2
   [*] --> CLOSED
-  CLOSED --> OPEN: failure rate over threshold
+  CLOSED --> OPEN: failure rate reaches threshold
   OPEN --> HALF_OPEN: wait time ends
   HALF_OPEN --> CLOSED: trial calls succeed
   HALF_OPEN --> OPEN: trial calls fail`}
 />
 
-- It opens on a failure rate over many calls, not on one error.
-- While OPEN, answer with a [fallback](card:fallback-and-degradation) or a clear error at once.
-- The breaker needs a short [timeout](card:timeouts-and-retries) on each call, or it learns about failures too late.
+1. CLOSED: calls pass normally, and the breaker records each result in a sliding window, such as the last 100 calls.
+2. Once enough calls are recorded, if the share of failed calls, or of slow calls, reaches the threshold, the breaker switches to OPEN.
+3. While OPEN, every call fails at once without touching the network. In Resilience4j it throws `CallNotPermittedException`.
+4. When the wait time has passed, the breaker moves to HALF_OPEN and lets a few trial calls through. In Resilience4j this happens on the next call, unless automatic transition is switched on.
+5. If the trial calls succeed, it goes back to CLOSED. If they still fail, it opens again for another wait.
+
+So the key is: the breaker decides from a rate over many calls, not from one error.
 
 ## Example
 
-```java
-@CircuitBreaker(name = "inventory", fallbackMethod = "stockUnknown")
-public Stock stock(String sku) {
-    return inventoryClient.get().uri("/stock/{sku}", sku)
-            .retrieve().body(Stock.class);
-}
+A small breaker around calls to Payment, which is down, so every call fails:
 
-// on failure, or at once while OPEN
-private Stock stockUnknown(String sku, Exception e) {
-    return Stock.unknown(sku);
+```java
+CircuitBreakerConfig config = CircuitBreakerConfig.custom()
+        .slidingWindowSize(4).minimumNumberOfCalls(4)      // judge the last 4 calls
+        .failureRateThreshold(50)                           // open at 50% failures or more
+        .waitDurationInOpenState(Duration.ofSeconds(30))    // stay OPEN for 30 s
+        .build();
+CircuitBreaker breaker = CircuitBreaker.of("payment", config);
+for (int i = 1; i <= 5; i++) {
+    try {
+        breaker.executeCallable(() -> { throw new IOException("payment timed out"); });
+    } catch (Exception e) {
+        System.out.println(i + ": " + e.getClass().getSimpleName() + ", state " + breaker.getState());
+    }
 }
 ```
 
-## Defaults
+```text output
+1: IOException, state CLOSED
+2: IOException, state CLOSED
+3: IOException, state CLOSED
+4: IOException, state OPEN
+5: CallNotPermittedException, state OPEN
+```
+
+What to notice:
+
+- Calls 1 to 3 really reach Payment and fail, but the breaker stays CLOSED: it has fewer than 4 recorded calls, so it does not judge yet.
+- Call 4 completes the window with 100% failures, so the breaker opens right after it.
+- Call 5 never reaches Payment. It fails at once with `CallNotPermittedException`, which is what saves the caller's threads.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
-| Opens at | 50% failed calls, over the last 100 calls (at least 100 recorded) | Resilience4j 2.x |
+| Opens at | 50% failed calls, over a count-based window of the last 100 calls | Resilience4j 2.x |
+| Calls needed first | 100 recorded calls (`minimumNumberOfCalls`) | Resilience4j 2.x |
+| Slow call | slower than 60 s; opens at 100% slow calls | Resilience4j 2.x |
 | Stays OPEN | 60 s, then 10 trial calls in HALF_OPEN | Resilience4j 2.x |
-| While OPEN | throws `CallNotPermittedException` | Resilience4j 2.x |
+
+- **What counts as a failure:** every exception, unless you set `recordExceptions` or `ignoreExceptions`. A 404 your code turns into an exception counts too.
+- **Slow calls:** the 60 s default is longer than most call timeouts, so set `slowCallDurationThreshold` lower if slowness should open the breaker.
+- **Timeout first:** a hung call is recorded only when it ends, so each call needs a short timeout under the breaker.
+
+## Not to be confused with
+
+A retry repeats one failed call, hoping a brief fault has passed. A circuit breaker stops calling after many failures. A [bulkhead](card:bulkhead), which you will see next, keeps calls going but caps how many run at once. Rule: retry for a blip, breaker for an outage, bulkhead for a slow dependency.
+
+## Common mistakes
+
+- **"One breaker for all outgoing calls."** Then Payment's failures would block calls to a healthy Inventory too. Give each dependency its own breaker.
 
 ## Interview Qs
 
 ### How do you prevent cascading failures?
 
-A timeout on every call, a few retries with backoff, a breaker per dependency, [bulkheads](card:bulkhead) so one slow service cannot take every thread, and [rate limits](card:rate-limiting) on incoming work. Monitor each dependency's errors and latency.
+Give every call a timeout, retry a few times with backoff, put a breaker on each dependency, use bulkheads so one slow service cannot take every thread, and rate limit incoming work. Monitor each dependency's errors and latency to spot trouble early.
 
 ### Why HALF_OPEN, and not straight back to CLOSED?
 
-A service that is just recovering may fall over again under full traffic. A few trial calls test it gently first.
+A service that is just recovering may fall over again under full traffic. A few trial calls test it gently first; only if they succeed does the breaker let all traffic through.
+
+### What should the caller return while the breaker is OPEN?
+
+Something useful at once: a fallback such as cached data or a default, or a clear error the user understands. Never a fake success for an operation like a payment. You will see the choices in [fallbacks](card:fallback-and-degradation).

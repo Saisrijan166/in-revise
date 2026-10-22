@@ -5,71 +5,122 @@ title: Delivery Guarantees and Idempotent Consumers
 topic: messaging
 level: intermediate
 heat: 3
-hook: "Plan for at-least-once delivery; an idempotent consumer turns repeats into exactly-once effects."
+hook: "Expect every message to arrive at least once, so sometimes twice. An idempotent consumer makes the second delivery harmless."
 points:
-  - { k: "Commit before work", v: "at-most-once: a crash loses the message" }
-  - { k: "Commit after work", v: "at-least-once: a crash repeats the message" }
-  - { k: "Kafka exactly-once", v: "transactions cover Kafka-to-Kafka work only", kind: minus }
-  - { k: "Idempotent producer", v: "on by default (Kafka 4.3): send retries add no duplicates", kind: default }
-  - { k: "Idempotent consumer", v: "save the eventId with the change; a repeat is skipped", kind: plus }
+  - { k: "At-most-once", v: "commit the offset before processing; a crash in between loses the message", kind: minus }
+  - { k: "At-least-once", v: "process first, then commit the offset; a crash in between delivers the message again" }
+  - { k: "Kafka exactly-once", v: "a Kafka transaction commits output records and input offsets together, for Kafka-to-Kafka work only", kind: minus }
+  - { k: "Idempotent producer", v: "on by default (Kafka 4.3): a producer's own send retry does not write a duplicate record", kind: default }
+  - { k: "Idempotent consumer", v: "saves each eventId in the same transaction as its change and skips an id it has seen", kind: plus }
 trap:
-  wrong: "Kafka has exactly-once, so the payment API is called only once."
+  wrong: "Kafka has exactly-once, so the payment provider is called only once."
   right: "Kafka's exactly-once covers reads and writes inside Kafka. A payment API or another database needs an idempotent consumer."
-sayIt: "I assume at-least-once delivery, so duplicates come. The consumer saves each eventId with its change in one transaction, under a unique key, and skips ids it has seen. Kafka's exactly-once covers Kafka-to-Kafka only."
+  why: "The feature is named exactly-once semantics, and announcements rarely mention its boundary, so people assume it covers everything the consumer does."
+sayIt: "I assume at-least-once delivery, so duplicates will come. The consumer saves each eventId with its change in one local transaction, under a unique key, and skips ids it has seen. Kafka's exactly-once covers Kafka-to-Kafka work only."
+cheat:
+  idea: "When a consumer can crash mid-way, a message is either lost (at-most-once) or delivered again (at-least-once). Plan for at-least-once and make the consumer idempotent."
+  remember: "Kafka's exactly-once covers Kafka-to-Kafka work only; a database or payment API needs an idempotent consumer."
+buildsOn: [kafka-fundamentals, idempotency]
+scenarios:
+  - q: "Payment Service's Spring Kafka listener charges ₹500 for OrderCreated, then the pod is killed before the offset is committed. What happens after restart?"
+    a: "The record is delivered again, because the committed offset is still before it. Without protection the customer is charged twice. Pass a key such as the orderId to the payment provider as its idempotency key, and record the eventId, so the repeat does nothing."
+  - q: "A listener commits the offset first, then saves to the database. The database is down, so the save throws. What happens to that message?"
+    a: "It is lost. The offset already says the message is done, so the consumer will not read it again. That is at-most-once. Commit only after the work has succeeded."
+  - q: "Two copies of the same OrderCreated reach two Inventory instances at the same moment. Both check the processed table and find nothing. Is stock reserved twice?"
+    a: "No, if eventId is the primary key of the processed table and the insert is in the same transaction as the reservation. The second insert fails on the key, its transaction rolls back, and its reservation is undone with it."
 confusedWith: [idempotency-vs-deduplication]
 tags: [delivery, exactly-once, idempotent-consumer, kafka]
 visual: table
 sources:
-  - title: "Design: message delivery semantics (Apache Kafka 4.3 docs)"
+  - title: "Design: message delivery semantics, idempotent producer (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/design/design/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Producer configs: enable.idempotence (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/configuration/producer-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Consumer configs: isolation.level, enable.auto.commit (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/configuration/consumer-configs/"
+    verifiedOn: "2026-10-21"
+  - title: "Kafka Streams configs: processing.guarantee, default at_least_once (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/configuration/kafka-streams-configs/"
+    verifiedOn: "2026-10-22"
+  - title: "Message listener containers: AckMode BATCH, enable.auto.commit false (Spring for Apache Kafka 4.1)"
+    url: "https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/message-listener-container.html"
+    verifiedOn: "2026-10-21"
   - title: "Idempotent consumer (microservices.io)"
     url: "https://microservices.io/patterns/communication-style/idempotent-consumer.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A delivery guarantee says how often a message can reach the consumer's processing when something fails. At-most-once means it can be lost but never repeats; at-least-once means it is never lost but can repeat; exactly-once means neither, inside a stated boundary. Which one you get depends mostly on when the consumer commits its [offset](card:kafka-fundamentals). An idempotent consumer is one where processing the same message twice has the same effect as processing it once.
+
 ## Why it exists
 
-Networks and consumers fail mid-way, so a broker must choose between losing a message and sending it again. Your code must cope with the choice.
+Inventory Service reserves stock for each OrderCreated. It can crash after reserving but before telling Kafka it has finished. On restart Kafka delivers the event again, and without care the stock is reserved twice. If it marks the event done first and crashes before reserving, the order never gets its stock. No broker can avoid both risks, so you choose one and write the consumer to be safe with it.
 
 ## How it works
 
 <Compare id="at-most-vs-at-least-vs-exactly-once" />
 
-- Kafka's default is at-least-once; at-most-once means no producer retries and committing first.
-- Storing the consumer's position with its output gives exactly-once without 2PC.
-- Keys for HTTP retries are a different tool: [idempotency keys](card:idempotency).
+1. The consumer reads a record from its partition.
+2. At-most-once: it commits the offset, then processes. A crash in between loses the record, because the restart begins after the committed offset.
+3. At-least-once: it processes, then commits the offset. A crash in between means the record is processed again after the restart.
+4. Exactly-once inside Kafka: when the output also goes to Kafka topics, the output records and the input offsets are committed in one Kafka transaction, and readers use `read_committed`, so they see only committed results.
+5. Anything outside Kafka, such as a database or a payment API, gets at-least-once delivery. An idempotent consumer turns the repeat into a no-op.
+
+So the plan is: accept at-least-once, and make every consumer idempotent.
 
 ## Example
 
+Inventory Service records each event id in the same transaction as the reservation:
+
 ```java
-@KafkaListener(topics = "payments", groupId = "order-service")
+@KafkaListener(topics = "orders", groupId = "inventory")
 @Transactional
-public void on(PaymentFailed event) {
+public void onOrderCreated(OrderCreated event) {
     if (processed.existsById(event.eventId())) {
-        return;                                  // duplicate: already applied
+        return;                                           // seen before: skip
     }
     processed.save(new ProcessedEvent(event.eventId()));  // primary key = eventId
-    orders.markPaymentFailed(event.orderId());   // same DB transaction
+    stock.reserve(event.orderId(), event.items());        // same DB transaction
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| `enable.idempotence` | `true` | Kafka 4.3 producer |
-| `isolation.level` | `read_uncommitted` | Kafka 4.3 consumer |
+- The id check, the insert and the reservation run in one database transaction, so either both rows are saved or neither is.
+- If the service crashes after the database commit but before the offset commit, the redelivered event finds its id and is skipped.
+- `eventId` is the primary key, so two copies processed at the same moment cannot both insert. The loser's transaction rolls back, and so does its reservation.
+- This guards only Inventory's own database. For an external call, such as charging ₹500, pass a stable key to the provider as its [idempotency key](card:idempotency).
+
+## Rules and defaults
+
+- **Spring for Apache Kafka (4.1):** sets `enable.auto.commit=false` and, in the default `BATCH` ack mode, commits offsets after the listener has processed all records from a poll. A crash before that commit redelivers them, so you get at-least-once.
+- **Plain Kafka consumer (4.3):** `enable.auto.commit=true` by default, committing every 5 seconds (`auto.commit.interval.ms`).
+- **Idempotent producer (Kafka 4.3):** `enable.idempotence=true` by default. It stops duplicates caused by the producer's own retries. It does not stop your code from sending the same event twice or a consumer from processing it twice.
+- **Exactly-once in Kafka:** needs a `transactional.id` on the producer, consumers with `isolation.level=read_committed` (the default is `read_uncommitted`), and auto commit off. Kafka Streams, Kafka's stream-processing library, sets all of this up when you set `processing.guarantee=exactly_once_v2`; its default is `at_least_once`.
+- **Outside Kafka:** the Kafka docs suggest storing the consumer's position in the same place as its output, or deduplicating by id as above.
+
+## Not to be confused with
+
+- **Idempotent producer:** a Kafka setting that removes duplicates from send retries, between producer and broker.
+- **Idempotent consumer:** your code, which makes a repeated delivery harmless.
+- **[Idempotency key](card:idempotency):** an id that a client sends with an HTTP request so a retried call does not act twice.
+
+Rule: producer idempotence protects the log; consumer idempotence protects your data; an idempotency key protects an API.
 
 ## Interview Qs
 
 ### Is exactly-once delivery possible?
 
-Inside Kafka, yes: a transaction writes the output and the consumer offsets together, and readers use read_committed. Across a database or an external API you get exactly-once effects only by making the consumer idempotent.
+Inside Kafka, yes: a transaction writes the output records and the consumer offsets together, and readers use read_committed. Across a database or an external API you cannot get exactly-once delivery, but you get exactly-once effects by making the consumer idempotent, or by storing the offset in the same transaction as the output.
 
 ### How do you make a consumer idempotent?
 
-Give every event a unique eventId. In one local transaction, insert the id into a processed table with a unique key and apply the change. A redelivered event hits the key and is skipped.
+Give every event a unique eventId. In one local transaction, insert the id into a processed table that has a unique key on it, and apply the change. A redelivered event finds its id and is skipped; two racing copies cannot both insert. Where possible, also make the change naturally safe to repeat, such as "set status = PAID".
+
+### The idempotent producer is on by default. Why do I still get duplicates?
+
+It only removes duplicates caused by the producer's own retries of one send. A consumer that crashes before committing its offset reads the record again, and an application that calls send twice writes two records. Both cases need an idempotent consumer.

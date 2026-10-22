@@ -5,17 +5,27 @@ title: Synchronous vs Asynchronous Communication
 topic: communication
 level: beginner
 heat: 3
-hook: "Sync: the caller waits for the reply. Async: the sender hands a message to a broker and moves on."
+hook: "Synchronous: the caller sends a request and waits for the reply. Asynchronous: the sender leaves a message with a broker and carries on without waiting."
 points:
-  - { k: "Sync (REST, gRPC)", v: "the caller waits; both services must be up at the same time" }
-  - { k: "Async (broker)", v: "the sender moves on; the broker holds the message for the consumer", kind: plus }
-  - { k: "Sync call chain", v: "A calls B calls C: delays add up, one failure fails the request", kind: minus }
-  - { k: "Async costs", v: "a broker to run, duplicate deliveries, data that is briefly stale", kind: minus }
-  - { k: "Non-blocking client", v: "still sync: a WebClient call needs the reply to finish its work" }
+  - { k: "Synchronous call", v: "the caller waits for the reply, so the other service must be running and fast at that moment" }
+  - { k: "Asynchronous message", v: "the sender carries on once the broker has stored the message; the receiver handles it later", kind: plus }
+  - { k: "Chain of sync calls", v: "if A calls B and B calls C in one request, their delays add up and any one failure fails it all", kind: minus }
+  - { k: "Async costs", v: "you run a broker, and receivers must handle late and duplicate messages and briefly stale data", kind: minus }
+  - { k: "Non-blocking client", v: "a non-blocking HTTP call is still synchronous: the caller cannot finish until the reply comes" }
 trap:
-  wrong: "Async messaging is always better because it decouples services."
-  right: "Use sync when the caller needs the answer now, like a stock check. Async adds a broker, duplicates and stale reads."
-sayIt: "Sync REST or gRPC when the caller needs the answer now; async events through Kafka or RabbitMQ for work that can finish later. Async removes temporal coupling, but consumers must handle duplicates."
+  wrong: "Asynchronous messaging is always better, because it decouples services."
+  right: "Use a sync call when the caller needs the answer now, such as a stock check. Async adds a broker, duplicate messages and briefly stale data."
+  why: "Async removes the need for both services to be up at the same time, and that benefit is often presented as if it came for free."
+sayIt: "I use synchronous REST or gRPC when the caller needs the answer now, and asynchronous messages through a broker when the work can finish later or many services react. Async means both services need not be up at once, but consumers must handle duplicates and delays."
+cheat:
+  idea: "Synchronous communication means the caller waits for the reply. Asynchronous communication means the sender leaves a message with a broker and carries on; the receiver handles it later."
+  remember: "Sync when the caller needs the answer now; async for work that can finish later. Async receivers must cope with duplicates."
+buildsOn: [monolith-and-microservices, distributed-systems-fallacies]
+scenarios:
+  - q: "The checkout page must show whether an item is in stock before the user pays. Should Order Service make a sync call or send an async message to Inventory Service?"
+    a: "A sync call. The page cannot continue without the answer, so waiting is the point. An async message returns at once with no stock figure to show."
+  - q: "Notification Service is down for two minutes when an order is placed. Order Service publishes OrderCreated to a broker. What happens to the order and the email?"
+    a: "The order still succeeds, because Order Service only needed the broker to accept the message. The broker keeps it, and Notification Service sends the email when it is back. With a sync call to Notification Service, the order request would have failed or waited."
 confusedWith: [command-vs-event, queue-vs-topic]
 tags: [communication, rest, messaging, coupling]
 visual: table
@@ -26,41 +36,81 @@ sources:
   - title: "Pattern: Messaging (microservices.io, Chris Richardson)"
     url: "https://microservices.io/patterns/communication-style/messaging.html"
     verifiedOn: "2026-10-20"
-  - title: "Web API design best practices: asynchronous operations (Azure Architecture Center)"
-    url: "https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-design"
-    verifiedOn: "2026-10-20"
+  - title: "Asynchronous Request-Reply pattern: 202 Accepted, Location, status endpoint (Azure Architecture Center)"
+    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/asynchronous-request-reply"
+    verifiedOn: "2026-10-21"
+  - title: "KafkaTemplate: sending messages (Spring for Apache Kafka reference)"
+    url: "https://docs.spring.io/spring-kafka/reference/kafka/sending-messages.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Services talk to each other over the network in one of two styles. In synchronous communication, the caller sends a request, such as an HTTP call, and waits until the reply comes back. In asynchronous communication, the sender hands a message to a message broker, a separate program that stores messages, and carries on; the receiver reads the message later. A message is a small piece of data, such as "order 9001 was created".
 
 ## Why it exists
 
-A remote call is not a method call: the other service may be slow or down. The style decides who waits, and what breaks when one service fails.
+Inside a monolith, one module calls another in the same process, and the call always arrives. Between services, the other side may be slow or down ([the fallacies](card:distributed-systems-fallacies)). If every step of placing an order is a waiting call, one slow service makes the user wait, and one stopped service fails the whole order. Choosing the style for each call decides who waits, and what breaks when a service fails.
 
 ## How it works
 
 <Compare id="rest-vs-messaging" />
 
-- Long work over HTTP: answer `202 Accepted` with a status URL, and let the client poll it.
-- Events vs commands: [Event-Driven Architecture](card:event-driven-architecture). Queues and topics: [Message Brokers](card:message-brokers).
+1. Synchronous: Order Service sends `GET /stock/101` to Inventory Service, and its thread waits.
+2. Inventory Service replies with the stock level, or the call fails or times out; Order Service must handle each case before it can answer the user.
+3. Asynchronous: Order Service saves the order and publishes an `OrderCreated` message to the broker.
+4. The broker stores the message, and Order Service answers the user without waiting for Inventory, Payment or Notification.
+5. Inventory, Payment and Notification each read the message when they are ready, even if one of them was down when it was sent.
+
+So the key is: a sync call needs the receiver to be up now; an async message needs only the broker to be up now.
 
 ## Example
 
-<Steps label="Placing an order, async">
-  <Step title="Order Service">Saves the order as PENDING and publishes `OrderCreated` (safely, with an [outbox](card:outbox-and-inbox)).</Step>
-  <Step title="User">Gets `201 Created` at once; nobody waits for stock or payment.</Step>
-  <Step title="Inventory and Payment">Each consumes `OrderCreated`: reserve stock, charge ₹2,499.</Step>
-  <Step title="Notification">Emails the user when the payment event arrives.</Step>
-</Steps>
+Placing an order in the shop uses both styles: a sync stock check, then an async event for the rest of the flow.
+
+```java
+Order placeOrder(Order order, long productId) {
+    // Synchronous: this thread waits here until Inventory replies or fails
+    StockLevel stock = restClient.get()
+            .uri("http://inventory-service/stock/{id}", productId)
+            .retrieve()
+            .body(StockLevel.class);
+
+    // Asynchronous: send() returns at once; Kafka gets the message in the background
+    Order saved = orderRepository.save(order);                  // status PENDING
+    kafkaTemplate.send("orders", saved.id(), new OrderCreated(saved.id(), 500));
+    return saved;   // the user gets an answer; stock, payment and email happen later
+}
+```
+
+What to notice:
+
+- The `restClient` call blocks: if Inventory Service is down, `placeOrder` fails right there, and the user sees an error.
+- `kafkaTemplate.send` queues `OrderCreated` (₹500) for the broker, here Kafka, and returns a future without waiting. Reserving stock, charging and the email happen in other services, later.
+- The order is returned as `PENDING`, because the payment has not happened yet. The user's screen must show that honestly.
+- Saving and sending are two separate steps: a crash between them loses the message. You will see the fix in [Transactional Outbox](card:outbox-and-inbox).
+
+## Rules and defaults
+
+- **Long work over HTTP:** answer `202 Accepted` with a `Location` header that points to a status URL. The client polls it; it returns `200` with the current state until the work finishes (the Asynchronous Request-Reply pattern).
+- **Non-blocking is not asynchronous messaging:** a non-blocking HTTP client frees the thread while it waits, but the caller still needs the reply, and the receiver must be up.
+- **Avoid long chains of sync calls:** if a request needs data from another service every time, keep a local copy of that data, updated by events.
+- **Async does not mean processed:** a message can arrive late, arrive twice, or end up in a [dead-letter queue](card:dead-letter-queues), as later concepts show.
+
+## Not to be confused with
+
+An async message can be a command or an event. A command asks one service to do something, such as `ReserveStock`, and that service may refuse. An event announces something that already happened, such as `OrderCreated`, to anyone who listens. Separately, a queue hands each message to one consumer, while a topic gives every subscriber its own copy. Rule: sync or async is about waiting; command or event is about meaning; queue or topic is about who receives it.
 
 ## Interview Qs
 
 ### How do microservices communicate?
 
-Sync HTTP (REST, gRPC) when the caller needs an immediate answer; async messages through a broker such as Kafka or RabbitMQ for events and background work. Most systems use both.
+Synchronously over HTTP, with REST or gRPC, when the caller needs an immediate answer, and asynchronously through a broker such as Kafka or RabbitMQ for events and background work. The choice depends on whether the caller needs the result now, how much coupling is acceptable, and which delivery guarantees you need. Most systems use both.
 
 ### Is asynchronous communication always better?
 
-No. It removes the need for both services to be up together, but adds a broker, duplicate or late messages, and briefly stale data. A login or stock check needs a sync answer.
+No. It removes the need for both services to be up together and lets work finish later. But it adds a broker to run, duplicate or late messages, ordering questions, harder debugging and briefly stale data. A login check or a stock check needs a sync answer.
 
-### Why is a chain of sync calls a problem?
+### Why is a chain of synchronous calls a problem?
 
-Each hop adds latency, and if any service in the chain fails or slows, the whole user request fails. Instead, keep a local copy of the data you need, updated by events.
+Each hop adds its latency to the user's request, and the request fails if any service in the chain fails or slows down. Availability also multiplies: three services at 99.9% each give about 99.7% together. Keep a local copy of the data you need, updated by events, or move work to async messages.

@@ -5,17 +5,28 @@ title: REST APIs Between Services
 topic: communication
 level: beginner
 heat: 3
-hook: "Name resources with nouns, act on them with HTTP methods, answer with the right status code and a stable contract."
+hook: "REST gives every thing a URL, such as /orders/9001, uses the HTTP method to say the action, and answers with a status code that says what happened."
 points:
-  - { k: "Resources", v: "plural nouns: /orders/9001, not /createOrder" }
-  - { k: "Idempotent methods", v: "PUT, DELETE and the safe ones (RFC 9110); not POST or PATCH" }
-  - { k: "401 vs 403", v: "401: no valid credentials. 403: known caller, not allowed" }
-  - { k: "DTOs, not entities", v: "the API must not mirror database tables", kind: minus }
-  - { k: "Breaking change", v: "removing or renaming a field needs a new version", kind: minus }
+  - { k: "Resource URLs", v: "use plural nouns such as /orders/9001; the HTTP method, not the URL, says what to do" }
+  - { k: "Idempotent methods", v: "GET, HEAD, OPTIONS, TRACE, PUT and DELETE can be repeated safely; POST and PATCH cannot (RFC 9110)" }
+  - { k: "Status code families", v: "2xx means success, 4xx means the caller sent something wrong, 5xx means the server failed" }
+  - { k: "401 vs 403", v: "401 means no valid credentials, so log in again; 403 means the caller is known but not allowed" }
+  - { k: "DTOs, not entities", v: "return classes shaped for the API (DTOs); returning database entities ties every client to your tables", kind: minus }
+  - { k: "Breaking change", v: "removing or renaming a field breaks old clients, so it needs a new API version", kind: minus }
 trap:
   wrong: "401 Unauthorized means the user lacks permission."
-  right: "401 means no valid credentials, so log in again. 403 means the caller is known but not allowed."
-sayIt: "I model resources as nouns, use methods as RFC 9110 defines them, return precise codes like 201, 409 or 422 with one error format, and evolve the API by adding fields; breaking changes get a new version."
+  right: "401 means no valid credentials, so authenticate again. 403 Forbidden means the caller is known but not allowed to do this."
+  why: "The name \"Unauthorized\" sounds like \"not permitted\", but RFC 9110 uses 401 for missing or invalid authentication."
+sayIt: "I model resources as nouns, use HTTP methods as RFC 9110 defines them, and return precise codes such as 201, 409 or 422 with one error format. I evolve the API by adding fields; a breaking change gets a new version."
+cheat:
+  idea: "REST designs HTTP APIs around resources such as /orders/9001. The method says the action (GET, POST, PUT, PATCH, DELETE), and the status code says the result."
+  remember: "PUT and DELETE are idempotent, POST and PATCH are not. 401 = not logged in; 403 = logged in but not allowed."
+buildsOn: [sync-and-async-communication]
+scenarios:
+  - q: "A client sends POST /orders with quantity 0. The JSON is valid. Which status code fits, and why not 400?"
+    a: "422 Unprocessable Content: the server understood the request, but a value breaks a business rule. 400 Bad Request fits a request the server cannot read at all, such as broken JSON."
+  - q: "Payment Service renames the response field amount to totalAmount. Order Service still reads amount. What happens, and how should the change be made?"
+    a: "Order Service finds no amount and reads null or fails: a breaking change. Add totalAmount next to amount, let clients move over, and remove amount only in a new version."
 confusedWith: [put-vs-post-vs-patch, rest-vs-grpc]
 tags: [rest, http, status-codes, api-versioning]
 visual: table
@@ -31,25 +42,32 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+REST is a way of designing HTTP APIs around resources. A resource is a thing the API exposes, such as an order, and each one has its own URL, like `/orders/9001`. The client acts on it with standard HTTP methods: GET reads, POST creates. The server answers with a status code, a three-digit number that says what happened, and usually a JSON body. Most [synchronous calls](card:sync-and-async-communication) between services are REST calls.
+
 ## Why it exists
 
-Teams must agree on how services ask and answer. REST reuses plain HTTP meanings, so any client understands the calls.
+Order Service and Payment Service are built by different teams that must agree on how to ask and answer. If each team invents its own style, such as `/doPayment` or `/getPaymentInfoById`, every client must learn every API, and errors and retries behave differently everywhere. REST reuses meanings that HTTP already defines: what each method does, which methods are safe to repeat, and what each status code means. Any client, proxy or developer can then read a call without extra notes.
 
 ## How it works
 
-| Method | Use | Safe | Idempotent |
+| Method | Use | Safe (read-only) | Idempotent |
 | --- | --- | --- | --- |
 | GET | Read | Yes | Yes |
 | POST | Create, or run an action | No | No |
-| PUT | Create or replace at a known URI | No | Yes |
+| PUT | Create or replace at a known URL | No | Yes |
 | PATCH | Change some fields | No | No, unless designed so |
 | DELETE | Remove | No | Yes |
 
-- Know the [status codes](card:client-error-codes) by family: 2xx done, 4xx caller's fault, 5xx server's fault.
-- Send every error in one format, such as problem details (RFC 9457).
-- Version in the URI (`/v2/`) for simplicity; a header keeps the URI the same.
+1. The client picks the resource URL: the collection, `/orders`, or one item, `/orders/9001`.
+2. It picks the method for the action and sends a JSON body that matches the API contract, the agreed shape of requests, responses and errors.
+3. The server validates the request, does the work, and answers with a status code: 2xx for success, 4xx for the caller's mistake, 5xx for the server's failure.
+4. On an error, the body explains it in one standard format, such as problem details (RFC 9457), so every client reads errors the same way.
 
 ## Example
+
+The shop's checkout creates an order, then sends one with a wrong quantity.
 
 ```text
 POST /api/v1/orders       {"productId": 101, "quantity": 2}
@@ -63,16 +81,40 @@ POST /api/v1/orders       {"productId": 101, "quantity": 0}
     "title": "Quantity must be at least 1", "status": 422}
 ```
 
+What to notice:
+
+- `201 Created` with a `Location` header tells the client the new order's URL, so it does not have to guess the id.
+- The second request is well-formed JSON with a bad value, so the answer is `422`, not `400`. Broken JSON would be `400`.
+- `application/problem+json` is the RFC 9457 format: `type`, `title` and `status` mean the same in every service, so one error handler fits all.
+- The `/v1/` in the path is the API version. A breaking change would go to `/v2/` while `/v1/` keeps working.
+
+## Rules and defaults
+
+- **Safe methods:** GET, HEAD, OPTIONS and TRACE only read; they must not change anything on the server (RFC 9110).
+- **Idempotent methods:** a method is idempotent when sending the same request twice has the same effect as sending it once. PUT, DELETE and the safe methods are; POST and PATCH are not, so a retried POST can create a second order; [idempotency](card:idempotency) shows the fix.
+- **401 needs a challenge:** a 401 response includes a `WWW-Authenticate` header that says how to authenticate (RFC 9110).
+- **Send DTOs:** a DTO (data transfer object) is a class shaped for the API. Returning database entities instead means a renamed column breaks every client.
+- **Evolve by adding:** a new optional field is safe for clients that ignore unknown fields. Removing or renaming a field is a breaking change that needs a new version.
+
+## Not to be confused with
+
+POST asks the server to process the body, usually to create a new item whose id the server picks. PUT stores the whole body at a URL the client already knows, so repeating it changes nothing more. PATCH changes only the fields it sends. Rule: POST creates, PUT replaces, PATCH edits. [gRPC](card:grpc), the next concept, is a different style that calls typed methods instead of acting on resources.
+
+## Common mistakes
+
+- **Verbs in URLs, such as `/createOrder`.** The method already carries the verb. Use `POST /orders`.
+- **`200 OK` with an error inside the body.** Clients, proxies and monitoring read the status code. A failure must use a 4xx or 5xx code.
+
 ## Interview Qs
 
 ### PUT, POST or PATCH: which one?
 
-POST creates when the server picks the id, PUT replaces the whole resource at a known URI, PATCH changes some fields. Only PUT is idempotent. See [PUT vs POST vs PATCH](compare:put-vs-post-vs-patch).
+POST creates when the server picks the id, such as `POST /orders`. PUT replaces the whole resource at a known URL. PATCH changes only some fields. PUT is idempotent; POST is not, and PATCH is not unless designed so. For a create that may be retried, I add an idempotency key to the POST.
 
 ### 409 or 422 for a request that breaks a rule?
 
-422 when the content is well-formed but its values are wrong, like quantity 0. 409 when it conflicts with the resource's current state, like editing a stale version.
+422 when the content is well-formed but its values are wrong, such as quantity 0. 409 Conflict when the request clashes with the resource's current state, such as updating an order that someone else changed first, or cancelling one that has already shipped.
 
 ### How do you change an API without breaking clients?
 
-Add optional fields; clients that ignore unknown fields keep working. For removals or renames, publish a new version and keep the old one. Guard it with [contract tests](card:testing-microservices).
+Add optional fields; clients that ignore unknown fields keep working. For removals or renames, publish a new version and run the old one until clients move. Contract tests, covered in [Testing Microservices](card:testing-microservices), catch a breaking change before it ships.

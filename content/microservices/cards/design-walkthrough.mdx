@@ -5,17 +5,29 @@ title: How to Answer a Microservices Design Question
 topic: playbook
 level: interview
 heat: 2
-hook: "Answer in one order: boundaries, calls, data, failures, consistency, security, observability, deployment, naming each trade-off."
+hook: "Answer in one fixed order: flows, boundaries, calls, data, failures, consistency, then security, observability and deployment, naming each trade-off."
 points:
-  - { k: "Start", v: "the business flows, then Order, Payment, Inventory" }
-  - { k: "Sync or async", v: "sync only when the caller needs the answer now" }
-  - { k: "Money path", v: "saga + outbox + idempotency key" }
-  - { k: "Every call", v: "timeout, bounded retry, circuit breaker" }
-  - { k: "Prove it", v: "trace ids, the golden signals, readiness probes" }
+  - { k: "Start", v: "with the business flows, and what must be correct at once (the payment) or may happen later (the email)" }
+  - { k: "Boundaries", v: "Order, Payment, Inventory and Notification, split by business capability, each with its own database" }
+  - { k: "Sync or async", v: "call synchronously only when the caller needs the answer now; otherwise publish an event" }
+  - { k: "Money path", v: "a saga with compensations, an outbox for its events, and an idempotency key on the charge", kind: plus }
+  - { k: "Every remote call", v: "gets a timeout, a bounded retry and a circuit breaker" }
+  - { k: "Prove it", v: "trace IDs, the four golden signals and SLOs show whether the design really works in production" }
 trap:
   wrong: "Start by listing tools: Kafka, Eureka, Kubernetes, Redis."
   right: "Start with the business flows and service boundaries. Name a tool only to fix a problem you have stated."
-sayIt: "I split by business capability and keep data private. Calls are sync only when needed, else events. Order and payment run as a saga with an outbox and idempotency keys; every call has a timeout and a breaker."
+  why: "Tool names are concrete and easy to say, so they feel like progress, while boundaries and data ownership feel abstract."
+sayIt: "I split by business capability and keep each service's data private. Calls are sync only when needed, otherwise events. Order and payment run as a saga with an outbox and idempotency keys, and every remote call has a timeout and a circuit breaker."
+cheat:
+  idea: "A fixed order for a design answer: start from the business flows, link each step to the pattern that fixes its problem, and say the trade-off aloud."
+  flow: "Boundaries → calls → data → failures → consistency → operations"
+  remember: "Spend the most time on the money path: a saga, an outbox and an idempotency key on the charge."
+buildsOn: [service-boundaries, saga, microservice-patterns-map]
+scenarios:
+  - q: "In your design, Payment Service times out while charging ₹500 for order 42. What happens next?"
+    a: "Order retries a bounded number of times with the same idempotency key, so if the first charge went through, Payment returns that result instead of charging again. If the charge fails, the saga compensates: Inventory releases the reserved stock and the order is cancelled."
+  - q: "The interviewer asks: 'Why not one @Transactional method across Order, Payment and Inventory?'"
+    a: "A local transaction covers only one service's own database. The other services sit behind network calls, each with its own database, so a saga of local transactions with compensations, such as a refund, takes its place."
 confusedWith: []
 tags: [interview, system-design, revision]
 visual: flow
@@ -34,37 +46,63 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+This concept is a fixed order for answering a question such as "design an online shop with microservices". It walks the shop from the business flows to deployment, and at each step names the concept that solves that step's problem and the trade-off it brings. It ties the whole tech together, so every step links to a concept you have already read.
+
 ## Why it exists
 
-"Design an order system with microservices" tests whether you can connect the concepts. A fixed order keeps the answer complete and calm.
+In a design interview it is easy to jump to tools such as Kafka, Redis and Kubernetes, and to forget who owns the data or what happens when a call fails. Interviewers check whether you can connect the ideas and explain trade-offs, not whether you can list products. A fixed order keeps the answer complete and calm, and leaves time for the part that matters most: money and stock.
 
 ## How it works
 
-<Steps label="The answer, step by step, for an online shop">
-  <Step title="Requirements">Flows, scale, and what must be correct at once (payment) or later (email).</Step>
-  <Step title="Boundaries">Order, Payment, Inventory, Notification by [business capability](card:service-boundaries).</Step>
-  <Step title="Calls">[Sync or async](card:sync-and-async-communication) per call; [gateway](card:api-gateway) at the edge.</Step>
-  <Step title="Data">[A database per service](card:database-per-service); no shared tables.</Step>
-  <Step title="Failures">[Timeouts and retries](card:timeouts-and-retries), [circuit breaker](card:circuit-breaker), [fallbacks](card:fallback-and-degradation).</Step>
-  <Step title="Consistency">[Saga](card:saga), [outbox](card:outbox-and-inbox), [idempotency keys](card:idempotency).</Step>
-  <Step title="Security">[Auth at the gateway, checks in every service](card:microservices-security).</Step>
-  <Step title="Observability">[Traces, logs, metrics](card:observability) and [SLOs](card:metrics-and-slos).</Step>
-  <Step title="Deploy and scale">[Kubernetes](card:containers-and-kubernetes), [probes](card:health-probes), [canary](card:deployment-strategies), [more instances](card:scaling-services).</Step>
-</Steps>
+<Mermaid
+  alt="The shop design. The client calls an API gateway, which routes to Order Service, which runs the order saga. First Order Service publishes ReserveStock through its outbox to Kafka, and Inventory Service consumes it. Once stock is reserved, Order Service calls Payment Service synchronously to charge 500 rupees, with a timeout and a circuit breaker. Notification Service consumes events from Kafka. Each service has its own database."
+  chart={`flowchart LR
+  C([Client]) --> G[API gateway]
+  G --> O[Order Service: saga]
+  O -- "1. ReserveStock via outbox" --> K[(Kafka)]
+  K --> I[Inventory Service]
+  K --> N[Notification Service]
+  O -- "2. charge ₹500: timeout + breaker" --> P[Payment Service]
+  O --- OD[(Order DB)]
+  P --- PD[(Payment DB)]
+  I --- ID[(Inventory DB)]`}
+/>
 
-| Don't say | Say |
+1. **Requirements:** state the flows (place order, reserve stock, charge ₹500, send confirmation), the scale, and what must be correct at once (the payment) or may happen later (the email).
+2. **Boundaries and data:** split by [business capability](card:service-boundaries) into Order, Payment, Inventory and Notification, each with [its own database](card:database-per-service) and no shared tables.
+3. **Calls:** choose [sync or async](card:sync-and-async-communication) per call, and put an [API gateway](card:api-gateway) at the edge.
+4. **Failures:** give every remote call a [timeout and a bounded retry](card:timeouts-and-retries), a [circuit breaker](card:circuit-breaker) and, where it is safe, a [fallback](card:fallback-and-degradation).
+5. **Consistency:** run the order as a [saga](card:saga), publish its events through an [outbox](card:outbox-and-inbox), and charge with an [idempotency key](card:idempotency).
+6. **Operations:** [authenticate at the gateway and check in every service](card:microservices-security), add [traces, logs and metrics](card:observability) with [SLOs](card:metrics-and-slos), and deploy on [Kubernetes](card:containers-and-kubernetes) with [probes](card:health-probes), a [canary](card:deployment-strategies) and [more instances](card:scaling-services) under load.
+
+So the key is: each step states a problem first, then the concept that fixes it.
+
+## Example
+
+The deep dive on the money path: the shop's classic failures and what the design does about each.
+
+| Failure | What the design does |
 |---|---|
-| "Microservices are faster." | They add network hops; they buy [independent deploys](card:monolith-and-microservices). |
-| "Expose each service to clients." | Put an [API gateway](card:api-gateway) in front. |
-| "@Transactional covers the payment call." | A local transaction cannot span services: [saga](card:saga) with compensations. |
-| "The outbox gives exactly-once." | The relay can publish twice; [consumers stay idempotent](card:delivery-guarantees). |
+| Payment times out while charging ₹500 | Retry with the same idempotency key, so a charge that went through is not repeated |
+| Stock runs out | Inventory reports it, and the saga cancels the order before any money is charged |
+| The card is declined | The saga compensates: Inventory releases the reserved stock and the order is cancelled |
+| OrderPlaced is delivered twice | Notification and Inventory are idempotent consumers and skip the repeat |
+
+## Common mistakes
+
+- **"Microservices are faster."** They add network hops. What they buy is [independent deploys](card:monolith-and-microservices) and scaling.
+- **"Expose each service to clients."** Put an [API gateway](card:api-gateway) in front, so clients have one entry and services can change behind it.
+- **"@Transactional covers the payment call."** A local transaction cannot span services; use a [saga](card:saga) with compensations.
+- **"The outbox gives exactly-once."** The relay can publish an event twice, so [consumers stay idempotent](card:delivery-guarantees).
 
 ## Interview Qs
 
 ### Can two services share a code library?
 
-Yes, for small, stable technical code such as data access or messaging helpers, versioned so each service upgrades on its own. Do not share domain logic or entities: one change then forces both teams to release together.
+Yes, for small, stable technical code such as logging or messaging helpers, versioned so that each service upgrades on its own. Do not share domain logic or entities: one change then forces both teams to release together, and the services are coupled again.
 
 ### How would you design an order, payment and inventory system?
 
-Walk the steps above in order, one line each, then go deep where money and stock meet: the saga, the outbox and idempotent payment. Say each trade-off aloud.
+Walk the six steps in order, one or two lines each: flows, boundaries and data, calls, failures, consistency, operations. Then go deep where money and stock meet: the saga, the outbox and the idempotent charge. Say each trade-off aloud, such as eventual consistency for stock.

@@ -5,34 +5,56 @@ title: Containers and Kubernetes
 topic: deployment
 level: beginner
 heat: 2
-hook: "Ship each service as an image, run it as containers, and let Kubernetes keep the declared number of copies running."
+hook: "A container runs a service together with everything it needs. Kubernetes runs many containers across machines and keeps the number of copies you asked for."
 points:
-  - { k: "Image vs container", v: "image = read-only template; container = a running instance of it" }
-  - { k: "Container vs VM", v: "a container shares the host kernel; a VM carries a full OS" }
-  - { k: "Desired state", v: "you declare 3 replicas; Kubernetes replaces Pods that fail", kind: plus }
-  - { k: "Writable layer", v: "lost when the container is removed: keep data in a volume or DB", kind: minus }
+  - { k: "Image vs container", v: "an image is a read-only, versioned template; a container is one running copy started from it" }
+  - { k: "Container vs VM", v: "a container is an isolated process that shares the host's OS kernel; a VM carries a whole OS" }
+  - { k: "Desired state", v: "you declare 3 replicas; if a Pod dies, Kubernetes starts a new one to get back to 3", kind: plus }
+  - { k: "Service name", v: "callers use a stable name such as order-service, never a Pod's IP, because Pods are replaced" }
+  - { k: "Writable layer", v: "files written inside a container are lost when it is removed; keep data in a volume or a database", kind: minus }
 trap:
   wrong: "Kubernetes restarts a crashed Pod, so the bug is handled."
   right: "A restart only clears a dead or stuck process; the bug stays. Kubernetes cannot see business errors such as a wrong order total."
-sayIt: "Each service ships as an image and runs as containers in Pods. A Deployment keeps N replicas, a Service gives them one stable address, and an autoscaler adds Pods under load."
+  why: "Self-healing is the feature everyone hears about first, and a crashed Pod that comes back by itself looks as if the problem was fixed."
+sayIt: "Each service ships as an image and runs as containers in Pods. A Deployment keeps N replicas running, a Service gives them one stable name, and an autoscaler can add Pods under load. Kubernetes restarts processes; it does not replace timeouts and retries in the app."
+cheat:
+  idea: "A container runs a service from an image that holds everything it needs. Kubernetes runs containers across many machines and keeps the declared number of copies."
+  flow: "Image → Deployment (3 replicas) → Pods → Service → callers"
+  remember: "Kubernetes restarts crashed Pods but cannot fix the bug or see business errors; callers still need timeouts and retries."
+buildsOn: [scaling-services, service-discovery]
+scenarios:
+  - q: "One of the three Order Service Pods crashes at 2 a.m. What does Kubernetes do, and what do callers of http://order-service notice?"
+    a: "The ReplicaSet sees two Pods instead of three and starts a new one. New calls go to the two Pods that are still ready, because the Service sends traffic only to ready Pods. Only the calls the crashed Pod was handling at that moment fail."
+  - q: "A team saves uploaded invoice PDFs to /tmp inside the container. After the next deploy they are gone. Why?"
+    a: "Files written inside a container live in its writable layer, which is deleted with the container. A deploy replaces every container, so files that must survive belong in a volume or a database."
 confusedWith: [docker-vs-kubernetes]
 tags: [docker, kubernetes, containers, pods]
 visual: flow
 sources:
-  - title: "Overview: why you need Kubernetes (Kubernetes 1.37 docs)"
+  - title: "Overview: why you need Kubernetes, and what it is not (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/overview/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Deployments (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
+    verifiedOn: "2026-10-21"
   - title: "Service (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/services-networking/service/"
     verifiedOn: "2026-10-20"
+  - title: "Ingress: the API is frozen, Gateway API recommended (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/services-networking/ingress/"
+    verifiedOn: "2026-10-21"
   - title: "What is a container? (Docker)"
     url: "https://www.docker.com/resources/what-container/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A container is a service running as an isolated process, packed with everything it needs: the Java runtime, the libraries and the jar. It starts from an image, a read-only template that is built once and has a version, such as `order-service:1.4.2`. Kubernetes is a platform that runs containers on a group of machines, called a cluster. It keeps the number of copies you ask for and gives each service one stable address.
+
 ## Why it exists
 
-Each service must run the same way on every machine, in many copies that recover from crashes. Containers solve the first; an orchestrator such as Kubernetes solves the second.
+Without containers, every server needs the right Java version and libraries installed by hand, so a service that works in test can fail in production. Without an orchestrator, someone must start three copies of Order Service on different machines, notice when one dies, start a new one and tell every caller the new address. Containers make a service run the same everywhere. Kubernetes does the starting, replacing and addressing for you.
 
 ## How it works
 
@@ -49,11 +71,17 @@ Each service must run the same way on every machine, in many copies that recover
   H[HPA] -. scales .-> D`}
 />
 
-- Pods come and go; the Service keeps one name and sends calls only to ready Pods.
-- Settings arrive through a ConfigMap and Secret: see [Configuration and Secrets](card:configuration-management).
-- Kubernetes does not replace [timeouts and retries](card:timeouts-and-retries) inside the app.
+1. You build an image of the service, usually from a Dockerfile, and push it to a registry, a store for images.
+2. You write a Deployment: the desired state, saying which image to run and how many copies (replicas).
+3. Kubernetes starts that many Pods. A Pod is the smallest unit it runs: one or more containers that share one network address. The Deployment's ReplicaSet keeps the count right; if a Pod dies, it starts a new one.
+4. A Service gives the Pods one stable name, such as `order-service`, and spreads calls over the Pods that are ready. Pods get a new address each time they are replaced, so callers use the name.
+5. Traffic from outside the cluster enters through an Ingress or a Gateway, Kubernetes objects that route outside HTTP calls to Services, and a HorizontalPodAutoscaler can change the replica count when load grows.
+
+So the key is desired state: you describe what should run, and Kubernetes keeps making reality match it.
 
 ## Example
+
+The Order Service runs as three Pods behind one Service name.
 
 ```yaml
 apiVersion: apps/v1
@@ -70,12 +98,47 @@ spec:
           image: registry.example.com/order-service:1.4.2
 ```
 
+```yaml
+apiVersion: v1
+kind: Service
+metadata: { name: order-service }
+spec:
+  selector: { app: order }
+  ports: [ { port: 80, targetPort: 8080 } ]
+```
+
+What to notice:
+
+- `replicas: 3` is the desired state. Delete one Pod by hand and the ReplicaSet starts a replacement.
+- The label `app: order` ties everything together: the Deployment finds its Pods by it, and the Service sends calls to every ready Pod that carries it.
+- Other services call `http://order-service`. Port 80 on the Service is forwarded to port 8080 in the container.
+- The image has a fixed version tag. Changing `1.4.2` to `1.4.3` starts a rolling update, which you will see in [Deployment Strategies](card:deployment-strategies).
+
+## Rules and defaults
+
+- **Service type:** `ClusterIP` by default, so the Service is reachable only inside the cluster (Kubernetes 1.37).
+- **Ingress:** the Ingress API is frozen; Kubernetes recommends Gateway API for new setups. An Ingress does nothing without an Ingress controller installed.
+- **Data:** the container's writable layer is deleted with the container. Keep data in a volume or a database.
+- **Not Kubernetes' job:** it does not build your application, and it cannot see business errors such as a wrong order total. It restarts processes; [timeouts and retries](card:timeouts-and-retries) stay in your code.
+
+## Not to be confused with
+
+Docker is a tool that builds images and runs containers, usually on one machine. Kubernetes runs, scales and heals containers across a whole cluster, and since version 1.24 it uses runtimes such as containerd instead of Docker Engine; images built with Docker still run. Rule: Docker builds and runs a container; Kubernetes keeps many of them running.
+
+## Common mistakes
+
+- **Calling a Pod by its IP address.** Pods are replaced on every deploy and crash, and each new Pod gets a new IP. Call the Service name.
+
 ## Interview Qs
 
 ### What is the difference between a container and a virtual machine?
 
-A container is an isolated process that shares the host's OS kernel, so it is small and starts fast. A VM virtualises hardware and carries a full OS, so it is heavier and slower to boot.
+A container is an isolated process that shares the host's operating system kernel, so it is small and starts in seconds. A virtual machine emulates hardware and runs its own full operating system, so it is heavier and slower to boot.
+
+### What do a Pod, a Deployment and a Service do?
+
+A Pod runs one or more containers with one network address. A Deployment declares which image and how many Pods, and replaces them on failure or on a new version. A Service gives those changing Pods one stable name and spreads calls over the ready ones.
 
 ### If Kubernetes restarts failed Pods, why do we still need resilience patterns?
 
-Restarts fix crashed processes, not slow dependencies or wrong results. Callers still need timeouts, retries and [circuit breakers](card:circuit-breaker), and monitoring must catch business errors.
+A restart fixes a crashed process, not a slow dependency or a wrong result. Callers still need timeouts, retries and [circuit breakers](card:circuit-breaker), and monitoring must catch business errors that Kubernetes cannot see.

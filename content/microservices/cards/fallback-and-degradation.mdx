@@ -5,53 +5,111 @@ title: "Fallbacks and Graceful Degradation"
 topic: resilience
 level: intermediate
 heat: 2
-hook: "When a dependency fails, keep the core feature working with a safe second-best answer; never fake a success."
+hook: "When a dependency fails, keep the core feature working with a safe second-best answer, and switch off the extras. Never fake a success."
 points:
-  - { k: "Fallback", v: "another answer once the call cannot succeed" }
-  - { k: "Graceful degradation", v: "keep the core feature, switch off the extras" }
-  - { k: "Soft dependency", v: "the page still works without it", kind: plus }
-  - { k: "Rarely run code", v: "fallback paths hide bugs; test them often", kind: minus }
+  - { k: "Fallback", v: "the answer given when a call cannot succeed: cached data, a default value, or a clear error" }
+  - { k: "Graceful degradation", v: "the core features keep working while extras, such as reviews or recommendations, switch off" }
+  - { k: "Soft dependency", v: "the feature still works without it, so it can be hidden or replaced when it fails", kind: plus }
+  - { k: "Hard dependency", v: "the feature cannot work without it, like Payment for checkout; fail clearly or mark the work pending" }
+  - { k: "Rarely run code", v: "fallback paths run only during failures, so they hide bugs; test them on purpose and keep them simple", kind: minus }
 trap:
-  wrong: "If Payment is down, show 'Order placed' and charge later."
-  right: "Never fake success for money. Fail clearly, or accept the order as 'payment pending' and confirm it when Payment answers."
-sayIt: "I decide per feature what happens when its dependency fails: hide recommendations, show cached data, or queue the work. For payments I keep correctness and fail clearly instead of faking success."
+  wrong: "If Payment is down, show \"Order placed\" and charge later."
+  right: "Never fake success for money. Fail clearly, or accept the order as \"payment pending\" and confirm it only when Payment answers."
+  why: "Showing success keeps the customer happy in the moment, and \"charge later\" sounds like a harmless delay rather than a broken promise."
+sayIt: "I decide per feature what happens when its dependency fails: hide recommendations, show cached data, or queue the work for later. For payments I keep correctness and fail clearly, or mark the order pending, instead of faking success."
+cheat:
+  idea: "A fallback is the safe second-best answer when a dependency fails: hide the extra, show cached data, or queue the work. Core features keep working."
+  remember: "Never fake success for money: fail clearly, or mark the payment pending."
+buildsOn: [timeouts-and-retries, circuit-breaker]
+scenarios:
+  - q: "Notification is down when a customer places an order. Should the order fail?"
+    a: "No. The confirmation email is a soft dependency for ordering. Save the order, queue the email, and send it when Notification is back. The customer should not lose an order because an email could not go out."
+  - q: "The Inventory breaker is OPEN, so the product page shows \"Stock is checked at checkout\". Can checkout skip the stock check too?"
+    a: "No. On the product page stock is a soft dependency, so a vague label is safe. At checkout, reserving stock is a hard dependency: selling stock you do not have costs more than an error. Checkout should retry later or fail clearly."
 confusedWith: []
 tags: [fallback, graceful-degradation, fault-tolerance]
 visual: table
 sources:
   - title: "REL05-BP01 Implement graceful degradation (AWS Well-Architected, Reliability Pillar)"
     url: "https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_mitigate_interaction_failure_graceful_degradation.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Avoiding fallback in distributed systems (Amazon Builders' Library)"
     url: "https://builder.aws.com/content/3EuS9Sakq7L3VLQIF3qzfMfke1Y/avoiding-fallback-in-distributed-systems"
     verifiedOn: "2026-10-20"
   - title: "Addressing Cascading Failures: graceful degradation (Google SRE book)"
     url: "https://sre.google/sre-book/addressing-cascading-failures/"
     verifiedOn: "2026-10-20"
+  - title: "Getting started with Spring Boot: fallback method rules (Resilience4j docs)"
+    url: "https://resilience4j.readme.io/docs/getting-started-3"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A fallback is the answer a service gives when a call to a dependency cannot succeed: cached data, a default value, or a clear error. Graceful degradation is the plan behind it: when a part fails, the core features keep working and the extras switch off. A soft dependency is one a feature can live without, like reviews on a product page. A hard dependency, like Payment for a purchase, cannot be replaced.
 
 ## Why it exists
 
-Retries cannot hide every failure. A shop should still take orders when recommendations are down, instead of showing an error page.
+[Retries](card:timeouts-and-retries) and [circuit breakers](card:circuit-breaker) decide when to stop calling; they do not say what to show the user. Without a plan, an outage of a small service such as Reviews turns the whole product page into an error page, and the shop loses sales over a feature nobody needed in order to buy. With a fallback per feature, the page loads without reviews and the order still goes through.
 
 ## How it works
 
 | Shop feature | Its dependency fails | Degrade to |
 | --- | --- | --- |
-| Recommendations | Recommendation service | Hide the section, or show a fixed list |
-| Product page | Review service | Show the page without reviews |
+| Product page stock label | Inventory service | "Stock is checked at checkout" |
+| Product page reviews | Review service | Show the page without reviews |
 | Order confirmation email | Notification service | Queue it; send when it is back |
 | Payment | Payment service | A clear error or "payment pending", never "paid" |
 
-- [Retry](card:timeouts-and-retries) first; fall back when retries run out or the [breaker](card:circuit-breaker) is open.
-- Alert when many instances serve degraded answers, so nobody mistakes degraded for healthy.
+1. For each feature, mark every dependency as soft or hard.
+2. For a soft dependency, pick a fallback: hide the section, show cached or default data, or queue the work for later.
+3. Run the fallback when retries run out, the breaker is OPEN, or the [bulkhead](card:bulkhead) is full.
+4. For a hard dependency, fail clearly or accept the work as pending; never pretend it succeeded.
+5. Alert when instances serve degraded answers, so nobody mistakes degraded for healthy.
+
+## Example
+
+The product page asks Inventory for a stock label and falls back to a safe text when the call fails or the breaker is OPEN:
+
+```java
+@CircuitBreaker(name = "inventory", fallbackMethod = "stockUnknown")
+public StockLabel stockLabel(String sku) {
+    int left = inventory.stock(sku);                         // remote call to Inventory
+    return new StockLabel(left > 0 ? left + " in stock" : "Out of stock");
+}
+
+// same parameters plus the exception, same return type
+private StockLabel stockUnknown(String sku, Exception e) {
+    return new StockLabel("Stock is checked at checkout");   // the page still loads
+}
+```
+
+What to notice:
+
+- `fallbackMethod` names a method in the same class. Resilience4j calls it with the original arguments plus the exception, so the signature must match, with one extra exception parameter.
+- The parameter type `Exception` catches every failure, including the `CallNotPermittedException` thrown while the breaker is OPEN, so the page never waits on a dead service.
+- The fallback is honest: it does not claim stock exists. Checkout still makes the real reservation, a hard dependency, and fails clearly if Inventory is down.
+
+## Rules and defaults
+
+- **Keep fallback code simple:** AWS advises that failure paths be tested and much simpler than the main path; complex fallbacks fail in ways nobody has seen.
+- **Avoid fallbacks that add load:** if every server falls back to the database when the cache fails, the database gets the whole load at once.
+- **Correctness first for money:** for payment processing, consistency matters more than staying available.
+
+## Not to be confused with
+
+A retry repeats the same call, hoping a brief fault has passed. A fallback gives a different answer once the call cannot succeed. Rule: retry first, fall back last.
 
 ## Interview Qs
 
-### Retry vs fallback?
-
-Retry repeats the same call, hoping a brief fault has passed. Fallback gives a different answer, such as cached or default data, once the call cannot succeed.
-
 ### When should you avoid a fallback?
 
-When a wrong answer costs more than an error, as with payments and other transactions. Also when the fallback adds load, such as every server hitting the database once the cache fails.
+When a wrong answer costs more than an error, as with payments and other transactions. Also when the fallback itself adds load, such as every server hitting the database once the cache fails, or when it is so rarely run that it is likely broken.
+
+### Is it safe to show stale cached data?
+
+It depends on the feature. A product description or reviews from an hour ago are fine. A price or stock level at checkout is not, because the customer acts on it. Decide per feature, and mark stale data where users could be misled.
+
+### What happens to writes while a dependency is down?
+
+For soft work, such as a confirmation email, accept the request and buffer it in a queue until the dependency is back. For hard work, such as a payment, either fail clearly or record it as pending and finish it later, so the customer is never told something false.

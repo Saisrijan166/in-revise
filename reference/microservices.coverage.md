@@ -1,5 +1,5 @@
 # Coverage: Microservices
-Reference: reference/microservices.md  ·  Last updated: 20-10-2026
+Reference: reference/microservices.md  ·  Last updated: 21-10-2026
 
 The reference has 25 numbered sections (M1–M25), 20 interview questions in section 22 (M22.Q1–M22.Q20) and a 20-row differences
 table in section 23 (M23.1–M23.20). Every item appears in exactly one of Mapped, Corrected or Dropped. A section whose parts went
@@ -325,3 +325,281 @@ primary pages (RFCs, product docs, microservices.io, martinfowler.com, Azure/AWS
 | M20. (part: simple REST service example, OrderController) | cut: duplicate: plain Spring Web code; REST design is owned by rest-apis, and no cross-tech link is allowed |
 | M21. N+1 query problem | cut: not microservice-specific; a data-access topic (already covered in the SQL and Spring Boot techs) |
 | M21. Term "Capacity" | cut: common English word as a glossary term; the idea stays in the scaling Interview Q and Example |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass then checked about 1,620 claims and fixed 33, removing 3.
+
+### Unit basics
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| M2. "Microservices are not always better" / codebase large is not a reason (M2 interview answer) | monolith-and-microservices, Common mistakes |
+| M2. Failure handling row of the table | comparison monolith-vs-microservices, new row "When a part fails" |
+| M1. Service, independent deployment, service autonomy explained in plain words | monolith-and-microservices, What it is and Rules |
+| M3. Domain service (stateless operation across aggregates) | service-boundaries, Rules |
+| M3. Entity-per-service and too-fine-grained splits (chatty communication) | service-boundaries, Common mistakes and scenario |
+| M24. "A network call can fail even when both services are running" | distributed-systems-fallacies, Common mistakes (moved from trap; trap is now the timeout = unknown outcome mistake) |
+| M21. Deployment vs scaling (M23.20) together with Q12 scaling vs load balancing | scaling-services, Interview Q 1 |
+| M8. Retry rule 6 (idempotency key) and 'payment creation is not safe to retry' | timeouts-and-retries, scenario 3 |
+| M8. Timeout vs retry (M23.5) | timeouts-and-retries, Not to be confused with (removed as Interview Q to avoid repeating) |
+| M22.Q16 Retry vs fallback | fallback-and-degradation, Not to be confused with (removed as Interview Q) |
+| M8. Concurrency limit vs rate limiting | rate-limiting, Not to be confused with (rate limit vs load shedding vs bulkhead) |
+| Rate limiting vs load shedding (was an Interview Q) | rate-limiting, Not to be confused with |
+Other new facts (verified 21-10-2026): PostgreSQL 18 reserves 3 superuser connections by default; Resilience4j 2.x minimumNumberOfCalls 100 and slow-call defaults (60 s, 100%); thread-pool bulkhead core = CPU count − 1; Resilience4j retries every exception by default (run locally); Amazon's p99.9 timeout rule; Spring Cloud Gateway 5.0.3 Redis limiter = token bucket (replenishRate, burstCapacity, requestedTokens) and empty key denied by default; Resilience4j fallback signature rule; AWS REL05-BP01 soft/hard dependencies, simple tested failure paths, consistency first for payments.
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| Draft fallacies point "L. Peter Deutsch, eighth by James Gosling" lacked dates | Deutsch listed seven at Sun in 1994; Gosling added the eighth around 1997 | Wikipedia, Fallacies of distributed computing |
+| Draft scaling Example said 2 more instances break the database at max_connections 100 | Counted the 3 reserved superuser slots: app users get 97, so 10 instances × 10 = 100 is already too many | PostgreSQL 18 docs, runtime-config-connection |
+| Draft circuit breaker point "Slow calls can open it too" without the default | Added: the default slow-call threshold is 60 s at 100% slow calls, so set slowCallDurationThreshold lower | Resilience4j CircuitBreaker docs; 2.4.0 jar run |
+| Draft timeouts Example used `enableRandomizedWait` with exponential backoff in YAML; that property is not on the Resilience4j Spring Boot getting-started page | Replaced by a runnable core-API example with `IntervalFunction.ofExponentialRandomBackoff` | Resilience4j 2.4.0 jars, run locally |
+| Spring Cloud Gateway rate-limit page: an empty-key status of 403 is not stated on the page | Wrote only "denied by default" | Spring Cloud Gateway 5.0.3 RequestRateLimiter page |
+Reference: no wrong statements found in M1–M3, M8, M21 for these concepts. The reference's 3 × 3 = 9 retry example is kept as the same rule with 3 layers (27).
+
+### Unit communication
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| M4 OrderCreated example flow (save, publish, others react) | sync-and-async-communication, How it works steps + Java example |
+| M4 "async does not guarantee processing: delayed, duplicated, dead-lettered" | sync-and-async-communication, Rules and defaults (links dead-letter-queues) |
+| M22.Q3 "the choice depends on immediate response, coupling, delivery guarantees" | sync-and-async-communication, Interview Q 1 |
+| M5 201 vs 202 for the order contract | rest-apis Example (201 + Location); 202 rule lives in sync-and-async-communication |
+| M5 common rules: validate input, consistent errors, backward-compatible contracts | rest-apis How it works steps 3-4, Rules and defaults |
+| M5 409 Conflict "conflicts with current state" | rest-apis Interview Q 2 (cancelling a shipped order) |
+| M6 "Why use a gateway if services already have APIs?" | api-gateway Interview Q 1 |
+| M6 TLS termination, request aggregation, rate limiting (429) | api-gateway How it works steps 2 and 5 |
+| M7 "dynamic scaling": new instances must get traffic | service-discovery Why + scenario 1 |
+| M7 "healthy instance may still be overloaded"; "LB is not fault tolerance by itself" | load-balancing trap, Common mistakes, Interview Q 3 |
+| M7 weighted routing | load-balancing Example (`weight=2`) |
+| M22.Q12 scaling vs load balancing | load-balancing, Not to be confused with |
+| M20 "Calling another service" (RestClient, payment-service must resolve) | service-discovery Example (`@LoadBalanced`), Kubernetes DNS note |
+| M23.4 service discovery vs load balancing | service-discovery trap + Not to be confused with |
+Also added (verified, not in the reference): Async Request-Reply details (Location, 200 while running); `WWW-Authenticate` on 401; gRPC `reserved` fields and "do not change a field type"; gRPC deadline propagation only automatic in Java and Go; Spring Cloud LoadBalancer 35 s instance cache; Eureka "up to 3 heartbeats" to become visible; NGINX passive check defaults and active checks only in NGINX Plus; Istio sidecar injection by namespace label at Pod creation; Spring Cloud Gateway `lb://` and 503 when no instance; property prefix moved to `spring.cloud.gateway.server.webflux` in Spring Cloud 2025.0.
+Coverage file changes for the owner to record: idempotency Interview Q 3 is now "How long should you keep idempotency keys?"; the idempotency-vs-deduplication question (M23.19) is now answered in idempotency's "Not to be confused with" section and the comparison. The idempotency "Prefer natural idempotency" bullet became a point plus a Rules line. rest-apis no longer links the tree node `client-error-codes` (the status-code families are in How it works and points).
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| service-mesh trap said "Linkerd retries only idempotent requests within a retry budget" | Current Linkerd docs (retries via HTTPRoute annotations, 2.16+) only advise using retries on idempotent methods; no automatic idempotent-only rule or budget is stated. The trap now says retries are safe only for idempotent calls and cites that advice. | https://linkerd.io/2/features/retries-and-timeouts/ (21-10-2026) |
+| grpc draft implied deadline propagation is general | Automatic only in Java and Go; C++ must enable it | https://grpc.io/docs/guides/deadlines/ (21-10-2026) |
+| sync-and-async-communication example returned "201 Created at once" for an order whose payment is pending | Kept 201-style creation but the example now shows the order returned as PENDING; 202 + status URL is the rule for long work over HTTP | Azure Asynchronous Request-Reply pattern (21-10-2026) |
+
+### Unit data
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| M9 "Common mistake": a shared database with open access makes a distributed monolith | database-per-service, Not to be confused with (server vs tables rule) |
+| M9 "Can one service access another's database directly?" (read-only angle) | database-per-service, Common mistakes ("harmless if I only read") |
+| M9 data duplication (local copy is allowed) | database-per-service, How it works step 3 and Common mistakes |
+| M9 "separate databases, schemas, credentials, access permissions" | database-per-service, Example (SQL GRANT + JDBC currentSchema, run on PostgreSQL 18) |
+| M12 "do not describe every database as simply CP or AP" | cap-and-consistency, Common mistakes |
+| M12 quorum, split brain | cap-and-consistency, Example (3-node quorum table) and scenario 3 |
+| M12 read-your-writes, causal | cap-and-consistency, point and Rules |
+| M13 rules: cache is not the truth, invalidation, TTL length, local caches go stale | caching-in-microservices, Rules and Common mistakes |
+| M13 write-through, write-behind | caching-in-microservices, Not to be confused with |
+| M13 stampede (also a new Interview Q), penetration, avalanche | caching-in-microservices, Rules, Interview Q 3, scenario 3 |
+| M19 "CQRS does not require event sourcing" | cqrs, trap and Common mistakes (models can share one database) |
+| M19 "Event sourcing ... can be used together, different problems" | cqrs and event-sourcing, Not to be confused with |
+Also added (beyond the reference, verified): CQRS "use it for parts only, risky complexity" (Fowler); CQRS Interview Q "Why not a read replica?"; event sourcing: Kafka is not an event store, integration events, idempotent consumers, use selectively, sealed-switch exhaustiveness (JEP 441).
+
+**Corrections**
+
+- None to the reference in this unit beyond the existing coverage row (M19 "event sourcing does not require separate read and write models" is technically true; the content keeps "nearly always comes with CQRS", source Azure Event Sourcing pattern, which says applications typically implement materialized views because reading and replaying events is costly).
+- Draft fix: the CQRS draft implied the DB write and event publish can never be in one transaction; now "usually cannot", matching the Azure CQRS pattern wording.
+
+### Unit deployment
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| M16 Pod, Deployment, Service (Kubernetes) parts | containers-and-kubernetes How it works steps 3-4, new Interview Q "What do a Pod, a Deployment and a Service do?" |
+| M16 Ingress "needs a suitable controller" (already corrected to Gateway API) | containers-and-kubernetes Rules and defaults (controller needed, API frozen) |
+| M16 rule "Kubernetes cannot see business failures" | containers-and-kubernetes Rules and defaults "Not Kubernetes' job" (also trap) |
+| M16 startup probe | health-probes How it works step 1, scenario 1 |
+| M16 rollback | deployment-strategies How it works step 5, scenario 2, Rules (progress deadline, no automatic rollback) |
+| M16 feature flag (deploy vs release) | deployment-strategies Not to be confused with |
+| M17 validate required configuration at startup | configuration-management Example (record with @Validated, real failure message), Rules "Validation" |
+| M17 configuration drift | configuration-management Common mistakes |
+| M17 rule "different settings per environment" | configuration-management scenario 1 |
+| M18 why contract testing matters (paymentStatus to status) | testing-microservices Why, Example, scenario 1 (adding a field does not break the contract) |
+| M18 test double, mock | testing-microservices What it is |
+| M18 pyramid | testing-microservices Mermaid pyramid and steps |
+| M19 confusing patterns (saga vs outbox) | microservice-patterns-map Common mistakes, cheat remember, scenario 1 |
+| M19 CQRS vs event sourcing | microservice-patterns-map Interview Q (links the comparison in the table) |
+| M19 strangler fig example | strangler-fig-migration Mermaid and Example |
+| M20 calling another service (RestClient, needs timeouts) | spring-cloud-stack Example, now an HTTP service client with a read timeout |
+| M20 "Spring Cloud does not make it microservices" | spring-cloud-stack trap |
+| M22 Q19 deploy without downtime | deployment-strategies Interview Q 1 |
+| M22 Q18 shared library | design-walkthrough Interview Q 1 |
+| M25 best interview strategy | design-walkthrough How it works (6 steps) and Example (failure table on the money path) |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft health-probes did not say that a missing probe counts as passing | Added: no readiness probe means the Pod gets traffic as soon as its container runs | https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/ |
+| Draft deployment-strategies did not say what happens to a stuck rollout | Added: progressDeadlineSeconds 600 s, reported as failed, no automatic rollback | https://kubernetes.io/docs/concepts/workloads/controllers/deployment/ |
+| Draft design-walkthrough had no running-example failures; first version of the new table said "stock runs out after the order was saved ... refund" | Matched to the saga flow: out of stock cancels the order before any charge; a declined card releases stock and cancels | content/microservices/cards/saga.mdx (same tech), https://microservices.io/patterns/data/saga.html |
+| spring-boot-vs-spring-cloud row: "for Boot 4.0 and 4.1" | "for Boot 4.0 and 4.1 (4.1 from 2025.1.2)" | https://spring.io/projects/spring-cloud |
+| Note: the blog "state of HTTP clients" says RestTemplate gets the formal @Deprecated mark in Framework 7.1; the Framework 7.0 reference says "As of Spring Framework 7.0, RestTemplate is deprecated". Kept "deprecated in Spring Framework 7.0" (reference docs are the primary source). | unchanged | https://docs.spring.io/spring-framework/reference/integration/rest-clients.html |
+
+### Unit messaging
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| M10. Compensation caveats: does not erase history, refund is not an undo, some steps cannot be reversed | saga, Rules and defaults ("Compensation is not erasure") |
+| M10. Saga example (create order, reserve stock, charge, confirm; release stock on payment failure) | saga, Mermaid + numbered steps + scenario (out of stock) |
+| M10. Orchestration vs choreography (coordinator can become complex; event flows hard to trace) | saga, Not to be confused with + Interview Q; comparison explain/example |
+| M10. Saga vs 2PC ("participants may have to wait") | distributed-transactions scenario (coordinator crash), comparison example |
+| M11. Event schema and versioning, eventual delivery | event-driven-architecture, Rules and defaults + scenario (rename breaks consumers) |
+| M11. Replay | kafka-fundamentals scenario (reset offsets to reprocess after a bug) |
+| M11. Consumer lag | kafka-fundamentals, Rules and defaults + Interview Q |
+| M11. Tiny event example (eventId, eventType, version) | event-driven-architecture Example (eventId, type, version, correlationId) |
+| M11. Dedup record saved with the business update in one transaction | delivery-guarantees Example + scenario (two racing copies) |
+| M11. Outbox publisher steps (read, publish, mark published) | outbox-and-inbox, How it works steps 2-4 |
+| M24. Outbox solves publication, not every duplication | outbox-and-inbox point "Duplicates remain", cheat remember, Interview Q |
+| M22.Q5. @Transactional is not a global transaction | distributed-transactions trap, Example, Interview Q; saga Interview Q |
+
+**Added beyond the reference (all verified 21-10-2026)**
+
+| Item | Concept | Source |
+|---|---|---|
+| Fowler: event notification hides the flow; event-carried state transfer copies data | event-driven-architecture | martinfowler.com/articles/201701-event-driven.html |
+| Adding partitions changes which partition a key maps to | kafka-fundamentals (Interview Q) | kafka.apache.org/43/operations/basic-kafka-operations/ |
+| min.insync.replicas default 1; docs suggest RF 3 + min.insync.replicas 2 + acks=all; NotEnoughReplicas error | kafka-fundamentals (Rules) | kafka.apache.org/43/configuration/topic-configs/ |
+| Records without a key use the sticky partitioner, so no order between them | kafka-fundamentals (Example) | kafka.apache.org/43/configuration/producer-configs/ |
+| Reset offsets with kafka-consumer-groups.sh --reset-offsets --to-datetime (consumers inactive) | kafka-fundamentals (scenario) | kafka.apache.org/43/operations/basic-kafka-operations/ |
+| Spring Kafka 4.1: enable.auto.commit=false, AckMode BATCH commits after the poll's records are processed | delivery-guarantees (Rules) | docs.spring.io/spring-kafka/reference/kafka/receiving-messages/message-listener-container.html |
+| Plain consumer: enable.auto.commit=true, every 5 s | delivery-guarantees (Rules) | kafka.apache.org/43/configuration/consumer-configs/ |
+| Idempotent producer only removes duplicates from its own retries | delivery-guarantees (Interview Q, Not to be confused with) | kafka.apache.org/43/design/design/ |
+| Polling publisher: tricky to publish in order; log tailing database-specific | outbox-and-inbox (Rules, Interview Q) | microservices.io polling-publisher, transaction-log-tailing |
+| KafkaTemplate.send() is asynchronous (returns CompletableFuture) | outbox-and-inbox (Common mistakes) | checked with javap on spring-kafka 4.1.1 |
+| After-commit hook still loses events on a crash | outbox-and-inbox (Common mistakes) | microservices.io transactional-outbox |
+| Debezium 3.7 outbox columns and default topic outbox.event.<aggregatetype> | outbox-and-inbox (Example, Rules) | debezium.io outbox-event-router |
+| DLT headers (exception, original topic/partition/offset); same partition, so DLT needs as many partitions | dead-letter-queues (steps, Example) | docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html |
+| Default non-retryable exceptions list | dead-letter-queues (Rules) | same |
+| Spring Boot applies a CommonErrorHandler bean to the default listener factory | dead-letter-queues (Example) | docs.spring.io/spring-boot/reference/messaging/kafka.html |
+| Retry topics: naming like orders-retry-1000, ordering lost | dead-letter-queues (Rules, scenario) | docs.spring.io/spring-kafka/reference/retrytopic/how-the-pattern-works.html |
+| Replay DLQ only to idempotent consumers | dead-letter-queues (Common mistakes, Interview Q) | reasoning from at-least-once; no new fact |
+| PostgreSQL 18 max_prepared_transactions = 0 (2PC off by default); meant for transaction managers; prepared transactions keep locks | distributed-transactions (point, Rules) | postgresql.org/docs/18/runtime-config-resource.html, sql-prepare-transaction.html |
+| A timeout means unknown outcome: the charge may have gone through | distributed-transactions Example; saga Common mistakes | links to idempotency concept |
+| Saga countermeasures beyond semantic lock (commutative updates, reread values); pivot and retryable steps | saga (Rules, Interview Q) | learn.microsoft.com/azure/architecture/patterns/saga |
+| Orchestrator persists saga state; replies may arrive twice | saga (Example) | microservices.io saga; Azure saga (idempotence) |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft outbox Rules implied the relay always publishes in commit order | Polling: strict order is tricky; per-order order comes from keying by aggregate id | microservices.io/patterns/data/polling-publisher.html |
+| Draft saga said compensations run "newest first" (my first v3 draft) | Removed: Azure says only that compensations undo finished steps | learn.microsoft.com/azure/architecture/patterns/compensating-transaction |
+| Draft DLQ Defaults showed "then log and skip" only in a table | Made explicit that without a recoverer a failed record is only logged (silent loss risk), with a scenario | Spring for Apache Kafka 4.1 error handling |
+| Reference M11 Kafka vs RabbitMQ "queue behaviour depends on configuration" | Stated concretely: a queue message is removed on ack; streams (3.9+) allow replay | rabbitmq.com/tutorials/amqp-concepts, rabbitmq.com/docs/streams |
+
+### Unit playbook
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| M16 Pod, Deployment, Service (Kubernetes) parts | containers-and-kubernetes How it works steps 3-4, new Interview Q "What do a Pod, a Deployment and a Service do?" |
+| M16 Ingress "needs a suitable controller" (already corrected to Gateway API) | containers-and-kubernetes Rules and defaults (controller needed, API frozen) |
+| M16 rule "Kubernetes cannot see business failures" | containers-and-kubernetes Rules and defaults "Not Kubernetes' job" (also trap) |
+| M16 startup probe | health-probes How it works step 1, scenario 1 |
+| M16 rollback | deployment-strategies How it works step 5, scenario 2, Rules (progress deadline, no automatic rollback) |
+| M16 feature flag (deploy vs release) | deployment-strategies Not to be confused with |
+| M17 validate required configuration at startup | configuration-management Example (record with @Validated, real failure message), Rules "Validation" |
+| M17 configuration drift | configuration-management Common mistakes |
+| M17 rule "different settings per environment" | configuration-management scenario 1 |
+| M18 why contract testing matters (paymentStatus to status) | testing-microservices Why, Example, scenario 1 (adding a field does not break the contract) |
+| M18 test double, mock | testing-microservices What it is |
+| M18 pyramid | testing-microservices Mermaid pyramid and steps |
+| M19 confusing patterns (saga vs outbox) | microservice-patterns-map Common mistakes, cheat remember, scenario 1 |
+| M19 CQRS vs event sourcing | microservice-patterns-map Interview Q (links the comparison in the table) |
+| M19 strangler fig example | strangler-fig-migration Mermaid and Example |
+| M20 calling another service (RestClient, needs timeouts) | spring-cloud-stack Example, now an HTTP service client with a read timeout |
+| M20 "Spring Cloud does not make it microservices" | spring-cloud-stack trap |
+| M22 Q19 deploy without downtime | deployment-strategies Interview Q 1 |
+| M22 Q18 shared library | design-walkthrough Interview Q 1 |
+| M25 best interview strategy | design-walkthrough How it works (6 steps) and Example (failure table on the money path) |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft health-probes did not say that a missing probe counts as passing | Added: no readiness probe means the Pod gets traffic as soon as its container runs | https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/ |
+| Draft deployment-strategies did not say what happens to a stuck rollout | Added: progressDeadlineSeconds 600 s, reported as failed, no automatic rollback | https://kubernetes.io/docs/concepts/workloads/controllers/deployment/ |
+| Draft design-walkthrough had no running-example failures; first version of the new table said "stock runs out after the order was saved ... refund" | Matched to the saga flow: out of stock cancels the order before any charge; a declined card releases stock and cancels | content/microservices/cards/saga.mdx (same tech), https://microservices.io/patterns/data/saga.html |
+| spring-boot-vs-spring-cloud row: "for Boot 4.0 and 4.1" | "for Boot 4.0 and 4.1 (4.1 from 2025.1.2)" | https://spring.io/projects/spring-cloud |
+| Note: the blog "state of HTTP clients" says RestTemplate gets the formal @Deprecated mark in Framework 7.1; the Framework 7.0 reference says "As of Spring Framework 7.0, RestTemplate is deprecated". Kept "deprecated in Spring Framework 7.0" (reference docs are the primary source). | unchanged | https://docs.spring.io/spring-framework/reference/integration/rest-clients.html |
+
+### Unit resilience
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| M2. "Microservices are not always better" / codebase large is not a reason (M2 interview answer) | monolith-and-microservices, Common mistakes |
+| M2. Failure handling row of the table | comparison monolith-vs-microservices, new row "When a part fails" |
+| M1. Service, independent deployment, service autonomy explained in plain words | monolith-and-microservices, What it is and Rules |
+| M3. Domain service (stateless operation across aggregates) | service-boundaries, Rules |
+| M3. Entity-per-service and too-fine-grained splits (chatty communication) | service-boundaries, Common mistakes and scenario |
+| M24. "A network call can fail even when both services are running" | distributed-systems-fallacies, Common mistakes (moved from trap; trap is now the timeout = unknown outcome mistake) |
+| M21. Deployment vs scaling (M23.20) together with Q12 scaling vs load balancing | scaling-services, Interview Q 1 |
+| M8. Retry rule 6 (idempotency key) and 'payment creation is not safe to retry' | timeouts-and-retries, scenario 3 |
+| M8. Timeout vs retry (M23.5) | timeouts-and-retries, Not to be confused with (removed as Interview Q to avoid repeating) |
+| M22.Q16 Retry vs fallback | fallback-and-degradation, Not to be confused with (removed as Interview Q) |
+| M8. Concurrency limit vs rate limiting | rate-limiting, Not to be confused with (rate limit vs load shedding vs bulkhead) |
+| Rate limiting vs load shedding (was an Interview Q) | rate-limiting, Not to be confused with |
+Other new facts (verified 21-10-2026): PostgreSQL 18 reserves 3 superuser connections by default; Resilience4j 2.x minimumNumberOfCalls 100 and slow-call defaults (60 s, 100%); thread-pool bulkhead core = CPU count − 1; Resilience4j retries every exception by default (run locally); Amazon's p99.9 timeout rule; Spring Cloud Gateway 5.0.3 Redis limiter = token bucket (replenishRate, burstCapacity, requestedTokens) and empty key denied by default; Resilience4j fallback signature rule; AWS REL05-BP01 soft/hard dependencies, simple tested failure paths, consistency first for payments.
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| Draft fallacies point "L. Peter Deutsch, eighth by James Gosling" lacked dates | Deutsch listed seven at Sun in 1994; Gosling added the eighth around 1997 | Wikipedia, Fallacies of distributed computing |
+| Draft scaling Example said 2 more instances break the database at max_connections 100 | Counted the 3 reserved superuser slots: app users get 97, so 10 instances × 10 = 100 is already too many | PostgreSQL 18 docs, runtime-config-connection |
+| Draft circuit breaker point "Slow calls can open it too" without the default | Added: the default slow-call threshold is 60 s at 100% slow calls, so set slowCallDurationThreshold lower | Resilience4j CircuitBreaker docs; 2.4.0 jar run |
+| Draft timeouts Example used `enableRandomizedWait` with exponential backoff in YAML; that property is not on the Resilience4j Spring Boot getting-started page | Replaced by a runnable core-API example with `IntervalFunction.ofExponentialRandomBackoff` | Resilience4j 2.4.0 jars, run locally |
+| Spring Cloud Gateway rate-limit page: an empty-key status of 403 is not stated on the page | Wrote only "denied by default" | Spring Cloud Gateway 5.0.3 RequestRateLimiter page |
+Reference: no wrong statements found in M1–M3, M8, M21 for these concepts. The reference's 3 × 3 = 9 retry example is kept as the same rule with 3 layers (27).
+
+### Unit security-observability
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| M14 JWT authentication flow (5 steps) | jwt-and-oauth, How it works (now 6 steps with refresh; plus client credentials line) |
+| M14 rule: valid token is not access to everything | microservices-security Example (ownership check in code) + scenario |
+| M14 encryption in transit / at rest | microservices-security, Rules and defaults |
+| M14 audit logging | microservices-security, How it works step 5 |
+| M14 rule: no secrets in browser-exposed config | microservices-security, Rules (links to configuration-management) |
+| M14 API key vs JWT: revocation, scope, storage matter | comparison api-key-vs-jwt (explain, example) |
+| M15 correlation ID vs trace ID | observability, Not to be confused with (moved from an Interview Q) |
+| M15 rule: success response is not business success | observability, Rules + new Interview Q |
+| M15 rule: avoid high-cardinality labels | observability scenario + new Interview Q |
+| M15 alerting / dashboards | metrics-and-slos How it works step 5, Common mistakes (symptoms vs causes) |
+Added beyond the reference (verified): JWK set caching (5 min) and lazy key discovery angle; SCOPE_ authority prefix; PKCE "why" Interview Q (RFC 7636); RFC 9700 audience restriction and PKCE MUST/RECOMMENDED split; head vs tail sampling Interview Q; "100% is the wrong SLO" and "how to choose an SLO" (SRE ch. 3 and 4); RED vs USE vs golden signals section.
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft: "do not use the implicit or password grants" (same strength for both) | password grant MUST NOT; implicit SHOULD NOT (RFC 9700) | https://www.rfc-editor.org/rfc/rfc9700 |
+| Draft Defaults row "Header it sends: W3C traceparent" was sourced to the tracing page, which does not state it | kept, now sourced to TracingProperties (produce = W3C) in Spring Boot 4.1.1 source | https://github.com/spring-projects/spring-boot/blob/v4.1.1/module/spring-boot-micrometer-tracing/src/main/java/org/springframework/boot/micrometer/tracing/autoconfigure/TracingProperties.java |
+| Observability JSON example implied a Spring format | labelled "simplified; real field names depend on the format" (ECS uses @timestamp, log.level, service.name) | https://docs.spring.io/spring-boot/reference/features/logging.html |
+| Draft example amount ₹2,499 | ₹500, the running example | tech notes |
+| Reference M15 flat trace list (gateway 20 ms) | already corrected earlier to a span tree; kept | OpenTelemetry observability primer |

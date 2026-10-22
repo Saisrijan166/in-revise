@@ -5,17 +5,28 @@ title: "Rate Limiting and Load Shedding"
 topic: resilience
 level: intermediate
 heat: 2
-hook: "Cap each client's requests per time window and answer 429 past it; when the server itself is overloaded, drop low-priority work."
+hook: "Cap how many requests each client may send per second and answer 429 past it; when the server itself is overloaded, drop its least important work first."
 points:
-  - { k: "Rate limit", v: "N requests per client per time window" }
-  - { k: "Key", v: "who is counted: a user, an API key or an IP" }
-  - { k: "Load shedding", v: "by the server's own load: drop low-priority work first" }
-  - { k: "Algorithms", v: "token bucket, leaky bucket, fixed or sliding window" }
-  - { k: "Callers", v: "honour Retry-After and back off", kind: plus }
+  - { k: "Rate limit", v: "a cap on requests per client per period, such as 10 per second per API key" }
+  - { k: "Key", v: "decides who is counted: a user, an API key or an IP address" }
+  - { k: "429 + Retry-After", v: "the answer over the limit; Retry-After says how long to wait (seconds or a date)" }
+  - { k: "Token bucket", v: "tokens refill at a steady rate and each request spends one, so short bursts up to the bucket size pass" }
+  - { k: "Load shedding", v: "the server drops low-priority work when it nears overload, whoever sent it, and answers 503" }
+  - { k: "Shared counters", v: "several gateway instances keep counts in one store, such as Redis, or each one allows the full limit", kind: minus }
 trap:
   wrong: "Return 503 when a client goes over its limit."
   right: "Send 429 Too Many Requests, ideally with Retry-After. Keep 503 for a server that is itself overloaded and shedding work."
-sayIt: "I rate limit each client at the API gateway with a token bucket kept in Redis, and return 429 with Retry-After. Inside services I shed low-priority work with 503 when they are overloaded."
+  why: "Both statuses mean \"try again later\", and 503 is the one people know best for \"too busy\"."
+sayIt: "I rate limit each client at the API gateway with a token bucket kept in Redis, and answer 429 with Retry-After. Inside services I shed low-priority work with 503 when they near overload, so the server survives by doing less."
+cheat:
+  idea: "Rate limiting caps each client's requests per period and answers 429 with Retry-After. Load shedding drops low-priority work when the server itself is overloaded."
+  remember: "429 = this client sent too much; 503 = the server is overloaded. Keep counters in Redis across gateway instances."
+buildsOn: [api-gateway, scaling-services]
+scenarios:
+  - q: "You run 10 gateway instances, each with an in-memory limit of 100 requests per second per user. What limit does a user really get?"
+    a: "Up to 1,000 requests per second, because each instance counts only the requests it sees itself. Keep the counters in a shared store such as Redis, so every instance checks the same bucket."
+  - q: "A client sends 25 requests at once to a token bucket that holds 20 tokens and refills 10 per second. What happens?"
+    a: "20 requests pass and use every token; 5 get 429. A second later 10 new tokens are there, so 10 more requests can pass. A token bucket allows a short burst up to its size, then the steady refill rate."
 confusedWith: []
 tags: [rate-limiting, throttling, load-shedding]
 visual: flow
@@ -23,55 +34,91 @@ sources:
   - title: "RFC 6585 Additional HTTP Status Codes: 429 Too Many Requests"
     url: "https://www.rfc-editor.org/rfc/rfc6585.html"
     verifiedOn: "2026-10-20"
+  - title: "RFC 9110 HTTP Semantics, 10.2.3 Retry-After (seconds or an HTTP-date)"
+    url: "https://www.rfc-editor.org/rfc/rfc9110.html#name-retry-after"
+    verifiedOn: "2026-10-22"
+  - title: "How we built rate limiting: fixed-window counters let spikes through at each reset (Cloudflare blog)"
+    url: "https://blog.cloudflare.com/counting-things-a-lot-of-different-things/"
+    verifiedOn: "2026-10-22"
+  - title: "Addressing Cascading Failures: load shedding with HTTP 503 (Google SRE book)"
+    url: "https://sre.google/sre-book/addressing-cascading-failures/"
+    verifiedOn: "2026-10-22"
   - title: "Scaling your API with rate limiters (Stripe engineering blog)"
     url: "https://stripe.com/blog/rate-limiters"
     verifiedOn: "2026-10-20"
-  - title: "RequestRateLimiter GatewayFilter Factory (Spring Cloud Gateway 5.0)"
+  - title: "RequestRateLimiter GatewayFilter Factory (Spring Cloud Gateway 5.0.3)"
     url: "https://docs.spring.io/spring-cloud-gateway/reference/spring-cloud-gateway-server-webflux/gatewayfilter-factories/requestratelimiter-factory.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Rate limiting caps how many requests one client may send in a period of time, such as 10 per second per API key. Requests over the cap get HTTP 429 Too Many Requests, usually with a `Retry-After` header that says how long to wait. Load shedding is the server-side partner: when a server is close to overload, it drops its least important work, whoever sent it. Both usually start at the [API gateway](card:api-gateway), before work reaches the services.
 
 ## Why it exists
 
-One noisy client or a sudden spike can use all the capacity. Limits keep a fair share per client and protect services before they fall over.
+One buggy mobile app retrying in a loop, or one big customer running a batch job, can use all of Order's capacity, and every other customer gets slow pages. Without limits the service falls over first and recovers later. A limit per client keeps a fair share for each one. Shedding keeps the server alive by doing less, instead of doing everything badly.
 
 ## How it works
 
 <Mermaid
-  alt="A client calls the API gateway, which checks the client's limit. Over the limit, the gateway answers 429 with Retry-After. Under the limit, the request goes to the Order service. If the Order service is overloaded, it sheds low-priority requests with 503; otherwise it calls its database."
+  alt="A client calls the API gateway, which checks the client's token bucket. With no token left, the gateway answers 429 with Retry-After. With a token, the request goes to the Order service. If the Order service is overloaded and the request is low priority, it sheds it with 503; otherwise it does the work and calls its database."
   chart={`flowchart LR
-  C[Client] --> G{"Gateway: under the client's limit?"}
+  C[Client] --> G{"Gateway: token left for this client?"}
   G -- no --> R1["429 + Retry-After"]
   G -- yes --> S{"Order service overloaded?"}
   S -- "yes, low priority" --> R2["503: shed"]
   S -- no --> DB[(Database)]`}
 />
 
-- Enforce per-client limits at the [API gateway](card:api-gateway), before work reaches the services.
-- Shedding keeps the server alive by doing less, for example rejecting work above a cap on requests in flight.
+1. A request reaches the gateway, which works out the key: who is counted, such as the user, the API key or the IP address.
+2. The gateway checks that key's token bucket in a shared store such as Redis. The bucket refills at a steady rate, and each request takes one token.
+3. If a token is left, the request goes on to the Order service. If not, the gateway answers 429 with `Retry-After` at once.
+4. Inside Order, if the number of requests in flight passes its own cap, Order sheds low-priority work with 503 Service Unavailable.
+5. A well-behaved client waits as long as `Retry-After` says, then retries with [backoff](card:timeouts-and-retries).
+
+So the key is: a rate limit protects fairness between clients; shedding protects the server itself.
 
 ## Example
 
+The gateway's limit for the shop's mobile app, followed second by second, and the answer a rejected request gets:
+
 ```text
-GET /orders?page=1 HTTP/1.1
-X-API-Key: shop-mobile-app
+Limit for API key shop-mobile-app: bucket holds 20 tokens, refills 10 per second
+
+t = 0 s   bucket full (20); 25 requests arrive -> 20 pass, 5 get 429
+t = 1 s   10 new tokens;    10 requests arrive -> all 10 pass
 
 HTTP/1.1 429 Too Many Requests
-Retry-After: 30
+Retry-After: 1
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Over the limit | 429; key = the user's principal; token bucket in Redis or Bucket4j | Spring Cloud Gateway 5.0 `RequestRateLimiter` |
+- The bucket size (20) is the largest burst that can pass at once; the refill rate (10 per second) is the steady limit after that.
+- The 5 rejected requests did no work in Order at all. The limit stopped them at the gateway.
+- `Retry-After: 1` tells the app to wait one second, when new tokens will be there, instead of retrying at once in a loop.
+
+## Rules and defaults
+
+- **Spring Cloud Gateway 5.0 `RequestRateLimiter`:** answers 429 by default when a request is not allowed. The default key is the logged-in user's name (`PrincipalNameKeyResolver`), and if no key is found the request is denied by default.
+- **Its Redis rate limiter is a token bucket:** `replenishRate` is tokens added per second, `burstCapacity` is the bucket size, and `requestedTokens` is the cost of one request (default 1).
+- **Algorithms:** besides the [token bucket](card:token-bucket), there are the leaky bucket and fixed or sliding windows; the tree lists how they differ.
+
+## Not to be confused with
+
+A rate limit looks at one client: has this client sent too much? Load shedding looks at the server: is it overloaded? Then it drops the least important work first, whoever sent it. A [bulkhead](card:bulkhead) is different again: it caps a service's outgoing calls to one dependency. Rule: rate limit = per client, for fairness; load shedding = per server, for survival; bulkhead = per dependency, for isolation.
 
 ## Interview Qs
 
-### Rate limiting vs load shedding?
-
-A rate limit looks at one client: has it sent too much? Load shedding looks at the server: is it overloaded? Then it drops the least important work first, whoever sent it.
-
 ### How do you rate limit across ten gateway instances?
 
-Keep the counters in a shared fast store such as Redis, so every instance sees the same count per client.
+Keep the counters in a shared fast store such as Redis, so every instance sees the same count for a client. With counters in each instance's memory, a client could get ten times its limit by spreading requests across instances.
+
+### What should a client do when it gets a 429?
+
+Stop and wait as long as `Retry-After` says. If there is no header, back off with jitter before retrying. Retrying at once only spends more of its limit and adds load.
+
+### Why use a token bucket instead of a fixed window?
+
+A token bucket allows short bursts up to the bucket size and then a smooth steady rate. A fixed window resets its counter each period, so a client can send a full window's worth just before and just after the reset, twice the limit in a moment.
