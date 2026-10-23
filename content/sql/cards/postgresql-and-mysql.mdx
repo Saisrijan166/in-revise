@@ -5,15 +5,27 @@ title: "PostgreSQL vs MySQL"
 topic: basics
 level: intermediate
 heat: 2
-hook: "Same SQL core, different defaults: PostgreSQL reads at READ COMMITTED from heap tables; InnoDB uses REPEATABLE READ and PK order."
+hook: "PostgreSQL and MySQL run the same core SQL, but their defaults differ: how text compares, what || means, how isolated transactions are, and how tables are stored."
 points:
-  - { k: "Baseline", v: "PostgreSQL 18; MySQL 9.7 LTS and 8.4 LTS", kind: default }
-  - { k: "MySQL engines", v: "pluggable; InnoDB is the default: ACID, row locks, FKs" }
-  - { k: "Case", v: "MySQL's default collation ignores case; PostgreSQL's does not", kind: minus }
+  - { k: "Baseline", v: "PostgreSQL 18 and MySQL 9.7 LTS (8.4 is the previous LTS)", kind: default }
+  - { k: "MySQL storage engines", v: "MySQL stores each table through a pluggable engine; the default, InnoDB, gives transactions, row locks and FKs" }
+  - { k: "Text comparison", v: "MySQL's default collation ignores case, so 'ASHA' = 'Asha'; PostgreSQL's default compares exactly", kind: minus }
+  - { k: "The || operator", v: "PostgreSQL joins strings with ||; MySQL treats || as a deprecated OR by default, so use CONCAT()", kind: minus }
+  - { k: "Default isolation", v: "PostgreSQL: READ COMMITTED; MySQL InnoDB: REPEATABLE READ", kind: default }
 trap:
   wrong: "A query that works on PostgreSQL behaves the same on MySQL."
-  right: "The core is shared, but isolation, string comparison and features such as RETURNING differ. Name the product when you answer."
-sayIt: "Both are relational databases with ACID transactions. PostgreSQL adds JSONB, partial indexes, materialized views, transactional DDL and extensions. MySQL InnoDB clusters rows by primary key and defaults to REPEATABLE READ."
+  right: "The core is shared, but string comparison, isolation and syntax such as RETURNING differ (MySQL has no RETURNING). Name the product when you answer."
+  why: "Both accept the same basic SELECT, INSERT and JOIN syntax, and simple queries return the same rows, so the differences only show up in edge cases."
+sayIt: "Both are relational databases with ACID transactions. PostgreSQL adds JSONB, partial indexes, materialized views, RETURNING and transactional DDL. MySQL InnoDB stores rows in primary key order and defaults to REPEATABLE READ."
+cheat:
+  idea: "PostgreSQL and MySQL are two popular open-source relational databases. They share standard SQL but differ in defaults and extra features."
+  remember: "MySQL: case-insensitive text, || means OR, REPEATABLE READ. PostgreSQL: exact text, || joins strings, READ COMMITTED."
+buildsOn: [relational-databases, constraints]
+scenarios:
+  - q: "Your login query is SELECT ... WHERE email = 'Asha@Mail.com'. The stored email is asha@mail.com. On which database does it find the row by default?"
+    a: "MySQL 9.7, because its default collation utf8mb4_0900_ai_ci ignores case. PostgreSQL 18 compares exactly by default, so it finds nothing; you would store emails in lower case or compare with lower(email)."
+  - q: "You move a report from PostgreSQL to MySQL. SELECT first_name || ' ' || last_name now returns 0 for every row. Why?"
+    a: "In MySQL, || means logical OR by default, not string joining. The strings are turned into numbers, which gives 0. Use CONCAT(first_name, ' ', last_name), which works in both."
 confusedWith: []
 tags: [postgresql, mysql, innodb]
 visual: table
@@ -30,36 +42,77 @@ sources:
   - title: "MySQL 9.7 Reference Manual: Server Character Set and Collation"
     url: "https://dev.mysql.com/doc/refman/9.7/en/charset-server.html"
     verifiedOn: "2026-10-20"
+  - title: "PostgreSQL 18 docs: 23.2 Collation Support (deterministic by default)"
+    url: "https://www.postgresql.org/docs/18/collation.html"
+    verifiedOn: "2026-10-21"
+  - title: "MySQL 9.7 Reference Manual: Logical Operators (|| deprecated, PIPES_AS_CONCAT)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/logical-operators.html"
+    verifiedOn: "2026-10-21"
+  - title: "PostgreSQL 18 docs: 13.2 Transaction Isolation"
+    url: "https://www.postgresql.org/docs/18/transaction-iso.html"
+    verifiedOn: "2026-10-20"
+  - title: "MySQL 9.7 Reference Manual: Transaction Isolation Levels"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-transaction-isolation-levels.html"
+    verifiedOn: "2026-10-20"
   - title: "Difference between MySQL and PostgreSQL (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/postgresql/difference-between-mysql-and-postgresql/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+PostgreSQL and MySQL are two popular open-source [relational databases](card:relational-databases), and backend interviews often ask about both. Both follow standard SQL, so tables, keys, [constraints](card:constraints) and basic queries look the same. Each also has its own defaults and extra syntax. MySQL stores tables through a pluggable storage engine, the layer that writes the data to disk; the default engine, InnoDB, is the one to know.
+
 ## Why it exists
 
-Most backend jobs use one of the two. Interviewers want the standard SQL answer first, then the product difference that changes behaviour.
+Interviewers ask this because "it depends on the database" is a real answer in SQL. A query moved from one to the other can run without error and still return different rows, as the example below shows. Knowing the few defaults that change behaviour lets you give the standard answer first and then say exactly how PostgreSQL or MySQL differs.
 
 ## How it works
 
 <Compare id="postgresql-vs-mysql" />
 
-- Each row has its own concept: [isolation](card:isolation-levels), [clustered indexes](card:clustered-indexes), [IDs](card:id-generation), [upsert](card:upsert), [views](card:views), [index types](card:index-types), [joins](card:joins).
-- Also in the tree: [extensions](card:postgresql-extension) and the [|| operator](card:mysql-double-pipe). Row versions: [MVCC](card:mvcc).
+1. Start from standard SQL. `CREATE TABLE`, primary and foreign keys, `SELECT`, `WHERE` and joins work the same in both.
+2. Check the defaults that change results: how text compares (collation), what `||` means, and the default isolation level, which decides what one transaction sees of another's changes (see [isolation levels](card:isolation-levels) later).
+3. Check the syntax that differs: generated ids, upsert (insert or update in one statement) and `RETURNING`, which PostgreSQL has and MySQL does not.
+4. Check how data is stored: InnoDB keeps a table's rows in primary key order, while PostgreSQL keeps rows in a separate heap. [Clustered indexes](card:clustered-indexes) explains why this matters.
 
 ## Example
 
+The same two queries on the `customers` table, where the stored name is `'Asha'`:
+
 ```sql
--- users has a row with name 'Asha'
-SELECT count(*) FROM users WHERE name = 'ASHA';
--- MySQL 9.7 (utf8mb4_0900_ai_ci): 1    PostgreSQL 18: 0
+SELECT count(*) AS n FROM customers WHERE name = 'ASHA';
+SELECT 'pay' || 'ment' AS joined;
 ```
+
+| Result | PostgreSQL 18.6 | MySQL 9.7.2 |
+|---|---|---|
+| `n` | 0 | 1 |
+| `joined` | `payment` | 0, with a deprecation warning |
+
+What to notice:
+
+- MySQL's default collation, `utf8mb4_0900_ai_ci`, is case-insensitive (`ci`), so `'ASHA'` matches `'Asha'`. PostgreSQL's default collations compare exactly, so it finds no row.
+- In MySQL `||` is a logical OR by default; the strings become numbers and the answer is 0. `CONCAT('pay', 'ment')` gives `payment` in both.
+- Neither query fails. The danger is wrong results with no error, which is why you name the product in an answer.
+
+## Rules and defaults
+
+- **Versions:** PostgreSQL 18 is the current major release. MySQL 9.7 is the current LTS (long-term support) release, after 8.4 LTS.
+- **Storage engine:** InnoDB is MySQL's default engine. It supports transactions, row-level locks and foreign keys. Other engines exist, but new tables use InnoDB unless you name another.
+- **Isolation:** PostgreSQL defaults to `READ COMMITTED`; InnoDB to `REPEATABLE READ`.
+- **`||` in MySQL:** with the `PIPES_AS_CONCAT` SQL mode turned on, `||` joins strings as in standard SQL. It is off by default.
 
 ## Interview Qs
 
 ### What are the main differences between PostgreSQL and MySQL?
 
-Start with the defaults that change behaviour: isolation level, table storage and string case. Then the syntax (ids, upsert) and the features only PostgreSQL has, as in the table above.
+Start with the defaults that change behaviour: default isolation level, how tables are stored (heap versus rows in primary key order) and case-sensitive text comparison. Then the syntax: identity versus `AUTO_INCREMENT`, `ON CONFLICT` versus `ON DUPLICATE KEY UPDATE`, and `RETURNING`. Finally, features only PostgreSQL has, such as JSONB, partial indexes, and table changes (DDL) that can be rolled back inside a transaction.
 
 ### Which would you choose for a new service?
 
-Either works for typical web apps. I would pick PostgreSQL when I need its extra SQL features or extensions, and MySQL when the team and tooling already run it. Then I would check the defaults that differ.
+Either works for a typical web app. I would pick PostgreSQL when I need its richer SQL, JSONB or extensions such as pg_trgm, and MySQL when the team and tooling already run it well. Either way I would check the defaults that differ before porting queries.
+
+### Why does MySQL find 'ASHA' when the stored name is 'Asha'?
+
+Because the default collation, `utf8mb4_0900_ai_ci`, ignores case and accents in comparisons. PostgreSQL compares exactly by default. For case-insensitive matching in PostgreSQL, compare `lower(name)`, use `ILIKE`, or define a nondeterministic collation.

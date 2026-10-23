@@ -5,27 +5,47 @@ title: "Window Functions"
 topic: querying
 level: intermediate
 heat: 3
-hook: "A window function computes over related rows but keeps every row: an aggregate that does not collapse."
+hook: "A window function computes over a group of related rows but keeps every row, so each payment can show its customer's total, its rank or the previous amount."
 points:
-  - { k: "Shape", v: "fn() OVER (PARTITION BY group ORDER BY sort [frame])" }
-  - { k: "Ranking", v: "ROW_NUMBER 1,2,3; RANK 1,1,3; DENSE_RANK 1,1,2" }
-  - { k: "LAG / LEAD", v: "previous / next row's value; NULL when there is none", kind: default }
-  - { k: "Default frame", v: "with ORDER BY: partition start to current row, ties included", kind: minus }
-  - { k: "MySQL", v: "window functions since 8.0", kind: default }
+  - { k: "Shape", v: "function() OVER (PARTITION BY group ORDER BY sort), written in the SELECT list" }
+  - { k: "PARTITION BY", v: "splits rows into groups for the calculation; unlike GROUP BY, no rows are merged" }
+  - { k: "Ranking", v: "on ties ROW_NUMBER gives 1, 2, 3; RANK gives 1, 1, 3; DENSE_RANK gives 1, 1, 2" }
+  - { k: "LAG and LEAD", v: "return the value from the previous or next row; NULL when there is no such row", kind: default }
+  - { k: "Default frame", v: "with ORDER BY, an aggregate covers the partition start up to the current row and every row tied with it", kind: minus }
+  - { k: "Versions", v: "PostgreSQL has had window functions since 8.4; MySQL added them in 8.0", kind: default }
 trap:
-  wrong: "SUM(amount) OVER (ORDER BY created_at) gives a running total one row at a time."
-  right: "The default RANGE frame includes rows tied on created_at, so ties jump together. Add ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, or a unique sort."
-sayIt: "Window functions use OVER: PARTITION BY splits rows into groups, ORDER BY sorts inside each group, and every row stays. I use them for ranking, running totals and comparing a row with the previous one."
+  wrong: "SUM(amount) OVER (ORDER BY created_at) adds one row at a time, so it is a running total."
+  right: "The default RANGE frame includes rows tied on created_at, so ties jump together. Add a unique sort key and ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW."
+  why: "With unique dates the default gives a correct running total, so the query passes testing and breaks only when two rows share a date."
+sayIt: "A window function uses OVER: PARTITION BY makes the groups, ORDER BY sorts inside each, and every row stays. I use it for ranks, running totals and previous-row comparisons, and filter it in an outer query."
+cheat:
+  idea: "A window function computes over related rows while keeping every row: a group total, a rank or the previous row's value appear next to each row."
+  code: |
+    SUM(amount) OVER (PARTITION BY customer_id)
+    LAG(amount) OVER (ORDER BY created_at)
+  remember: "Window functions run after WHERE: to keep rn = 1, compute it in a subquery or CTE and filter outside."
+buildsOn: [aggregates-group-by, query-order]
+scenarios:
+  - q: "Payments 2 and 3 were both created on 06-01-2026. SUM(amount) OVER (ORDER BY created_at) shows 1500 on both rows. Bug or expected?"
+    a: "Expected. With ORDER BY and no frame, the default RANGE frame runs up to the current row's last tie, so both rows of 06-01-2026 include each other. Add id to the ORDER BY with ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW to add one row at a time."
+  - q: "You need each payment next to its customer's total paid amount. GROUP BY customer_id or SUM(amount) OVER (PARTITION BY customer_id)?"
+    a: "The window version. GROUP BY returns one row per customer, so the single payments disappear. PARTITION BY computes the same total but keeps every payment row, with the total repeated on each row of that customer."
 confusedWith: [row-number-vs-rank-vs-dense-rank]
 tags: [window-functions, rank, partition-by, lag]
 visual: table
 sources:
-  - title: "Window Function Calls: frames (PostgreSQL 18 docs)"
+  - title: "Window Function Calls: default frame, peers, where allowed (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/sql-expressions.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Window Functions (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/functions-window.html"
     verifiedOn: "2026-10-20"
+  - title: "Window Functions tutorial (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/18/tutorial-window.html"
+    verifiedOn: "2026-10-20"
+  - title: "PostgreSQL 8.4 Release Notes: window functions"
+    url: "https://www.postgresql.org/docs/release/8.4.0/"
+    verifiedOn: "2026-10-21"
   - title: "Window Function Frame Specification (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/window-functions-frames.html"
     verifiedOn: "2026-10-20"
@@ -34,44 +54,73 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A window function is a function with an `OVER (...)` clause that computes a value from a set of rows related to the current row, called its window. Unlike `GROUP BY`, it does not merge the rows: every input row stays in the result, with the computed value next to it. `PARTITION BY` inside `OVER` says which rows form the group, and `ORDER BY` inside `OVER` says their order.
+
 ## Why it exists
 
-GROUP BY gives one row per group, so you lose the detail rows. Ranking, running totals and "change since last month" need the group's numbers next to each row.
+[GROUP BY](card:aggregates-group-by) gives one row per group, so the single rows are lost. "Show each payment with its customer's total" would need a grouped subquery joined back to the payments. Ranking, running totals and "change since the previous payment" are even harder that way, often needing a self-join. A window function puts the group's numbers right next to each row in one pass.
 
 ## How it works
 
 <Compare id="group-by-vs-partition-by" />
 
-- Only in SELECT and ORDER BY: [they run after WHERE and HAVING](card:query-order).
-- Top N per group, running totals and streaks: see [the patterns](card:top-n-per-group).
+1. `FROM`, `WHERE`, `GROUP BY` and `HAVING` run first and fix which rows exist, as in the [logical order](card:query-order).
+2. For each window function, the rows are split by `PARTITION BY`; with no `PARTITION BY`, all rows form one partition.
+3. Inside each partition, the rows are sorted by the `ORDER BY` written inside `OVER`.
+4. For every row, the function looks at its window: the whole partition, the rows up to it, or the row just before it, and computes one value.
+5. The value is added as a new column, and the outer `ORDER BY` then sorts the final rows.
 
 ## Example
 
+Three PAID payments: Asha (customer 1) paid 500 and then 700; Ravi (customer 2) paid 700.
+
 ```sql
--- employees: Asha 100, Ravi 100, Meena 90 (which tie gets rn 1 is not fixed)
-SELECT name, salary,
-       ROW_NUMBER() OVER w AS rn,
-       RANK()       OVER w AS rnk,
-       DENSE_RANK() OVER w AS drnk,
-       LAG(salary)  OVER w AS prev
-FROM employees
-WINDOW w AS (ORDER BY salary DESC);
+SELECT id, customer_id, amount,
+       SUM(amount) OVER (PARTITION BY customer_id) AS customer_total,
+       RANK()      OVER (ORDER BY amount DESC)     AS amount_rank,
+       LAG(amount) OVER (PARTITION BY customer_id
+                         ORDER BY created_at)      AS prev_amount
+FROM payments
+WHERE status = 'PAID'
+ORDER BY id;
 ```
 
 ```text output
- name  | salary | rn | rnk | drnk | prev
--------+--------+----+-----+------+------
- Asha  |    100 |  1 |   1 |    1 | NULL
- Ravi  |    100 |  2 |   1 |    1 |  100
- Meena |     90 |  3 |   3 |    2 |  100
+ id | customer_id | amount | customer_total | amount_rank | prev_amount
+----+-------------+--------+----------------+-------------+-------------
+  1 |           1 | 500.00 |        1200.00 |           3 |        NULL
+  3 |           2 | 700.00 |         700.00 |           1 |        NULL
+  4 |           1 | 700.00 |        1200.00 |           1 |      500.00
 ```
+
+What to notice:
+
+- All three payments stay, and each shows its customer's total. `GROUP BY customer_id` would return only two rows.
+- Payments 3 and 4 tie at 700, so both get rank 1 and the next rank is 3.
+- `LAG` is NULL for each customer's first payment, because `PARTITION BY` restarts at each customer. Payment 4's previous amount is Asha's 500.
+- PostgreSQL 18 and MySQL 9.7 return the same rows.
+
+## Rules and defaults
+
+- **Where allowed:** only in the SELECT list and `ORDER BY`. To filter on one, compute it in a [subquery](card:subqueries) or CTE and filter outside.
+- **Default frame:** with `ORDER BY` in `OVER`, an aggregate covers the partition start up to the current row and its ties (`RANGE`). Without `ORDER BY`, it covers the whole partition.
+- **ROWS vs RANGE:** `ROWS` counts physical rows; `RANGE` treats rows tied in the sort as one step.
+- **LAG and LEAD:** the offset is 1 and the default is NULL; `LAG(amount, 1, 0)` returns 0 instead.
+- **Ties in ROW_NUMBER:** tied rows get numbers in no fixed order; add a unique column such as `id` to the `ORDER BY`.
+- **Named windows:** `WINDOW w AS (ORDER BY amount DESC)` lets several functions share one `OVER w`.
 
 ## Interview Qs
 
-### ROW_NUMBER vs RANK vs DENSE_RANK?
+### What is the difference between ROW_NUMBER, RANK and DENSE_RANK?
 
-All number rows in order. On ties, ROW_NUMBER still counts 1, 2, 3; RANK shares the rank and skips (1, 1, 3); DENSE_RANK shares it without gaps (1, 1, 2).
+All three number rows in the window's order; they differ only on ties. ROW_NUMBER gives every row a different number, 1, 2, 3. RANK gives tied rows the same rank and then skips, 1, 1, 3. DENSE_RANK gives tied rows the same rank without a gap, 1, 1, 2. DENSE_RANK suits "Nth highest distinct value".
 
 ### Can you filter on a window function in WHERE?
 
-No. WHERE runs before window functions. Compute it in a subquery or CTE, then filter outside: `WHERE rn = 1`.
+No. WHERE runs before window functions are computed, and PostgreSQL rejects it with "window functions are not allowed in WHERE". Compute the value in a subquery or CTE, for example as `rn`, and write `WHERE rn = 1` in the outer query.
+
+### How do you compare each row with the previous one?
+
+Use `LAG(column) OVER (ORDER BY ...)`, adding `PARTITION BY` if the comparison should restart per group. It returns the previous row's value without a self-join, so `amount - LAG(amount) OVER (...)` gives the change. The first row gets NULL unless you pass a default.

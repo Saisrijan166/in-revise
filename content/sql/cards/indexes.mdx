@@ -5,16 +5,27 @@ title: Indexes
 topic: indexes
 level: beginner
 heat: 3
-hook: "An index is a search tree over some columns, so the database jumps to matching rows instead of reading every row."
+hook: "An index is a sorted copy of some columns with pointers to their rows, so the database can jump to the matching rows instead of reading every row."
 points:
-  - { k: "Helps", v: "WHERE filters, JOIN keys, ORDER BY, ranges, UPDATE and DELETE", kind: plus }
-  - { k: "Costs", v: "disk space, and every INSERT, UPDATE, DELETE updates it too", kind: minus }
-  - { k: "Made for you", v: "PRIMARY KEY and UNIQUE always create a unique index", kind: default }
-  - { k: "Foreign keys", v: "InnoDB adds an index on the FK column; PostgreSQL 18 does not", kind: default }
+  - { k: "Speeds up", v: "WHERE filters, JOIN keys and ORDER BY on the indexed columns, when only a small share of rows is needed", kind: plus }
+  - { k: "Costs", v: "extra disk space, and every INSERT, UPDATE and DELETE has extra work to keep each index in step", kind: minus }
+  - { k: "Made for you", v: "a PRIMARY KEY or UNIQUE constraint always creates a unique index (PostgreSQL 18, MySQL 9.7)", kind: default }
+  - { k: "Foreign keys", v: "MySQL InnoDB creates an index on a foreign key column; PostgreSQL 18 does not, so you add it", kind: default }
+  - { k: "The planner decides", v: "the database uses an index only when it estimates that is cheaper than reading the whole table" }
 trap:
   wrong: "Adding an index always makes a query faster."
-  right: "Not when the query reads a big share of rows or the table is tiny; then a full scan wins, and the index still slows writes."
-sayIt: "An index is a sorted search structure that lets the database find rows without a full scan. It speeds up filters, joins and sorts, but takes space and slows every write, so I index what real queries use."
+  right: "Only when the query needs a small share of rows from a big table. Otherwise a full read wins, and the index still slows every write."
+  why: "Tests usually look up one row by id or email, where an index gives a huge speed-up, so it is easy to forget that the planner can ignore an index and that writes pay for it."
+sayIt: "An index is a separate sorted structure that lets the database jump to matching rows instead of scanning the table. It speeds up filters, joins and sorts, but takes space and slows every write, so I index what real queries filter and join on."
+cheat:
+  idea: "An index is a separate, sorted copy of some columns with a pointer to each row, so a query can jump to the matching rows instead of reading the whole table."
+  remember: "Indexes speed up reads but slow every write. PostgreSQL does not index foreign key columns for you; MySQL InnoDB does."
+buildsOn: [keys, select-and-filtering, joins]
+scenarios:
+  - q: "Deleting one customer takes seconds on PostgreSQL, although customers has a primary key. payments.customer_id references customers.id. Why, and what is the fix?"
+    a: "To check the foreign key, PostgreSQL must find payments that still point to that customer. It does not index the referencing column for you, so every delete reads the whole payments table. An index on payments (customer_id) turns that check into a quick lookup."
+  - q: "A nightly job inserts 2 million payments. The table has 9 indexes, and the job got slower each time an index was added. Why?"
+    a: "Every inserted row must also be added to each of the 9 indexes, so each new index adds write work to every insert. Check which indexes queries really use and drop the ones that are never scanned."
 confusedWith: [clustered-vs-nonclustered-index]
 tags: [indexes, performance]
 visual: flow
@@ -25,9 +36,21 @@ sources:
   - title: "Constraints: primary keys, unique and foreign keys (PostgreSQL 18 docs, 5.5)"
     url: "https://www.postgresql.org/docs/18/ddl-constraints.html"
     verifiedOn: "2026-10-20"
+  - title: "Unique Indexes: created automatically for unique constraints and primary keys (PostgreSQL 18 docs, 11.6)"
+    url: "https://www.postgresql.org/docs/18/indexes-unique.html"
+    verifiedOn: "2026-10-21"
+  - title: "CREATE INDEX: building indexes concurrently (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/18/sql-createindex.html"
+    verifiedOn: "2026-10-21"
+  - title: "pg_stat_all_indexes: idx_scan (PostgreSQL 18 docs, 27.2)"
+    url: "https://www.postgresql.org/docs/18/monitoring-stats.html"
+    verifiedOn: "2026-10-21"
   - title: "FOREIGN KEY Constraint (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/constraint-foreign-key.html"
     verifiedOn: "2026-10-20"
+  - title: "Online DDL Operations: creating a secondary index permits concurrent DML (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-online-ddl-operations.html"
+    verifiedOn: "2026-10-21"
   - title: "How MySQL Uses Indexes (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/mysql-indexes.html"
     verifiedOn: "2026-10-20"
@@ -36,49 +59,84 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An index is a separate structure the database keeps next to a table, so it can find rows by the value of some columns without reading every row. The table's rows are not sorted by the columns you search on. The index holds one or more columns, such as `customer_id`, in sorted order, each value with a pointer to the row it came from. The database updates it on every change, and the [primary key](card:keys) already has one.
+
 ## Why it exists
 
-Without an index, `WHERE email = 'asha@example.com'` reads every row. With one, the database walks a few tree levels and reads only the matches.
+Take `SELECT * FROM payments WHERE customer_id = 7` on 100,000 payments. With no index, the database reads all 100,000 rows and throws away the 99,990 that do not match, and the work grows with the table. With an index on `customer_id`, it walks the sorted index to the value 7, gets the 10 row pointers and reads only those rows. The cost now depends on how many rows match, not on how big the table is.
 
 ## How it works
 
 <Mermaid
-  alt="Without an index the query reads every row. With one it walks root, branch and leaf pages to a row pointer, then reads only that row."
+  alt="A query for customer_id 7. Without an index the database reads all 100,000 rows. With an index it goes from the root page to a branch page to the leaf page holding 7, gets 10 row pointers, and reads only those 10 rows."
   chart={`flowchart LR
-  Q([WHERE email = ...]) --> N[No index: read all rows]
+  Q(["WHERE customer_id = 7"]) -. "no index" .-> S[("Read all 100,000 rows")]
   Q --> R[Root page]
   R --> B[Branch page]
-  B --> L[Leaf: email + row pointer]
-  L --> T[(Just that row)]`}
+  B --> L["Leaf page: 7 and 10 row pointers"]
+  L --> T[("Read only those 10 rows")]`}
 />
 
-- The planner uses an index only when it is cheaper than a full scan: [why an index is skipped](card:index-not-used).
-- Pick the kind in [index types](card:index-types); for several columns see [composite indexes](card:composite-indexes).
+1. You run `CREATE INDEX idx_payments_customer ON payments (customer_id)`. The database reads the table once and builds a B-tree: a balanced tree of pages whose leaf pages hold every `customer_id` value in sorted order with its row pointer.
+2. A query arrives with `WHERE customer_id = 7`. The planner, the part of the database that chooses how to run a query, estimates how many rows match and compares using the index with reading the whole table.
+3. If the index is cheaper, the database goes from the root page down a few levels to the leaf page that holds 7. Because the values are sorted, it never looks at the rest of the tree.
+4. It follows the pointers and reads just the matching rows from the table.
+5. From now on every INSERT, and every UPDATE or DELETE, also does the work to keep each index in step with the table.
+
+So an index trades extra work on every write for much less work on matching reads.
 
 ## Analogy
 
-<Analogy title="The index at the back of a book" limit="A book index never changes; a database index is updated on every write, and the database may still decide to read the whole table.">
-Look up a word, get the page numbers, open only those pages.
+<Analogy title="The index at the back of a book" limit="A book's index never changes, while a database index is updated on every write, and the database may still decide to read the whole table.">
+To find "deadlock" you look it up in the sorted index, get the page numbers and open only those pages, instead of reading the book from page 1.
 </Analogy>
 
 ## Example
 
+The same query on 100,000 payments, before and after the index, on PostgreSQL 18. Customer 7 has 10 payments.
+
 ```sql
-CREATE INDEX idx_users_email ON users (email);
+EXPLAIN ANALYZE SELECT id, amount FROM payments WHERE customer_id = 7;
 
--- now a tree lookup, not a full scan
-SELECT id, name FROM users WHERE email = 'asha@example.com';
+CREATE INDEX idx_payments_customer ON payments (customer_id);
 
--- PostgreSQL: index the FK column yourself
-CREATE INDEX idx_orders_user_id ON orders (user_id);
+EXPLAIN ANALYZE SELECT id, amount FROM payments WHERE customer_id = 7;
 ```
+
+What to notice:
+
+- `EXPLAIN ANALYZE` runs the query and reports how the database read the table. You will learn to read it in [Query execution and EXPLAIN](card:explain-query-plans).
+- Before the index, the plan was `Seq Scan on payments` with `Rows Removed by Filter: 99990`: all 100,000 rows were read to return 10, in about 15.7 ms.
+- After the index, the plan used `idx_payments_customer` and read only the 10 matching rows, in about 0.13 ms.
+- `customer_id` is a foreign key, yet PostgreSQL had not indexed it. MySQL InnoDB would have created this index by itself.
+
+## Rules and defaults
+
+- **Automatic indexes:** a PRIMARY KEY or UNIQUE constraint always creates a unique index, in PostgreSQL 18 and MySQL 9.7. Do not add a second index on the same column.
+- **Foreign keys:** MySQL InnoDB needs an index on the foreign key columns and creates one if it is missing. PostgreSQL 18 does not; index the referencing column yourself, because joins use it and deleting a parent row must search the child table.
+- **Building on a live table:** a plain PostgreSQL `CREATE INDEX` blocks INSERT, UPDATE and DELETE on the table until it ends, though reads continue. See the last interview question for the way around it.
+- **Kept current for you:** the database updates every index on each write. You never refresh an index by hand after changing data.
+
+## Not to be confused with
+
+A [key or UNIQUE constraint](card:constraints) is a rule about the data: no two payments may share an id. An index is a lookup structure that makes finding rows fast. The database enforces a uniqueness rule with a unique index, which is why the two appear together, but you can index any column without adding a rule. Rule: constraint = what is allowed; index = how fast it is found.
+
+## Common mistakes
+
+- **"More indexes can only help."** Every index slows writes, and one that no query uses gives nothing back. In PostgreSQL, `pg_stat_user_indexes.idx_scan` counts each index's scans; an index that stays at 0 for a long period is a candidate to drop.
 
 ## Interview Qs
 
 ### What is an index, and what does it cost?
 
-A separate search structure that finds rows by key without scanning the table. It costs disk space, and every insert, update and delete must also change each index.
+A separate sorted structure over some columns that finds rows by those columns without scanning the table. It costs disk space, and every insert, update and delete must also maintain each index, so too many indexes slow writes.
 
 ### Should you index foreign key columns?
 
-Usually. Joins use them, and deleting a parent row must search the child table. InnoDB creates the index if missing; PostgreSQL leaves it to you.
+Usually yes. Joins use them, and deleting or changing a parent row must search the child table for rows that point to it. MySQL InnoDB creates that index automatically; PostgreSQL leaves it to you.
+
+### How would you add an index to a big production table without blocking writes?
+
+In PostgreSQL, use `CREATE INDEX CONCURRENTLY`: it takes longer but lets inserts and updates continue, and it cannot run inside a transaction. If it fails, it leaves an invalid index to drop and rebuild. In MySQL InnoDB, adding a secondary index already allows concurrent writes.

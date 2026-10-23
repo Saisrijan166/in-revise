@@ -5,17 +5,27 @@ title: Clustered vs Non-Clustered Index
 topic: indexes
 level: intermediate
 heat: 3
-hook: "A clustered index is the table itself, stored in key order; a non-clustered index is a separate list of keys pointing to rows."
+hook: "A clustered index is the table itself, stored in key order. A non-clustered index is a separate list of keys that points to the rows."
 points:
-  - { k: "How many", v: "one clustered index per table: rows have one order" }
-  - { k: "InnoDB", v: "the table is a clustered index on the PRIMARY KEY", kind: default }
-  - { k: "No PK", v: "InnoDB: first UNIQUE NOT NULL index, else hidden 6-byte row id", kind: default }
-  - { k: "Secondary", v: "InnoDB: stores the PK, then a second lookup finds the row", kind: minus }
-  - { k: "PostgreSQL", v: "rows live in a heap; every index is secondary" }
+  - { k: "One per table", v: "a table has at most one clustered index, because its rows can be stored in only one order" }
+  - { k: "InnoDB", v: "every table is a clustered index on its PRIMARY KEY: the rows live in that index's leaf pages", kind: default }
+  - { k: "InnoDB with no PK", v: "the first UNIQUE index whose columns are all NOT NULL; else a hidden 6-byte row id", kind: default }
+  - { k: "Secondary index", v: "InnoDB stores the primary key in each entry, then searches the clustered index for the row", kind: minus }
+  - { k: "PostgreSQL", v: "rows live in a heap in no key order, so every index, the primary key's too, is separate" }
 trap:
   wrong: "In PostgreSQL the primary key keeps the table sorted on disk."
-  right: "PostgreSQL stores rows in a heap with no key order. CLUSTER sorts the table once; new and updated rows are not kept in order."
-sayIt: "A clustered index stores the rows themselves in key order, so a table has one. In InnoDB it is the primary key, and secondary indexes hold the PK to find rows. PostgreSQL has none: every index points into the heap."
+  right: "PostgreSQL stores rows in a heap with no key order. CLUSTER sorts the table once; new and updated rows are not kept in that order."
+  why: "In MySQL InnoDB the primary key is the clustered index, and many tutorials teach this as a general rule without naming the database."
+sayIt: "A clustered index stores the rows themselves in key order, so a table has one. In InnoDB it is the primary key, and secondary indexes hold the primary key to find rows, so I keep it short. PostgreSQL has none: tables are heaps and every index points into the heap."
+cheat:
+  idea: "A clustered index holds the rows themselves in key order; a non-clustered (secondary) index holds keys and a way to reach each row. In InnoDB the primary key is the clustered index."
+  remember: "InnoDB copies the primary key into every secondary index, so keep it short. PostgreSQL has no clustered index."
+buildsOn: [indexes, postgresql-and-mysql]
+scenarios:
+  - q: "An InnoDB payments table uses a 36-character UUID string as its PRIMARY KEY and has four secondary indexes. Why are those indexes much bigger than on a table with a BIGINT id?"
+    a: "Each secondary index entry stores the primary key value so it can find the row. A 36-character string instead of an 8-byte BIGINT is copied into every entry of all four indexes."
+  - q: "In PostgreSQL you run CLUSTER payments USING idx_payments_customer, then insert payments for a week. Are the new rows stored in customer_id order?"
+    a: "No. CLUSTER rewrote the table once in that order; PostgreSQL does not keep the order for new or updated rows. You would have to run CLUSTER again, which locks the table while it rewrites it."
 confusedWith: []
 tags: [indexes, innodb, clustered-index]
 visual: table
@@ -29,48 +39,83 @@ sources:
   - title: "CLUSTER (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/sql-cluster.html"
     verifiedOn: "2026-10-20"
+  - title: "EXPLAIN Statement: FORMAT=TREE (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/explain.html"
+    verifiedOn: "2026-10-21"
   - title: "SQL Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/sql/sql-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A clustered index is an index whose leaf pages hold the full rows, so the table itself is stored in the order of that index's key. A non-clustered index, also called a secondary index, is a separate structure that holds the key and a way to reach the row. A table can have only one clustered index, because its rows can be stored in only one order. Whether a table has one depends on the [database](card:postgresql-and-mysql).
+
 ## Why it exists
 
-Rows must be stored in some order. If that order is the key you search by most, one tree walk lands on the row; every other index needs a second step.
+Every index lookup ends by fetching the row. If the rows sit inside the index you searched, the walk ends at the row itself, and rows with neighbouring keys share pages, so a range such as ids 1,000 to 1,100 reads few pages. MySQL InnoDB stores every table this way, around the primary key. The price is that every other index needs a second step to reach the row.
 
 ## How it works
 
 <Compare id="clustered-vs-nonclustered-index" />
 
-- Keep an InnoDB primary key short: every secondary index copies it.
-- A query that needs only the secondary key and the PK skips the second lookup ([covering](card:composite-indexes)).
+Follow `WHERE customer_id = 7` on an InnoDB `payments` table:
+
+1. InnoDB stores the payments rows in the leaf pages of the PRIMARY KEY index, sorted by `id`.
+2. A secondary index on `customer_id` stores pairs of (`customer_id`, `id`), sorted by `customer_id`.
+3. The query walks the secondary index and collects the ids of customer 7's payments.
+4. For each id, InnoDB walks the clustered index down to the full row. If the query needs only `customer_id` and `id`, it skips this step, because the secondary index already holds both.
+5. In PostgreSQL, by contrast, each index entry points straight to a row's place in the heap, the table's unordered storage, so there is no second tree walk.
+
+So in InnoDB the primary key is copied into every secondary index.
 
 ## Example
 
+The same lookup on InnoDB, once reading `amount` and once reading only `id`. The table holds 100,000 payments.
+
 ```sql
--- MySQL InnoDB
-CREATE TABLE orders (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,  -- clustered: rows stored by id
-  user_id BIGINT NOT NULL,
-  amount DECIMAL(10,2),
-  INDEX idx_orders_user (user_id)         -- entries: (user_id, id)
+-- MySQL 9.7, InnoDB
+CREATE TABLE payments (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,      -- clustered: rows stored by id
+  customer_id BIGINT NOT NULL,
+  amount DECIMAL(10,2) NOT NULL,
+  INDEX idx_payments_customer (customer_id)  -- entries: (customer_id, id)
 );
--- idx_orders_user gives the id, then the clustered index gives the row
-SELECT amount FROM orders WHERE user_id = 7;
+EXPLAIN FORMAT=TREE SELECT amount FROM payments WHERE customer_id = 7;
+EXPLAIN FORMAT=TREE SELECT id FROM payments WHERE customer_id = 7;
 ```
 
-PostgreSQL: `CLUSTER orders USING orders_pkey;` rewrites the table in key order once, under an ACCESS EXCLUSIVE lock.
+```text output
+-> Index lookup on payments using idx_payments_customer (customer_id = 7)  (cost=3.5 rows=10)
+-> Covering index lookup on payments using idx_payments_customer (customer_id = 7)  (cost=1.25 rows=10)
+```
+
+What to notice:
+
+- `amount` is not in the secondary index, so each of the 10 matches needs a second walk through the clustered index: an "Index lookup".
+- `id` is the primary key, and InnoDB stores it in every secondary index entry, so the second query is answered from `idx_payments_customer` alone: a "Covering index lookup", with a lower cost.
+- Make `id` a long string and every entry of `idx_payments_customer` grows with it.
+
+## Rules and defaults
+
+- **InnoDB clustered key:** the PRIMARY KEY. With no primary key, the first UNIQUE index whose columns are all NOT NULL. With neither, InnoDB adds a hidden clustered index, `GEN_CLUST_INDEX`, on a 6-byte row id.
+- **Short primary key:** every InnoDB secondary index entry carries the primary key, so a short key such as a BIGINT keeps all of them small.
+- **PostgreSQL:** tables are heaps and every index is secondary. `CLUSTER payments USING payments_pkey` rewrites the table in that order once, under an ACCESS EXCLUSIVE lock that blocks reads and writes; later writes are not kept in order.
+
+## Not to be confused with
+
+A [primary key](card:keys) is a rule: each row has a unique, non-NULL id. A clustered index is a way of storing rows. In InnoDB the primary key becomes the clustered index; in PostgreSQL the primary key is an ordinary unique index over a heap. Rule: primary key = which rows are allowed; clustered index = where the rows live.
 
 ## Interview Qs
 
 ### How many clustered indexes can a table have?
 
-One, because the rows can be stored in only one order. A table can have many non-clustered (secondary) indexes.
+One, because the rows themselves can be stored in only one order. A table can have many non-clustered (secondary) indexes, each a separate structure pointing to the rows.
 
 ### Why should an InnoDB primary key be short?
 
-Every secondary index entry stores the primary key value, so a long key such as an email makes every index bigger. A short auto-increment id keeps them small.
+Every secondary index entry stores the primary key value to find the row. A long key, such as an email or a UUID string, makes every secondary index bigger and slower to search. A short auto-increment BIGINT keeps them small.
 
 ### Does PostgreSQL have clustered indexes?
 
-No. Tables are heaps and every index is separate. `CLUSTER` reorders a table once, but later writes are not kept in that order.
+No. Tables are heaps, and every index, including the primary key's, is stored separately. `CLUSTER` reorders a table once by an index, but PostgreSQL does not keep that order as rows are inserted or updated.

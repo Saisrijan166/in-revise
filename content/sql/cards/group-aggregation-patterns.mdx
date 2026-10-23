@@ -5,17 +5,27 @@ title: Pivots, Zero Counts and Above-Average Rows
 topic: patterns
 level: intermediate
 heat: 2
-hook: "CASE inside an aggregate pivots; LEFT JOIN plus COUNT(child.id) keeps zeros; compare with AVG to find above-average rows."
+hook: "A CASE inside an aggregate turns categories into columns; LEFT JOIN plus COUNT(child.id) keeps groups with zero rows; compare with AVG to find above-average rows."
 points:
-  - { k: "Pivot", v: "one SUM(CASE WHEN status = 'PAID' THEN 1 ELSE 0 END) per column" }
-  - { k: "FILTER", v: "PostgreSQL: COUNT(*) FILTER (WHERE …); MySQL has no FILTER", kind: plus }
-  - { k: "Zero counts", v: "LEFT JOIN from the parent, then COUNT(child.id), not COUNT(*)" }
-  - { k: "Empty SUM", v: "SUM over no rows is NULL: wrap it in COALESCE(…, 0)", kind: minus }
-  - { k: "Above average", v: "overall: scalar subquery; own group: AVG() OVER (PARTITION BY …)" }
+  - { k: "Pivot", v: "write one aggregate per output column: SUM(CASE WHEN status = 'PAID' THEN 1 ELSE 0 END) AS paid" }
+  - { k: "FILTER", v: "PostgreSQL 18 also accepts COUNT(*) FILTER (WHERE status = 'PAID'); MySQL 9.7 rejects it" }
+  - { k: "Zero counts", v: "LEFT JOIN from the parent table, then COUNT(child.id); COUNT(*) gives 1 for an empty group" }
+  - { k: "Empty SUM", v: "SUM over no values is NULL, not 0, so wrap it as COALESCE(SUM(…), 0)", kind: minus }
+  - { k: "Above average", v: "overall: compare with a scalar subquery; within a group: AVG() OVER (PARTITION BY …) in a subquery" }
 trap:
-  wrong: "After a LEFT JOIN, COUNT(*) shows 0 for a department with no employees."
-  right: "It shows 1: the empty department still has one joined row. COUNT(e.id) skips that row's NULL and shows 0."
-sayIt: "To pivot I aggregate a CASE per category. To keep empty groups I LEFT JOIN from the parent and count the child key. For above-average rows I compare with AVG in a subquery, or AVG OVER PARTITION BY per group."
+  wrong: "After a LEFT JOIN, COUNT(*) shows 0 for a customer with no payments."
+  right: "It shows 1: Kabir still has one joined row, with NULLs on the payment side. COUNT(p.id) skips that NULL and shows 0."
+  why: "COUNT(*) reads as 'count the payments', but it counts result rows, and a LEFT JOIN always produces one row for an unmatched customer."
+sayIt: "To pivot I write one aggregate over a CASE per category. To keep empty groups I LEFT JOIN from the parent and count the child's key, with COALESCE around sums. For above-average rows I compare with AVG in a scalar subquery, or AVG OVER PARTITION BY per group."
+cheat:
+  idea: "Three report patterns on top of GROUP BY: CASE inside SUM or COUNT turns categories into columns, LEFT JOIN with COUNT(child.id) keeps empty groups, and AVG in a subquery finds above-average rows."
+  remember: "After a LEFT JOIN, COUNT(*) gives 1 for an empty group; COUNT(p.id) gives 0."
+buildsOn: [aggregates-group-by, joins, window-functions]
+scenarios:
+  - q: "Your report counts payments per customer with an INNER JOIN. The manager asks why Kabir is missing. What do you change?"
+    a: "Start FROM customers and LEFT JOIN payments, then count COUNT(p.id). The inner join drops customers with no match; the LEFT JOIN keeps Kabir with NULL payment columns, and COUNT(p.id) skips that NULL, so he shows 0."
+  - q: "Payments average 442.86 overall. Which payments are above the average, and why can you not write WHERE amount > AVG(amount)?"
+    a: "Payments 1, 3 and 4 (500, 700 and 700). WHERE runs before any aggregate is computed, so AVG is not allowed there. Compute the average in a scalar subquery: WHERE amount > (SELECT AVG(amount) FROM payments)."
 confusedWith: [where-vs-having, group-by-vs-partition-by]
 tags: [patterns, aggregation, pivot]
 visual: table
@@ -26,6 +36,9 @@ sources:
   - title: "Aggregate Function Descriptions (MySQL 9.7)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/aggregate-functions.html"
     verifiedOn: "2026-10-20"
+  - title: "Aggregate Functions: sum returns null for no rows (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/functions-aggregate.html"
+    verifiedOn: "2026-10-21"
   - title: "Table Expressions: joins (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/queries-table-expressions.html"
     verifiedOn: "2026-10-20"
@@ -34,51 +47,76 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+These are three report patterns built on [GROUP BY](card:aggregates-group-by). A pivot turns row values into columns, such as one count column per payment status. A zero count keeps groups that have no rows, such as a customer with no payments. An above-average filter compares each row with an average. Each one fills a gap that a plain `GROUP BY` leaves.
+
 ## Why it exists
 
-Reports need per-category counts side by side, groups with no rows, and rows compared with an average. GROUP BY alone does none.
+`GROUP BY status` gives one row per status, but a report usually wants one row per customer with PAID and FAILED side by side. An inner join drops customers who have no payments, so the report hides them. And `WHERE amount > AVG(amount)` is rejected, because `WHERE` runs before any average exists. Each pattern solves one of these three problems.
 
 ## How it works
 
 | Need | Pattern | Watch out |
 |---|---|---|
-| Categories as columns | `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, or `COUNT(CASE WHEN … THEN 1 END)` | Without ELSE 0, SUM gives NULL; COUNT gives 0 |
-| Groups with zero rows | Parent `LEFT JOIN` child, `COUNT(child.id)` | A child condition in WHERE drops empty groups |
+| Categories as columns | `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, or `COUNT(CASE WHEN … THEN 1 END)` | Without `ELSE 0`, SUM gives NULL when nothing matches |
+| Groups with zero rows | Parent `LEFT JOIN` child, `COUNT(child.id)` | A child condition in `WHERE` drops the empty groups again |
 | Above the overall average | `WHERE x > (SELECT AVG(x) FROM …)` | The subquery must return one value |
 | Above the group's own average | `AVG(x) OVER (PARTITION BY g)` in a subquery | Or a correlated subquery |
 
-- Why: [COUNT(column) skips NULLs](card:aggregates-group-by); [child conditions belong in ON](card:joins).
+1. Pivot: for each output column, write one aggregate over a `CASE` that keeps only that category. `CASE` returns 1 for a match and 0 otherwise, so `SUM` counts the matches.
+2. Zero counts: start `FROM` the parent table (customers), `LEFT JOIN` the child (payments), and count the child's key. An unmatched customer has one row with NULL in `p.id`, which `COUNT(p.id)` skips.
+3. Empty sums: `SUM` over no values returns NULL, so wrap it as `COALESCE(SUM(…), 0)`.
+4. Above average: compare with a scalar subquery for the overall average. For each group's own average, compute `AVG() OVER (PARTITION BY …)` in a subquery and compare in the outer query.
 
 ## Example
 
+One row per customer, with every customer shown, payment counts per status, and the amount paid.
+
 ```sql
--- Eng pays 100, 95, 70; Sales pays 60; HR has no staff
-SELECT d.name,
-       COUNT(e.id)                                     AS staff,
-       COALESCE(SUM(e.salary), 0)                      AS payroll,
-       SUM(CASE WHEN e.salary >= 90 THEN 1 ELSE 0 END) AS senior
-FROM departments d
-LEFT JOIN employees e ON e.dept_id = d.id
-GROUP BY d.id, d.name
-ORDER BY d.id;
+SELECT c.name,
+       COUNT(p.id)                                          AS payments,
+       SUM(CASE WHEN p.status = 'PAID'   THEN 1 ELSE 0 END) AS paid,
+       SUM(CASE WHEN p.status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+       COALESCE(SUM(CASE WHEN p.status = 'PAID' THEN p.amount END), 0) AS paid_amount
+FROM customers c
+LEFT JOIN payments p ON p.customer_id = c.id
+GROUP BY c.id, c.name
+ORDER BY c.id;
 ```
 
 ```text output
- name  | staff | payroll | senior
--------+-------+---------+--------
- Eng   |     3 |     265 |      2
- Sales |     1 |      60 |      0
- HR    |     0 |       0 |      0
+ name  | payments | paid | failed | paid_amount
+-------+----------+------+--------+-------------
+ Asha  |        4 |    3 |      1 |     1600.00
+ Ravi  |        1 |    1 |      0 |      700.00
+ Meena |        1 |    0 |      0 |           0
+ Kabir |        0 |    0 |      0 |           0
+ Neha  |        1 |    1 |      0 |      300.00
 ```
 
-`COUNT(*)` would show 1 for HR: it counts the join row that has no employee.
+What to notice:
+
+- Kabir shows 0 payments because the query counts `p.id`. With `COUNT(*)` he would show 1, the joined row that holds no payment.
+- Meena's only payment is PENDING, so the `CASE` inside `paid_amount` gives NULL for it, and `SUM` of only NULLs is NULL. `COALESCE` turns that into 0. MySQL prints it as `0.00`.
+- The three status columns are written into the query. A new status, such as REFUNDED, needs a new line; plain SQL has no automatic pivot.
+
+## Rules and defaults
+
+- **FILTER clause:** PostgreSQL accepts `COUNT(*) FILTER (WHERE p.status = 'PAID')`, which feeds the aggregate only matching rows. MySQL 9.7 rejects `FILTER`, so the `CASE` form is the one that runs on both.
+- **Child conditions go in ON:** after a `LEFT JOIN`, `WHERE p.status = 'PAID'` removes Kabir and Meena again. Put the condition in `ON`, or inside the `CASE`, as above ([Joins](card:joins)).
+- **Scalar subquery:** `(SELECT AVG(amount) FROM payments)` must return exactly one value; a subquery that returns several rows is an error.
+
+## Not to be confused with
+
+`WHERE` removes rows before the aggregates run, so a condition there changes every column. A `CASE` inside an aggregate only decides what one column counts, and every row still reaches the group. Rule: to filter the whole report, use `WHERE`; to count one category beside others, use `CASE` inside the aggregate.
 
 ## Interview Qs
 
-### Employees who earn more than their department's average?
+### Find payments above their customer's own average.
 
-Compute `AVG(salary) OVER (PARTITION BY dept_id) AS dept_avg` in a subquery; keep `salary > dept_avg`. A correlated subquery gives the same rows, except rows with a NULL dept_id.
+Compute `AVG(amount) OVER (PARTITION BY customer_id) AS cust_avg` in a subquery and keep `amount > cust_avg` outside. Here that returns payments 1 and 4, since Asha averages 475. A correlated subquery, `amount > (SELECT AVG(p2.amount) FROM payments p2 WHERE p2.customer_id = p.customer_id)`, gives the same rows.
 
 ### How do you turn rows into columns?
 
-Write one aggregate over a CASE per output column. PostgreSQL also accepts `COUNT(*) FILTER (WHERE status = 'PAID')`. The column list is fixed in the query text.
+Write one aggregate over a `CASE` for each output column, grouped by the row key. PostgreSQL also offers `FILTER (WHERE …)`. The list of columns is fixed in the query text, so new categories need a change to the query.

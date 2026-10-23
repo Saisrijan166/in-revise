@@ -5,48 +5,68 @@ title: Stored Procedures, Functions and Triggers
 topic: design
 level: intermediate
 heat: 2
-hook: "Code kept in the database: CALL a procedure, use a function inside a query, and a trigger runs by itself when rows change."
+hook: "Code stored inside the database: you CALL a procedure, use a function inside a query, and a trigger fires automatically when rows change."
 points:
-  - { k: "Procedure", v: "run with CALL; returns no value; may COMMIT (MySQL; PostgreSQL 11+)" }
-  - { k: "Function", v: "returns a value (PostgreSQL: also rows); used inside SELECT or WHERE" }
-  - { k: "Trigger", v: "fires BEFORE or AFTER INSERT, UPDATE or DELETE, in the same transaction" }
-  - { k: "Gains", v: "fewer round trips; the rule holds for every app that writes", kind: plus }
-  - { k: "Costs", v: "hidden logic: harder to test, version, debug and move", kind: minus }
+  - { k: "Procedure", v: "run on its own with CALL; returns no value, and may COMMIT part-way (MySQL; PostgreSQL 11+)" }
+  - { k: "Function", v: "returns a value, or in PostgreSQL also rows, and is used inside SELECT or WHERE; it cannot COMMIT" }
+  - { k: "Trigger", v: "runs automatically BEFORE or AFTER an INSERT, UPDATE or DELETE, inside that statement's transaction" }
+  - { k: "Gains", v: "one call replaces many round trips, and a trigger's rule holds for every app that writes", kind: plus }
+  - { k: "Costs", v: "logic hidden from app code is harder to test, review, version and debug", kind: minus }
 trap:
   wrong: "If the trigger fails, the original insert is still saved."
-  right: "A trigger runs inside the statement's transaction. If it fails, the statement that fired it fails and is rolled back."
-sayIt: "A procedure is called with CALL to run a workflow; a function returns a value inside a query; a trigger fires automatically on data changes, often for audit. They save round trips but hide logic, so I use them sparingly."
+  right: "A trigger runs inside the statement's transaction. If it fails, the statement that fired it fails and its changes are rolled back."
+  why: "A trigger feels like a separate step that runs after the write is done, as an event listener in app code would."
+sayIt: "A procedure is called with CALL to run a workflow and may commit; a function returns a value inside a query; a trigger fires automatically on data changes, often for audit, in the same transaction. They save round trips but hide logic, so I use them sparingly."
+cheat:
+  idea: "Code stored in the database: a procedure runs a job when you CALL it, a function returns a value inside a query, a trigger fires automatically when rows change."
+  flow: "UPDATE → BEFORE trigger → row written → AFTER trigger"
+  remember: "A trigger runs in the same transaction: if it fails, the firing statement is rolled back."
+buildsOn: [sql-commands]
+scenarios:
+  - q: "An AFTER UPDATE trigger on payments inserts into payment_audit, but the audit table's disk is full and the insert errors. What happens to the UPDATE that changed the status?"
+    a: "It fails and is rolled back. The trigger runs as part of the same statement and transaction, so an error in the trigger undoes the status change too. Nothing is half-saved."
+  - q: "A MySQL table has an AFTER DELETE trigger on payments. Deleting a customer removes their payments through ON DELETE CASCADE. Does the trigger run for those payments?"
+    a: "No. MySQL triggers are not activated by foreign key actions, so cascaded deletes skip them. In PostgreSQL they do fire, because the cascade runs as ordinary deletes on the child table."
+  - q: "You need the net amount of a payment (amount minus refunds) inside many SELECT queries. Procedure or function?"
+    a: "A function. It returns a value, so you can write SELECT id, net_amount(id) FROM payments. A procedure is run alone with CALL and cannot be used inside a query."
 confusedWith: [stored-procedure-vs-function]
 tags: [procedure, function, trigger]
 visual: flow
 sources:
   - title: "PostgreSQL 18: Overview of Trigger Behavior"
     url: "https://www.postgresql.org/docs/18/trigger-definition.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "PostgreSQL 18: User-Defined Procedures"
     url: "https://www.postgresql.org/docs/18/xproc.html"
-    verifiedOn: "2026-10-20"
-  - title: "MySQL 9.7: Restrictions on Stored Programs"
+    verifiedOn: "2026-10-21"
+  - title: "PostgreSQL 18: CREATE TRIGGER (UPDATE OF columns, FOR EACH ROW or STATEMENT)"
+    url: "https://www.postgresql.org/docs/18/sql-createtrigger.html"
+    verifiedOn: "2026-10-21"
+  - title: "MySQL 9.7: Restrictions on Stored Programs (no commit in functions or triggers; triggers not activated by foreign key actions)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/stored-program-restrictions.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "MySQL 9.7: Trigger Syntax and Examples"
     url: "https://dev.mysql.com/doc/refman/9.7/en/trigger-syntax.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "DBMS Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/dbms/commonly-asked-dbms-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+These are three kinds of code you store in the database itself, written in SQL or a database language such as PostgreSQL's PL/pgSQL. A stored procedure is a named job you run with `CALL`, such as "mark old pending payments as failed". A function takes inputs and returns a value, so you can use it inside a query like any built-in function. A trigger is code the database runs automatically when rows in a table are inserted, updated or deleted.
+
 ## Why it exists
 
-Some jobs take many SQL statements, and some rules must hold however data is written. Code next to the data saves round trips and applies to every writer.
+Some jobs need many SQL statements in a row; sent one by one from the app, each pays a network round trip. Some rules must hold however the data is written: every status change of a payment should be audited, whether it comes from the app, a script or a support engineer at the console. Code stored next to the data runs in one call and, for triggers, applies to every writer without anyone remembering to call it.
 
 ## How it works
 
 <Mermaid
-  alt="UPDATE salary, then a BEFORE trigger checks or changes the new row, the row is written, an AFTER trigger inserts an audit row. Any error fails the statement and undoes its changes."
+  alt="An UPDATE of a payment's status fires a BEFORE trigger, which can check or change the new row. The row is written. Then an AFTER trigger inserts an audit row. An error in either trigger fails the statement and rolls it back."
   chart={`flowchart LR
-  U([UPDATE salary]) --> B[BEFORE trigger: check or change NEW]
+  U([UPDATE payments]) --> B[BEFORE trigger: check or change NEW]
   B --> W[(Row written)]
   W --> A[AFTER trigger: insert audit row]
   A --> C([Statement done])
@@ -54,30 +74,88 @@ Some jobs take many SQL statements, and some rules must hold however data is wri
   A -. error .-> R`}
 />
 
-- Row-level triggers run once per changed row; statement-level ones once per statement (PostgreSQL only; MySQL triggers are per row).
+Follow one UPDATE on a table with triggers:
+
+1. The statement starts inside a transaction, the group of changes that is saved together at COMMIT or undone together at ROLLBACK.
+2. For each row, a BEFORE trigger runs first. It sees the old row as `OLD` and the new row as `NEW`, and it can change `NEW` or reject the change.
+3. The database writes the row.
+4. An AFTER trigger runs, typically to write an audit row or update a summary.
+5. If any trigger raises an error, the whole statement fails and its changes, including the triggers' own writes, are rolled back.
+
+So the key is that a trigger is part of the write, not a step after it.
 
 ## Example
 
-```sql
-CREATE FUNCTION log_salary() RETURNS trigger AS $$
-BEGIN
-  INSERT INTO salary_audit (emp_id, old_salary, new_salary)
-  VALUES (OLD.id, OLD.salary, NEW.salary);
-  RETURN NEW;
-END $$ LANGUAGE plpgsql;
+This audits every status change of a payment, run on PostgreSQL 18. The trigger calls a function that returns the special type `trigger`.
 
-CREATE TRIGGER salary_change AFTER UPDATE OF salary ON employees
-  FOR EACH ROW EXECUTE FUNCTION log_salary();
+```sql
+CREATE TABLE payment_audit (payment_id bigint, old_status text, new_status text);
+
+CREATE FUNCTION log_status() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  INSERT INTO payment_audit VALUES (OLD.id, OLD.status, NEW.status);
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER payment_status_audit
+  AFTER UPDATE OF status ON payments
+  FOR EACH ROW EXECUTE FUNCTION log_status();
+
+UPDATE payments SET status = 'PAID' WHERE id = 5;
+SELECT * FROM payment_audit;
 ```
 
-MySQL puts the body in the trigger itself: `... FOR EACH ROW INSERT INTO salary_audit ...`.
+```text output
+ payment_id | old_status | new_status
+------------+------------+------------
+          5 | PENDING    | PAID
+```
+
+What to notice:
+
+- The UPDATE says nothing about auditing; the audit row appears because the trigger ran inside the same statement.
+- `UPDATE OF status` fires only when the status column is set. MySQL has no `OF` list: write `AFTER UPDATE ON payments FOR EACH ROW INSERT INTO payment_audit VALUES (OLD.id, OLD.status, NEW.status)`; it fires on every update.
+- `FOR EACH ROW` runs once per changed row; an UPDATE of 1,000 payments writes 1,000 audit rows.
+
+A procedure for a nightly job looks like this; it commits its own work:
+
+```sql
+CREATE PROCEDURE fail_old_pending(cutoff timestamptz) LANGUAGE plpgsql AS $$
+BEGIN
+  UPDATE payments SET status = 'FAILED'
+  WHERE status = 'PENDING' AND created_at < cutoff;
+  COMMIT;
+END $$;
+CALL fail_old_pending(now() - interval '1 day');
+```
+
+What to notice:
+
+- It runs with `CALL` and returns nothing; you cannot write it inside a SELECT.
+- The `COMMIT` inside works only when the CALL is not inside your own BEGIN block; there PostgreSQL raises "invalid transaction termination".
+
+## Rules and defaults
+
+- **Row or statement triggers:** PostgreSQL supports `FOR EACH ROW` and `FOR EACH STATEMENT`; a statement trigger fires even when zero rows change. MySQL triggers are row-level only.
+- **INSTEAD OF (PostgreSQL):** a row trigger on a view that writes the base tables instead.
+- **BEFORE returning NULL (PostgreSQL):** skips the operation for that row silently.
+- **Cascades:** MySQL triggers are not activated by foreign key actions such as ON DELETE CASCADE.
+- **No COMMIT in functions or triggers:** not allowed in either product. Procedures may commit (PostgreSQL 11+ when not called inside an explicit transaction).
+
+## Not to be confused with
+
+A procedure is a job you start on purpose with CALL; a function is an expression you use inside a query and it returns a value; a trigger is never called by name and runs because a table changed. Rule: CALL it, SELECT it, or let a change fire it.
 
 ## Interview Qs
 
-### Stored procedure vs function?
+### What is the difference between a stored procedure and a function?
 
-A function returns a value (PostgreSQL: also a table) and is used inside a query. A procedure runs alone with CALL, returns data only through OUT parameters or, in MySQL, result sets, and may COMMIT. See [the comparison](compare:stored-procedure-vs-function).
+A function returns a value, or in PostgreSQL also a set of rows, and is used inside SELECT or WHERE. A procedure runs on its own with CALL, returns data only through OUT parameters or, in MySQL, result sets, and may COMMIT part-way through. Functions cannot commit in either product.
 
 ### When would you use a trigger, and why be careful?
 
-For audit logs, an updated_at column, or a rule every writer must follow. Careful: they are invisible to app code, add work to every write, and can fire other triggers.
+For audit logs, an updated_at column, or a rule every writer must follow. Be careful: triggers are invisible to anyone reading the app code, add work to every write, can fire other triggers, and in MySQL do not run for cascaded foreign key changes.
+
+### Should business logic live in stored procedures?
+
+Usually only small, data-heavy parts. Logic in the app is easier to test, version, review and deploy, and ties you less to one database. Procedures earn their place for batch jobs that touch many rows, where one call saves thousands of round trips.

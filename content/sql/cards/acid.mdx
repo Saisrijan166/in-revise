@@ -5,16 +5,27 @@ title: ACID
 topic: transactions
 level: beginner
 heat: 3
-hook: "All or nothing, rules still hold, no one sees half-done work, and a commit survives a crash."
+hook: "ACID names the four promises of a transaction: all or nothing, the rules still hold, no one sees half-done work, and a committed change survives a crash."
 points:
-  - { k: "Atomicity", v: "every change in the transaction lands, or none does" }
-  - { k: "Consistency", v: "each commit leaves declared constraints satisfied" }
-  - { k: "Isolation", v: "running transactions do not see each other's unfinished work" }
-  - { k: "Durability", v: "once COMMIT returns, a crash cannot undo it" }
+  - { k: "Atomicity", v: "either every change in the transaction is saved or none is, even if the server crashes halfway" }
+  - { k: "Consistency", v: "every commit leaves the declared rules satisfied: keys, NOT NULL, CHECK and foreign keys" }
+  - { k: "Isolation", v: "transactions running at the same time affect each other only as far as the isolation level allows" }
+  - { k: "Durability", v: "once COMMIT returns, the change survives a crash or power cut, because its log is already on disk" }
+  - { k: "Rules only in code", v: "a business rule you never declare in the database is not protected by the C of ACID", kind: minus }
 trap:
   wrong: "The C in ACID is the same consistency as the C in CAP."
-  right: "ACID C means constraints still hold. CAP C means every read sees the latest write (linearizability) across nodes."
-sayIt: "ACID: atomicity, all or nothing; consistency, constraints still hold; isolation, concurrent transactions do not interfere; durability, a committed change survives a crash because the log is on disk."
+  right: "ACID's C means your declared constraints still hold after each commit. CAP's C means every read sees the latest write, even across copies on several servers."
+  why: "Both use the word consistency, and both come up in the same database interviews, so people assume one meaning."
+sayIt: "ACID: atomicity, all or nothing; consistency, declared constraints still hold; isolation, concurrent transactions do not see each other's unfinished work, up to the chosen level; durability, a committed change survives a crash because its log is on disk."
+cheat:
+  idea: "ACID is the set of four guarantees a database transaction gives: atomicity (all or nothing), consistency (rules still hold), isolation (concurrent work does not mix) and durability (commits survive crashes)."
+  remember: "ACID's C means your declared constraints still hold. It is not CAP's C, which is about copies on several servers agreeing."
+buildsOn: [transactions, constraints]
+scenarios:
+  - q: "Your rule 'a customer has at most one PENDING payment' lives only in Java code. Two requests for the same customer insert a PENDING payment at the same moment. Does ACID stop the second one?"
+    a: "No. Each request checks, finds no PENDING payment, and inserts one; both inserts are valid as far as the database knows. Declare the rule, for example a unique index on customer_id WHERE status = 'PENDING' in PostgreSQL, so the database rejects the second insert."
+  - q: "A transfer runs BEGIN and the credit to Ravi, then the database server is killed before the debit runs. What is in Ravi's wallet after restart?"
+    a: "His old balance. Crash recovery discards every transaction that had not committed, so the credit is gone. Atomicity covers crashes, not only errors: only committed work survives a restart."
 confusedWith: []
 tags: [acid, atomicity, consistency, isolation, durability]
 visual: table
@@ -25,6 +36,9 @@ sources:
   - title: "MySQL and the ACID Model (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/mysql-acid.html"
     verifiedOn: "2026-10-20"
+  - title: "Partial Indexes: unique index on a subset of rows (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/indexes-partial.html"
+    verifiedOn: "2026-10-21"
   - title: "Please stop calling databases CP or AP (Martin Kleppmann)"
     url: "https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html"
     verifiedOn: "2026-10-20"
@@ -33,37 +47,67 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+ACID is a short name for the four guarantees a database gives every [transaction](card:transactions): Atomicity, Consistency, Isolation and Durability. Together they say what stays true when many users write at the same time and when the server crashes at a bad moment. PostgreSQL and MySQL's InnoDB storage engine give all four.
+
 ## Why it exists
 
-Many users change data at once, and servers crash. ACID names the four promises a transaction gives so that money, stock and orders stay correct anyway.
+A payment system must never lose a committed payment, charge a wallet without recording the payment, or store a negative balance, even with thousands of requests at once and a crash at any moment. Without these guarantees, every application would need its own crash-recovery and coordination code, and most would get it wrong. ACID moves that work into the database, and gives everyone four words to ask about it precisely.
 
 ## How it works
 
 | Letter | What it promises | What gives it |
 | --- | --- | --- |
-| A | All or nothing | `ROLLBACK`, and crash recovery that discards unfinished work |
-| C | Valid before and after | Constraints: keys, `CHECK`, `NOT NULL` |
-| I | No interference | [Isolation levels](card:isolation-levels), via [MVCC](card:mvcc) and [locks](card:locking) |
-| D | Committed means kept | The [log](card:wal) is flushed to disk at commit |
+| A, atomicity | All or nothing | `ROLLBACK`, and crash recovery that discards unfinished work |
+| C, consistency | Valid before and after | [Constraints](card:constraints): keys, `CHECK`, `NOT NULL`, foreign keys |
+| I, isolation | No mixing of unfinished work | Isolation levels, the next concept |
+| D, durability | Committed means kept | A log written to disk at commit (the write-ahead log, later in this topic) |
 
-- The C here is not the C of the [CAP theorem](card:cap-theorem); see the trap.
+Follow one wallet payment through the four letters:
+
+1. `BEGIN` starts the transaction, and the debit and the payment insert run. Isolation: at READ COMMITTED or stricter, other sessions keep seeing the old balance until `COMMIT`.
+2. Each statement is checked against the declared constraints. Consistency: a debit that would make the balance negative is refused.
+3. If any statement fails, or the server crashes before `COMMIT`, all of the transaction's changes are discarded. Atomicity.
+4. At `COMMIT` the database writes the change to its log on disk before it reports success. Durability: after a crash, the log restores every committed change.
 
 ## Example
 
+Ravi (customer 2) has ₹300 and Meera (customer 3) has ₹0. A transfer of ₹500 from Meera to Ravi credits Ravi first (PostgreSQL 18):
+
 ```sql
-ALTER TABLE accounts ADD CHECK (balance >= 0);
 BEGIN;
-UPDATE accounts SET balance = balance + 500 WHERE id = 2;
-UPDATE accounts SET balance = balance - 500 WHERE id = 1;  -- id 1 has 300: CHECK fails
-ROLLBACK;  -- A: the credit to id 2 is undone too. C: no negative balance.
+UPDATE wallets SET balance = balance + 500 WHERE customer_id = 2;   -- credit Ravi
+UPDATE wallets SET balance = balance - 500 WHERE customer_id = 3;   -- debit Meera
+-- ERROR: new row for relation "wallets" violates check constraint "wallets_balance_check"
+ROLLBACK;
+SELECT customer_id, balance FROM wallets WHERE customer_id IN (2, 3);
 ```
+
+```text output
+ customer_id | balance
+-------------+---------
+           2 |  300.00
+           3 |    0.00
+```
+
+What to notice:
+
+- Consistency: the `CHECK (balance >= 0)` refuses Meera's negative balance.
+- Atomicity: `ROLLBACK` also undoes Ravi's credit, which had already succeeded. Ravi is back at ₹300, so no money was created.
+- If the code had run `COMMIT` instead, PostgreSQL would still roll back, but MySQL would save Ravi's credit, as [Transactions](card:transactions) showed. Atomicity needs the application to roll back on error.
+
+## Not to be confused with
+
+ACID's consistency means the data obeys the rules you declared, after every commit, on one database. The consistency in the [CAP theorem](card:cap-theorem), which you will see in Scaling, means that every read on any copy of the data returns the latest write. Rule: ACID C = rules hold; CAP C = all copies agree.
 
 ## Interview Qs
 
-### Explain ACID with a bank transfer.
+### Explain ACID with a money transfer.
 
-Atomicity: the debit and credit both happen or neither does. Consistency: no balance breaks the `CHECK`. Isolation: other transactions do not see the half-done transfer. Durability: after commit, a crash cannot lose the transfer.
+Atomicity: the debit and the credit both happen or neither does. Consistency: no balance breaks the `CHECK (balance >= 0)`. Isolation: other transactions do not see the half-done transfer. Durability: after commit, a crash or power cut cannot lose the transfer.
 
 ### Which ACID property depends most on the application?
 
-Consistency. The database enforces only the constraints you declare; a business rule kept only in code is not protected.
+Consistency. The database enforces only the constraints you declare. A business rule kept only in application code is not protected: two concurrent requests can both pass the check in code and commit data that breaks it.
+

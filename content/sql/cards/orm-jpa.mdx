@@ -5,27 +5,45 @@ title: "ORM, JPA and Hibernate"
 topic: backend
 level: beginner
 heat: 2
-hook: "An ORM maps classes to tables and writes routine SQL. JPA is the rulebook, Hibernate the engine, JDBC the wire underneath."
+hook: "An ORM maps your classes to tables and writes the routine SQL for you. JPA is the rulebook, Hibernate the engine, and JDBC the wire underneath."
 points:
-  - { k: "Entity", v: "a class marked @Entity; one object stands for one row" }
-  - { k: "Persistence context", v: "one managed object per row; changes are written at commit" }
-  - { k: "To-one default", v: "@ManyToOne and @OneToOne are EAGER (JPA 3.2)", kind: default }
-  - { k: "To-many default", v: "@OneToMany and @ManyToMany are LAZY (JPA 3.2)", kind: default }
-  - { k: "Still need SQL", v: "to read the generated SQL, tune it and write reports", kind: minus }
+  - { k: "Entity", v: "a class marked @Entity; one object stands for one row, and its fields for the columns" }
+  - { k: "JPA", v: "Jakarta Persistence 3.2: a specification of annotations and interfaces, with no engine of its own" }
+  - { k: "Hibernate", v: "the most used JPA implementation; it builds the SQL and sends it through JDBC and the pool" }
+  - { k: "To-one default (JPA 3.2)", v: "@ManyToOne and @OneToOne are EAGER, so the related row is always loaded unless you set LAZY", kind: default }
+  - { k: "To-many default (JPA 3.2)", v: "@OneToMany and @ManyToMany are LAZY: the collection loads when the code first reads it", kind: default }
+  - { k: "Still need SQL", v: "to read the generated SQL, add indexes, fix slow queries and write reports", kind: minus }
 trap:
   wrong: "JPA and Hibernate are two rival ORMs; you pick one."
   right: "JPA (Jakarta Persistence) is a specification. Hibernate implements it, and Spring Data JPA builds repositories on top."
-sayIt: "JPA is the standard API for mapping objects to tables, Hibernate is the usual implementation, and both run SQL through JDBC. The ORM saves boilerplate, but I still check its SQL for N+1 queries and missing indexes."
+  why: "Both names appear in the same tutorials and dependency lists, and code often imports from both jakarta.persistence and org.hibernate, so they look like two competing products."
+sayIt: "JPA is the standard API for mapping objects to tables, Hibernate is the usual implementation, and both run SQL through JDBC. The ORM removes boilerplate, but I still read its SQL for N+1 queries and missing indexes, and I make to-one associations LAZY."
+cheat:
+  idea: "An ORM maps classes to tables, one object per row, and writes the routine SQL. JPA is the standard; Hibernate implements it over JDBC."
+  flow: "Spring Data repository → JPA (Hibernate) → JDBC + pool → database"
+  remember: "To-one associations are EAGER by default in JPA; mark them LAZY and fetch what each use case needs."
+buildsOn: [relationships, connection-pooling]
+scenarios:
+  - q: "Payment has @ManyToOne Customer customer with no fetch attribute. You run a JPQL query that returns 3 payments of 3 different customers. How many SELECTs does Hibernate 7.4 run?"
+    a: "Four: one for the payments, then one per customer, straight away. @ManyToOne is EAGER by default, and for a JPQL query Hibernate meets that requirement with extra SELECTs unless the query fetches the customer itself. LAZY plus a fetch join is the usual fix."
+  - q: "Inside one transaction, the code calls findById(101L) twice for the same payment. How many SELECTs run?"
+    a: "One. The persistence context keeps exactly one object per row, so the second call returns the object it already holds, without SQL."
 confusedWith: [jdbc-vs-jpa-vs-hibernate]
 tags: [orm, jpa, hibernate, spring-data-jpa]
-visual: flow
+visual: code
 sources:
-  - title: "Jakarta Persistence 3.2 specification"
+  - title: "Jakarta Persistence 3.2 specification: 2.1 entity class rules, fetch type defaults"
     url: "https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2.html"
-    verifiedOn: "2026-10-20"
-  - title: "Hibernate ORM 7.4 Introduction"
+    verifiedOn: "2026-10-21"
+  - title: "A Short Guide to Hibernate 7 (7.4): persistence contexts, dirty checking, association fetching"
     url: "https://docs.hibernate.org/orm/7.4/introduction/html_single/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Hibernate ORM releases: 7.4 is the latest stable series, Jakarta Persistence 3.2"
+    url: "https://hibernate.org/orm/releases/"
+    verifiedOn: "2026-10-21"
+  - title: "Configure Hibernate Naming Strategy (Spring Boot 4.1 how-to guides)"
+    url: "https://docs.spring.io/spring-boot/how-to/data-access.html"
+    verifiedOn: "2026-10-21"
   - title: "JPA Query Methods (Spring Data JPA reference)"
     url: "https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html"
     verifiedOn: "2026-10-20"
@@ -34,52 +52,92 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An ORM (object-relational mapping) library maps your classes to tables: one object stands for one row, and its fields for the columns. You load and save objects, and the library writes the SQL. In Java the standard is JPA (Jakarta Persistence 3.2), a specification of annotations and interfaces with no engine of its own. Hibernate is the most used implementation, and Spring Data JPA adds ready-made repositories on top.
+
 ## Why it exists
 
-Hand-written JDBC for every insert, update and row-to-object mapping is long and repetitive. An ORM does the mapping and generates the routine SQL.
+With plain JDBC, every query means writing the SQL, setting each parameter and copying each column of the `ResultSet` into a field by hand. For a dozen tables that is hundreds of near-identical lines, and renaming a column breaks them one by one. With an ORM you describe the mapping once, on the class, and the library generates the routine `SELECT`, `INSERT`, `UPDATE` and `DELETE` statements. Under the hood it still sends SQL through JDBC and the [connection pool](card:connection-pooling).
 
 ## How it works
 
 <Mermaid
-  alt="A request flows from the controller to the service, then to a repository, which calls Hibernate as the JPA provider. Hibernate sends SQL through JDBC and a connection pool to the database, and rows come back as objects."
+  alt="A request such as GET /payments/101 reaches the controller, which calls the service, which calls a Spring Data repository. The repository calls JPA, implemented by Hibernate. Hibernate sends SQL through JDBC and the connection pool to the database, and the rows come back as objects."
   chart={`flowchart LR
-  C[Controller] --> S[Service]
-  S --> R[Repository]
-  R --> H["Hibernate (JPA)"]
+  C["PaymentController (GET /payments/101)"] --> S[PaymentService]
+  S --> R[PaymentRepository]
+  R --> H["JPA, implemented by Hibernate"]
   H --> J["JDBC + pool"]
-  J --> D[(Database)]`}
+  J --> D[(Database)]
+  D -. rows become objects .-> S`}
 />
 
-- Spring Data JPA writes the repository; a method name such as `findByStatus` becomes a query.
-- Hibernate still sends plain SQL through JDBC and the [connection pool](card:connection-pooling).
+Follow one call, `payments.findById(101L)`:
+
+1. The service calls the repository interface. Spring Data wrote its implementation at startup.
+2. The repository calls `find` on JPA's `EntityManager`, the interface that loads and saves entities. Hibernate implements it.
+3. Hibernate builds the SQL from the mapping, `select … from payments where id=?`, and runs it through JDBC on a pooled connection.
+4. It copies the row into a new `Payment` object and keeps it in the persistence context: the set of objects it tracks in this transaction, one per row.
+5. If the code changes a field of that object, Hibernate notices at flush, just before commit, and writes the `UPDATE` itself. This is called dirty checking.
 
 ## Example
 
-```java
-@Entity
-@Table(name = "orders")
-class CustomerOrder {
-    @Id @GeneratedValue Long id;
-    BigDecimal amount; String status;
-    @ManyToOne(fetch = FetchType.LAZY)       // the default would be EAGER
-    User user;
-}
+The `payments` table mapped as an entity, with its foreign key to `customers` as a [many-to-one relationship](card:relationships):
 
-interface OrderRepository extends JpaRepository<CustomerOrder, Long> {
-    List<CustomerOrder> findByStatus(String status); // query derived from the name
+```java
+@Entity                                   // one Payment object = one row
+@Table(name = "payments")
+public class Payment {
+    @Id Long id;                          // the primary key
+    BigDecimal amount;
+    String status;                        // PAID, FAILED or PENDING
+    @Column(name = "created_at") LocalDateTime createdAt;
+
+    @ManyToOne(fetch = FetchType.LAZY)    // the JPA default would be EAGER
+    @JoinColumn(name = "customer_id")     // the foreign key column
+    Customer customer;
 }
 ```
+
+```java
+public interface PaymentRepository extends JpaRepository<Payment, Long> {
+    List<Payment> findByStatus(String status);  // query made from the method name
+}
+```
+
+What to notice:
+
+- `@Table` and `@Column` give the table or column name when it differs from the class or field name. Spring Boot's default naming already maps `createdAt` to `created_at`, but not `Payment` to `payments`.
+- `fetch = FetchType.LAZY` means the customer is loaded only when code first reads it. Remove it and every payment query also loads its customer, needed or not.
+- `findByStatus` has no body. Spring Data reads the method name and generates `select … from payments where status = ?`.
+- `JpaRepository` already gives `findById`, `save`, `findAll` and `delete`, so routine data access needs no SQL.
+
+## Rules and defaults
+
+- **Entity class (JPA 3.2):** needs `@Entity`, an `@Id`, and a public or protected constructor with no parameters. It must not be final, so a Java record cannot be an entity.
+- **Fetch defaults (JPA 3.2):** `@ManyToOne` and `@OneToOne` are EAGER; `@OneToMany` and `@ManyToMany` are LAZY.
+- **EAGER is a requirement, LAZY is a hint:** the provider must load an EAGER association, and may load a LAZY one early. Hibernate's guide says almost all associations should be LAZY.
+- **Changes need a transaction:** dirty checking writes changes only when a transaction flushes; outside one, edits to an object are not saved.
+
+## Not to be confused with
+
+JDBC is Java's low-level API: you write the SQL and copy the results yourself. JPA is the standard that says how mapping, the `EntityManager` and JPQL, its SQL-like query language over entities, must behave. Hibernate is a library that implements JPA and adds features of its own. Spring Data JPA writes repository classes for you on top of JPA. Rule: JDBC = the wire; JPA = the rules; Hibernate = the engine; Spring Data JPA = the repository writer.
+
+## Common mistakes
+
+- **"@ManyToOne is lazy by default."** In JPA it is EAGER. Write `fetch = FetchType.LAZY` on every to-one association, then fetch what each use case needs, as [N+1 queries](card:n-plus-one) shows next.
 
 ## Interview Qs
 
 ### Why learn SQL if you use an ORM?
 
-The ORM writes SQL, but you own its speed. You read the generated SQL, spot [N+1 queries](card:n-plus-one) and missing indexes, and write native SQL for reports, bulk updates and window functions.
+The ORM writes SQL, but you own its speed. You read the generated SQL, spot [N+1 queries](card:n-plus-one) and missing indexes, and check plans with EXPLAIN. Reports, bulk updates and window functions are often clearer and faster as native SQL.
 
-### Which fetch type should associations use?
+### What is the difference between JPA and Hibernate?
 
-Hibernate's guide says almost all associations should be LAZY, because EAGER defaults load far more than a use case needs. Fetch what each use case needs with JOIN FETCH or an entity graph.
+JPA (Jakarta Persistence) is a specification: annotations such as `@Entity`, the `EntityManager` interface and the JPQL query language. Hibernate is an implementation that does the work behind those interfaces and adds extras such as batch fetching. Code written against JPA can switch providers more easily.
 
 ### What is the persistence context?
 
-The set of entities one EntityManager manages, with exactly one object per row identity. Changes to managed entities are written to the database at flush or commit, without an explicit save call.
+The set of entities one `EntityManager` tracks, usually for one transaction, with exactly one object per row. Loading the same row twice returns the same object without new SQL. Changes to tracked entities are written at flush, before commit, without an explicit save call.

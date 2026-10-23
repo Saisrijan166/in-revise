@@ -5,27 +5,40 @@ title: Find and Remove Duplicates
 topic: patterns
 level: intermediate
 heat: 2
-hook: "Find with GROUP BY + HAVING COUNT(*) > 1, delete every ROW_NUMBER() above 1, then add UNIQUE so they never return."
+hook: "Find repeated values with GROUP BY and HAVING COUNT(*) > 1, delete every copy numbered above 1 by ROW_NUMBER(), then add UNIQUE so they cannot return."
 points:
-  - { k: "Find the values", v: "GROUP BY email HAVING COUNT(*) > 1" }
-  - { k: "Show every copy", v: "COUNT(*) OVER (PARTITION BY email) > 1, in a subquery" }
-  - { k: "Keep one", v: "delete rows with ROW_NUMBER() > 1; its ORDER BY picks the survivor" }
-  - { k: "NULLs", v: "GROUP BY puts all NULLs in one group: filter them out first", kind: minus }
-  - { k: "Prevent", v: "add a UNIQUE constraint after the clean-up", kind: plus }
+  - { k: "Find", v: "GROUP BY email HAVING COUNT(*) > 1 lists each repeated email once, with its number of copies" }
+  - { k: "See every copy", v: "COUNT(*) OVER (PARTITION BY email) keeps all rows and puts the copy count on each one" }
+  - { k: "Keep one", v: "number the rows per email with ROW_NUMBER() ORDER BY id and delete rn > 1; that ORDER BY picks the survivor" }
+  - { k: "NULL emails", v: "GROUP BY puts all NULLs into one group, so filter WHERE email IS NOT NULL first", kind: minus }
+  - { k: "Prevent", v: "add a UNIQUE constraint after the clean-up; adding it while duplicates exist fails", kind: plus }
 trap:
   wrong: "Delete every row whose email appears in the GROUP BY … HAVING COUNT(*) > 1 result."
-  right: "That deletes the original too. Number the rows per email with ROW_NUMBER() and delete only rn > 1."
-sayIt: "I find duplicates with GROUP BY and HAVING COUNT(*) > 1. To clean up I number rows per value with ROW_NUMBER(), delete everything above 1, then add a UNIQUE constraint."
+  right: "That deletes the original as well. Number the rows per email with ROW_NUMBER() and delete only rn > 1."
+  why: "The find query and the delete seem to describe the same rows, 'the duplicated emails', but the row you want to keep has that email too."
+sayIt: "I find duplicates with GROUP BY and HAVING COUNT(*) > 1, ignoring NULLs. To clean up I number the rows per value with ROW_NUMBER(), delete everything above 1, and then add a UNIQUE constraint so new copies are rejected."
+cheat:
+  idea: "Find duplicates by grouping on the column and keeping groups with COUNT(*) > 1. Remove them by numbering rows per value and deleting every number above 1."
+  remember: "Never delete every row in the duplicate list: that removes the original too."
+buildsOn: [aggregates-group-by, window-functions, constraints]
+scenarios:
+  - q: "GROUP BY email HAVING COUNT(*) > 1 shows a row with email NULL and count 2. Are those duplicates?"
+    a: "No, they are two sign-ups without an email. GROUP BY puts all NULLs into one group, even though NULL = NULL is not true. Add WHERE email IS NOT NULL unless the question counts missing emails as a value."
+  - q: "In MySQL, DELETE FROM signups WHERE id IN (SELECT id FROM signups WHERE …) fails with error 1093. How do you fix it?"
+    a: "Wrap the inner SELECT in a derived table: WHERE id IN (SELECT id FROM (SELECT … FROM signups …) d). MySQL forbids reading the table you modify in a subquery, except through a derived table that it materialises first."
 confusedWith: []
 tags: [patterns, duplicates, delete]
 visual: flow
 sources:
-  - title: "B.3.4.3 Problems with NULL Values: GROUP BY treats NULLs as equal (MySQL 9.7)"
-    url: "https://dev.mysql.com/doc/refman/9.7/en/problems-with-null.html"
-    verifiedOn: "2026-10-20"
+  - title: "Working with NULL Values: NULLs are equal in GROUP BY (MySQL 9.7)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/working-with-null.html"
+    verifiedOn: "2026-10-21"
   - title: "15.2.15.12 Restrictions on Subqueries (MySQL 9.7)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/subquery-restrictions.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Optimizing Derived Tables: window functions prevent merging (MySQL 9.7)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/derived-table-optimization.html"
+    verifiedOn: "2026-10-21"
   - title: "DELETE: the USING clause and self-joins (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/sql-delete.html"
     verifiedOn: "2026-10-20"
@@ -34,42 +47,77 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A duplicate is two or more rows that hold the same value in a column that should be unique, such as two sign-ups with the same email. Handling duplicates has three parts: find them by grouping, delete the extra copies while keeping one, and add a [UNIQUE constraint](card:constraints) so they cannot come back. A duplicate can also be defined by several columns together, such as name and city.
+
 ## Why it exists
 
-Imports and retried inserts without a unique key leave repeated rows. You must find them, keep exactly one of each, and stop new ones.
+Duplicates come from an import that ran twice, or from app code that checks "does this email exist?" and then inserts, so two requests at the same moment both insert. They break reports and joins: one customer counted twice, one email sent twice. Deleting by hand misses copies, and a careless `DELETE` removes the original along with its copies.
 
 ## How it works
 
-<Steps label="Clean up duplicate emails">
-  <Step title="Find">`GROUP BY email HAVING COUNT(*) > 1` lists each repeated email once.</Step>
-  <Step title="Inspect">`COUNT(*) OVER (PARTITION BY email)` keeps every row with its count.</Step>
-  <Step title="Delete extras">`ROW_NUMBER() OVER (PARTITION BY email ORDER BY id) > 1` keeps the lowest id.</Step>
-  <Step title="Prevent">Add a [UNIQUE constraint](card:constraints) on email.</Step>
-</Steps>
+<Mermaid
+  alt="Four steps from left to right: find repeated values with GROUP BY and HAVING, number the copies of each value with ROW_NUMBER, delete every row numbered above 1, then add a UNIQUE constraint."
+  chart={`flowchart LR
+  F[1. Find: GROUP BY + HAVING] --> N[2. Number copies: ROW_NUMBER]
+  N --> D[3. Delete rn > 1] --> U[4. Add UNIQUE]`}
+/>
 
-- Add `WHERE email IS NOT NULL`, or the NULL emails form one "duplicate" group.
-- MySQL blocks a DELETE whose subquery reads the same table, unless that read is a materialised derived table, as below.
+1. Find the repeated values: `GROUP BY email HAVING COUNT(*) > 1` returns each repeated email once, with its count.
+2. Number the copies of each value: `ROW_NUMBER() OVER (PARTITION BY email ORDER BY id)` gives the oldest row 1 and its copies 2, 3 and so on.
+3. Delete every row whose number is above 1. The `ORDER BY` inside the window decides which copy survives: `ORDER BY id` keeps the oldest.
+4. Add a `UNIQUE` constraint on the column, so the database rejects any new copy.
 
 ## Example
 
+An import loaded `signups(id, name, email)` with Asha three times (ids 1, 3, 5); Kabir (4) and Neha (6) have no email. First find the copies, then delete all but the oldest.
+
 ```sql
-DELETE FROM users
+SELECT email, COUNT(*) AS copies
+FROM signups
+WHERE email IS NOT NULL
+GROUP BY email
+HAVING COUNT(*) > 1;
+
+DELETE FROM signups
 WHERE id IN (
   SELECT id FROM (
     SELECT id, ROW_NUMBER() OVER (PARTITION BY email ORDER BY id) AS rn
-    FROM users
-    WHERE email IS NOT NULL
+    FROM signups WHERE email IS NOT NULL
   ) ranked
-  WHERE rn > 1
-);
+  WHERE rn > 1);
 ```
+
+```text output
+    email     | copies
+--------------+--------
+ asha@mail.in |      3
+DELETE 2
+```
+
+What to notice:
+
+- The delete removed ids 3 and 5 and kept 1, 2, 4 and 6: Asha's oldest row survives, and the two rows without an email are untouched.
+- Without `WHERE email IS NOT NULL`, the find query also reports NULL with 2 copies, because `GROUP BY` puts both missing emails in one group.
+- The extra derived table `ranked` is what lets MySQL run this delete; the same statement works unchanged in PostgreSQL 18.
+
+## Rules and defaults
+
+- **MySQL same-table rule:** MySQL 9.7 rejects a `DELETE` or `UPDATE` whose subquery reads the same table directly (error 1093). A derived table that MySQL materialises is allowed, and a window function inside it prevents merging, so it is materialised.
+- **Several columns:** for duplicates on name and city, use `GROUP BY name, city` and `PARTITION BY name, city`.
+- **UNIQUE after the clean-up:** adding the constraint fails while duplicates exist. By default it still allows many NULLs, in PostgreSQL 18 and MySQL 9.7.
+
+## Not to be confused with
+
+`SELECT DISTINCT email` removes repeated values from one query's result; the table still holds every copy. Deleting duplicates changes the table itself. Rule: `DISTINCT` hides duplicates in a result; `DELETE` with `ROW_NUMBER` removes them from the data.
 
 ## Interview Qs
 
-### Delete duplicate emails, keeping the lowest id, without a window function?
+### Delete duplicate emails, keeping the lowest id, without a window function.
 
-Self-join. PostgreSQL: `DELETE FROM users u USING users d WHERE u.email = d.email AND u.id > d.id;` MySQL: `DELETE u FROM users u JOIN users d ON u.email = d.email AND u.id > d.id;` NULL emails never match, so they stay.
+Join the table to itself. PostgreSQL: `DELETE FROM signups s USING signups d WHERE s.email = d.email AND s.id > d.id;` MySQL: `DELETE s FROM signups s JOIN signups d ON s.email = d.email AND s.id > d.id;` Each copy finds an older row and is deleted. NULL emails never match, so they stay.
 
-### How do you stop duplicates coming back?
+### How do you stop duplicates from coming back?
 
-Add a UNIQUE constraint or unique index on the column, after the clean-up or it fails. For concurrent writers use an [upsert](card:upsert) rather than "check, then insert".
+Add a `UNIQUE` constraint or unique index on the column after the clean-up. For two writers at the same moment, "check, then insert" in app code is not enough; let the constraint reject the second insert, or use an [upsert](card:upsert).

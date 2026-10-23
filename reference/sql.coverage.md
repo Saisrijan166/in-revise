@@ -1,5 +1,5 @@
 # Coverage: SQL & Databases
-Reference: reference/sql.md  ·  Last updated: 20-10-2026
+Reference: reference/sql.md  ·  Last updated: 21-10-2026
 
 The reference has two parts: Part A (sections A1–A47, a one-shot guide) and Part B (sections B1–B24, a cheat sheet; B21 holds
 the lettered query patterns B21.A–B21.L). Every section and every lettered pattern appears in exactly one of Mapped, Corrected or
@@ -396,3 +396,288 @@ headings. Every item of the addition appears in exactly one of Mapped, Corrected
 | Reference item | Reason |
 |---|---|
 | (none) | Every item is mapped or corrected |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass then checked about 1,880 claims and fixed 17, removing 2.
+
+### Unit backend
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| A37 request → create connection → query → close, every time (the "without a pool" flow) | connection-pooling (Why it exists) |
+| B22 pool "limits concurrent database sessions" | connection-pooling (Why, How step 4) |
+| A38 Client → Controller → Service → Repository → Database (GET /users/10) | orm-jpa (Mermaid now starts at the controller, GET /payments/101) |
+| B20 "avoid exposing sensitive error details" | sql-injection (Rules: error messages; Interview Q) |
+| B20 "validate inputs, but don't rely on validation alone" | sql-injection (Not to be confused with: validation vs parameters) |
+| A41 "joins" as an N+1 fix | n-plus-one (Why: a join could load both; Not to be confused with: JOIN vs JOIN FETCH) |
+| A45 Redis uses (sessions, rate limiting, counters, locks, pub/sub) | caching-redis (Interview Q linking the tree nodes) |
+
+**Added beyond the reference (verified)**
+
+- HikariCP 7.1 defaults minimumIdle = maximumPoolSize, maxLifetime 30 min, leakDetectionThreshold 0 (off); in-use connections are retired only when closed (connection-pooling Rules).
+- Spring Boot 4.1 pool order HikariCP → Tomcat → DBCP2 → Oracle UCP; spring.datasource.type overrides (connection-pooling Rules).
+- close() on a pooled connection recycles it (javax.sql.PooledConnection Javadoc) (connection-pooling Common mistakes).
+- PgBouncer pooling modes vs HikariCP (connection-pooling Not to be confused with).
+- `FROM ?` is a syntax error and `ORDER BY ?` sorts by a constant, run on PostgreSQL 18 (sql-injection Rules).
+- Concatenating before prepareStatement() is still injectable (sql-injection Common mistakes, scenario).
+- JPA 3.2 entity rules: no-arg public/protected constructor, non-final, a record cannot be an entity (orm-jpa Rules).
+- Spring Boot default naming CamelCaseToUnderscoresNamingStrategy (orm-jpa Example note).
+- EAGER @ManyToOne with a JPQL query still runs 1 + N SELECTs in Hibernate 7.4 (run) (n-plus-one trap.why, Interview Q; orm-jpa scenario).
+- Plain JOIN does not fill the association; JOIN FETCH does; JOIN FETCH is inner, LEFT JOIN FETCH keeps null associations (n-plus-one).
+- Batch fetching query count: 100 payments, batch 25 → 5 queries (run) (n-plus-one scenario).
+- Redis 8 maxmemory 0 by default on 64-bit, default policy noeviction, allkeys-lru suggested for caches (caching-redis Rules).
+- Writing the new value into the cache on update races; delete instead (caching-redis Common mistakes).
+- PostgreSQL ON CONFLICT: conflict target required for DO UPDATE; cardinality violation when one statement hits the same row twice (upsert Rules).
+- MySQL ON DUPLICATE KEY UPDATE affected rows 1 / 2 / 0 (run on MySQL 9.7.2); avoid it on tables with several unique indexes (upsert Rules, scenario).
+- The proposed row must satisfy NOT NULL even when it conflicts (run on PostgreSQL 18) (upsert Common mistakes).
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| Glossary persistence-context said changes are written "at commit" | "at flush, before commit" (override in backend.glossary.yaml) | Jakarta Persistence 3.2 spec, 3.1; Hibernate 7.4 guide |
+| Draft cache example used a generic `cache.set(key, u, Duration)` API | Real Jedis 8.0.2 code; `setex` is deprecated in Jedis 8, so `set(key, value, SetParams.setParams().ex(300))` | compiled with -Xlint:deprecation |
+| Draft orm-jpa used a `User` / `orders` example | Payments running example; mapping compiled against Jakarta Persistence 3.2 and Spring Data JPA | — |
+| Draft sql-injection said a stored procedure is safe "only if it does not build SQL from its input" | Kept, now in Rules | OWASP SQL Injection Prevention Cheat Sheet |
+| statement-vs-preparedstatement row "Server-side prepare: … Connector/J off by default" | Reworded to a readable phrase, same fact (useServerPrepStmts=true needed) | Connector/J prepared statement properties |
+
+### Unit basics
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| A1 / B1 "why a database" angle (store, find, keep correct, many users) | relational-databases (Why it exists, Interview Q "Why use a database instead of files?") |
+| A5 "who am I / which record am I connected to" angle (paraphrased, not copied) | keys (Not to be confused with: rule line) |
+| B1 surrogate vs natural key | keys (Interview Q, Common mistake "email as primary key") |
+| A6 one-to-one (person / passport) | relationships (wallets example, Interview Q "How do you build a one-to-one relationship?") |
+| B3 VARCHAR(n) limit, INT range | data-types (How it works step 2, scenario on INT overflow) |
+| B9 DEFAULT vs explicit NULL | constraints (point, scenario) |
+| B9 "why constraints when the app validates" angle | constraints (Interview Q) |
+| B18 string concatenation row, case sensitivity row | postgresql-and-mysql (example run on both, scenarios, Interview Q) |
+| B18 RETURNING row | postgresql-and-mysql (trap); comparison postgresql-vs-mysql (example with LAST_INSERT_ID) |
+
+**Corrections and new verified facts**
+
+| What | Source |
+|---|---|
+| MySQL 8.4 parses an inline column `REFERENCES` and ignores it (no foreign key); MySQL 9.7 enforces it. Added to keys (point, Rules) | https://dev.mysql.com/doc/refman/8.4/en/ansi-diff-foreign-keys.html ; https://dev.mysql.com/doc/refman/9.7/en/create-table-foreign-keys.html |
+| Out-of-range integers: error in MySQL's default strict mode, clipped with a warning when strict mode is off | https://dev.mysql.com/doc/refman/9.7/en/out-of-range-and-overflow.html |
+| PostgreSQL text / unlimited varchar: up to about 1 GB (was "no length limit") | https://www.postgresql.org/docs/18/datatype-character.html (chapter 8 source already listed) |
+| SQL standard is ISO/IEC 9075, latest SQL:2023 | https://www.postgresql.org/docs/18/features.html |
+| MySQL `||` is a deprecated OR unless PIPES_AS_CONCAT is on | https://dev.mysql.com/doc/refman/9.7/en/logical-operators.html |
+| PostgreSQL standard collations are deterministic (exact byte comparison) | https://www.postgresql.org/docs/18/collation.html |
+| MySQL LAST_INSERT_ID() is per connection (comparison example) | https://dev.mysql.com/doc/refman/9.7/en/information-functions.html |
+| Neo4j stores nodes, relationships and properties | https://neo4j.com/docs/getting-started/graph-database/ |
+| Constraints How it works: no claim about the internal order of checks (grouped as "rules on the new row" and "rules that need other rows") | PostgreSQL 18 docs 5.5 |
+| Removed unsourced market wording ("most widely used") from postgresql-and-mysql | org rule: no unsourced market claims |
+
+### Unit design
+
+**Added from the reference**
+
+- A14 / B10 anomaly example (duplicated customer details) → normalization: Why it exists + Example (real run, two cities for one customer).
+- B10 "2NF example with a composite key" → normalization How it works step 3 (order_lines) + Interview Q.
+- B10 "normalise first, denormalise when measured" → normalization Interview Q "Is a fully normalised schema always best?", denormalization points/sayIt.
+- A15 "useful when joins are expensive" → denormalization Why it exists, scenario (dashboard: index vs summary table).
+- A28 / B17 views uses (simplify, abstraction, controlled access) → views What/Why, scenario on access with owner rights.
+- B17 "MySQL has no native materialized view; summary table" → views points, Rules (with test result).
+- A29 / B17 procedure vs function, "capabilities vary" → stored-procedures-triggers Example (procedure with COMMIT), Rules, comparison explain/example.
+- A30 / B17 trigger audit flow, "hidden side effects" → audit trigger Example on payments (real run), Interview Q.
+- A31 OLTP vs OLAP characteristics → oltp-and-olap What/Why, Example with real result.
+- B23 SERIAL / IDENTITY, "identity is the standards-oriented choice" → id-generation Interview Q "IDENTITY or SERIAL?".
+
+**Added beyond the reference (verified)**
+
+- Manual ids with SERIAL / BY DEFAULT do not advance the sequence, so a later insert hits a duplicate key; MySQL moves its counter past a larger explicit id (both tested; MySQL doc innodb-auto-increment-handling).
+- Identity column is NOT NULL but not unique by itself (PostgreSQL 18 identity docs).
+- PostgreSQL 18 uuidv4()/gen_random_uuid() = v4, uuidv7(); MySQL 9.7 UUID() is version 1, no v4/v7 function (MySQL miscellaneous functions doc).
+- View SELECT * is expanded at creation (tested on PostgreSQL 18.6 and MySQL 9.7.2; MySQL doc "frozen at creation").
+- Views read base tables with the owner's rights by default (PostgreSQL CREATE VIEW; MySQL SQL SECURITY DEFINER default).
+- PostgreSQL updatable-view rules list, WITH CHECK OPTION (CASCADED default) (PostgreSQL 18 CREATE VIEW).
+- Plain REFRESH locks out reads; materialized views are read-only (tested: "cannot change materialized view").
+- Statement-level triggers fire on zero rows; BEFORE trigger returning NULL skips the row; trigger errors roll back statement and trigger effects (PostgreSQL 18 trigger-definition).
+- MySQL triggers are not activated by foreign key actions (MySQL 9.7 stored-program restrictions); PostgreSQL user triggers do fire on cascaded deletes (tested).
+- MySQL has no UPDATE OF column list for triggers (tested: syntax error).
+- Procedure COMMIT fails with "invalid transaction termination" inside an explicit transaction block, and in a function (tested; PostgreSQL 18 xproc).
+
+**Corrections**
+
+- Draft id-generation said `visual: table`; the concept's main aid is now the code example, so `visual: code`.
+- Draft views/denormalization listed their embedded comparison in confusedWith in my first pass; reverted to [] per CLAUDE.md 3.3 (embedded comparisons are not listed again).
+- No reference statements were wrong in this unit beyond those already recorded in the coverage file (A15 overstatement, B18 materialized-view row).
+
+### Unit indexes
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| A16 / B11 "indexes need maintenance" (reworded as automatic upkeep) | indexes: Rules "Kept current for you" |
+| B11 "when indexes hurt: too many indexes" | indexes: Common mistakes (unused indexes, pg_stat_user_indexes.idx_scan) |
+| B11 "Does adding an index always make a query faster?" | indexes: trap with why |
+| B11 index types table (unique, partial, expression) | index-types: How it works steps, Rules (unique NULLs, NULLS NOT DISTINCT) |
+| B11 leftmost prefix "not an absolute prohibition" | composite-indexes: Rules (skip scan, PG 18 rule on columns after a range) |
+| B19 cardinality / selectivity | index-not-used: Not to be confused with |
+| B11 "EXPLAIN ANALYZE executes the statement" | explain-query-plans: scenario + Rules |
+| A24 estimated cost | explain-query-plans: point "Cost" (arbitrary units) |
+| B19 optimisation order (measure ... measure again) | query-optimization: Mermaid loop + 6 steps |
+| A42 pagination, keyset "stable ordering" | pagination: steps, tie-breaker example with real rows |
+| New beyond the reference | indexes: CREATE INDEX CONCURRENTLY / InnoDB online index build (Interview Q); index-types: partial index needs a literal, not a parameter; explain: PG 18 BUFFERS by default, loops averaging, join-method Interview Q; query-optimization: pg_stat_statements normalises constants, "slow query vs too many queries"; pagination: drift scenario |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Reference "indexes need maintenance" | The database updates indexes on every write; the real task is dropping unused ones | https://www.postgresql.org/docs/18/indexes-intro.html ; https://www.postgresql.org/docs/18/monitoring-stats.html |
+| Earlier draft composite Q: "a range stops later columns" (too strong) | Later columns are checked in the index but do not necessarily narrow the scanned part (PG 18 wording; skip scan can still apply) | https://www.postgresql.org/docs/18/indexes-multicolumn.html |
+| Earlier draft trap why (clustered) mentioned SQL Server without a source | Removed; InnoDB only | https://dev.mysql.com/doc/refman/9.7/en/innodb-index-types.html |
+New sources (verifiedOn 2026-10-21): 14 (indexes-unique, sql-createindex x2 uses, monitoring-stats x2, innodb-online-ddl-operations, indexes-partial, release-15, release-18 x2, indexes-ordering x2, mysql explain, using-explain, planner-optimizer, innodb-persistent-stats, pgstatstatements re-check). Facts added or changed: about 22.
+
+### Unit patterns
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| Q-TRANSLATOR words (GET, ONLY, LIST, PATTERN, EMPTY, KEEP LEFT, CLASSIFY, REPLACE NULL…) | english-to-sql, words table (merged into 9 rows) |
+| Q40 combinations; Q13 group by the key | english-to-sql, Rules ("Group by the key") and Interview Q |
+| Q29 duplicates on several columns | duplicates, Rules ("Several columns") and What it is |
+| Q30 DISTINCT removes duplicates from a result | duplicates, Not to be confused with (DISTINCT vs deleting) |
+| Q32/Q33 conditional count and sum | group-aggregation-patterns, table and Example |
+| B21.J latest per user with id tie-breaker | top-n-per-group, scenario and Interview Q (now "latest payment per customer") |
+| B21.L consecutive / repeated records, LAG and LEAD | running-totals-and-streaks, streak query, "three in a row" Interview Q, "previous month" Interview Q (LEAD as mirror) |
+| New: questions to ask the interviewer (ties, NULLs, zero groups) | sql-problem-approach, Interview Q |
+| New: join fan-out shown with real numbers (1600 vs 2300) | sql-problem-approach, Interview Q |
+| New: LEFT JOIN anti-join with an extra match condition (status in ON vs WHERE) | anti-join-pattern, Example and scenario |
+| New: MySQL error 1093 and the derived-table exception | duplicates, Rules and scenario |
+| New: NULL sort order differs (PostgreSQL NULLS FIRST in DESC, MySQL NULLs last) | top-n-per-group, Rules |
+| New: subquery alias required in MySQL, optional in PostgreSQL 18 | top-n-per-group, What to notice |
+| New: LAG default value, LAG(amount, 1, 0) | running-totals-and-streaks, Rules |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft (top-n-per-group): "MySQL needs the subquery alias" stated without the PostgreSQL side | PostgreSQL 18 allows omitting it (SQL standard requires it); keep it for portability | https://www.postgresql.org/docs/18/sql-select.html (Compatibility) |
+| Draft (duplicates): MySQL exception explained only as "materialised derived table" | Added why it is materialised here: window functions prevent derived-table merging | https://dev.mysql.com/doc/refman/9.7/en/derived-table-optimization.html |
+| Reference Q38 running total `SUM(amount) OVER (ORDER BY date)` | Already the trap; now shown with real numbers (payments 2 and 3 both 1500) | https://www.postgresql.org/docs/18/sql-expressions.html |
+| Reference Q-TRANSLATOR "NTH HIGHEST → ORDER BY DESC + OFFSET" | Needs DISTINCT so OFFSET counts values (english-to-sql Rules, top-n-per-group Interview Q) | https://www.postgresql.org/docs/18/sql-select.html |
+| Reference Q35 top employee per department with ROW_NUMBER, "top 3: rn <= 3" | ROW_NUMBER cuts tied salary levels (Kiran dropped in the run); DENSE_RANK for levels | real run, PostgreSQL 18 |
+New sources (verifiedOn 2026-10-21): PostgreSQL 18 Sorting Rows (queries-order), PostgreSQL 18 Aggregate Functions, MySQL 9.7 Working with NULL Values, MySQL 9.7 Derived Tables, MySQL 9.7 Optimizing Derived Tables, MySQL 9.7 EXCEPT, MySQL 9.7 Window Function Frame Specification, MySQL 9.7 Date and Time Functions; re-dated PostgreSQL 18 SELECT, PostgreSQL 18 Table Expressions, MySQL 9.7 Subquery Restrictions.
+
+### Unit querying-a
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| B2 trap: UPDATE/DELETE without WHERE (now with the "how to protect yourself" angle) | sql-commands (Common mistakes, Interview Q) |
+| B4 SELECT * vs explicit columns (why) | select-and-filtering (point, Interview Q) |
+| B4 BETWEEN inclusive, shown with a real missed 28-Feb payment | select-and-filtering (Interview Q) |
+| B4 operators list (=, <>, !=, IN) | select-and-filtering (Rules) |
+| B8 NULLIF use (division by zero) | null-handling (Rules, scenario) |
+| B8 "PostgreSQL and MySQL differ in NULL-sensitive behaviours: sorting" | null-handling (point, Rules) |
+| Q13 JOIN + GROUP BY with COUNT(e.id) for zero counts | joins (scenario) |
+| B6 CROSS 3 x 4 = 12 (as 4 x 6 = 24 on the running data) | joins (table, scenario) |
+| Added beyond: autocommit in both databases | sql-commands (Rules, Example notes) |
+| Added beyond: PostgreSQL CREATE DATABASE cannot run in a transaction | sql-commands (Rules) |
+| Added beyond: GROUP BY does not sort the output (PostgreSQL 18, MySQL 9.7) | aggregates-group-by (Example notes) |
+| Added beyond: NULLs form one group in GROUP BY | null-handling (Rules), aggregates-group-by (Rules) |
+| Added beyond: plain JOIN = INNER JOIN; NULL keys never match; MySQL advises LEFT over RIGHT | joins (Rules) |
+| Added beyond: NOW() fixed per transaction (PostgreSQL) / statement (MySQL) kept; SUBSTRING forms | string-date-functions (Rules) |
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| Draft point "NULL-safe equal: IS NOT DISTINCT FROM; MySQL writes <=>" read as if both work in MySQL | MySQL 9.7 rejects IS NOT DISTINCT FROM (syntax error, run) and has no NULLS FIRST/LAST syntax (run); stated in Rules | run on mysql:9.7; https://dev.mysql.com/doc/refman/9.7/en/comparison-operators.html |
+| Reference "ASC commonly the default" | ASC is the default in both (kept as plain rule) | https://www.postgresql.org/docs/18/queries-order.html |
+| Division by zero: PostgreSQL raises an error, MySQL returns NULL with warning 1365 | stated in null-handling | run; https://dev.mysql.com/doc/refman/9.7/en/arithmetic-functions.html |
+
+### Unit querying-b
+
+**Added from the reference**
+
+| Item | Concept |
+|---|---|
+| B4 logical order "logical model, not physical" | query-order (trap, Not to be confused with, Interview Q) |
+| B7 "correlated may be evaluated repeatedly or transformed" | subqueries (trap, How it works step 5) |
+| B7 SELECT 1 convention in EXISTS | subqueries (point, What to notice) |
+| Q21 EXISTS vs JOIN (each outer row once) | subqueries (Not to be confused with, Interview Q, scenario) |
+| B14 LAG/LEAD "without a self-join" | window-functions (Why, Interview Q) |
+| B14 ROW_NUMBER ties arbitrary without tie-breaker | window-functions (Rules) |
+| Q39 AVG/SUM OVER (PARTITION BY) | window-functions (example, scenario) |
+| B15 / Q22 multiple CTEs | ctes (Example with two CTEs) |
+| B15 "account for cycles" | ctes (point, Rules, Interview Q, scenario) |
+| B16 compatible columns, ORDER BY at the end | set-operations (points, Rules, How it works step 5) |
+| Q23 UNION vs UNION ALL | set-operations, union-vs-union-all |
+Also added (beyond the reference, verified): column matching by position and names from the first query (set-operations); brackets for ORDER BY/LIMIT on one part; INTERSECT ALL / EXCEPT ALL; scalar subquery with no rows gives NULL; derived-table alias rule (MySQL requires, PostgreSQL 18 optional); DISTINCT + ORDER BY rule in PostgreSQL; GROUP BY alias ambiguity rule in PostgreSQL; NOT MATERIALIZED; CTE used twice computed once; UNION vs UNION ALL inside recursion; PostgreSQL 8.4 as the first release with window functions and CTEs; LAG default argument; WINDOW clause.
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Reference Q38 running total SUM OVER (ORDER BY date) | default RANGE frame includes ties; ROWS frame + unique sort (already recorded; kept as trap) | PostgreSQL 18 sql-expressions 4.2.8 |
+| Draft point "MySQL alias in GROUP BY and HAVING; PostgreSQL GROUP BY" | kept; added PostgreSQL rejects aliases in HAVING (verified by run and docs) | PostgreSQL 18 SELECT docs |
+| Draft tree/glossary "derived table: standard SQL requires an alias" | true, but PostgreSQL 18 allows omitting it; MySQL 9.7 errors | PostgreSQL 18 SELECT (Compatibility) |
+| Draft "PostgreSQL computes a CTE used many times once" | kept, with the exact rule: non-recursive, side-effect-free, referenced once → inlined; NOT MATERIALIZED forces merge | PostgreSQL 18 queries-with |
+
+### Unit scaling
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| A32 "WRITE → Primary, READ → Replicas" | replication (How it works steps; Java Example with read-your-writes routing) |
+| A32 / B22 replica lag paragraph | replication (point, scenario, Interview Q, Common mistake on fresh reads) |
+| A33 range example "Server 1: users 1-1M ..." | sharding (scenario: range by rising id = hot shard) |
+| A34 "Orders 2024 / 2025 / 2026" | partitioning (Example: monthly partitions of payments, real EXPLAIN) |
+| A35 partition picture "Server A X Server B" | cap-theorem (Mermaid with numbered steps, per-data CP/AP table) |
+| A46 backup, restore, PITR, disaster recovery | backup-recovery (real PITR run, RPO/RTO scenario) |
+| A47 final answer "How do you make a database-backed application fast?" | scaling-ladder (Interview Q) |
+| New angle: delayed replica (recovery_min_apply_delay / SOURCE_DELAY, default 0) | replication (Rules); glossary delayed-replica |
+| New angle: a row with no matching partition fails; DEFAULT partition; key update moves the row; DETACH CONCURRENTLY; MySQL 8192-partition limit; choose the partition key by the WHERE clauses | partitioning (scenario, Rules, Interview Q) |
+| New angle: unique ids across shards; same key for related tables; status as a bad key; each shard needs its own backups | sharding (Rules) |
+| New angle: max_prepared_transactions = 0 and the real "prepared transactions are disabled" error; prepared transactions are for transaction managers; "a compensation is not a rollback"; outbox Interview Q | distributed-transactions |
+| New angle: recovery_target_action defaults to pause; whole-cluster-only physical restore; unbroken WAL chain | backup-recovery (Example, Rules) |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft replication "How it works" called the MySQL binary log the write-ahead log | Worded as "the change log": WAL in PostgreSQL, binary log in MySQL (InnoDB's WAL is the redo log, see concept wal) | https://dev.mysql.com/doc/refman/9.7/en/replication.html |
+| Draft sharding example said a hash with plain `%`; negative ids give negative shards | Java uses `Math.floorMod`, which takes the divisor's sign | https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Math.html |
+| Reference A32 "backup/recovery support" (already recorded) | Kept as the replication trap; added the delayed-replica exception | runtime-config-replication (PG 18), replication-delayed (MySQL 9.7) |
+| Draft backup example used `text` for a config file | Now a bash block that was really run, with real output | run on postgres:18 |
+
+### Unit transactions
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| B12 "production code must check funds and handle errors" | transactions (trap, Rules: error behaviour per product; Java rollback in catch); optimistic-pessimistic-locking (atomic `balance >= 500`) |
+| B12 COMMIT / ROLLBACK / SAVEPOINT example | transactions (Example rebuilt as a savepoint-per-row import, showing PostgreSQL's aborted state) |
+| A20 dirty read story (T1 changes, T2 reads, T1 rolls back) | isolation-levels (How it works, numbered timeline of all three anomalies) |
+| B13 "Serializable can cause blocking or serialization failures" | isolation-levels (Rules: PostgreSQL SSI vs InnoDB SERIALIZABLE; Interview Q "Why not always SERIALIZABLE?") |
+| B13 Reduce deadlocks: indexing so statements touch fewer rows | locking (Rules: InnoDB locks every scanned index record; Interview Q on missing index); deadlocks (Rules) |
+| B13 zero rows updated = changed or missing | optimistic-pessimistic-locking (steps, Rules, Interview Q) |
+| New angle: MySQL undoes only the failed statement, so COMMIT after an error saves half the work; PostgreSQL turns that COMMIT into ROLLBACK | transactions (points, trap, scenario), acid (Example) |
+| New angle: JDBC autocommit and setAutoCommit(false) / commit / rollback | transactions (Java Example) |
+| New angle: MySQL vs PostgreSQL REPEATABLE READ under a concurrent update | isolation-levels (Example, Interview Q); scenario on migrating MySQL → PostgreSQL |
+| New angle: write skew with concurrent refunds | isolation-levels (scenario) |
+| New angle: lock wait timeout rolls back one statement (InnoDB) vs deadlock rolls back the transaction | deadlocks (Not to be confused with) |
+| New angle: sync_binlog default 1; innodb_flush_log_at_trx_commit 0/2 lose up to about a second | wal (Example, Rules) |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Reference B12: "if something fails, the transaction can be rolled back" (implies automatic) | The app must roll back: PostgreSQL aborts the block, MySQL undoes only the failed statement (most errors) and keeps the transaction open | https://dev.mysql.com/doc/refman/9.7/en/innodb-error-handling.html ; https://www.postgresql.org/docs/18/tutorial-transactions.html ; run on both |
+| Reference A21 "READ → shared" (already recorded) | Kept as the locking trap | existing |
+| Draft acid table linked later concepts (mvcc, locks, wal, cap-theorem) as if known | Later concepts named as "the next concept" / "later in this topic"; CAP linked as "which you will see in Scaling" | n/a |
+| Draft isolation level for pessimistic JPA: none | `LockModeType.PESSIMISTIC_WRITE` described as "asks for an exclusive row lock" (no claim about the exact SQL Hibernate emits) | Jakarta Persistence 3.2 spec |

@@ -5,72 +5,124 @@ title: Fixing a Slow Query
 topic: indexes
 level: interview
 heat: 3
-hook: "Measure, read the plan, fix the biggest cost, measure again. Do not add indexes blindly."
+hook: "Find the query that costs the most, read its plan, fix the biggest cost, then measure again. Do not add indexes blindly."
 points:
-  - { k: "Find it", v: "PostgreSQL pg_stat_statements; MySQL slow query log" }
-  - { k: "pg_stat_statements", v: "needs shared_preload_libraries and a restart", kind: default }
-  - { k: "Slow query log", v: "MySQL 9.7: off by default; long_query_time = 10 s", kind: default }
-  - { k: "SELECT *", v: "reads extra columns and rules out index-only scans", kind: minus }
-  - { k: "Extra indexes", v: "each one slows every write", kind: minus }
+  - { k: "Find it", v: "rank queries by total time: PostgreSQL pg_stat_statements, MySQL slow query log" }
+  - { k: "pg_stat_statements", v: "needs shared_preload_libraries, a restart and CREATE EXTENSION; groups queries that differ only in values", kind: default }
+  - { k: "Slow query log", v: "MySQL 9.7: off by default; logs statements slower than long_query_time, default 10 seconds", kind: default }
+  - { k: "SELECT *", v: "reads columns nobody uses and rules out an index-only scan, because the index lacks those columns", kind: minus }
+  - { k: "Extra indexes", v: "each new index slows every insert and update, so add one only for a cost the plan shows", kind: minus }
 trap:
   wrong: "A query is slow, so index every column in its WHERE."
-  right: "Read the plan first. The cost may be a bad join, N+1 calls, too many rows or lock waits, and each extra index slows writes."
-sayIt: "I find the slow query with pg_stat_statements or the slow query log, read EXPLAIN ANALYZE, fix the biggest cost: an index, fewer rows or columns, a better join, fresh statistics, or lock waits. Then I measure again."
+  right: "Read the plan first. The cost may be a bad join, too many rows, many small queries or lock waits, and each extra index slows writes."
+  why: "A missing index is the most common cause, and adding one feels safe and quick, so it becomes the reflex even when the plan points elsewhere."
+sayIt: "I find the slow query with pg_stat_statements or the slow query log, read EXPLAIN ANALYZE, and fix the biggest cost: an index, fewer rows or columns, a better join, fresh statistics or lock waits. Then I measure again."
+cheat:
+  idea: "Fixing a slow query is a loop: find the query with the most total time, read its plan, fix the biggest cost, and measure again."
+  flow: "find (total time) → EXPLAIN ANALYZE → fix biggest cost → measure"
+  remember: "Rank by total time: a 5 ms query run a million times costs more than one slow report."
+buildsOn: [explain-query-plans, index-not-used, composite-indexes]
+scenarios:
+  - q: "pg_stat_statements shows SELECT * FROM payments WHERE id = $1 at the top by total time, with 2 million calls and a mean of 1 ms. Its plan uses the primary key. What do you look at?"
+    a: "The query itself is already fast; the cost is the number of calls. Look in the app for a loop that loads payments one at a time, the N+1 pattern, and load them in one query instead."
+  - q: "EXPLAIN ANALYZE of a slow endpoint's query shows 2 ms, but users wait 3 seconds. Where else do you look?"
+    a: "The time is spent outside running the query: waiting for a lock held by another transaction, waiting for a free connection in the pool, or sending many rows to the app. Check wait events in pg_stat_activity, the pool's wait time, and how many rows come back."
 confusedWith: []
 tags: [performance, optimisation, slow-query]
 visual: flow
 sources:
-  - title: "pg_stat_statements (PostgreSQL 18 docs, F.32)"
+  - title: "pg_stat_statements: setup, normalised queries, columns (PostgreSQL 18 docs, F.32)"
     url: "https://www.postgresql.org/docs/18/pgstatstatements.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "The Slow Query Log (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/slow-query-log.html"
     verifiedOn: "2026-10-20"
   - title: "Index-Only Scans: the query must use only indexed columns (PostgreSQL 18 docs, 11.9)"
     url: "https://www.postgresql.org/docs/18/indexes-index-only-scans.html"
     verifiedOn: "2026-10-20"
+  - title: "Indexes and ORDER BY: ORDER BY with LIMIT (PostgreSQL 18 docs, 11.4)"
+    url: "https://www.postgresql.org/docs/18/indexes-ordering.html"
+    verifiedOn: "2026-10-21"
+  - title: "pg_stat_activity: wait_event_type and wait_event (PostgreSQL 18 docs, 27.2)"
+    url: "https://www.postgresql.org/docs/18/monitoring-stats.html"
+    verifiedOn: "2026-10-21"
   - title: "SQL Interview Questions: optimise a slow query (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/sql/sql-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Fixing a slow query is a repeatable method: find which query costs the most, read its plan, change the one thing that costs most, and check the result. It uses the tools from earlier in this topic: [indexes](card:indexes), [EXPLAIN](card:explain-query-plans) and the reasons [an index is skipped](card:index-not-used).
+
 ## Why it exists
 
-A slow query has many possible causes. Working in a fixed order finds the real one; guessing adds indexes that slow writes and miss the cost.
+A slow page can come from a missing index, a query that reads too many rows, an app that runs the same small query thousands of times, or a query waiting for a lock. Each needs a different fix. Guessing usually means adding an index, which slows every write and may not touch the real cost. Working in a fixed order finds the real one.
 
 ## How it works
 
-<Steps label="Fixing a slow query">
-  <Step title="Find it">Rank queries by total time, not by one slow run.</Step>
-  <Step title="Read the plan">[EXPLAIN ANALYZE](card:explain-query-plans): scans, joins, estimated vs actual rows.</Step>
-  <Step title="Fix access">Add or change an index the plan needs ([why one is skipped](card:index-not-used)).</Step>
-  <Step title="Cut work">Fewer columns and rows, [pagination](card:pagination), no [N+1 calls](card:n-plus-one).</Step>
-  <Step title="Check the rest">Join conditions, stale statistics, [lock waits](card:locking), the [connection pool](card:connection-pooling).</Step>
-  <Step title="Measure again">Confirm it is faster and writes did not suffer.</Step>
-</Steps>
+<Mermaid
+  alt="A loop. Find the query with the most total time. Read its plan with EXPLAIN ANALYZE. Fix the biggest cost. Measure again. If it is still slow, go back to reading the plan; if it is fast enough, stop."
+  chart={`flowchart LR
+  F[Find: most total time] --> P[Read plan: EXPLAIN ANALYZE]
+  P --> X[Fix the biggest cost]
+  X --> M[Measure again]
+  M -- "still slow" --> P
+  M -- "fast enough" --> D([Done])`}
+/>
+
+1. Find the query. Rank statements by total time, which is calls times mean time, not by one slow run.
+2. Read its plan with `EXPLAIN ANALYZE`: look for full scans that keep few rows, the join method, and estimated rows far from actual.
+3. Fix access to the data: add or change the index the plan needs, or rewrite a filter the index cannot serve.
+4. Cut the work: select only the columns you need, return fewer rows with [pagination](card:pagination), and stop running one query per row, the N+1 problem you will see in [N+1 queries](card:n-plus-one).
+5. Check what the plan does not show: stale statistics, waits for [locks](card:locking) held by other transactions, and waits for a free connection in the [pool](card:connection-pooling). Both are covered in later topics.
+6. Measure again, and check that writes and other queries did not get slower.
 
 ## Example
 
+The "latest payments of a customer" query is slow. Steps 1 to 3 and the measurement, on 100,000 payments in PostgreSQL 18:
+
 ```sql
--- PostgreSQL: the 5 queries that use the most total time
+-- 1. Find: the statements that used the most total time
 SELECT query, calls, total_exec_time, mean_exec_time
-FROM pg_stat_statements
-ORDER BY total_exec_time DESC
-LIMIT 5;
+FROM pg_stat_statements ORDER BY total_exec_time DESC LIMIT 5;
+
+-- 2. Read the plan of the slow one
+EXPLAIN ANALYZE SELECT id, amount, status FROM payments
+WHERE customer_id = 7 ORDER BY created_at DESC LIMIT 5;
+
+-- 3. Fix the biggest cost, then measure again
+CREATE INDEX idx_payments_cust_created ON payments (customer_id, created_at);
+EXPLAIN ANALYZE SELECT id, amount, status FROM payments
+WHERE customer_id = 7 ORDER BY created_at DESC LIMIT 5;
 ```
 
-MySQL: turn on `slow_query_log`, lower `long_query_time`, then summarise the log with `mysqldumpslow`.
+What to notice:
+
+- pg_stat_statements listed the query as `... WHERE customer_id = $1 ... LIMIT $2`: runs for customer 7 and customer 8 were counted as one statement.
+- The first plan was a `Seq Scan` with `Rows Removed by Filter: 99990` and then a `Sort`: about 13 ms to return 5 rows.
+- After the [composite index](card:composite-indexes), the plan was `Index Scan Backward using idx_payments_cust_created`: equality on `customer_id`, rows already in `created_at` order, and it stopped after 5. About 0.1 ms.
+
+## Rules and defaults
+
+- **pg_stat_statements:** add it to `shared_preload_libraries`, restart PostgreSQL, then run `CREATE EXTENSION pg_stat_statements` in the database. It records calls, total and mean execution time per statement, in milliseconds.
+- **MySQL slow query log:** off by default in MySQL 9.7. Turn on `slow_query_log`, lower `long_query_time` from its default of 10 seconds, and summarise the log with `mysqldumpslow`.
+- **ORDER BY with LIMIT:** an index that matches the ORDER BY lets the database read only the first rows; without one, it must sort every matching row first.
+
+## Not to be confused with
+
+A slow query is one statement that takes long each time; its plan shows the cost. Too many queries is many fast statements, such as one per payment in a loop; each plan looks fine, and you spot it by a huge `calls` count. Rule: slow query = fix the plan; too many queries = fix the code that sends them.
 
 ## Interview Qs
 
 ### How do you optimise a slow query?
 
-Find it, read its plan with EXPLAIN ANALYZE, then fix the biggest cost: a missing index, too many rows or columns, a bad join or stale statistics. Check lock waits and the pool, then measure again.
+Find it by total time, read its plan with EXPLAIN ANALYZE, then fix the biggest cost: a missing or unusable index, too many rows or columns, a bad join or stale statistics. Check lock waits and the connection pool too. Then measure again, including the effect on writes.
 
 ### Does SELECT * slow a query?
 
-It can. It returns columns nobody uses, and it stops index-only scans, because the query now needs columns the index does not hold.
+It can. It reads and sends columns nobody uses, which adds work and network traffic, and it rules out an index-only scan, because the query now needs columns the index does not hold.
 
 ### How do you find slow queries in production?
 
-PostgreSQL: `pg_stat_statements` keeps calls and total and mean time per statement. MySQL: the slow query log records statements over `long_query_time`.
+In PostgreSQL, `pg_stat_statements` keeps calls and total and mean time per normalised statement, so you rank by total time. In MySQL, the slow query log records statements slower than `long_query_time`, and `mysqldumpslow` summarises it.

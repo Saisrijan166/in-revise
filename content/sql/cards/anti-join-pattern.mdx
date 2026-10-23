@@ -5,22 +5,32 @@ title: Find Rows With No Match
 topic: patterns
 level: intermediate
 heat: 2
-hook: "'Never', 'without any', 'not in the other table' means an anti-join: NOT EXISTS, or LEFT JOIN where the right key IS NULL."
+hook: "'Never', 'without any' and 'not in the other table' ask for an anti-join: write NOT EXISTS, or a LEFT JOIN that keeps rows where the right table's key IS NULL."
 points:
-  - { k: "NOT EXISTS", v: "first choice: reads clearly and NULLs cannot break it", kind: plus }
-  - { k: "LEFT JOIN … IS NULL", v: "test the right table's key, never a nullable column" }
-  - { k: "NOT IN", v: "one NULL in the subquery result returns zero rows", kind: minus }
-  - { k: "Has at least one", v: "EXISTS returns each row once; a JOIN repeats it per match" }
-  - { k: "EXCEPT", v: "set difference of whole rows; returns only the compared columns" }
+  - { k: "NOT EXISTS", v: "keeps a row when the subquery finds no match; NULLs in the other table cannot break it", kind: plus }
+  - { k: "LEFT JOIN … IS NULL", v: "keeps unmatched rows; test the right table's key, and put extra match conditions in ON" }
+  - { k: "NOT IN", v: "if the subquery returns even one NULL, NOT IN is never true, so the query returns no rows", kind: minus }
+  - { k: "EXISTS", v: "returns each customer with at least one match once; a JOIN returns that customer once per match" }
+  - { k: "EXCEPT", v: "subtracts one result from another; it returns only the compared columns, without duplicates" }
 trap:
-  wrong: "WHERE id NOT IN (SELECT user_id FROM orders) finds users with no orders."
-  right: "If any orders.user_id is NULL it returns nothing. Use NOT EXISTS, or add WHERE user_id IS NOT NULL inside."
-sayIt: "For 'users with no orders' I use NOT EXISTS with a subquery on user_id. LEFT JOIN with IS NULL on the orders key also works. I avoid NOT IN: one NULL makes it return no rows."
+  wrong: "WHERE c.id NOT IN (SELECT customer_id FROM payments) always finds customers with no payments."
+  right: "Only while customer_id is never NULL. One NULL in the list makes NOT IN unknown for every row, so nothing comes back. Use NOT EXISTS."
+  why: "NOT IN reads like plain English and works on test data that has no NULLs, so the bug appears only later, with real data."
+sayIt: "For 'customers who never paid' I use NOT EXISTS with the match condition inside the subquery. A LEFT JOIN with IS NULL on the right table's key also works. I avoid NOT IN, because one NULL in the subquery makes it return no rows."
+cheat:
+  idea: "An anti-join keeps the rows of one table that have no matching row in another, such as customers who never paid. Write it with NOT EXISTS or LEFT JOIN … WHERE key IS NULL."
+  remember: "Avoid NOT IN on a column that can be NULL: one NULL returns no rows."
+buildsOn: [joins, subqueries, null-handling]
+scenarios:
+  - q: "Customers who never had a PAID payment: you LEFT JOIN payments and write WHERE p.status = 'PAID' AND p.id IS NULL. What comes back?"
+    a: "No rows. An unmatched row has NULL in every payment column, so it cannot also have status PAID. The status test is part of the match, so it belongs in ON: LEFT JOIN payments p ON p.customer_id = c.id AND p.status = 'PAID', then WHERE p.id IS NULL."
+  - q: "What does SELECT 4 NOT IN (1, 2, NULL) return?"
+    a: "NULL, not true. NOT IN means 4 <> 1 AND 4 <> 2 AND 4 <> NULL, and the last comparison is unknown, so the whole test is unknown. WHERE keeps only true rows, so that row is dropped."
 confusedWith: [in-vs-exists, inner-vs-left-join]
 tags: [patterns, anti-join, exists]
 visual: table
 sources:
-  - title: "Subquery Expressions (PostgreSQL 18)"
+  - title: "Subquery Expressions: EXISTS, NOT IN (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/functions-subquery.html"
     verifiedOn: "2026-10-20"
   - title: "Table Expressions: joins (PostgreSQL 18)"
@@ -29,59 +39,82 @@ sources:
   - title: "Semijoin and Antijoin Transformations (MySQL 9.7)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/semijoins-antijoins.html"
     verifiedOn: "2026-10-20"
+  - title: "EXCEPT Clause: DISTINCT is the default (MySQL 9.7)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/except.html"
+    verifiedOn: "2026-10-21"
   - title: "Customers Who Never Order (LeetCode)"
     url: "https://leetcode.com/problems/customers-who-never-order/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An anti-join returns the rows of one table that have no matching row in another, such as customers who never paid. Its opposite, a semi-join, returns the rows that have at least one match, each row once. SQL has no `ANTI JOIN` keyword: you write it with `NOT EXISTS`, or with a [LEFT JOIN](card:joins) that keeps only the unmatched rows.
+
 ## Why it exists
 
-A normal join drops rows that have no match, so missing data stays hidden. You need a filter that keeps the rows whose match does not exist.
+An inner join keeps only matches, so a customer with no payment silently disappears from the result. Questions with "never", "without any" or "not in the other table" ask for exactly those missing rows. The obvious tool, `NOT IN`, returns no rows at all when the subquery contains one NULL, so a NULL-safe pattern is needed.
 
 ## How it works
 
-| Form | Returns | If orders.user_id has a NULL |
+| Form | Returns | If the subquery column holds a NULL |
 |---|---|---|
-| `NOT EXISTS (… WHERE o.user_id = u.id)` | Users with no order | Still correct |
-| `LEFT JOIN orders o … WHERE o.id IS NULL` | Users with no order | Still correct |
-| `u.id NOT IN (SELECT user_id …)` | Users with no order | No rows at all |
-| `EXISTS (…)`, a semi-join | Users with an order, once each | Still correct |
+| `NOT EXISTS (… WHERE p.customer_id = c.id)` | Customers with no match | Still correct |
+| `LEFT JOIN payments p ON … WHERE p.id IS NULL` | Customers with no match | Still correct |
+| `c.id NOT IN (SELECT customer_id …)` | Customers with no match | No rows at all |
+| `EXISTS (…)`, the semi-join | Customers with a match, once each | Still correct |
 
-- Why NOT IN breaks: [NULL comparisons](card:null-handling) give unknown, never true.
-- MySQL rewrites NOT EXISTS and NOT IN subqueries into antijoins internally.
+1. Start from the table whose rows you want back: `customers`.
+2. Write the match condition, `p.customer_id = c.id`, plus any condition on the match itself, such as `p.status = 'PAID'`.
+3. With `NOT EXISTS`, put both conditions inside the subquery. The customer is kept when the subquery finds no row.
+4. With `LEFT JOIN`, put both conditions in `ON`, then keep the rows where the payment's key is NULL. Only unmatched rows have NULL there.
 
 ## Example
 
+"Find customers who never had a successful payment." Meena has only a PENDING payment and Kabir has none. Both forms give the same answer.
+
 ```sql
--- Users with no orders (users: 1 Asha, 2 Ravi; only Asha has orders)
-SELECT u.id, u.name
-FROM users u
+SELECT c.id, c.name
+FROM customers c
 WHERE NOT EXISTS (
-  SELECT 1 FROM orders o WHERE o.user_id = u.id
+  SELECT 1 FROM payments p
+  WHERE p.customer_id = c.id AND p.status = 'PAID'
 );
--- Same with a join: keep users that matched no order
-SELECT u.id, u.name
-FROM users u
-LEFT JOIN orders o ON o.user_id = u.id
-WHERE o.id IS NULL;
+
+SELECT c.id, c.name
+FROM customers c
+LEFT JOIN payments p ON p.customer_id = c.id AND p.status = 'PAID'
+WHERE p.id IS NULL;
 ```
 
 ```text output
  id | name
-----+------
-  2 | Ravi
-
- id | name
-----+------
-  2 | Ravi
+----+-------
+  3 | Meena
+  4 | Kabir
 ```
+
+What to notice:
+
+- Meena is returned although she has a payment, because the status test is part of the match. Drop `p.status = 'PAID'` and only Kabir comes back.
+- In the join form, moving `p.status = 'PAID'` from `ON` to `WHERE` returns no rows: an unmatched row has NULL in every payment column.
+- Test `p.id`, the primary key, which is never NULL in a real match; a nullable column could be NULL in a matched row too.
+- `SELECT 1` only says "a row exists"; the subquery's columns are never read.
+
+## Rules and defaults
+
+- **NOT IN and NULL:** `4 NOT IN (1, 2, NULL)` is NULL, not true, so the row is dropped ([NULL handling](card:null-handling)). If you must use `NOT IN`, add `WHERE customer_id IS NOT NULL` inside the subquery.
+- **EXISTS for "at least one":** an inner join lists Asha once per PAID payment, three times; `EXISTS` lists her once.
+## Not to be confused with
+
+`NOT EXISTS` returns whole rows of the first table that have no match, such as each customer's id and name. `EXCEPT` subtracts one query's result from another's: `SELECT id FROM customers EXCEPT SELECT customer_id FROM payments WHERE status = 'PAID'` gives ids 3 and 4, but only the compared column, with duplicates removed (PostgreSQL 18 and MySQL 9.7). Rule: rows with no match = `NOT EXISTS`; a difference of two value lists = [EXCEPT](card:set-operations). How `IN` and `EXISTS` differ is in [Subqueries](card:subqueries).
 
 ## Interview Qs
 
 ### NOT EXISTS, LEFT JOIN … IS NULL or NOT IN: which is fastest?
 
-Plans differ by product and version, so check with [EXPLAIN](card:explain-query-plans). Choose for correctness first: NOT IN changes the answer when NULLs exist. NOT EXISTS is NULL-safe.
+It depends on the product and version, so check with [EXPLAIN](card:explain-query-plans). PostgreSQL and MySQL can both plan `NOT EXISTS` as an antijoin. Choose for correctness first: `NOT IN` changes the answer when NULLs exist, while `NOT EXISTS` stays correct.
 
-### Find users who placed at least one order, without duplicates.
+### Find customers who made at least one payment, without repeating anyone.
 
-`WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)`. An inner join returns a user once per order.
+`SELECT c.* FROM customers c WHERE EXISTS (SELECT 1 FROM payments p WHERE p.customer_id = c.id)`. An inner join would return a customer once per payment, and fixing that with `DISTINCT` does extra work.

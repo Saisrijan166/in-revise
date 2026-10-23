@@ -5,24 +5,39 @@ title: "CTEs and Recursive Queries"
 topic: querying
 level: intermediate
 heat: 2
-hook: "WITH names a query so the main query can read it like a table. WITH RECURSIVE repeats a step to walk trees."
+hook: "WITH gives a subquery a name, so the main query reads it like a table and a long query reads top to bottom. WITH RECURSIVE repeats a step to walk a tree."
 points:
-  - { k: "Use", v: "split a long query into named steps, top to bottom" }
-  - { k: "Recursive", v: "anchor rows, UNION ALL, a step that joins to the CTE itself" }
-  - { k: "PostgreSQL 12+", v: "a plain SELECT CTE used once is inlined; MATERIALIZED stops that", kind: default }
-  - { k: "MySQL", v: "CTEs since 8.0; error past cte_max_recursion_depth (1000)", kind: default }
-  - { k: "Cycles", v: "cyclic data can loop without end in PostgreSQL; 14+ adds CYCLE", kind: minus }
+  - { k: "CTE", v: "a named subquery written with WITH before the main query, and it lasts for that statement only" }
+  - { k: "Several CTEs", v: "separate them with commas; each may read the CTEs defined before it" }
+  - { k: "Recursive CTE", v: "an anchor query, UNION ALL, then a step query that joins to the CTE by its own name" }
+  - { k: "Inlining (PostgreSQL 12+)", v: "a SELECT CTE used once is merged into the main query; MATERIALIZED forces it to be computed apart", kind: default }
+  - { k: "Depth limit (MySQL 9.7)", v: "recursion stops with an error after cte_max_recursion_depth, 1000 by default", kind: default }
+  - { k: "Cycles", v: "PostgreSQL has no depth limit, so cyclic data loops until stopped; the CYCLE clause (14+) marks repeats", kind: minus }
 trap:
-  wrong: "A CTE is always faster (or always slower) than a subquery."
-  right: "Neither by itself. PostgreSQL 12+ inlines single-use CTEs like subqueries; check the plan."
+  wrong: "A CTE is always faster, or always slower, than the same subquery."
+  right: "Neither by rule. PostgreSQL 12+ inlines a single-use CTE like a subquery, and a CTE used twice is computed once. Check with EXPLAIN."
+  why: "Before PostgreSQL 12 every CTE was computed apart and ignored outer filters, so old advice called CTEs slow; others assume a named step is cached."
 sayIt: "A CTE is a named subquery written with WITH, mainly for readability. A recursive CTE starts from anchor rows and keeps adding rows that join to the previous level, which is how I walk an org chart."
+cheat:
+  idea: "A CTE names a subquery with WITH, and the main query reads it like a table. WITH RECURSIVE repeats a step to walk a tree."
+  flow: "anchor rows → step joins to them → new rows → repeat → stop"
+  remember: "Not faster by itself: PostgreSQL 12+ inlines a single-use CTE. Guard recursion against cycles."
+buildsOn: [subqueries, set-operations]
+scenarios:
+  - q: "You need customers ranked by total paid, keeping only rank 1. Why does a CTE help here?"
+    a: "The rank is a window function, which WHERE cannot see. Put the totals and RANK() in a CTE, then write SELECT ... FROM ranked WHERE rnk = 1. The CTE is the outer-query step that the logical order requires, written as a named step."
+  - q: "A recursive CTE over a category table never finishes in PostgreSQL. In MySQL the same query fails after 1001 iterations. What is going on?"
+    a: "The data has a cycle, such as category A under B and B under A, so the step always finds new rows. MySQL stops at cte_max_recursion_depth (1000); PostgreSQL has no limit. Fix it with the CYCLE clause in PostgreSQL 14+, a visited-path check, or a depth limit in the step."
 confusedWith: [cte-vs-subquery]
 tags: [cte, with, recursive, hierarchy]
 visual: flow
 sources:
-  - title: "WITH Queries (PostgreSQL 18 docs)"
+  - title: "WITH Queries: recursive evaluation, CYCLE, MATERIALIZED (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/queries-with.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "PostgreSQL 8.4 Release Notes: WITH and WITH RECURSIVE"
+    url: "https://www.postgresql.org/docs/release/8.4.0/"
+    verifiedOn: "2026-10-21"
   - title: "PostgreSQL 12 Release Notes: CTE inlining"
     url: "https://www.postgresql.org/docs/release/12.0/"
     verifiedOn: "2026-10-20"
@@ -37,48 +52,87 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A CTE (common table expression) is a [subquery](card:subqueries) that you name with `WITH` and write before the main query. The main query then reads it by name, like a table. A recursive CTE, written `WITH RECURSIVE`, refers to its own name, so it can repeat a step: it is how SQL walks a tree such as an org chart, where each employee row stores its manager's id.
+
 ## Why it exists
 
-Nested subqueries read inside-out and hard to follow. A tree, such as managers and reports, cannot be walked to any depth with plain joins.
+A query with two or three nested subqueries reads inside-out: you start in the middle and work outwards. A CTE turns each subquery into a named step, read top to bottom, and a step used twice is written once. Trees are the second problem. Each join climbs exactly one level, so a fixed number of joins cannot reach every report at any depth. A recursive CTE keeps going until no new rows appear.
 
 ## How it works
 
-<Steps label="WITH RECURSIVE">
-  <Step title="Anchor">Run the first SELECT once: the starting rows, such as the CEO.</Step>
-  <Step title="Step">Join the table to the rows found last time: their direct reports.</Step>
-  <Step title="Repeat">Add the new rows and run the step again on just those.</Step>
-  <Step title="Stop">When a step finds no new rows, return everything found.</Step>
-</Steps>
+<Mermaid
+  alt="Recursive CTE on the org chart. The anchor selects Asha, who has no manager: level 1. The step finds employees whose manager is in the last level: Ravi and Kabir, level 2. The step runs again on Ravi and Kabir and finds Meena, level 3. The next step finds no rows, so the recursion stops."
+  chart={`flowchart LR
+  A["Anchor: Asha (level 1)"] -- step --> B["Ravi, Kabir (level 2)"]
+  B -- step --> C["Meena (level 3)"]
+  C -- step --> D["no new rows: stop"]`}
+/>
+
+A plain CTE is computed or merged into the main query, which then reads it by name. A recursive CTE runs like this:
+
+1. The anchor query runs once and returns the starting rows, here the employee with no manager.
+2. Those rows go into the result and become the working set.
+3. The step query runs, joining the table to the working set only: it finds the direct reports of the last level.
+4. The new rows are added to the result and become the next working set.
+5. Steps 3 and 4 repeat until a step returns no rows; then the full result goes to the main query.
 
 ## Example
 
+Net paid per customer: paid totals minus refunds. Each total gets its own named step before the join, so a customer with several payments and refunds is not counted twice.
+
 ```sql
--- Asha manages Ravi; Ravi manages Meena
-WITH RECURSIVE team AS (
-  SELECT id, name, 1 AS level
-  FROM employees WHERE manager_id IS NULL      -- anchor
-  UNION ALL
-  SELECT e.id, e.name, t.level + 1
-  FROM employees e
-  JOIN team t ON e.manager_id = t.id           -- step
+WITH paid AS (
+  SELECT customer_id, SUM(amount) AS total
+  FROM payments WHERE status = 'PAID'
+  GROUP BY customer_id
+),
+refunded AS (
+  SELECT p.customer_id, SUM(r.amount) AS total
+  FROM refunds r JOIN payments p ON p.id = r.payment_id
+  GROUP BY p.customer_id
 )
-SELECT * FROM team ORDER BY level;
+SELECT c.name, paid.total - COALESCE(refunded.total, 0) AS net_paid
+FROM paid
+JOIN customers c ON c.id = paid.customer_id
+LEFT JOIN refunded ON refunded.customer_id = paid.customer_id
+ORDER BY c.name;
 ```
 
 ```text output
- id | name  | level
-----+-------+-------
-  1 | Asha  |     1
-  2 | Ravi  |     2
-  3 | Meena |     3
+ name | net_paid
+------+----------
+ Asha |  1200.00
+ Ravi |     0.00
 ```
+
+What to notice:
+
+- `paid` and `refunded` are separated by a comma, and the main query joins them like two tables.
+- Ravi's 700 payment was refunded, so his net is 0. Asha has no refund, so `refunded` has no row for her and `COALESCE` turns the NULL into 0.
+- The recursive form follows the same layout: `WITH RECURSIVE team AS (anchor UNION ALL step) SELECT * FROM team`. On the org chart it returns Asha at level 1, Ravi and Kabir at level 2 and Meena at level 3.
+- Both queries return the same rows on PostgreSQL 18 and MySQL 9.7.
+
+## Rules and defaults
+
+- **Scope:** a CTE exists only for the statement it belongs to.
+- **Versions:** PostgreSQL has had CTEs and `WITH RECURSIVE` since 8.4; MySQL since 8.0.
+- **Inlining (PostgreSQL 12+):** a non-recursive `SELECT` CTE that is used once and has no side effects is merged into the main query. `MATERIALIZED` forces it to be computed apart; `NOT MATERIALIZED` forces merging. A CTE used twice is computed once by default.
+- **Recursion limit:** MySQL 9.7 aborts after `cte_max_recursion_depth` iterations (default 1000). PostgreSQL has no limit.
+- **Stopping cycles:** in PostgreSQL 14+ write `CYCLE id SET is_cycle USING path`; anywhere, keep a path of visited ids or a depth counter in the step.
+- **UNION vs UNION ALL in recursion:** `UNION` drops rows already found, which can end a simple cycle; `UNION ALL` keeps all rows and is the usual choice.
 
 ## Interview Qs
 
+### What is the difference between a CTE and a subquery?
+
+Both are a query used inside another. A CTE is named and written first with WITH, so it reads top to bottom and can be referenced several times; it can also be recursive. A subquery is written inside the expression that uses it. Neither is faster by rule: PostgreSQL 12+ inlines a single-use CTE.
+
 ### How do you get every employee under a manager, at any depth?
 
-A recursive CTE: the anchor selects the manager, the step joins employees whose manager_id is in the previous level, until no new rows appear.
+Use a recursive CTE. The anchor selects the manager. The step joins employees whose `manager_id` is in the rows found by the previous step, and adds a level counter. It repeats until a step finds no one. A fixed number of self-joins only reaches a fixed depth.
 
-### How do you stop a recursive CTE looping forever?
+### How do you stop a recursive CTE from looping forever?
 
-Track the path and skip ids already seen, add a depth limit in the step, or in PostgreSQL 14+ use the CYCLE clause. MySQL raises an error past cte_max_recursion_depth.
+Cyclic data, where a row leads back to itself, makes the step find rows forever. In PostgreSQL 14+ add the CYCLE clause, which marks a repeated row and stops that path. In any database you can carry a path or a depth column and stop when it repeats or passes a limit. MySQL also stops at cte_max_recursion_depth, 1000 by default.

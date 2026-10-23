@@ -5,66 +5,119 @@ title: Write-Ahead Log and Durability
 topic: transactions
 level: intermediate
 heat: 2
-hook: "Write the change to a log first, and the data pages later. A commit is safe once its log record is on disk."
+hook: "The database writes each change to a log first and to the table files later. A commit is safe as soon as its log records are on disk."
 points:
-  - { k: "Commit", v: "flush the log (fsync), not the changed data pages" }
-  - { k: "Fast", v: "one sequential log write instead of many random page writes", kind: plus }
-  - { k: "Crash", v: "replay the log to redo changes the pages missed" }
-  - { k: "MySQL: two logs", v: "InnoDB redo log for crashes; binary log for replicas and PITR" }
-  - { k: "Relaxed commit", v: "faster, but a crash can lose the last commits", kind: minus }
+  - { k: "Log first", v: "every change is recorded in the log before the data files that hold tables and indexes are changed" }
+  - { k: "COMMIT", v: "returns only after the transaction's log records are flushed to disk, not after the data pages are" }
+  - { k: "Fast", v: "one sequential log write per commit, often shared by many commits, replaces many random page writes", kind: plus }
+  - { k: "Crash recovery", v: "on restart the database replays the log to redo committed changes the data files missed" }
+  - { k: "Default", v: "PostgreSQL 18 synchronous_commit = on; MySQL 9.7 innodb_flush_log_at_trx_commit = 1", kind: default }
+  - { k: "Relaxed commit", v: "turning those settings down speeds up commits, but a crash can lose the last committed transactions", kind: minus }
 trap:
   wrong: "COMMIT writes every changed table page to disk."
-  right: "COMMIT only flushes the log. Pages are written later; after a crash the database redoes them from the log."
-sayIt: "With a write-ahead log, every change is logged before data pages are written. Commit waits only for the log flush. After a crash the log is replayed, and the same log feeds replicas and point-in-time recovery."
+  right: "COMMIT only flushes the log. The pages are written later; after a crash the database redoes them from the log."
+  why: "'Committed means saved on disk' is true, so people assume the table files themselves are written at commit, not just the log."
+sayIt: "With a write-ahead log, every change is logged before the data pages are written. COMMIT waits only for the log flush, which is one fast sequential write. After a crash the log is replayed, and the same log feeds replicas and point-in-time recovery."
+cheat:
+  idea: "The write-ahead log records every change before the data files change, so a commit only needs its log records on disk."
+  flow: "change in memory → log record → COMMIT flushes log → pages written later"
+  remember: "In MySQL the redo log handles crash recovery; the binary log feeds replicas and point-in-time recovery."
+buildsOn: [acid, transactions]
+scenarios:
+  - q: "The power fails one millisecond after COMMIT returned for payment 5, before any data page was written. Is payment 5 there after restart?"
+    a: "Yes, with default settings. COMMIT returned only after the log record was flushed to disk, and on restart the database replays the log and redoes the change in the data files."
+  - q: "A service writes thousands of low-value events per second to PostgreSQL, and commits are the bottleneck. A teammate suggests fsync = off. What do you suggest instead?"
+    a: "synchronous_commit = off, ideally only for those transactions. A crash may then lose the last few commits, but the database stays consistent. fsync = off can corrupt the database after a crash, so it is never safe for data you keep."
 confusedWith: []
 tags: [wal, redo-log, binary-log, durability, fsync]
 visual: flow
 sources:
   - title: "Write-Ahead Logging (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/18/wal-intro.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Write Ahead Log settings: synchronous_commit, fsync (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/18/runtime-config-wal.html"
     verifiedOn: "2026-10-20"
+  - title: "Asynchronous Commit: risk window of three times wal_writer_delay (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/wal-async-commit.html"
+    verifiedOn: "2026-10-21"
   - title: "InnoDB Startup Options and System Variables: innodb_flush_log_at_trx_commit (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-parameters.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "The Binary Log (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/binary-log.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The write-ahead log (WAL) is an append-only file in which the database records every change before it changes the data files that hold tables and indexes. A commit is safe once that transaction's log records are flushed to disk, meaning forced out of the operating system's memory onto the storage device. PostgreSQL calls this log the WAL; MySQL's InnoDB engine calls its version the redo log.
+
 ## Why it exists
 
-Writing every changed data page at each commit is slow. Logging the change first makes a commit one fast write that a crash cannot lose.
+[Durability](card:acid) says a committed payment survives a crash. Tables and indexes are stored on disk in fixed-size blocks called pages. The direct way is to write every changed page to disk at each `COMMIT`, which means many slow writes scattered over the disk. The log turns that into one sequential append, and when many small transactions commit together, one flush can cover them all. The data pages can be written later, because the log can redo them.
 
 ## How it works
 
-<Steps label="One committed change">
-  <Step title="Change in memory">The row is changed in a page held in memory.</Step>
-  <Step title="Log it">A log record describing the change is appended.</Step>
-  <Step title="COMMIT">The log is flushed to disk; only then does the client hear "success".</Step>
-  <Step title="Pages later">Changed pages are written to disk later, in the background.</Step>
-  <Step title="After a crash">The log is replayed to redo changes the pages missed.</Step>
-</Steps>
+<Mermaid
+  alt="An UPDATE changes a page in memory and appends a log record. COMMIT flushes the log to disk and then reports success. Later the changed pages are written to the data files. After a crash, the log is replayed to redo changes the data files missed."
+  chart={`flowchart LR
+  U([UPDATE]) --> P[page in memory]
+  U --> L[log record]
+  C([COMMIT]) --> F[flush log to disk] --> OK([success])
+  P -. later .-> D[(data files)]
+  L -. after a crash: replay .-> D`}
+/>
 
-- The same log feeds [replication](card:replication) and [point-in-time recovery](card:backup-recovery).
-- PostgreSQL `synchronous_commit = off` may lose recent commits but never corrupts; `fsync = off` can corrupt.
+1. An UPDATE changes the row in a copy of its page held in memory.
+2. A log record describing the change is added to the log.
+3. At `COMMIT`, the database flushes the log to disk, and only then tells the client "success".
+4. Later, in the background, the changed pages are written to the data files.
+5. After a crash, the database replays the log and redoes every change the data files missed. Work from transactions that never committed is not kept.
 
-## Defaults
+The same log has a second job: copies of it are sent to replicas and archived for point-in-time recovery, which you will see in [Replication](card:replication) and [Backup and recovery](card:backup-recovery).
+
+## Example
+
+Check the durability settings on each database (output from PostgreSQL 18 and MySQL 9.7 with default settings):
+
+```sql
+-- PostgreSQL 18
+SHOW synchronous_commit;   -- on
+SHOW fsync;                -- on
+-- MySQL 9.7
+SELECT @@innodb_flush_log_at_trx_commit, @@log_bin, @@sync_binlog;   -- 1, 1, 1
+```
+
+What to notice:
+
+- `synchronous_commit = on` and `innodb_flush_log_at_trx_commit = 1` both mean a commit waits until its log records are on disk. This is what makes durability real.
+- `sync_binlog = 1` makes MySQL also sync the binary log to disk before each commit, so replicas and recovery do not miss committed changes.
+- `fsync = on` makes PostgreSQL force its writes onto the disk with fsync calls. Turned off, a crash can leave the database corrupt, not just missing recent commits.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
 | `synchronous_commit` | `on`: commit waits for the WAL flush | PostgreSQL 18 |
-| `innodb_flush_log_at_trx_commit` | `1`: flush redo log at each commit | MySQL 9.7 (InnoDB) |
+| `innodb_flush_log_at_trx_commit` | `1`: write and flush the redo log at each commit | MySQL 9.7 (InnoDB) |
 | `log_bin` (binary log) | On | MySQL 9.7 |
+| `sync_binlog` | `1`: sync the binary log before each commit | MySQL 9.7 |
+
+- **PostgreSQL `synchronous_commit = off`:** commits return before the WAL flush. A crash can lose the last few commits, up to three times `wal_writer_delay`, but the database stays consistent. It can be set per transaction.
+- **MySQL `innodb_flush_log_at_trx_commit` = 0 or 2:** the log is flushed about once a second, so a crash can lose up to about a second of commits.
+- **`fsync = off`:** never for data you keep; a crash can corrupt the database.
+
+## Not to be confused with
+
+The redo log belongs to InnoDB and is replayed after a crash. The binary log belongs to the MySQL server and records changes for replicas and point-in-time recovery. The [undo log](card:undo-log) from MVCC holds old values for rollback and old snapshots. In PostgreSQL one WAL does both crash recovery and replication. Rule: redo = crash recovery; binlog = replicas and recovery to a point in time; undo = rollback and old versions.
 
 ## Interview Qs
 
 ### What is a write-ahead log, and why is it fast?
 
-Every change is recorded in an append-only log before the data files change. Commit needs one sequential flush of the log, not random writes of every page; many small commits can share one flush.
+Every change is recorded in an append-only log before the data files change. A commit needs one sequential flush of the log, not random writes of every changed page, and many small concurrent commits can share one flush. The data pages are written later.
 
 ### Redo log vs binary log in MySQL?
 
-The redo log belongs to InnoDB and is used for crash recovery. The binary log belongs to the server and records changes for replicas and point-in-time recovery.
+The redo log belongs to InnoDB and is used for crash recovery. The binary log belongs to the MySQL server and records data changes for replicas and point-in-time recovery. Both are flushed at commit with the default settings.

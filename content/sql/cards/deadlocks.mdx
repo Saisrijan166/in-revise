@@ -5,17 +5,28 @@ title: Deadlocks
 topic: transactions
 level: intermediate
 heat: 2
-hook: "Two transactions each hold a lock the other needs; the database spots the cycle, kills one, and your code retries it."
+hook: "Two transactions each hold a row lock the other needs, so neither can finish. The database spots the cycle, rolls one back, and your code retries it."
 points:
-  - { k: "Cycle", v: "T1 holds row 1, wants row 2; T2 holds row 2, wants row 1" }
-  - { k: "PostgreSQL", v: "aborts one; which one is unpredictable; SQLSTATE 40P01" }
-  - { k: "MySQL InnoDB", v: "tries to roll back a small one; error 1213, SQLSTATE 40001" }
-  - { k: "Retry", v: "the victim's whole transaction is undone: run it again", kind: plus }
-  - { k: "Prevent", v: "lock rows in the same order everywhere, e.g. lower id first" }
+  - { k: "Cycle", v: "A holds row 1 and waits for row 2 while B holds row 2 and waits for row 1; neither can continue" }
+  - { k: "Victim", v: "the database rolls back one whole transaction to break the cycle, and the other one finishes" }
+  - { k: "PostgreSQL 18", v: "checks for a cycle after waiting deadlock_timeout (1 s); the victim gets SQLSTATE 40P01", kind: default }
+  - { k: "MySQL 9.7 InnoDB", v: "detection is on by default; the victim gets error 1213, SQLSTATE 40001", kind: default }
+  - { k: "Retry", v: "the victim's whole transaction was undone, so run it again from BEGIN", kind: plus }
+  - { k: "Prevention", v: "lock rows in the same order everywhere, for example lower id first, so waits cannot form a cycle" }
 trap:
   wrong: "Deadlocks need explicit LOCK statements; plain UPDATEs cannot deadlock."
-  right: "Two plain UPDATEs touching the same two rows in opposite order can deadlock. Row locks from ordinary writes are enough."
-sayIt: "A deadlock is a cycle of lock waits. The database detects it and rolls back one transaction, so the app retries. I avoid them by locking in a fixed order and keeping transactions short."
+  right: "Two plain UPDATEs touching the same two rows in opposite order can deadlock. The row locks that ordinary writes take are enough."
+  why: "Deadlock examples often use LOCK TABLE, so people tie deadlocks to explicit locks and forget that every UPDATE locks its row until commit."
+sayIt: "A deadlock is a cycle of lock waits. The database detects it and rolls back one transaction, the victim, so the app retries the whole transaction. I avoid them by locking rows in a fixed order and keeping transactions short."
+cheat:
+  idea: "A deadlock is two transactions each waiting for a row lock the other holds, so neither can finish. The database detects the cycle and rolls back one of them, the victim."
+  remember: "Retry the victim's whole transaction, and lock rows in the same order everywhere so the cycle cannot form."
+buildsOn: [locking, transactions]
+scenarios:
+  - q: "A transfer from Asha to Ravi and one from Ravi to Asha run at the same moment, and sometimes one fails with a deadlock. How do you fix the code?"
+    a: "Make every transfer update the two wallets in the same order, for example the lower customer_id first, whatever the direction. Then the second transfer waits for the first instead of forming a cycle. Keep the retry loop as well, because other code paths may still deadlock."
+  - q: "Your retry code catches a deadlock and re-runs only the UPDATE that failed. What goes wrong?"
+    a: "The database rolled back the victim's entire transaction, including the debit that ran before the failed UPDATE. Re-running one statement and committing would save half a transfer. Retry from BEGIN."
 confusedWith: []
 tags: [deadlock, locking, retry]
 visual: flow
@@ -23,59 +34,99 @@ sources:
   - title: "Explicit Locking: Deadlocks (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/18/explicit-locking.html"
     verifiedOn: "2026-10-20"
-  - title: "Serialization Failure Handling (PostgreSQL 18 documentation)"
-    url: "https://www.postgresql.org/docs/18/mvcc-serialization-failure-handling.html"
+  - title: "Lock Management: deadlock_timeout (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/runtime-config-locks.html"
     verifiedOn: "2026-10-20"
+  - title: "PostgreSQL Error Codes: 40001, 40P01 (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/errcodes-appendix.html"
+    verifiedOn: "2026-10-21"
   - title: "Deadlock Detection (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-deadlock-detection.html"
     verifiedOn: "2026-10-20"
   - title: "How to Minimize and Handle Deadlocks (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-deadlocks-handling.html"
     verifiedOn: "2026-10-20"
-  - title: "An InnoDB Deadlock Example (MySQL 9.7 Reference Manual)"
-    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-deadlock-example.html"
-    verifiedOn: "2026-10-20"
+  - title: "InnoDB Error Handling: lock wait timeout vs deadlock (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-error-handling.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A deadlock happens when two transactions each hold a [lock](card:locking) the other one needs. Transaction A has locked Asha's wallet and waits for Ravi's; transaction B has locked Ravi's wallet and waits for Asha's. Neither can ever continue, so the database detects the cycle and rolls back one of them, called the victim.
 
 ## Why it exists
 
-Once transactions lock more than one row, two of them can wait for each other forever. Without detection, both would hang.
+Row locks are held until commit, so any two transactions that change the same two rows in opposite order can end up in this cycle. No explicit `LOCK` statement is needed. Without detection, both transactions, and everyone queued behind them, would hang. With detection, one transaction fails fast with a known error code, the other finishes, and the application can run the victim again.
 
 ## How it works
 
 <Mermaid
-  alt="T1 holds account 1 and waits for account 2; T2 holds account 2 and waits for account 1. The database finds this cycle and rolls back one of them."
+  alt="T1 holds Asha's wallet and waits for Ravi's wallet; T2 holds Ravi's wallet and waits for Asha's wallet. The database finds this cycle and rolls back one of them, the victim."
   chart={`flowchart LR
-  T1([T1]) -- holds --> A1[(account 1)]
-  T1 -. waits for .-> A2[(account 2)]
+  T1([T1]) -- holds --> A1[(Asha's wallet)]
+  T1 -. waits for .-> A2[(Ravi's wallet)]
   T2([T2]) -- holds --> A2
   T2 -. waits for .-> A1
   D{{cycle found}} --> V[roll back one: the victim]`}
 />
 
+1. T1 debits Asha's wallet and gets its exclusive row lock.
+2. T2 debits Ravi's wallet and gets that row's lock.
+3. T1 tries to credit Ravi's wallet and waits for T2.
+4. T2 tries to credit Asha's wallet and waits for T1. Now each waits for the other.
+5. The database finds the cycle. PostgreSQL checks once a lock wait has lasted `deadlock_timeout`; InnoDB's detector is on by default.
+6. It rolls back the victim's whole transaction and returns an error. The other transaction gets its lock and commits.
+
 ## Example
 
+The four steps above, run as two sessions on both databases, end with an error for the victim:
+
+```text
+PostgreSQL 18:  ERROR:  40P01: deadlock detected
+MySQL 9.7:      ERROR 1213 (40001): Deadlock found when trying to get lock; try restarting transaction
+```
+
+The application catches that error and runs the whole transfer again:
+
 ```java
-void transferWithRetry(long from, long to, BigDecimal amount) throws SQLException {
+void runWithRetry(Tx transfer) throws SQLException {   // Tx: one method, run() throws SQLException
     for (int attempt = 1; ; attempt++) {
         try {
-            transfer(from, to, amount);   // the whole transaction, BEGIN to COMMIT
+            transfer.run();                      // the whole transaction, BEGIN to COMMIT
             return;
         } catch (SQLException e) {
-            String state = e.getSQLState();
-            boolean retry = "40P01".equals(state) || "40001".equals(state);
-            if (!retry || attempt == 3) throw e;   // 40001: MySQL deadlock or serialization failure
+            String state = e.getSQLState();      // 40P01: PostgreSQL deadlock; 40001: MySQL deadlock
+            boolean retryable = "40P01".equals(state) || "40001".equals(state);
+            if (!retryable || attempt == 3) throw e;
         }
     }
 }
 ```
 
+What to notice:
+
+- `transfer.run()` is the whole transaction, not the failed statement, because the victim's earlier work was rolled back too.
+- 40001 is also PostgreSQL's serialization failure from [isolation levels](card:isolation-levels), so the same loop serves both. Other errors, such as a duplicate key (23505), are thrown at once.
+- The limit of three attempts makes a problem that keeps coming back visible instead of looping forever.
+
+## Rules and defaults
+
+- **PostgreSQL 18:** waits `deadlock_timeout` (1 s by default) before checking for a cycle. Which transaction becomes the victim is not predictable.
+- **MySQL 9.7 InnoDB:** `innodb_deadlock_detect` is on by default. InnoDB tries to roll back a small transaction, measured by the rows it inserted, updated or deleted.
+- **Prevention:** lock rows in one fixed order everywhere, keep transactions short, index the WHERE columns so fewer rows are locked, and skip locking reads you do not need.
+- **Retry anyway:** prevention lowers the rate but never removes it, so retry code is always needed.
+
+## Not to be confused with
+
+A lock wait is normal: one transaction waits for another that will finish. A deadlock is a cycle in which nobody can finish, so the whole victim transaction is rolled back. A [lock wait timeout](card:lock-wait-timeout) fires when a normal wait lasts too long; in InnoDB it rolls back only the waiting statement. Rule: cycle = deadlock, whole transaction undone; long wait = timeout, one statement undone.
+
 ## Interview Qs
 
 ### How do you prevent deadlocks?
 
-Take locks in one fixed order (for example, by ascending id), keep transactions short, add indexes so fewer rows are locked, and avoid locking reads you do not need. Still write retry code: prevention is never perfect.
+Take locks in one fixed order, for example by ascending id, keep transactions short, add indexes so statements lock fewer rows, and avoid locking reads you do not need. Still write retry code, because prevention is never perfect.
 
-### Deadlock vs lock wait timeout?
+### What does the database do when it detects a deadlock?
 
-A deadlock is a cycle: no one can ever proceed, so the database detects it and rolls back a whole transaction. A [lock wait timeout](card:lock-wait-timeout) has no cycle: one transaction simply waited longer than the limit.
+It picks one transaction as the victim, rolls back all of its work and returns an error: SQLSTATE 40P01 in PostgreSQL, error 1213 in MySQL. That releases the victim's locks, so the other transaction continues. The application should retry the victim's whole transaction.

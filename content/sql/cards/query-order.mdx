@@ -5,24 +5,36 @@ title: "Logical Order of a SELECT"
 topic: querying
 level: intermediate
 heat: 2
-hook: "SQL is written SELECT-first but runs FROM-first: FROM, WHERE, GROUP BY, HAVING, SELECT, DISTINCT, ORDER BY, LIMIT."
+hook: "You write SELECT first, but SQL works it out FROM first: FROM, WHERE, GROUP BY, HAVING, SELECT, DISTINCT, ORDER BY, LIMIT. Each step sees only earlier steps."
 points:
-  - { k: "WHERE", v: "runs before SELECT, so it cannot see SELECT aliases" }
-  - { k: "ORDER BY", v: "runs after SELECT, so aliases work there" }
-  - { k: "Alias elsewhere", v: "PostgreSQL: also GROUP BY. MySQL: GROUP BY and HAVING" }
-  - { k: "Aggregates", v: "exist only after GROUP BY: filter them in HAVING" }
-  - { k: "Window functions", v: "computed with SELECT, after HAVING; not in WHERE" }
+  - { k: "Order", v: "FROM and joins, WHERE, GROUP BY, HAVING, SELECT, DISTINCT, ORDER BY, then LIMIT and OFFSET" }
+  - { k: "Alias in WHERE", v: "fails in PostgreSQL and MySQL, because WHERE runs before SELECT creates the alias" }
+  - { k: "Alias in ORDER BY", v: "works everywhere, because ORDER BY runs after SELECT" }
+  - { k: "Alias in GROUP BY, HAVING", v: "PostgreSQL 18 allows it in GROUP BY only; MySQL 9.7 allows it in GROUP BY and HAVING", kind: default }
+  - { k: "Window functions", v: "are computed with SELECT, after HAVING, so WHERE cannot filter on them; filter in an outer query" }
+  - { k: "Logical, not physical", v: "the planner may run the work in another order, as long as the result is the same", kind: minus }
 trap:
-  wrong: "The database executes the clauses in exactly this order."
-  right: "This is the logical order that defines the result. The planner may do the work in any order that gives the same rows."
-sayIt: "Logically a query runs FROM and joins, WHERE, GROUP BY, HAVING, SELECT, DISTINCT, ORDER BY, LIMIT. That is why a SELECT alias fails in WHERE but works in ORDER BY."
+  wrong: "The database runs the clauses exactly in this order, step by step."
+  right: "It is the logical order that defines the result. The planner may filter early or use an index, as long as the rows are the same."
+  why: "The order is taught as a list of steps, and it explains every alias error correctly, so it is easy to think it describes how the engine really runs."
+sayIt: "Logically a query runs FROM and joins, WHERE, GROUP BY, HAVING, SELECT, DISTINCT, ORDER BY, LIMIT. That is why a SELECT alias fails in WHERE but works in ORDER BY. It is the meaning, not the physical plan."
+cheat:
+  idea: "SQL is written SELECT first but evaluated FROM first. Each clause can use only what earlier clauses produced, which explains most alias and aggregate errors."
+  flow: "FROM → WHERE → GROUP BY → HAVING → SELECT → DISTINCT → ORDER BY → LIMIT"
+  remember: "A SELECT alias fails in WHERE (it runs earlier) but works in ORDER BY (it runs later)."
+buildsOn: [select-and-filtering, aggregates-group-by, joins]
+scenarios:
+  - q: "You write SELECT customer_id, SUM(amount) AS total FROM payments WHERE total > 600 GROUP BY customer_id. What happens?"
+    a: "It fails: PostgreSQL says column \"total\" does not exist, MySQL says unknown column 'total' in 'where clause'. WHERE runs before GROUP BY and SELECT, so neither the sum nor its alias exists yet. Move the condition to HAVING SUM(amount) > 600."
+  - q: "You want only rows where ROW_NUMBER() OVER (ORDER BY amount DESC) = 1, so you put that in WHERE. Why does it fail, and what is the fix?"
+    a: "Window functions are computed with SELECT, after WHERE, so WHERE cannot use them (PostgreSQL: window functions are not allowed in WHERE). Compute the number in a subquery or CTE, then filter WHERE rn = 1 in the outer query."
 confusedWith: [where-vs-having]
 tags: [select, alias, logical-order]
 visual: flow
 sources:
-  - title: "SELECT: description and output column names (PostgreSQL 18 docs)"
+  - title: "SELECT: description of processing order, output column names (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/sql-select.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Problems with Column Aliases (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/problems-with-alias.html"
     verifiedOn: "2026-10-20"
@@ -34,46 +46,88 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The logical order of a SELECT is the order in which its clauses take effect, which differs from the order you write them. You write `SELECT` first, but the database starts from `FROM`: first it collects the rows, then filters, groups and sorts them. Each clause can use only what the clauses before it produced.
+
 ## Why it exists
 
-Most "why does this error?" questions in SQL come from reading a query top to bottom. Each clause can only use what the earlier steps produced.
+If you read a query top to bottom, many errors look random. A column alias from `SELECT` works in `ORDER BY` but fails in `WHERE`, and `SUM(amount)` works in `HAVING` but fails in `WHERE`. Once you know the order, each of these has one reason: the clause ran before the thing it needs was created. You can then predict errors and write the fix at once.
 
 ## How it works
 
-<Steps label="Logical order of one SELECT">
-  <Step title="FROM / JOIN">Build the combined rows.</Step>
-  <Step title="WHERE">Keep rows where the condition is true.</Step>
-  <Step title="GROUP BY">Fold rows into groups; aggregates are computed.</Step>
-  <Step title="HAVING">Keep groups where the condition is true.</Step>
-  <Step title="SELECT">Compute output columns, aliases and window functions.</Step>
-  <Step title="DISTINCT">Drop duplicate output rows.</Step>
-  <Step title="ORDER BY">Sort the output.</Step>
-  <Step title="LIMIT / OFFSET">Return one slice.</Step>
-</Steps>
+<Mermaid
+  alt="Logical order of a SELECT, top to bottom: FROM and JOIN build the rows, WHERE filters rows, GROUP BY makes groups and aggregates, HAVING filters groups, SELECT computes columns, aliases and window functions, DISTINCT drops duplicates, ORDER BY sorts, LIMIT returns a slice. Aliases exist only from SELECT onwards."
+  chart={`flowchart TB
+  F["1. FROM / JOIN: build rows"] --> W["2. WHERE: filter rows"]
+  W --> G["3. GROUP BY: groups and aggregates"]
+  G --> H["4. HAVING: filter groups"]
+  H --> S["5. SELECT: columns, aliases, window functions"]
+  S --> D["6. DISTINCT: drop duplicates"]
+  D --> O["7. ORDER BY: sort, aliases visible"]
+  O --> L["8. LIMIT / OFFSET: slice"]`}
+/>
 
-- The real plan is in [EXPLAIN](card:explain-query-plans).
+1. `FROM` and the joins build one set of rows from the tables.
+2. `WHERE` tests each row and drops those whose condition is false or unknown. No groups or aliases exist yet.
+3. `GROUP BY` folds the remaining rows into groups and computes aggregates like `SUM`, and `HAVING` then drops whole groups.
+4. `SELECT` computes the output columns and gives them their aliases, and `DISTINCT` removes repeated output rows. Window functions are computed here too; you will see them in [Window functions](card:window-functions).
+5. `ORDER BY` sorts the output, so it can use aliases, and `LIMIT` returns the first rows of that sorted list.
+
+So the key is: a clause can use a name only if an earlier step created it.
 
 ## Example
 
-```sql
-SELECT user_id, SUM(amount) AS total
-FROM orders
-WHERE total > 1000          -- error: total does not exist yet
-GROUP BY user_id;
+Total paid amount per customer, keeping customers above 600. The data is the payments table: customer 1 has PAID payments of 500 and 700, customer 2 has one of 700.
 
-SELECT user_id, SUM(amount) AS total
-FROM orders
-GROUP BY user_id
-HAVING SUM(amount) > 1000   -- portable
-ORDER BY total DESC;        -- alias is fine here
+```sql
+SELECT customer_id, SUM(amount) AS total
+FROM payments
+WHERE status = 'PAID'          -- row filter: runs before grouping
+GROUP BY customer_id
+HAVING SUM(amount) > 600       -- group filter: the sum exists now
+ORDER BY total DESC;           -- alias works: ORDER BY runs after SELECT
 ```
+
+```text output
+ customer_id |  total
+-------------+---------
+           1 | 1200.00
+           2 |  700.00
+```
+
+What to notice:
+
+- `status = 'PAID'` is a plain column test, so it goes in `WHERE` and cuts rows before any grouping.
+- `HAVING` repeats `SUM(amount)` instead of using `total`. PostgreSQL rejects `HAVING total > 600`; MySQL accepts it, but the repeated form runs on both.
+- Move `total > 600` into `WHERE` and both databases fail with "column total does not exist" (PostgreSQL) or "Unknown column 'total' in 'where clause'" (MySQL).
+
+## Rules and defaults
+
+- **WHERE and HAVING:** neither can use a SELECT alias in PostgreSQL 18; write the expression again.
+- **GROUP BY:** PostgreSQL 18 and MySQL 9.7 both accept an output alias. If the name is also a column of the table, PostgreSQL uses the table column.
+- **MySQL extension:** MySQL 9.7 also accepts aliases in `HAVING`. It is not portable, so do not rely on it.
+- **Window functions:** allowed only in the SELECT list and `ORDER BY`. To filter on one, compute it in a subquery or CTE first; you will see both in [Subqueries](card:subqueries) and [CTEs](card:ctes).
+- **No ORDER BY:** rows come back in whatever order is fastest, which can change between runs.
+
+## Not to be confused with
+
+The logical order says what each clause can see. The execution plan is how the engine really does the work, and it may filter early or read an index first. You will see plans in [EXPLAIN](card:explain-query-plans). Rule: logical order = what the query means; plan = how it is run.
+
+## Common mistakes
+
+- **"With SELECT DISTINCT, I can still sort by any column."** DISTINCT runs before ORDER BY, so after duplicates are dropped a column that is not in the select list has no single value to sort by. PostgreSQL 18 and MySQL 9.7 both reject such an `ORDER BY`.
 
 ## Interview Qs
 
 ### Why can't I use a SELECT alias in WHERE?
 
-WHERE is evaluated before SELECT, so the alias has no value yet. Repeat the expression, or wrap the query in a subquery or CTE and filter outside.
+WHERE is evaluated before SELECT, so when WHERE runs the alias does not exist yet. Repeat the expression in WHERE, or put the query in a subquery or CTE and filter on the alias in the outer query. ORDER BY runs after SELECT, so the alias works there.
 
-### Where are window functions computed?
+### Why can't you filter on ROW_NUMBER() in WHERE?
 
-After WHERE, GROUP BY and HAVING, together with the SELECT list. So they cannot be filtered in WHERE; filter them in an outer query.
+Window functions are computed together with the SELECT list, after WHERE, GROUP BY and HAVING. WHERE has already run, so it cannot see them. Compute the row number in a subquery or CTE, then filter `WHERE rn = 1` outside.
+
+### Does the database really run FROM first, then WHERE, and so on?
+
+Not necessarily. The order defines the result, not the plan. The planner may use an index, push a filter into a join, or stop early for LIMIT, as long as the rows returned are the same as the logical order would give.

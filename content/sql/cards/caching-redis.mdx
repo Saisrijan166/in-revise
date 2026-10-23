@@ -5,16 +5,28 @@ title: Database vs Cache (Redis)
 topic: backend
 level: intermediate
 heat: 2
-hook: "The database holds the truth; Redis holds fast copies. Read the cache first; on writes update the DB, then delete the key."
+hook: "The database holds the truth; Redis holds fast copies of what you read often. Read the cache first; on a write, update the database, then delete the key."
 points:
-  - { k: "Hit and miss", v: "hit: answer from memory; miss: read the DB, then store the copy" }
-  - { k: "TTL", v: "EXPIRE deletes a key after N seconds, which caps staleness" }
-  - { k: "Good fit", v: "data read often and changed rarely", kind: plus }
-  - { k: "Stale window", v: "between the DB write and the delete, readers may get old data", kind: minus }
+  - { k: "Hit and miss", v: "a hit answers from memory; a miss reads the database and stores a copy for next time" }
+  - { k: "TTL", v: "a time limit on a key; when it runs out Redis deletes the key, which caps how long a copy can be stale" }
+  - { k: "No TTL by default (Redis 8)", v: "a key set without EX or EXPIRE lives until it is deleted or evicted", kind: default }
+  - { k: "Good fit", v: "data read often and changed rarely, such as a customer's name on every page", kind: plus }
+  - { k: "Stale window", v: "between the database write and the key delete, readers can still get the old copy", kind: minus }
 trap:
   wrong: "Delete the cached key first, then update the database."
   right: "Update the database first, then delete the key. Deleting first lets a reader put the old row back into the cache."
+  why: "Deleting first feels safer, because the old copy is gone before the new value is written. But a read in that gap misses, loads the old row from the database and caches it again."
 sayIt: "The database is the source of truth; Redis keeps hot data in memory. With cache-aside I read Redis first, load from the database on a miss and set a TTL; on writes I update the database, then delete the key."
+cheat:
+  idea: "A cache such as Redis keeps in-memory copies of data the app reads often, so repeated reads skip the database, which stays the source of truth."
+  flow: "read Redis → hit: return; miss: read DB → store with TTL → return"
+  remember: "On a write: update the database first, then delete the key. Always set a TTL."
+buildsOn: [wal, connection-pooling]
+scenarios:
+  - q: "To rename customer 1, the code deletes the key customer:1:name and then updates the database. A read arrives between the two steps. What does the cache hold afterwards?"
+    a: "The old name. The read misses, loads the row before the update and caches it, and nothing deletes that copy again. With 'update the database, then delete the key', the next read after the delete loads the new name."
+  - q: "The app crashes after updating the database but before deleting the key. How long do readers see the old value?"
+    a: "Until the key's TTL runs out, for example at most 300 seconds with EX 300. Without a TTL the stale copy would stay until something else deletes it, which may be never. That is why every cached key gets a TTL."
 confusedWith: [database-vs-cache]
 tags: [cache, redis, cache-aside, ttl]
 visual: flow
@@ -28,55 +40,90 @@ sources:
   - title: "EXPIRE (Redis command reference)"
     url: "https://redis.io/docs/latest/commands/expire/"
     verifiedOn: "2026-10-20"
+  - title: "Key eviction: maxmemory and maxmemory-policy (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/reference/eviction/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A cache is a fast store that keeps copies of data the app reads often, so the next read does not need the database. Redis is the usual choice: a server that keeps keys and their values in memory (RAM), so a lookup by key is much faster than a database query. The database stays the source of truth: the one place whose data counts when the two disagree. Cache-aside is the common way to use them together: the app itself fills and clears the cache.
 
 ## Why it exists
 
-Most apps read the same rows again and again. A cache serves those repeated reads from memory and takes that load off the database.
+A payments app shows the customer's name on every page, so it runs the same `SELECT` thousands of times for data that changes rarely. Each one borrows a pooled connection and uses database time. A cache answers those repeated reads from memory, so the database is left for writes and less common reads. The price is that the copy can be briefly out of date, so you cache only data that may be stale for a short time.
 
 ## How it works
 
-<Steps label="Cache-aside with Redis">
-  <Step title="Read">Look up `user:42` in Redis. On a hit, return it.</Step>
-  <Step title="Miss">Read the row from the database, store it with a TTL, return it.</Step>
-  <Step title="Write">Update the database, then delete `user:42`.</Step>
-  <Step title="Next read">It misses and loads the fresh row.</Step>
-</Steps>
+<Mermaid
+  alt="Cache-aside read path. The app asks Redis for the key. On a hit it returns the cached value. On a miss it reads the database, stores the value in Redis with a TTL, and returns it."
+  chart={`flowchart LR
+  A[App] -- "1. GET key" --> R[(Redis)]
+  R -- "2. hit: value" --> A
+  A -- "3. miss: SELECT" --> D[(Database)]
+  A -- "4. SET key EX 300" --> R`}
+/>
 
-- A TTL heals any delete that was missed, so set one on every cached key.
-- [Redis](card:redis) also serves sessions, counters, rate limits, locks and pub/sub.
+1. The app asks Redis for the key, such as `customer:1:name`.
+2. On a hit, Redis returns the copy and the database is not touched.
+3. On a miss, the app reads the row from the database, stores a copy in Redis with a TTL, and returns it.
+4. On a write, the app updates the database first, then deletes the key.
+5. The next read misses and loads the fresh value from the database.
+
+So the key is that the app, not Redis, keeps the two in step.
 
 ## Example
 
+The payment service caches customer names for 300 seconds. `redis` is a Jedis client, a Java library for Redis; `findName` and `updateName` run plain SQL.
+
 ```java
-User find(long id) {
-    String key = "user:" + id;
-    User u = cache.get(key);
-    if (u != null) return u;                      // hit
-    u = userRepo.findById(id).orElseThrow();      // miss: read the DB
-    cache.set(key, u, Duration.ofMinutes(5));     // store with a TTL
-    return u;
+String customerName(long id) throws SQLException {
+    String key = "customer:" + id + ":name";
+    String name = redis.get(key);                // 1. try the cache
+    if (name != null) return name;               // hit: no database trip
+    name = findName(id);                         // 2. miss: read the database
+    redis.set(key, name, SetParams.setParams().ex(300));  // 3. copy, 300 s TTL
+    return name;
 }
-void rename(long id, String name) {
-    userRepo.updateName(id, name);                // 1. database
-    cache.delete("user:" + id);                   // 2. drop the copy
+
+void rename(long id, String newName) throws SQLException {
+    updateName(id, newName);                     // 1. the database first
+    redis.del("customer:" + id + ":name");       // 2. then delete the old copy
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Key lifetime | none: keys live until deleted | Redis 8.x, without EXPIRE |
-| Disk persistence | RDB snapshots to `dump.rdb`; AOF off | Redis 8.x |
-| AOF fsync policy | `everysec` (lose up to about 1 s) | Redis 8.x, when AOF is on |
+- The first call reads the database; a second call within 300 seconds returns the cached name without SQL.
+- `ex(300)` is the TTL. Remove it and the key never expires, so one missed delete leaves a wrong name for good.
+- `rename` deletes the key instead of writing the new name into it. The next read loads whatever the database now holds.
+- Swap the two lines in `rename` and a read between them can cache the old name again.
+
+## Rules and defaults
+
+- **Key lifetime (Redis 8):** no expiry by default; a key lives until it is deleted or evicted. Set a TTL with `SET … EX` or `EXPIRE`.
+- **Persistence (Redis 8 defaults):** periodic RDB snapshots (a copy of all data written to disk) are on and the append-only file (AOF), a log of every write, is off, so a crash can lose the writes since the last snapshot. With AOF on, the default `everysec` sync can lose about one second of writes.
+- **Memory limit:** `maxmemory` is 0 (no limit) by default on 64-bit systems. When a limit is set and reached, the default policy `noeviction` rejects new writes; for a cache the Redis docs suggest `allkeys-lru`, which drops the least recently used keys.
+- **What not to cache:** data that must never be stale, such as a balance checked before a payment, and anything whose only copy would be in Redis.
+
+## Not to be confused with
+
+The database is the durable source of truth: committed data survives a crash thanks to the [write-ahead log](card:wal), and it has constraints, joins and transactions. The cache is a copy kept in memory for speed: it may be stale, and it may lose data in a crash. Rule: if losing it would lose information, it belongs in the database.
+
+## Common mistakes
+
+- **"Write the new value into the cache on every update."** Two updates running at the same time can reach the database in one order and the cache in the other, leaving the older value cached until the TTL ends. Deleting the key avoids that race, because the next read loads from the database.
 
 ## Interview Qs
 
 ### Why not keep everything in Redis instead of the database?
 
-Redis keeps data in memory, so size costs RAM, and a crash can lose recent writes: about a second with AOF everysec, minutes with RDB alone. The database gives durable storage, constraints, joins and transactions.
+Redis keeps data in memory, so size costs RAM, and a crash can lose recent writes: about a second with AOF `everysec`, and everything since the last snapshot with RDB alone. The database gives durable storage, constraints, joins and transactions. Redis is the fast layer in front, not the record.
 
 ### How do you keep the cache and the database consistent?
 
-Not perfectly, without extra cost. Update the database, then delete the key, and set a TTL so a missed delete heals itself. Do not cache data that must never be stale.
+Not perfectly without extra cost. Update the database first, then delete the key, and set a TTL on every key so a missed delete heals itself. Do not cache data that must never be stale.
+
+### What else is Redis used for in a backend?
+
+Besides caching: [session storage](card:redis-sessions), [counters and rate limits](card:redis-rate-limiter) with atomic `INCR`, [distributed locks](card:redis-distributed-lock) and [pub/sub messaging](card:redis-pub-sub). In each case the database still holds the permanent data.

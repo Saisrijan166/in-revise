@@ -5,16 +5,27 @@ title: Optimistic vs Pessimistic Locking
 topic: transactions
 level: intermediate
 heat: 2
-hook: "Pessimistic: lock the row first, so others wait. Optimistic: lock nothing, and at write time check that the version has not changed."
+hook: "Pessimistic: lock the row first, so others wait. Optimistic: lock nothing, and at write time check that the row's version has not changed."
 points:
-  - { k: "The problem", v: "lost update: two read-modify-writes, the last one wins" }
-  - { k: "Pessimistic", v: "SELECT … FOR UPDATE, then change, then COMMIT" }
-  - { k: "Optimistic", v: "UPDATE … WHERE version = ?; 0 rows means someone else won" }
-  - { k: "Atomic update", v: "SET balance = balance - 500 in one statement needs neither", kind: plus }
+  - { k: "Lost update", v: "two transactions read the same row and write it back; the later write erases the earlier change" }
+  - { k: "Pessimistic", v: "SELECT … FOR UPDATE inside a transaction locks the row first, so others wait their turn" }
+  - { k: "Optimistic", v: "UPDATE … WHERE id = ? AND version = ? holds no lock; 0 rows updated means someone changed it" }
+  - { k: "Atomic UPDATE", v: "SET balance = balance - 500 in one statement needs no version and no separate locking read", kind: plus }
+  - { k: "Many conflicts", v: "optimistic writes then fail and retry often, wasting the work done before each one", kind: minus }
 trap:
   wrong: "Optimistic locking locks the row while the user edits it."
-  right: "It holds no lock at all. The conflict is found at write time, when the version no longer matches."
-sayIt: "Both stop lost updates. Pessimistic locks the row with FOR UPDATE, good when conflicts are common. Optimistic checks a version column on update and retries on conflict, good when conflicts are rare."
+  right: "It holds no lock at all. The conflict is found at write time, when the version in the WHERE no longer matches."
+  why: "The name contains 'locking', so people picture a lock held during the edit. The real mechanism is only a check inside the UPDATE."
+sayIt: "Both stop lost updates. Pessimistic locks the row with FOR UPDATE, good when conflicts are common. Optimistic checks a version column in the UPDATE and retries when 0 rows change, good when conflicts are rare or a user edits for a while."
+cheat:
+  idea: "Both stop lost updates, where a later write erases an earlier one. Pessimistic locking locks the row first so others wait; optimistic locking takes no lock and checks a version at write time."
+  remember: "Optimistic when conflicts are rare or edits are long; pessimistic when the same rows are fought over often."
+buildsOn: [locking, isolation-levels]
+scenarios:
+  - q: "An edit form shows payment 2 to a support agent, who may keep it open for ten minutes. Optimistic or pessimistic, and why?"
+    a: "Optimistic. A pessimistic lock would be held for ten minutes and block every other change to the row. With a version column, the form carries version 0, the save runs WHERE version = 0, and a conflict appears only if someone saved first."
+  - q: "In a flash sale, 1,000 requests a second each take one item from the same stock row. Is version-column optimistic locking a good fit?"
+    a: "No. With that many conflicts most optimistic writes fail and retry. An atomic UPDATE stock SET qty = qty - 1 WHERE id = ? AND qty > 0 does the check and the change in one statement, and each request waits only briefly for the row lock."
 confusedWith: []
 tags: [optimistic-locking, pessimistic-locking, version-column, lost-update]
 visual: table
@@ -28,45 +39,86 @@ sources:
   - title: "Controlling Concurrent Access to Entity Data with Locking (Jakarta EE Tutorial)"
     url: "https://jakarta.ee/learn/jakartaee-tutorial/9.1/persist/persistence-locking/persistence-locking.html"
     verifiedOn: "2026-10-20"
+  - title: "Jakarta Persistence 3.2 specification: optimistic locking and version attributes"
+    url: "https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Both are ways to stop a lost update: two transactions read the same row, each changes it in memory, and the later write silently erases the earlier one. Pessimistic locking takes a [row lock](card:locking) before the change, so the second transaction waits. Optimistic locking takes no lock. It keeps a version number in the row and makes the UPDATE change nothing if the version moved since you read it.
 
 ## Why it exists
 
-Two requests read a balance of 1000, each subtracts its own amount and saves: one change vanishes. This [lost update](card:lost-update) needs either waiting or detecting.
+Two support agents open payment 2 at the same time. Both load it as `PENDING`, version 0. One saves `FAILED`, the other saves `PAID` a second later, and the first agent's change is gone without any error. READ COMMITTED, PostgreSQL's default [isolation level](card:isolation-levels), does not stop this, because each UPDATE is valid on its own. You need either waiting (pessimistic) or detecting (optimistic).
 
 ## How it works
 
 <Compare id="optimistic-vs-pessimistic-locking" />
 
-- [JPA](card:orm-jpa) does the version check for a `@Version` field; a conflict throws `OptimisticLockException` and rolls the transaction back.
+The optimistic way, step by step:
+
+1. Read the row together with its version: `SELECT status, version FROM payments WHERE id = 2` returns `PENDING`, 0.
+2. The user or the code works for as long as needed. No lock is held.
+3. Write with the old version in the WHERE, and raise the version: `… SET status = 'PAID', version = version + 1 WHERE id = 2 AND version = 0`.
+4. Check the row count. 1 means your write won. 0 means someone changed the row, or deleted it, since you read it: re-read and retry, or show a conflict.
+
+The pessimistic way is shorter: `BEGIN`, `SELECT … FOR UPDATE`, change the row, `COMMIT`. A second transaction's `FOR UPDATE` waits until the first one commits, then reads the new value.
 
 ## Example
 
+Two agents both read payment 2 at version 0 and then save (run on PostgreSQL 18 and MySQL 9.7):
+
 ```sql
--- accounts(id, balance, version)
-SELECT balance, version FROM accounts WHERE id = 1;     -- 1000, version 7
-UPDATE accounts SET balance = 500, version = version + 1
-WHERE id = 1 AND version = 7;                           -- 0 rows: conflict, retry
--- or, when the new value depends only on the old one:
-UPDATE accounts SET balance = balance - 500
-WHERE id = 1 AND balance >= 500;                        -- 0 rows: not enough money
+UPDATE payments SET status = 'PAID', version = version + 1
+WHERE id = 2 AND version = 0;                -- agent 1: 1 row, version is now 1
+UPDATE payments SET status = 'FAILED', version = version + 1
+WHERE id = 2 AND version = 0;                -- agent 2: 0 rows, conflict
+-- when the new value depends only on the old one, one statement is enough:
+UPDATE wallets SET balance = balance - 500
+WHERE customer_id = 2 AND balance >= 500;    -- 0 rows: Ravi has only ₹300
 ```
+
+What to notice:
+
+- Agent 2's UPDATE changes 0 rows because the version is already 1. The app must check that count; ignoring it silently loses agent 2's intent.
+- The wallet UPDATE needs no version. It reads and changes the balance in one statement, and the `balance >= 500` condition refuses an overdraft.
+
+In JPA, a `@Version` field makes the provider add the version check for you:
 
 ```java
 @Entity
-class Account {
-    @Id Long id;
-    BigDecimal balance;
-    @Version long version;   // checked and bumped on every update
+@Table(name = "payments")
+class Payment {
+    @Id Integer id;
+    BigDecimal amount;
+    String status;
+    @Version int version;   // JPA adds "AND version = ?" to every UPDATE and increments it
 }
 ```
+
+What to notice:
+
+- You never write the version check. When the UPDATE changes 0 rows, JPA throws `OptimisticLockException` and the transaction is marked for rollback.
+- Remove `@Version` and the same code silently overwrites the other agent's change.
+
+## Rules and defaults
+
+- **Zero rows:** means the version changed or the row was deleted. Re-read and retry, or report the conflict; never ignore the count.
+- **No lock during user think time:** never hold a pessimistic lock while a user edits a form. Carry the version in the form instead.
+- **JPA pessimistic:** `LockModeType.PESSIMISTIC_WRITE` asks the database for an exclusive row lock on the entity.
+- **Atomic UPDATE:** at READ COMMITTED, PostgreSQL re-checks the WHERE on the newest version of a row that another transaction just changed, so `balance >= 500` is tested against the real current balance.
 
 ## Interview Qs
 
 ### When do you choose optimistic over pessimistic locking?
 
-Optimistic when conflicts are rare and reads are long, like editing a form: no locks held, just a retry now and then. Pessimistic when conflicts are frequent or a retry is costly, like a hot stock row.
+Optimistic when conflicts are rare or the edit is long, like a form open for minutes: no lock is held, and a retry is needed now and then. Pessimistic when the same rows are fought over often or a retry is costly, such as one hot stock row.
 
 ### What does it mean when an optimistic UPDATE affects 0 rows?
 
-Someone changed the row since you read it (or it no longer exists). Re-read and retry, or report the conflict. Never ignore the row count.
+Someone changed the row since you read it, so the version no longer matches, or the row no longer exists. Re-read and retry, or show the user a conflict. Never ignore the row count.
+
+### How do you prevent a lost update on a counter or a balance?
+
+Often with neither lock: one atomic statement such as `SET balance = balance - 500 WHERE customer_id = ? AND balance >= 500`. The database reads and writes the row in one step, under the row lock. Use a version column or `FOR UPDATE` only when the new value needs logic outside SQL.

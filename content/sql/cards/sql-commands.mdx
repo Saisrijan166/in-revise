@@ -5,18 +5,29 @@ title: "SQL Command Types: DDL, DML, DQL, DCL, TCL"
 topic: querying
 level: beginner
 heat: 2
-hook: "DDL shapes tables, DML changes rows, DQL reads them, DCL grants access, TCL commits or undoes the work."
+hook: "SQL statements come in five groups by job: build tables, change rows, read rows, grant access, and keep or undo a group of changes."
 points:
-  - { k: "CRUD", v: "INSERT, SELECT, UPDATE, DELETE" }
-  - { k: "Groups", v: "a teaching convention; books file SELECT or TRUNCATE differently" }
-  - { k: "No WHERE", v: "UPDATE or DELETE without WHERE touches every row", kind: minus }
-  - { k: "MySQL DDL", v: "CREATE, ALTER, DROP, TRUNCATE commit the open transaction", kind: minus }
-  - { k: "PostgreSQL DDL", v: "runs inside a transaction, so ROLLBACK can undo it", kind: plus }
+  - { k: "DDL", v: "CREATE, ALTER, DROP and TRUNCATE build, change or remove structure, such as a table or a column" }
+  - { k: "DML and DQL", v: "INSERT, UPDATE and DELETE add, change or remove rows; SELECT (DQL) only reads them" }
+  - { k: "DCL and TCL", v: "GRANT and REVOKE control who may do what; COMMIT and ROLLBACK keep or undo a transaction" }
+  - { k: "No WHERE", v: "UPDATE or DELETE without a WHERE condition changes or removes every row in the table", kind: minus }
+  - { k: "MySQL 9.7 DDL", v: "CREATE, ALTER, DROP and TRUNCATE first commit the open transaction, so ROLLBACK cannot undo them", kind: minus }
+  - { k: "PostgreSQL 18 DDL", v: "most DDL runs inside the transaction, so ROLLBACK also undoes a DROP or a TRUNCATE", kind: plus }
 trap:
   wrong: "TRUNCATE can never be rolled back."
-  right: "In MySQL it commits at once. In PostgreSQL it can be rolled back if the transaction does not commit."
-sayIt: "DDL defines objects, DML changes rows, DQL is SELECT, DCL is GRANT and REVOKE, TCL is COMMIT and ROLLBACK. DELETE removes chosen rows, TRUNCATE empties the table, DROP removes the table itself."
-confusedWith: []
+  right: "In MySQL it commits at once and cannot be undone. In PostgreSQL, a TRUNCATE inside a transaction is undone by ROLLBACK."
+  why: "TRUNCATE is filed under DDL, and in MySQL and many tutorials DDL commits at once, so people assume every database behaves that way."
+sayIt: "DDL defines structure, DML changes rows, DQL is SELECT, DCL is GRANT and REVOKE, and TCL is COMMIT and ROLLBACK. DELETE removes chosen rows, TRUNCATE empties the table, DROP removes the table. MySQL commits DDL at once; PostgreSQL can roll it back."
+cheat:
+  idea: "SQL statements are grouped by job: DDL changes structure, DML changes rows, DQL (SELECT) reads them, DCL grants access, and TCL commits or rolls back a transaction."
+  remember: "UPDATE or DELETE without WHERE hits every row. MySQL commits DDL at once; PostgreSQL can roll it back."
+buildsOn: [relational-databases]
+scenarios:
+  - q: "In MySQL you run START TRANSACTION, then DELETE FROM payments WHERE status = 'FAILED', then CREATE TABLE audit_log (id INT), then ROLLBACK. Are the failed payments back?"
+    a: "No. CREATE TABLE is DDL, and in MySQL it commits the open transaction before it runs. The DELETE was committed at that moment, so ROLLBACK has nothing left to undo. In PostgreSQL the same steps would bring the rows back."
+  - q: "A staging table holds a million test rows. You want it empty, and you still need the table. Which command?"
+    a: "TRUNCATE. It empties the whole table without deleting row by row, and the table stays. DELETE without WHERE also works but removes rows one at a time, and DROP would remove the table itself."
+confusedWith: [delete-vs-truncate-vs-drop]
 tags: [ddl, dml, crud, truncate]
 visual: table
 sources:
@@ -29,6 +40,15 @@ sources:
   - title: "Transactional DDL in PostgreSQL (PostgreSQL wiki)"
     url: "https://wiki.postgresql.org/wiki/Transactional_DDL_in_PostgreSQL:_A_Competitive_Analysis"
     verifiedOn: "2026-10-20"
+  - title: "Transactions tutorial: implicit BEGIN and COMMIT around each statement (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/18/tutorial-transactions.html"
+    verifiedOn: "2026-10-21"
+  - title: "START TRANSACTION, COMMIT and ROLLBACK: autocommit on by default (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/commit.html"
+    verifiedOn: "2026-10-21"
+  - title: "CREATE DATABASE: cannot run inside a transaction block (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/18/sql-createdatabase.html"
+    verifiedOn: "2026-10-21"
   - title: "Data Manipulation Statements: SELECT is filed here (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/sql-data-manipulation-statements.html"
     verifiedOn: "2026-10-20"
@@ -37,41 +57,87 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A SQL statement is one command you send to the database, such as "create this table" or "read these rows". Statements are sorted into five groups by what they touch: DDL (data definition) changes the structure, DML (data manipulation) changes rows, DQL (data query) reads rows, DCL (data control) changes permissions, and TCL (transaction control) ends a transaction. A transaction is a group of changes that the database keeps together (commit) or undoes together (rollback).
+
 ## Why it exists
 
-Interviewers sort SQL statements by job: defining structure, changing data, reading, permissions and transactions. Knowing the group tells you whether a statement can be undone.
+The group tells you how much a statement can damage and whether you can take it back. An UPDATE run by mistake inside a transaction can be rolled back. A DROP TABLE in MySQL is committed the moment it runs, so the table and its data are gone. Interviewers use the groups to ask exactly this: what does DELETE, TRUNCATE or DROP remove, and which one can you undo.
 
 ## How it works
 
 | Group | Job | Commands |
 |---|---|---|
-| DDL | Define objects | CREATE, ALTER, DROP, TRUNCATE |
-| DML | Change rows | INSERT, UPDATE, DELETE |
+| DDL | Build or change structure | CREATE, ALTER, DROP, TRUNCATE |
+| DML | Add, change, remove rows | INSERT, UPDATE, DELETE |
 | DQL | Read rows | SELECT |
 | DCL | Permissions | GRANT, REVOKE |
-| TCL | Transactions | COMMIT, ROLLBACK, SAVEPOINT |
+| TCL | Transactions | BEGIN, COMMIT, ROLLBACK, SAVEPOINT |
 
-<Compare id="delete-vs-truncate-vs-drop" />
+A payments table goes through all five groups in its life:
 
-- Transactions themselves are in [Transactions](card:transactions).
+1. `CREATE TABLE payments (...)` builds the table. This is DDL.
+2. `INSERT`, `UPDATE` and `DELETE` add, change and remove payment rows. This is DML.
+3. `SELECT` reads them for a report. This is DQL, and it changes nothing.
+4. `GRANT SELECT ON payments TO reporting` lets a reporting user read the table. This is DCL.
+5. `BEGIN` starts a transaction around risky changes, and `COMMIT` or `ROLLBACK` ends it. This is TCL.
+
+So the key is: know the group, and you know whether ROLLBACK can save you.
 
 ## Example
 
+This PostgreSQL script deletes every row by mistake, then undoes it. The table is a small copy of two payments.
+
 ```sql
-INSERT INTO users (name, city) VALUES ('Asha', 'Pune'), ('Ravi', 'Delhi');
-UPDATE users SET city = 'Delhi' WHERE id = 1;  -- one row
-DELETE FROM users WHERE id = 1;                -- one row
-DELETE FROM users;                             -- every row, can roll back
-TRUNCATE users;                                -- every row, fast
-DROP TABLE users;                              -- the table is gone
+CREATE TABLE payments_archive (id INT PRIMARY KEY, amount DECIMAL(10,2));
+INSERT INTO payments_archive VALUES (101, 500), (102, 800);
+
+BEGIN;
+DELETE FROM payments_archive;     -- no WHERE: every row goes
+ROLLBACK;                         -- the delete is undone
+
+SELECT COUNT(*) AS rows_left FROM payments_archive;
 ```
+
+```text output
+ rows_left
+-----------
+         2
+(1 row)
+```
+
+What to notice:
+
+- `DELETE` with no `WHERE` removed both rows, with no error. The `BEGIN` before it is what made the mistake recoverable.
+- Put `TRUNCATE payments_archive` in place of the `DELETE` and PostgreSQL still shows 2 rows after `ROLLBACK`. MySQL 9.7 shows 0, because its `TRUNCATE` commits first.
+- Without `BEGIN`, each statement commits on its own as soon as it succeeds, so `ROLLBACK` would have nothing to undo.
+
+## Rules and defaults
+
+- **Autocommit:** PostgreSQL 18 and MySQL 9.7 both commit each statement on its own unless you start a transaction with `BEGIN` or `START TRANSACTION`.
+- **MySQL implicit commit:** DDL such as CREATE, ALTER, DROP and TRUNCATE commits the open transaction before it runs, so earlier changes in that transaction are committed too.
+- **PostgreSQL transactional DDL:** CREATE, ALTER, DROP and TRUNCATE roll back with the transaction. A few commands, such as `CREATE DATABASE`, refuse to run inside a transaction at all.
+- **The groups are a teaching convention:** the MySQL manual files SELECT under data manipulation statements, and some books call TRUNCATE DML.
+
+## Not to be confused with
+
+DELETE removes the rows that match its WHERE condition, one by one, and the table stays. TRUNCATE empties the whole table at once, and the table stays. DROP TABLE removes the table itself, with its indexes and constraints. Rule: DELETE = some rows, TRUNCATE = all rows, DROP = the table.
+
+## Common mistakes
+
+- **"UPDATE without WHERE gives an error."** It does not: it changes every row. Before a risky UPDATE or DELETE, run a SELECT with the same WHERE to see which rows it hits, and run the change inside `BEGIN` so you can roll it back.
 
 ## Interview Qs
 
 ### What is the difference between DELETE, TRUNCATE and DROP?
 
-DELETE removes chosen rows and fires delete triggers. TRUNCATE empties the whole table without scanning it. DROP removes the table, its indexes and constraints.
+DELETE removes chosen rows, one at a time, and fires delete triggers. TRUNCATE removes all rows at once without scanning them, and the table stays. DROP removes the table with its data, indexes and constraints. DELETE can always be rolled back inside a transaction; TRUNCATE and DROP can be rolled back in PostgreSQL but not in MySQL.
 
 ### Is TRUNCATE DDL or DML?
 
-Usually DDL. MySQL calls it DDL and commits implicitly. PostgreSQL treats it like a fast unqualified DELETE that still obeys the transaction.
+It is usually filed as DDL. MySQL treats it as DDL and commits implicitly, so you cannot roll it back. PostgreSQL treats it like a fast delete of every row that still obeys the transaction, so ROLLBACK undoes it.
+
+### You ran UPDATE without WHERE in production. What could have prevented the damage?
+
+Running it inside a transaction: BEGIN, run the UPDATE, check the reported row count, then COMMIT or ROLLBACK. Running a SELECT with the same WHERE first also shows which rows will change. Without a transaction, autocommit has already saved the change, and only a backup can restore it.

@@ -5,17 +5,29 @@ title: Query Execution and EXPLAIN
 topic: indexes
 level: intermediate
 heat: 2
-hook: "The planner turns SQL into a plan: how to read each table and join them. EXPLAIN shows the plan; EXPLAIN ANALYZE runs it."
+hook: "The database turns your SQL into a plan: how to read and join each table. EXPLAIN shows the plan; EXPLAIN ANALYZE also runs it and shows what really happened."
 points:
-  - { k: "Cost-based", v: "estimates each plan's cost from statistics; picks the cheapest" }
-  - { k: "Read first", v: "scan type, estimated vs actual rows, join method" }
-  - { k: "Rows far off", v: "estimate far from actual: stale or poor statistics", kind: minus }
-  - { k: "ANALYZE runs it", v: "wrap INSERT, UPDATE, DELETE in BEGIN … ROLLBACK", kind: minus }
-  - { k: "MySQL", v: "EXPLAIN ANALYZE since 8.0.18; type ALL = full table scan", kind: default }
+  - { k: "Cost-based planner", v: "estimates the cost of each possible plan from table statistics and picks the cheapest one" }
+  - { k: "Cost", v: "an estimate in arbitrary units (PostgreSQL: one sequential page read = 1.0), not milliseconds" }
+  - { k: "Read first", v: "the scan type of each table, estimated versus actual rows, and the join method" }
+  - { k: "Estimate far off", v: "estimated rows far from actual rows usually means stale statistics; run ANALYZE", kind: minus }
+  - { k: "ANALYZE runs it", v: "EXPLAIN ANALYZE really executes the statement, so wrap an UPDATE or DELETE in BEGIN ... ROLLBACK", kind: minus }
+  - { k: "MySQL", v: "EXPLAIN ANALYZE since 8.0.18; in the classic EXPLAIN table, type ALL means a full table scan", kind: default }
 trap:
-  wrong: "A Seq Scan in the plan always means a missing index."
+  wrong: "A Seq Scan in the plan always means an index is missing."
   right: "Not for small tables or queries that read most rows: one sequential pass is cheaper than many index jumps."
-sayIt: "The database parses the query, the cost-based planner picks the cheapest plan using statistics, and the executor runs it. EXPLAIN shows the plan; EXPLAIN ANALYZE adds real rows and time. I check scans, joins and row estimates."
+  why: "A Seq Scan is the most common sign of a slow query, so people treat it as a fault. The planner picks it on purpose whenever it estimates that reading everything is cheaper."
+sayIt: "The database parses the query, the cost-based planner picks the cheapest plan using statistics, and the executor runs it. EXPLAIN shows the plan; EXPLAIN ANALYZE runs it and adds actual rows and time. I look at scan types, join methods and estimated versus actual rows."
+cheat:
+  idea: "A query plan is the steps the database chose for one statement: which scans and joins, in what order. EXPLAIN shows it; EXPLAIN ANALYZE also runs it with real rows and time."
+  flow: "SQL → parse → rewrite → plan (cheapest) → execute → rows"
+  remember: "Estimated rows far from actual rows means stale statistics: run ANALYZE."
+buildsOn: [indexes, joins, index-not-used]
+scenarios:
+  - q: "After a bulk insert of 50,000 payments for customer 7, EXPLAIN ANALYZE shows rows=10 estimated but rows=50010.00 actual. What happened, and what do you do?"
+    a: "The planner still uses statistics from before the insert, so it thinks customer 7 has 10 payments and may pick a plan that suits 10 rows. Run ANALYZE payments; in our test the estimate then became about 50,000, close to the truth."
+  - q: "You run EXPLAIN ANALYZE DELETE FROM payments WHERE status = 'FAILED' to see how the delete would run. What happens?"
+    a: "The failed payments are really deleted, because EXPLAIN ANALYZE executes the statement. Run it inside BEGIN and ROLLBACK, or use plain EXPLAIN, which only plans it."
 confusedWith: []
 tags: [explain, query-plan, optimizer]
 visual: flow
@@ -26,9 +38,15 @@ sources:
   - title: "EXPLAIN (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/sql-explain.html"
     verifiedOn: "2026-10-20"
-  - title: "Using EXPLAIN (PostgreSQL 18 docs, 14.1)"
+  - title: "Using EXPLAIN: cost units, loops, BUFFERS with ANALYZE, BEGIN/ROLLBACK (PostgreSQL 18 docs, 14.1)"
     url: "https://www.postgresql.org/docs/18/using-explain.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "PostgreSQL 18 release notes: BUFFERS included in EXPLAIN ANALYZE"
+    url: "https://www.postgresql.org/docs/18/release-18.html"
+    verifiedOn: "2026-10-21"
+  - title: "Planner/Optimizer: nested loop, merge and hash joins (PostgreSQL 18 docs, 51.5)"
+    url: "https://www.postgresql.org/docs/18/planner-optimizer.html"
+    verifiedOn: "2026-10-21"
   - title: "EXPLAIN Output Format (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/explain-output.html"
     verifiedOn: "2026-10-20"
@@ -40,44 +58,85 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A query plan, or execution plan, is the list of steps the database chose to run one SQL statement: how to read each table, which index to use, and how and in what order to join tables. `EXPLAIN` shows the plan without running the query. `EXPLAIN ANALYZE` runs the query and adds what really happened: the actual rows and time of every step.
+
 ## Why it exists
 
-The same SQL can run many ways: a full scan or an index, this join order or that one. The chosen plan shows where the time goes and why a query is slow.
+SQL says which rows you want, not how to get them, so the same query can run as a full scan or an index lookup, with a hash join or a nested loop. When a query is slow, guessing the cause wastes time. The plan shows which step reads too many rows or takes the time, and whether an [index](card:indexes) was used or [skipped](card:index-not-used).
 
 ## How it works
 
-<Steps label="What happens to one SELECT">
-  <Step title="Parse">Check the syntax and build a query tree.</Step>
-  <Step title="Rewrite">Replace views with the tables behind them.</Step>
-  <Step title="Plan">List the ways to read and join the tables, estimate each cost, keep the cheapest.</Step>
-  <Step title="Execute">Walk the plan and return the rows.</Step>
-</Steps>
+<Mermaid
+  alt="SQL text goes to the parser, which builds a query tree. The rewriter replaces views. The planner estimates the cost of each possible plan and keeps the cheapest. The executor runs it and returns rows. EXPLAIN prints the plan after planning; EXPLAIN ANALYZE prints it after execution."
+  chart={`flowchart LR
+  Q([SQL]) --> P[Parse] --> W[Rewrite views] --> PL[Plan: pick cheapest] --> E[Execute] --> R([Rows])
+  PL -. EXPLAIN .-> X[Plan with estimates]
+  E -. EXPLAIN ANALYZE .-> Y[Plan with actual rows and time]`}
+/>
 
-- Scans: PostgreSQL `Seq Scan`, `Index Scan`, `Index Only Scan`, `Bitmap Heap Scan`; MySQL `type` from `ALL` (worst) to `const`.
-- Joins: nested loop, hash join, merge join. MySQL uses hash joins since 8.0.18.
+1. The parser checks the syntax and builds a query tree.
+2. The rewriter replaces each [view](card:views) with the query behind it.
+3. The planner lists ways to read and join the tables, estimates each one's cost from table statistics, and keeps the cheapest.
+4. The executor runs the plan as a tree of nodes. Each node pulls rows from the nodes indented below it, and the top node returns the result.
+5. `EXPLAIN` prints the tree after step 3, with estimates only; `EXPLAIN ANALYZE` prints it after step 4, with real numbers next to the estimates.
+
+| Node | Meaning |
+|---|---|
+| `Seq Scan` (MySQL `type` ALL) | Reads every row of the table |
+| `Index Scan` / `Index Only Scan` | Walks an index, then the rows / answers from the index alone |
+| `Bitmap Heap Scan` | Collects row locations from an index first, then reads those pages in order |
+| `Nested Loop` | For each outer row, searches the inner side; good when the inner side is indexed |
+| `Hash Join` | Builds a hash table on one side, then probes it with each row of the other |
+| `Merge Join` | Both sides sorted on the key, then merged in one pass |
 
 ## Example
 
+Pending payments of customers in Pune, on 100,000 payments and 10,000 customers in PostgreSQL 18.
+
 ```sql
 EXPLAIN ANALYZE
-SELECT id, amount FROM orders WHERE user_id = 7;
+SELECT c.name, p.amount
+FROM customers c JOIN payments p ON p.customer_id = c.id
+WHERE c.city = 'Pune' AND p.status = 'PENDING';
 ```
 
-```text
-Index Scan using idx_orders_user_id on orders
-  (cost=0.43..8.50 rows=4 width=14)
-  (actual time=0.021..0.034 rows=3.00 loops=1)
-  Index Cond: (user_id = 7)
+```text output
+Hash Join  (cost=230.25..3941.12 rows=750 width=19) (actual time=4.712..24.431 rows=1000.00 loops=1)
+  Hash Cond: (p.customer_id = c.id)
+  ->  Seq Scan on payments p  (cost=0.00..3703.00 rows=3000 width=14) (actual time=1.430..19.913 rows=3000.00 loops=1)
+        Filter: (status = 'PENDING'::text)
+        Rows Removed by Filter: 97000
+  ->  Hash  (cost=199.00..199.00 rows=2500 width=21) (actual time=3.218..3.219 rows=2500.00 loops=1)
+        ->  Seq Scan on customers c  (cost=0.00..199.00 rows=2500 width=21) (actual time=0.016..2.075 rows=2500.00 loops=1)
+Execution Time: 24.636 ms
 ```
 
-`rows=4` is the estimate; `rows=3.00` is the actual count (output trimmed).
+What to notice:
+
+- Read from the most indented nodes outwards: PostgreSQL read the 2,500 Pune customers into a hash table, then read payments and probed the hash table with each pending payment.
+- `rows=750` is the estimate and `rows=1000.00` the actual count, which is close. A large gap would point to stale statistics.
+- `Rows Removed by Filter: 97000` says payments was read in full to keep 3,000 rows. That is the step to fix first, for example with a partial index on pending payments.
+- The output is trimmed: PostgreSQL 18 also printed the customers `Filter` line, the hash `Buckets` line and `Buffers` lines (pages read from memory or disk), which `EXPLAIN ANALYZE` now includes by default.
+
+## Rules and defaults
+
+- **EXPLAIN ANALYZE executes:** for INSERT, UPDATE and DELETE, run it inside `BEGIN; ... ROLLBACK;` so the changes are undone.
+- **Loops:** when a node runs many times, as the inner side of a nested loop does, its actual rows and time are averages per loop; multiply by `loops` for the total.
+- **PostgreSQL 18:** `EXPLAIN ANALYZE` includes `BUFFERS` by default; turn it off with `EXPLAIN (ANALYZE, BUFFERS OFF)`.
+- **MySQL:** `EXPLAIN FORMAT=TREE` prints a tree like PostgreSQL's; `EXPLAIN ANALYZE` (8.0.18+) runs the query and prints actual times. Hash joins exist since 8.0.18.
 
 ## Interview Qs
 
 ### What is the difference between EXPLAIN and EXPLAIN ANALYZE?
 
-EXPLAIN only plans the query and shows estimates. EXPLAIN ANALYZE also runs it and shows actual rows and time per step, so for data changes run it inside a transaction and roll back.
+EXPLAIN only plans the query and shows estimates. EXPLAIN ANALYZE also runs it and shows the actual rows and time of every step. Because it really executes the statement, run it for data changes inside a transaction and roll back.
 
 ### What do you look for in a query plan?
 
-Full scans on big tables, the join method, and steps where estimated rows are far from actual rows. A big gap usually means stale statistics, so run ANALYZE.
+Full scans on big tables that keep few rows, the join method and join order, and steps where estimated rows are far from actual rows. A big gap usually means stale statistics, so run ANALYZE; then check whether a missing or unusable index explains the scan.
+
+### When does the planner choose a nested loop instead of a hash join?
+
+A nested loop suits a small outer input with an index on the inner side: each outer row does one quick lookup. A hash join suits larger inputs joined on equality with no useful index: it reads each side once. A merge join suits inputs already sorted on the join key.

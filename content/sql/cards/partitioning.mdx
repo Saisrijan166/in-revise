@@ -5,69 +5,128 @@ title: Partitioning
 topic: scaling
 level: intermediate
 heat: 2
-hook: "One big table, split into smaller pieces on the same server, but still queried as one table."
+hook: "Partitioning splits one big table into smaller tables on the same server, by a key such as the month, while queries still use the one table name."
 points:
-  - { k: "Types", v: "range, list, hash; MySQL also KEY" }
-  - { k: "Pruning", v: "a WHERE on the partition key skips other partitions", kind: plus }
-  - { k: "Old data", v: "drop a partition instead of a slow bulk DELETE", kind: plus }
-  - { k: "Unique keys", v: "every PK and unique key must include the partition key", kind: minus }
-  - { k: "MySQL InnoDB", v: "partitioned tables cannot have foreign keys", kind: minus }
+  - { k: "Partition key", v: "the column that decides which partition stores a row, such as created_at for one partition per month" }
+  - { k: "Pruning", v: "a query that filters on the partition key reads only the matching partitions and skips the rest", kind: plus }
+  - { k: "Old data", v: "removing a month is a quick DROP of one partition, not a slow DELETE of millions of rows", kind: plus }
+  - { k: "Unique keys", v: "PostgreSQL 18 and MySQL 9.7: every primary key and unique key must include the partition key", kind: minus }
+  - { k: "No matching partition", v: "an INSERT whose key fits no partition fails; PostgreSQL can catch it in a DEFAULT partition", kind: minus }
+  - { k: "Types", v: "range (such as months), list (such as cities) and hash (an even spread); MySQL adds KEY" }
 trap:
-  wrong: "Partitioning makes every query faster."
-  right: "Only queries that filter on the partition key skip partitions. Others still search every partition."
-sayIt: "Partitioning splits a large table, often by date range, inside one server. Queries on the key touch only the matching partitions, and old data goes by dropping a partition."
+  wrong: "Partitioning makes every query on the table faster."
+  right: "Only queries that filter on the partition key skip partitions. A query on another column still searches every partition."
+  why: "Splitting a huge table into small ones sounds like it must speed everything up, and the usual demo query filters on the date."
+sayIt: "Partitioning splits a large table inside one server, usually by month. Queries that filter on the key touch only the matching partitions, and old data goes by dropping a partition. It adds no servers, and the primary key must include the partition key."
+cheat:
+  idea: "Partitioning splits one large table into smaller tables on the same server, by a key such as the month. The app still reads and writes the one table name."
+  remember: "Only queries that filter on the partition key skip partitions, and every primary or unique key must include that key."
+buildsOn: [indexes, explain-query-plans]
+scenarios:
+  - q: "payments is range-partitioned by month on created_at. You run SELECT * FROM payments WHERE customer_id = 7. How many partitions does it read?"
+    a: "All of them. The WHERE clause does not mention created_at, so the planner cannot prove any partition is empty for this query and must search each one. An index on customer_id in each partition makes each search fast, but none is skipped."
+  - q: "Only the September and October 2026 partitions exist, and the app inserts a payment dated 1 December 2026. What happens?"
+    a: "The INSERT fails: PostgreSQL reports that no partition was found for the row, and MySQL that the table has no partition for the value. Create future partitions ahead of time, for example by a monthly job, or in PostgreSQL add a DEFAULT partition."
 confusedWith: [partitioning-vs-sharding]
 tags: [partitioning, partition-pruning, range-partitioning]
 visual: code
 sources:
-  - title: "Table Partitioning (PostgreSQL 18)"
+  - title: "Table Partitioning: bounds, pruning, unique constraints, best practices (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/ddl-partitioning.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Partitioning Types (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/partitioning-types.html"
     verifiedOn: "2026-10-20"
-  - title: "Restrictions and Limitations on Partitioning (MySQL 9.7 Reference Manual)"
+  - title: "Restrictions and Limitations on Partitioning: foreign keys, 8192 partitions (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/partitioning-limitations.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Partitioning Keys, Primary Keys, and Unique Keys (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/partitioning-limitations-partitioning-keys-unique-keys.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Partitioning is splitting one large table into smaller tables, called partitions, that all live on the same database server. A column called the partition key, such as the payment date, decides which partition stores each row. The app still reads and writes the parent table, `payments`, and the database sends each row to the right partition.
 
 ## Why it exists
 
-Huge tables slow down scans, index upkeep and bulk deletes. Splitting by a key lets the database touch only the pieces a query or cleanup needs.
+A payments table that grows by millions of rows a month gets hard to manage. Deleting last year's rows means one huge DELETE that runs for a long time and, in PostgreSQL, leaves dead rows for VACUUM to clean. Every index on the table keeps growing too. With one partition per month, a query for this month reads only this month's partition, and removing an old month means dropping one small table.
 
 ## How it works
 
-| Type | Rows go by | Typical key |
+| Type | Each partition holds | Typical key |
 |---|---|---|
-| [Range](card:range-partitioning) | value ranges (lower bound in, upper out) | `created_at` by month |
-| [List](card:list-partitioning) | listed values | `region`, `country` |
-| [Hash](card:hash-partitioning) | hash of the key | `user_id`, for even spread |
+| [Range](card:range-partitioning) | A range of values: lower bound included, upper bound not | `created_at`, one month each |
+| [List](card:list-partitioning) | The values you list | `city` or `country` |
+| [Hash](card:hash-partitioning) | Rows whose key hashes to it | `customer_id`, for an even spread |
 
-- PostgreSQL: declarative partitioning since 10 (range, list); hash since 11.
-- Worth it mainly when a table is very large; PostgreSQL's rule of thumb is bigger than the server's RAM.
+1. You create the parent table with `PARTITION BY RANGE (created_at)`, which names the partition key.
+2. You create one partition per range, such as October 2026: from 1 October, included, to 1 November, not included.
+3. On INSERT, the database reads the row's `created_at` and stores the row in the matching partition. A row that matches none is rejected.
+4. On SELECT, the planner compares the WHERE condition with each partition's range and leaves out the ones that cannot match. This is [partition pruning](card:partition-pruning).
+5. To remove old data, you drop or detach the old month's partition.
+
+So the key is: the database works per partition, and a filter on the key decides how many partitions it touches.
 
 ## Example
 
+The `payments` table gets one partition per month, and a query for October shows pruning in its plan.
+
 ```sql
-CREATE TABLE orders (
-  id bigint, user_id bigint, amount numeric(12,2), created_at date,
-  PRIMARY KEY (id, created_at)              -- must include the partition key
+CREATE TABLE payments (
+  id bigint, customer_id bigint, amount numeric(10,2), status text, created_at date,
+  PRIMARY KEY (id, created_at)          -- must include the partition key
 ) PARTITION BY RANGE (created_at);
 
-CREATE TABLE orders_2026_10 PARTITION OF orders
+CREATE TABLE payments_2026_09 PARTITION OF payments
+  FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE payments_2026_10 PARTITION OF payments
   FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
 
-SELECT sum(amount) FROM orders
-WHERE created_at >= '2026-10-01';           -- older partitions are pruned
-DROP TABLE orders_2025_10;                  -- an old month, gone at once
+EXPLAIN (COSTS OFF)
+SELECT sum(amount) FROM payments WHERE created_at >= '2026-10-01';
 ```
+
+```text output
+                     QUERY PLAN
+----------------------------------------------------
+ Aggregate
+   ->  Seq Scan on payments_2026_10 payments
+         Filter: (created_at >= '2026-10-01'::date)
+(3 rows)
+```
+
+What to notice:
+
+- The plan scans only `payments_2026_10`. September was pruned, because its range ends before 1 October.
+- `PRIMARY KEY (id)` alone is rejected: PostgreSQL says a unique constraint on a partitioned table must include all partitioning columns. MySQL 9.7 rejects it too.
+- Change the WHERE to `customer_id = 7` and the plan scans both partitions, because the filter says nothing about dates.
+- `DROP TABLE payments_2026_09;` removes all of September at once, with no row-by-row DELETE.
+
+## Rules and defaults
+
+- **Pruning is on by default:** `enable_partition_pruning = on` in PostgreSQL 18. It also prunes at run time when a value is known only then.
+- **No matching partition:** the INSERT fails, in PostgreSQL 18 and MySQL 9.7. In PostgreSQL, a `DEFAULT` partition receives rows that fit no other partition.
+- **Changing the key:** in PostgreSQL, an UPDATE that changes `created_at` to another month moves the row to that month's partition.
+- **Detach without blocking:** `ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY` (PostgreSQL) takes a weaker lock on the parent than a plain detach.
+- **MySQL InnoDB:** a partitioned table cannot have foreign keys, and no table can reference it. A table has at most 8192 partitions.
+- **When it is worth it:** PostgreSQL's rule of thumb is a table bigger than the server's memory. Too many partitions slow down planning.
+
+## Not to be confused with
+
+Partitioning splits a table into pieces **inside one server**. [Sharding](card:sharding), the next concept, splits rows **across separate servers**. Rule: partitioning helps one server manage a huge table; sharding adds servers when one is not enough.
 
 ## Interview Qs
 
-### Why drop a partition instead of DELETE?
+### Why drop a partition instead of running DELETE?
 
-Dropping or detaching a partition is far faster. A bulk DELETE must find and remove every row and, in PostgreSQL, leaves dead rows for VACUUM to clean.
+Dropping or detaching a partition removes the whole table piece at once and is far faster. A bulk DELETE must find and remove every row, writes all of it to the log, and in PostgreSQL leaves dead rows for VACUUM to clean up.
 
 ### Why must the primary key include the partition key?
 
-Each partition has its own index, which checks uniqueness only inside that partition. Including the key makes duplicates in different partitions impossible. PostgreSQL and MySQL both require it.
+Each partition has its own index, which can check uniqueness only inside that partition. If the key includes the partition column, two equal keys always land in the same partition, so the per-partition check is enough. PostgreSQL and MySQL both require it.
+
+### How do you choose the partition key?
+
+Pick the column that most large queries filter on, and that your cleanup works by. For payments that is usually the date: reports ask for a month, and old months are dropped. A key that queries rarely filter on gives no pruning, so every query pays for all partitions.

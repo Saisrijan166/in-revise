@@ -5,20 +5,32 @@ title: "SELECT, WHERE and ORDER BY"
 topic: querying
 level: beginner
 heat: 2
-hook: "Pick the columns, filter the rows with WHERE, sort with ORDER BY, cut with LIMIT. No ORDER BY means no promised order."
+hook: "SELECT picks the columns, WHERE keeps only the rows you want, ORDER BY sorts them and LIMIT cuts the list. Without ORDER BY, no order is promised."
 points:
-  - { k: "Columns", v: "name them; SELECT * is fine only for quick checks" }
-  - { k: "AND before OR", v: "AND binds tighter; add brackets when you mix them", kind: minus }
-  - { k: "BETWEEN", v: "inclusive: same as x >= a AND x <= b" }
-  - { k: "DISTINCT", v: "drops duplicate rows across all selected columns" }
-  - { k: "ORDER BY", v: "ASC is the default; tied rows have no fixed order", kind: default }
+  - { k: "Name the columns", v: "SELECT * returns every column, so it sends more data than the screen needs" }
+  - { k: "AND before OR", v: "a AND b OR c means (a AND b) OR c, so add brackets whenever you mix AND with OR", kind: minus }
+  - { k: "BETWEEN", v: "amount BETWEEN 100 AND 500 includes both ends: amount >= 100 AND amount <= 500" }
+  - { k: "LIKE", v: "in a LIKE pattern, % matches any run of characters (even none) and _ matches exactly one character" }
+  - { k: "DISTINCT", v: "removes duplicate result rows, comparing all the selected columns together, not one column" }
+  - { k: "ORDER BY", v: "sorts ascending unless you write DESC; rows that tie on every sort column come back in no fixed order" }
 trap:
-  wrong: "Without ORDER BY, rows come back in insert or id order."
-  right: "The order is unspecified and can change with the plan. Only ORDER BY guarantees it; add a unique tie-breaker."
+  wrong: "Without ORDER BY, rows come back in the order they were inserted, or by id."
+  right: "The order is not defined and can change when the data or the way the query runs changes. Only ORDER BY fixes it; add a unique column for ties."
+  why: "On a small, new table rows usually do come back in insert order, because the database reads them as stored, so it looks like a rule."
 sayIt: "I list only the columns I need, filter with WHERE, bracket mixed AND and OR, and always ORDER BY a unique key before LIMIT, because without ORDER BY the row order is not guaranteed."
+cheat:
+  idea: "SELECT reads rows: FROM names the table, WHERE keeps rows whose condition is true, the SELECT list picks columns, ORDER BY sorts, LIMIT keeps the first N."
+  flow: "FROM → WHERE → SELECT list → ORDER BY → LIMIT"
+  remember: "No ORDER BY means no promised order. Add a unique tie-breaker, such as id, before LIMIT."
+buildsOn: [sql-commands]
+scenarios:
+  - q: "A page shows payments with ORDER BY created_at DESC LIMIT 10 OFFSET 10. Two payments share the same created_at, and one of them shows up on both page 1 and page 2. Why, and what is the fix?"
+    a: "Tied rows have no fixed order, so each page query may order the two differently. Add a unique tie-breaker: ORDER BY created_at DESC, id DESC. Now every row has exactly one position, and pages never overlap."
+  - q: "WHERE status = 'PAID' AND customer_id = 1 OR customer_id = 3. Does a PENDING payment of customer 3 come back?"
+    a: "Yes. AND is evaluated first, so this means (PAID and customer 1) OR (customer 3, any status). Write status = 'PAID' AND (customer_id = 1 OR customer_id = 3) to keep only paid payments."
 confusedWith: []
 tags: [select, where, order-by, like, limit]
-visual: table
+visual: flow
 sources:
   - title: "SELECT (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/sql-select.html"
@@ -35,51 +47,89 @@ sources:
   - title: "Case Sensitivity in String Searches (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/case-sensitivity.html"
     verifiedOn: "2026-10-20"
+  - title: "SELECT Statement: LIMIT (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/select.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+`SELECT` is the statement that reads data. You name a table after `FROM`, list the columns you want after `SELECT`, and get back a result: a small table of rows built for this one query. `WHERE` keeps only the rows for which a condition is true, `ORDER BY` sorts the result, and `LIMIT` keeps only the first few rows. Nothing in the table changes; a SELECT only reads.
 
 ## Why it exists
 
-Most SQL in an app is a read: some columns, some rows, in some order, a page at a time. These clauses say exactly that.
+A payments table can hold millions of rows, but a screen needs "the latest paid payments of customer 1". Fetching every row into Java and filtering there would move all that data over the network and waste memory. With WHERE, ORDER BY and LIMIT, the database does the work and sends back only the rows the screen shows.
 
 ## How it works
 
-| You write | It means |
-|---|---|
-| `city IN ('Pune', 'Delhi')` | equal to any value in the list |
-| `amount BETWEEN 100 AND 500` | 100 and 500 are included |
-| `name LIKE 'A%'` | `%` any run of characters, `_` exactly one |
-| `LIMIT 10 OFFSET 20` | skip 20 sorted rows, return 10 |
+<Mermaid
+  alt="A SELECT runs as a pipeline: FROM reads the payments table, WHERE keeps rows whose condition is true, the SELECT list picks and computes columns, ORDER BY sorts, and LIMIT keeps the first rows."
+  chart={`flowchart LR
+  F[FROM payments] --> W[WHERE keeps TRUE rows]
+  W --> S[SELECT list: columns, CASE]
+  S --> O[ORDER BY sorts]
+  O --> L[LIMIT keeps first N]`}
+/>
 
-- Case: PostgreSQL `LIKE` is case-sensitive (`ILIKE` is not); MySQL follows the collation, case-insensitive by default.
-- Standard SQL writes `FETCH FIRST 10 ROWS ONLY` (PostgreSQL accepts it; MySQL uses `LIMIT`).
-- Big offsets get slow: see [Pagination](card:pagination). NULL tests: see [NULL](card:null-handling).
+1. `FROM payments` gives the database the rows to start from.
+2. `WHERE` tests each row and keeps it only if the condition is true.
+3. The `SELECT` list builds the output columns. It can rename a column with `AS` or compute one with `CASE WHEN ... THEN ... ELSE ... END`, which returns the result of the first true `WHEN`.
+4. `ORDER BY` sorts the kept rows; later columns in the list only break ties.
+5. `LIMIT 10` returns at most 10 rows from the top; `OFFSET 20` would skip 20 first.
+
+This is a simplified order; you will see the full one, with grouping, in [Logical order of a SELECT](card:query-order).
 
 ## Example
 
+Paid payments of customers 1 and 3, largest first. The `payments` table has six rows; three of them match.
+
 ```sql
--- users: 1 Asha (Pune), 2 Amit (Mumbai), 3 Ravi (Pune), 4 Anu (Delhi)
-SELECT id, name,
-       CASE WHEN city = 'Pune' THEN 'local' ELSE 'other' END AS zone
-FROM users
-WHERE (city = 'Pune' OR city = 'Mumbai')
-  AND name LIKE 'A%'
-ORDER BY name, id          -- id breaks ties
+SELECT id, customer_id, amount,
+       CASE WHEN amount >= 800 THEN 'large' ELSE 'normal' END AS size
+FROM payments
+WHERE status = 'PAID'
+  AND (customer_id = 1 OR customer_id = 3)
+ORDER BY amount DESC, id
 LIMIT 10;
 ```
 
 ```text output
- id | name | zone
-----+------+-------
-  2 | Amit | other
-  1 | Asha | local
+ id  | customer_id | amount |  size
+-----+-------------+--------+--------
+ 102 |           1 | 800.00 | large
+ 106 |           3 | 800.00 | large
+ 101 |           1 | 500.00 | normal
+(3 rows)
 ```
+
+What to notice:
+
+- Payments 102 and 106 tie at 800. The `id` in `ORDER BY` puts 102 first every time; without it, their order could change between runs.
+- Remove the brackets and the query also returns payment 105, a PENDING payment of customer 3, because AND is evaluated before OR.
+- `size` is a computed column: the CASE expression runs for each row, and the stored data does not change.
+
+## Rules and defaults
+
+- **Comparison operators:** `=`, `<>` (or `!=`), `<`, `>`, `<=`, `>=`; `IN ('PAID', 'PENDING')` means equal to any value in the list.
+- **LIKE and case:** in PostgreSQL 18, `LIKE` is case-sensitive and `ILIKE` ignores case. In MySQL 9.7, `LIKE` follows the column's collation, its rules for comparing text, and the default collation ignores case (see [PostgreSQL vs MySQL](card:postgresql-and-mysql)).
+- **First N rows:** both databases accept `LIMIT n OFFSET m`. PostgreSQL also accepts the standard `FETCH FIRST n ROWS ONLY`; MySQL does not.
+- **Large offsets are slow:** the database still reads and throws away every skipped row; see [Pagination](card:pagination).
+- **NULL:** a condition such as `city = NULL` is never true; the next concept, [NULL](card:null-handling), explains why.
+
+## Common mistakes
+
+- **"DISTINCT city, name gives each city once."** DISTINCT compares the whole selected row, so a city repeats once for every different name. To get each city once, select only `city`.
 
 ## Interview Qs
 
-### Does DISTINCT apply to one column or the whole row?
+### Why should you not rely on the row order without ORDER BY?
 
-To the whole selected row. `SELECT DISTINCT city, name` keeps each different (city, name) pair, so a city can repeat.
+SQL tables have no built-in order. The database returns rows in whatever order its way of reading them produces, which can change after an update, a new index or a version upgrade. ORDER BY is the only guarantee, and it needs a unique column at the end so tied rows get a fixed place too.
 
 ### Is BETWEEN inclusive?
 
-Yes, at both ends. With timestamps, `BETWEEN '2026-01-01' AND '2026-01-31'` misses most of 31 January; use `>= start AND < next_day` instead.
+Yes, at both ends. With timestamps that is a trap: BETWEEN '2026-02-01' AND '2026-02-28' ends at midnight at the start of 28 February, so a payment at 20:10 that day is missed. Use a half-open range: >= the first day AND < the day after the last.
+
+### Why avoid SELECT * in application code?
+
+It fetches every column, including large ones the screen never shows, so more data crosses the network. The result also changes when someone adds a column, which can break code that reads columns by position. Listing columns states exactly what the code needs.

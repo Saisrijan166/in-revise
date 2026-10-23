@@ -5,70 +5,130 @@ title: Views and Materialized Views
 topic: design
 level: beginner
 heat: 2
-hook: "A view is a saved query that runs every time you use it; a materialized view saves the result and stays old until refreshed."
+hook: "A view is a saved SELECT with a name: it runs every time you read it. A materialized view stores the result instead and stays old until refreshed."
 points:
-  - { k: "View", v: "stores only the query, no rows; always shows current data" }
-  - { k: "Uses", v: "hide joins, show only some columns, GRANT on the view not the table" }
-  - { k: "Updatable", v: "simple one-table views (no GROUP BY, DISTINCT, aggregates) accept writes" }
-  - { k: "REFRESH", v: "PostgreSQL rebuilds it fully; CONCURRENTLY needs a unique index" }
-  - { k: "MySQL 9.7", v: "no materialized views outside HeatWave (9.5+): keep a summary table", kind: minus }
+  - { k: "View", v: "stores only the SELECT, no rows; every read reruns it, so it always shows current data" }
+  - { k: "Uses", v: "name a long join once, show only some columns, grant access to the view instead of the table" }
+  - { k: "Write through a view", v: "works for a simple view on one table, with no GROUP BY, DISTINCT, aggregates or LIMIT" }
+  - { k: "Materialized view", v: "stores the result rows, so reads are fast, but they show data as of the last REFRESH", kind: minus }
+  - { k: "REFRESH (PostgreSQL)", v: "rebuilds the whole result; CONCURRENTLY keeps reads working but needs a unique index" }
+  - { k: "MySQL 9.7", v: "has plain views; materialized views work only on MySQL HeatWave, so use a summary table", kind: minus }
 trap:
   wrong: "A view speeds up a slow query because its result is stored."
-  right: "A plain view stores nothing; its query runs each time. Only a materialized view stores the result."
-sayIt: "A view is a named query: it hides complexity and limits what users see, but runs every time. A materialized view stores the result for fast reads and must be refreshed. MySQL has none outside HeatWave, so I use a summary table."
+  right: "A plain view stores nothing: its SELECT runs on every read. Only a materialized view stores the result."
+  why: "You query a view exactly like a table, so it is easy to assume it holds rows like a table does."
+sayIt: "A view is a named query: it hides complexity and limits what users see, but its SELECT runs on every read. A materialized view stores the result for fast reads and must be refreshed; on MySQL, outside HeatWave, I keep a summary table."
+cheat:
+  idea: "A view is a saved SELECT with a name that you query like a table; it stores no rows. A materialized view stores the result and shows data as of its last refresh."
+  remember: "A plain view is never faster than its query. A materialized view is fast but stale until REFRESH."
+buildsOn: [select-and-filtering, aggregates-group-by, denormalization]
+scenarios:
+  - q: "customer_totals is a materialized view of each customer's PAID total, refreshed every night. A customer pays 100 at noon. What does SELECT total FROM customer_totals show at 1 pm?"
+    a: "The old total, without the 100. The materialized view holds the rows computed at the last REFRESH and does not watch the payments table. A plain view would show the new total, because it reruns its SELECT."
+  - q: "A support team may see payment ids and amounts but not customer details. How can a view help?"
+    a: "Create a view that selects only those columns and grant SELECT on the view, not on payments. By default the view reads the table with its owner's rights, so the team sees the chosen columns and nothing else."
 confusedWith: []
 tags: [view, materialized-view, refresh, access-control]
 visual: table
 sources:
-  - title: "PostgreSQL 18: CREATE VIEW"
+  - title: "PostgreSQL 18: CREATE VIEW (updatable views, CHECK OPTION, owner privileges)"
     url: "https://www.postgresql.org/docs/18/sql-createview.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "PostgreSQL 18: REFRESH MATERIALIZED VIEW"
     url: "https://www.postgresql.org/docs/18/sql-refreshmaterializedview.html"
     verifiedOn: "2026-10-20"
-  - title: "MySQL 9.7: CREATE VIEW (materialized views on HeatWave only)"
-    url: "https://dev.mysql.com/doc/refman/9.7/en/create-view.html"
+  - title: "PostgreSQL 18: Materialized Views"
+    url: "https://www.postgresql.org/docs/18/rules-materializedviews.html"
     verifiedOn: "2026-10-20"
+  - title: "MySQL 9.7: CREATE VIEW (definition frozen, SQL SECURITY DEFINER, materialized views on HeatWave only)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/create-view.html"
+    verifiedOn: "2026-10-21"
+  - title: "MySQL HeatWave User Guide: Materialized Views (supported as of 9.5.0, re-materialized on query)"
+    url: "https://dev.mysql.com/doc/heatwave/en/mys-hw-materialized-views.html"
+    verifiedOn: "2026-10-22"
   - title: "Commonly Asked DBMS Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/dbms/commonly-asked-dbms-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A view is a SELECT statement saved in the database under a name, which you then query as if it were a table. It holds no rows of its own: each time you read it, the database runs the saved SELECT on the real tables, called the base tables. A materialized view also starts from a SELECT, but it runs the query once and stores the resulting rows, like a summary table from [Denormalisation](card:denormalization).
+
 ## Why it exists
 
-The same long query gets copied into many places, and some users should see only part of a table. A view gives that query one name.
+The same long query, say paid payments joined to customers, ends up copied into many reports and services; when the rule for "paid" changes, every copy must change. Some users should also see only a few columns of a table. A view gives the query one name and one place to change, and lets you grant access to the view instead of the table. When the query is too slow to run on every read, a materialized view keeps its answer ready.
 
 ## How it works
 
 <Compare id="view-vs-materialized-view" />
 
-- Without `WITH CHECK OPTION`, an insert through a view may create a row the view cannot show.
-- PostgreSQL can index a materialized view like a table.
+1. `CREATE VIEW name AS SELECT ...` saves only the query text and its column list.
+2. When a query reads the view, the database puts the saved SELECT in its place and runs the combined query on the base tables, so the result is always current.
+3. `CREATE MATERIALIZED VIEW name AS SELECT ...` runs the query once and stores the rows, which you can index like a table.
+4. Reads of the materialized view return those stored rows and ignore later changes to the base tables.
+5. `REFRESH MATERIALIZED VIEW` reruns the query and replaces the stored rows; until then the data is stale.
+
+So the key is that a view saves the question and a materialized view saves the answer.
 
 ## Example
 
+This creates a view and a materialized view over payments, adds a payment of 100 for Asha (customer 1, who had paid 500 and 700), and reads both, run on PostgreSQL 18.
+
 ```sql
-CREATE VIEW paid_orders AS
-  SELECT id, user_id, amount FROM orders WHERE status = 'PAID';
+CREATE VIEW paid_payments AS
+  SELECT id, customer_id, amount FROM payments WHERE status = 'PAID';
+CREATE MATERIALIZED VIEW customer_totals AS
+  SELECT customer_id, SUM(amount) AS total
+  FROM payments WHERE status = 'PAID' GROUP BY customer_id;
+CREATE UNIQUE INDEX ON customer_totals (customer_id);
 
-CREATE MATERIALIZED VIEW user_totals AS
-  SELECT user_id, SUM(amount) AS total FROM orders GROUP BY user_id;
-CREATE UNIQUE INDEX ON user_totals (user_id);
+INSERT INTO payments VALUES (6, 1, 100, 'PAID', '2026-01-10');
 
--- reads keep working while it refreshes
-REFRESH MATERIALIZED VIEW CONCURRENTLY user_totals;
+SELECT SUM(amount) AS from_view FROM paid_payments WHERE customer_id = 1;
+SELECT total AS stored FROM customer_totals WHERE customer_id = 1;
+REFRESH MATERIALIZED VIEW CONCURRENTLY customer_totals;
+SELECT total AS refreshed FROM customer_totals WHERE customer_id = 1;
 ```
+
+```text output
+from_view
+1300.00
+stored
+1200.00
+refreshed
+1300.00
+```
+
+What to notice:
+
+- The view already includes the new 100, because it reran its SELECT. The materialized view still says 1200 until the REFRESH.
+- `CONCURRENTLY` lets other sessions keep reading the old rows while it rebuilds. Remove the unique index and PostgreSQL refuses the concurrent refresh with an error.
+- The view lists its columns instead of `SELECT *`; a `*` is expanded when the view is created, so columns added to payments later would not appear.
+
+## Rules and defaults
+
+- **Updatable view (PostgreSQL 18):** INSERT, UPDATE and DELETE work automatically when the view reads exactly one table and has no DISTINCT, GROUP BY, HAVING, LIMIT, OFFSET, WITH, UNION, aggregates or window functions. MySQL has similar rules.
+- **WITH CHECK OPTION:** rejects a write through the view that would create a row the view cannot show, such as a FAILED payment through `paid_payments`. Without it, such a row is accepted.
+- **Access:** by default the base tables are read with the view owner's rights (PostgreSQL; MySQL `SQL SECURITY DEFINER`), so granting only the view is enough.
+- **Materialized views are read-only:** you cannot INSERT into one; only REFRESH changes it. A plain REFRESH can block reads while it runs.
+- **MySQL 9.7:** the manual says materialized views are supported only on MySQL HeatWave (from 9.5), where the view is re-materialized automatically when a query reads it after its base tables changed. Elsewhere, use a summary table kept up to date by a job.
+
+## Common mistakes
+
+- **"I will put the slow query in a view to make it fast."** The view runs the same query, so it is exactly as slow. Index the base tables or use a materialized view.
+- **"The materialized view updates itself when payments change."** In PostgreSQL nothing refreshes it automatically; schedule the REFRESH or run it after a data load.
 
 ## Interview Qs
 
 ### What is the difference between a view and a table?
 
-A table stores rows. A view stores only a SELECT; each time you query it, the database runs that SELECT on the base tables, so it is always current.
+A table stores rows. A view stores only a SELECT; each time you query it, the database runs that SELECT on the base tables, so the result is always current and takes no storage. Views are used to simplify queries, hide columns and control access.
 
 ### Can you insert or update through a view?
 
-Yes, if it is simple: one table and no GROUP BY, DISTINCT or aggregates. Add WITH CHECK OPTION to reject rows the view would not show. Complex views need an INSTEAD OF trigger in PostgreSQL.
+Yes, if the view is simple: one base table and no GROUP BY, DISTINCT, aggregates or LIMIT. The write goes to the base table. Add WITH CHECK OPTION to reject rows the view would not show. For a complex view, PostgreSQL needs an INSTEAD OF trigger that writes the base tables.
 
 ### How do you keep a materialized view up to date?
 
-Run REFRESH MATERIALIZED VIEW on a schedule or after loads. With CONCURRENTLY and a unique index, reads are not blocked during the refresh.
+Run REFRESH MATERIALIZED VIEW on a schedule or after each data load; it recomputes the whole result. With CONCURRENTLY and a unique index on the view, reads are not blocked during the refresh. Choose it only when slightly old data is acceptable.

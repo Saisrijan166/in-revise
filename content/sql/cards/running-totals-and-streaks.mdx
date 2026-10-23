@@ -5,17 +5,27 @@ title: Running Totals, Previous Row and Streaks
 topic: patterns
 level: interview
 heat: 2
-hook: "Order the rows and let a window look back: SUM for running totals, LAG for change, date minus ROW_NUMBER for streaks."
+hook: "Sort the rows by time and let a window look back: SUM for a running total, LAG for the change from the previous row, date minus ROW_NUMBER for streaks."
 points:
-  - { k: "Running total", v: "SUM(x) OVER (ORDER BY t, id ROWS UNBOUNDED PRECEDING)" }
-  - { k: "Moving average", v: "AVG(x) OVER (… ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)" }
-  - { k: "Change", v: "x - LAG(x) OVER (ORDER BY …); NULL on the first row" }
-  - { k: "Streaks", v: "day minus ROW_NUMBER() is constant within one run of days" }
-  - { k: "Repeated days", v: "remove duplicate days with DISTINCT first, or runs split", kind: minus }
+  - { k: "Running total", v: "SUM(amount) OVER (… ORDER BY created_at, id ROWS UNBOUNDED PRECEDING) adds every row so far" }
+  - { k: "Change", v: "amount - LAG(amount) OVER (…) compares with the previous row; the first row has none, so it is NULL" }
+  - { k: "Moving average", v: "AVG(amount) OVER (… ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) averages the row and the two before it" }
+  - { k: "Streaks", v: "for consecutive days, day minus ROW_NUMBER() stays the same, so group by that difference" }
+  - { k: "LAG default", v: "LAG(amount, 1, 0) returns 0 instead of NULL on the first row of each customer" }
 trap:
-  wrong: "SUM(amount) OVER (ORDER BY created_at) adds one row at a time."
-  right: "The default RANGE frame includes ties: rows with the same created_at share one total. Add id to ORDER BY, or use ROWS."
-sayIt: "I use windows over ordered rows: SUM OVER with a ROWS frame for running totals, LAG for change from the previous row, and for streaks date minus ROW_NUMBER gives each run one key to group by."
+  wrong: "For streaks, subtract ROW_NUMBER() from the date directly on the payment rows."
+  right: "Two payments on one day get two numbers, so the run splits into wrong pieces. Keep one row per customer and day with DISTINCT first."
+  why: "Test data often has at most one payment per day, where the raw rows give the right streaks, so the repeated-day case never shows."
+sayIt: "I use windows over rows sorted by time: SUM OVER with a ROWS frame for running totals, LAG for the change from the previous row, and for streaks date minus ROW_NUMBER, which gives each run of consecutive days one key to group by."
+cheat:
+  idea: "Running totals, change from the previous row and streaks are window functions over rows sorted by time: SUM for totals, LAG for the previous value, ROW_NUMBER for streaks."
+  remember: "Streak trick: on consecutive days, date minus ROW_NUMBER() stays constant; group by it."
+buildsOn: [window-functions, ctes, string-date-functions]
+scenarios:
+  - q: "Payments 1, 2 and 3 are 500, 300 and 700. What does AVG(amount) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) show on each?"
+    a: "500, 400 and 500. Row 1 has no earlier rows, so it averages only itself; row 2 averages two rows; only row 3 has a full window of three. The first rows of a moving average cover fewer rows."
+  - q: "Find customers who paid on 3 or more consecutive days."
+    a: "Keep one row per customer and day, subtract ROW_NUMBER() from the date, group by customer and that difference, and keep HAVING COUNT(*) >= 3. Each group is one unbroken run, and its count is the length of the streak."
 confusedWith: [group-by-vs-partition-by]
 tags: [patterns, window-functions, gaps-and-islands]
 visual: table
@@ -29,58 +39,118 @@ sources:
   - title: "9.9 Date/Time Functions and Operators: date - integer (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/functions-datetime.html"
     verifiedOn: "2026-10-20"
+  - title: "Window Function Frame Specification (MySQL 9.7)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/window-functions-frames.html"
+    verifiedOn: "2026-10-21"
+  - title: "Date and Time Functions: DATE_SUB (MySQL 9.7)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/date-and-time-functions.html"
+    verifiedOn: "2026-10-21"
   - title: "SQL Interview Questions: running total (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/sql/sql-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+These are patterns where each row's answer depends on the rows before it in time. A running total adds up every payment so far, a change compares a payment with the previous one, and a streak is a run of consecutive days, such as paying on three days in a row. All three use a [window function](card:window-functions) over rows sorted by time, so every row stays in the result.
+
 ## Why it exists
 
-Running totals, change from the previous period and streaks all depend on row order. [Window functions](card:window-functions) read neighbouring rows directly, with no self-join.
+Without windows you would join the table to itself, "each payment with every earlier payment", which is slow and easy to get wrong. `GROUP BY` does not help either, because it collapses the rows you need to keep. A window reads the neighbouring rows directly, so each question becomes one extra column, or one extra step for streaks.
 
 ## How it works
 
-| day | ROW_NUMBER() | day − rn | Run |
+| day | ROW_NUMBER() | day − ROW_NUMBER() | Run |
 |---|---|---|---|
-| 01-01 | 1 | 12-31 | A |
-| 01-02 | 2 | 12-31 | A |
-| 01-04 | 3 | 01-01 | B |
+| 01-10-2026 | 1 | 30-09-2026 | A |
+| 02-10-2026 | 2 | 30-09-2026 | A |
+| 03-10-2026 | 3 | 30-09-2026 | A |
+| 05-10-2026 | 4 | 01-10-2026 | B |
 
-- Consecutive days rise by one, like rn, so day − rn stays fixed; a gap changes it. Group by it.
-- ROWS counts rows. For "the last 7 days" order by a date and use `RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW` (MySQL: `INTERVAL 6 DAY`).
+1. Choose the order, `ORDER BY created_at, id`, and the group, `PARTITION BY customer_id`. Every pattern here needs both; `id` makes the order unique.
+2. Running total: `SUM(amount) OVER (… ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` adds everything from the first row up to this one.
+3. Change: `amount - LAG(amount) OVER (…)`. `LAG` reads the previous row's value, and gives NULL on the first row of each customer.
+4. Streak: keep one row per day, number the days with `ROW_NUMBER()`, and subtract the number from the date. The table shows Asha's four payment days.
+5. Consecutive days and row numbers both rise by 1, so their difference stays fixed inside a run and jumps after a gap. Group by that difference: each group is one streak.
 
 ## Example
 
+First, a running total and the change per payment, for PAID payments.
+
 ```sql
--- user 1 ordered on 1, 2 (twice), 3 and 5 October 2026
-WITH days AS (
-  SELECT DISTINCT user_id, created_at::date AS d FROM orders
-), marked AS (
-  SELECT user_id, d,
-         d - ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY d)::int AS grp
-  FROM days
-)
-SELECT user_id, MIN(d) AS first_day, MAX(d) AS last_day, COUNT(*) AS days
-FROM marked
-GROUP BY user_id, grp
-ORDER BY user_id, first_day;
+SELECT customer_id, created_at, amount,
+       SUM(amount) OVER (PARTITION BY customer_id ORDER BY created_at, id
+                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running,
+       amount - LAG(amount) OVER (PARTITION BY customer_id
+                                  ORDER BY created_at, id) AS diff
+FROM payments
+WHERE status = 'PAID'
+ORDER BY customer_id, created_at, id;
 ```
 
 ```text output
- user_id | first_day  |  last_day  | days
----------+------------+------------+------
-       1 | 2026-10-01 | 2026-10-03 |    3
-       1 | 2026-10-05 | 2026-10-05 |    1
+ customer_id | created_at | amount | running |  diff
+-------------+------------+--------+---------+---------
+           1 | 2026-10-01 | 500.00 |  500.00 |    NULL
+           1 | 2026-10-03 | 700.00 | 1200.00 |  200.00
+           1 | 2026-10-05 | 400.00 | 1600.00 | -300.00
+           2 | 2026-10-02 | 700.00 |  700.00 |    NULL
+           5 | 2026-10-04 | 300.00 |  300.00 |    NULL
 ```
 
-MySQL: `DATE(created_at)` and `DATE_SUB(d, INTERVAL ROW_NUMBER() OVER (…) DAY)`.
+Then the streaks: each run of consecutive days with any payment, per customer.
+
+```sql
+WITH days AS (
+  SELECT DISTINCT customer_id, created_at AS d FROM payments
+), marked AS (
+  SELECT customer_id, d,
+         d - CAST(ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY d) AS int) AS grp
+  FROM days
+)
+SELECT customer_id, MIN(d) AS first_day, MAX(d) AS last_day, COUNT(*) AS days
+FROM marked
+GROUP BY customer_id, grp
+ORDER BY customer_id, first_day;
+```
+
+```text output
+ customer_id | first_day  |  last_day  | days
+-------------+------------+------------+------
+           1 | 2026-10-01 | 2026-10-03 |    3
+           1 | 2026-10-05 | 2026-10-05 |    1
+           2 | 2026-10-02 | 2026-10-02 |    1
+           3 | 2026-10-03 | 2026-10-03 |    1
+           5 | 2026-10-04 | 2026-10-04 |    1
+```
+
+What to notice:
+
+- `PARTITION BY customer_id` restarts both the running total and `LAG` for each customer, so Ravi's first row shows 700 and NULL.
+- Asha's run from 1 to 3 October counts her FAILED payment on 2 October, because the streak query asks about any payment. Add `WHERE status = 'PAID'` in `days` and each of her runs is one day long.
+- `DISTINCT` in `days` matters: with a second payment on 2 October, that day would get two row numbers and the run would split.
+- MySQL 9.7 has no `date - integer`: write `DATE_SUB(d, INTERVAL ROW_NUMBER() OVER (…) DAY)`.
+
+## Rules and defaults
+
+- **Default frame:** with `ORDER BY` and no frame, the window runs from the first row to the current row plus every row tied with it. See [Window functions](card:window-functions).
+- **Rows or values:** `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW` counts rows. For "the last 7 days", sort by a date and use `RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW` (MySQL: `INTERVAL 6 DAY`).
+- **First rows:** a moving average over 3 rows averages fewer rows at the start; `LAG` returns NULL there unless you give a default, as in `LAG(amount, 1, 0)`.
+
+## Not to be confused with
+
+`GROUP BY customer_id` with `SUM(amount)` gives one total per customer, and the individual payments disappear. `SUM(amount) OVER (PARTITION BY customer_id ORDER BY …)` keeps every payment and shows the total so far beside it. Rule: "a total per customer" is `GROUP BY`; "a total after each payment" is a window.
 
 ## Interview Qs
 
-### Show a running total of spending per user.
+### Show a running total of spending per customer.
 
-`SUM(amount) OVER (PARTITION BY user_id ORDER BY created_at, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. Every order row stays; GROUP BY would collapse them into one total.
+`SUM(amount) OVER (PARTITION BY customer_id ORDER BY created_at, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. Every payment stays, with the total so far beside it. `id` in the `ORDER BY` and the `ROWS` frame stop two payments with the same timestamp from sharing one total.
 
-### Find users who ordered on 3 or more consecutive days.
+### Compare each month's revenue with the previous month.
 
-Build the runs as above, add `HAVING COUNT(*) >= 3`, and select DISTINCT user_id from them. For "the same value in 3 rows in a row", compare the value with `LAG(x, 1)` and `LAG(x, 2)`.
+Group to one row per month first, then add `revenue - LAG(revenue) OVER (ORDER BY month)`. The first month has no previous value, so the difference is NULL. For the next month instead, use `LEAD`.
+
+### Find the same status three times in a row.
+
+Compare each row with the two before it: `status = LAG(status, 1) OVER (ORDER BY created_at, id) AND status = LAG(status, 2) OVER (…)`. Compute it in a subquery and filter outside, because `WHERE` cannot use a window result.

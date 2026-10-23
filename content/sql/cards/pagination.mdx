@@ -5,17 +5,30 @@ title: "Pagination: OFFSET vs Keyset"
 topic: indexes
 level: intermediate
 heat: 3
-hook: "OFFSET reads and throws away every skipped row; keyset remembers the last row seen and asks for the rows after it."
+hook: "OFFSET pagination reads and throws away every skipped row. Keyset pagination remembers the last row seen and asks only for the rows after it."
 points:
-  - { k: "OFFSET cost", v: "page 5,000 (20 a page) first reads about 100,000 rows", kind: minus }
-  - { k: "Drift", v: "a row inserted between pages makes OFFSET repeat a row", kind: minus }
-  - { k: "Keyset", v: "WHERE (created_at, id) < last seen, same ORDER BY, LIMIT" }
-  - { k: "Tie-breaker", v: "end ORDER BY with a unique column such as id" }
-  - { k: "Keyset limit", v: "no jump to page N; fine for 'next' and infinite scroll", kind: minus }
+  - { k: "OFFSET cost", v: "page 5,000 at 20 rows a page makes the database produce about 100,000 rows and drop all but 20", kind: minus }
+  - { k: "Drift", v: "with OFFSET, a row inserted before page 2 is requested pushes page 1's last row onto page 2, so it shows twice", kind: minus }
+  - { k: "Keyset", v: "WHERE (created_at, id) < the last row seen, the same ORDER BY, then LIMIT" }
+  - { k: "Tie-breaker", v: "end the ORDER BY with a unique column such as id, so rows with equal sort values keep a fixed order" }
+  - { k: "Keyset limit", v: "it cannot jump to page N; it suits 'next page' buttons and infinite scroll", kind: minus }
 trap:
   wrong: "Keyset on created_at alone: WHERE created_at < last_created_at."
-  right: "Rows sharing that created_at are skipped. Add a unique tie-breaker: (created_at, id) in ORDER BY, WHERE and the index."
-sayIt: "OFFSET is simple and can jump to any page, but the database reads every skipped row and pages drift on inserts. Keyset filters after the last row seen, with a unique tie-breaker and a matching index, so every page costs the same."
+  right: "Rows sharing that created_at are skipped. Add a unique tie-breaker: (created_at, id) in the ORDER BY, the WHERE and the index."
+  why: "Timestamps look unique in small tests, so the bug stays hidden until two rows share a created_at and one of them silently never appears."
+sayIt: "OFFSET is simple and can jump to any page, but the database reads every skipped row and pages drift when rows are added. Keyset filters after the last row seen, with a unique tie-breaker and a matching index, so every page costs the same."
+cheat:
+  idea: "Pagination returns a big result one page at a time. OFFSET skips n rows but still reads them; keyset asks for rows after the last one seen, so deep pages stay fast."
+  code: |
+    WHERE (created_at, id) < (:last_created_at, :last_id)
+    ORDER BY created_at DESC, id DESC LIMIT 20
+  remember: "Keyset needs a unique tie-breaker such as id, in the ORDER BY, the WHERE and the index."
+buildsOn: [select-and-filtering, composite-indexes]
+scenarios:
+  - q: "A user is on page 1 of newest payments (LIMIT 20 OFFSET 0). Two new payments arrive, then the user opens page 2 (LIMIT 20 OFFSET 20). What do they see?"
+    a: "The last two payments of page 1 again, at the top of page 2. The new rows pushed everything down by two places. Keyset pagination asks for rows older than the last row seen, so new rows do not shift it."
+  - q: "An admin screen shows 5,000 refunds with numbered pages, and users jump to page 37. OFFSET or keyset?"
+    a: "OFFSET. Users need to jump to a page number, which keyset cannot do, and with 5,000 rows the deepest offset is small. Keep a unique ORDER BY, such as created_at, id, so pages are stable."
 confusedWith: []
 tags: [pagination, performance, keyset]
 visual: table
@@ -34,42 +47,82 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Pagination returns a large result one page at a time, for example 20 payments per screen. OFFSET pagination asks for "skip the first 40 rows, give me the next 20". Keyset pagination, also called cursor pagination or the seek method, asks for "the 20 rows after the last row you showed me". Both need an ORDER BY, from [SELECT and ORDER BY](card:select-and-filtering), that puts the rows in one fixed order.
+
 ## Why it exists
 
-An API must not return a million rows at once. Pages fix that, but the obvious `OFFSET` gets slower with every page.
+An API must not send a million payments at once, so it sends pages. The obvious way, `LIMIT 20 OFFSET 40`, gets slower with every page, because the database still produces every skipped row before dropping it. It also drifts: a payment inserted while the user reads page 1 shifts every row, so page 2 starts with a row already shown. Keyset fixes both by starting right after a known row.
 
 ## How it works
 
 <Compare id="offset-vs-keyset-pagination" />
 
-- The client sends back the last row's `(created_at, id)`: that pair is the cursor.
-- MySQL: the row comparison gives correct rows but may not get an index range scan. Spell it out: `created_at < ? OR (created_at = ? AND id < ?)`.
+1. The first page has no cursor: `ORDER BY created_at DESC, id DESC LIMIT 20`. The `id` breaks ties between equal timestamps.
+2. The app returns the page together with the last row's `(created_at, id)`. That pair is the cursor.
+3. For the next page, the client sends the cursor back, and the query adds `WHERE (created_at, id) < (cursor values)` with the same ORDER BY and LIMIT.
+4. An index on `(created_at, id)` lets the database seek straight to the cursor and read just 20 entries, so page 5,000 costs the same as page 2.
 
 ## Example
 
+Six payments, three per page, newest first. Payments 3 and 4 share the same `created_at`. Run on PostgreSQL 18; MySQL 9.7 returns the same rows.
+
 ```sql
-CREATE INDEX idx_orders_created ON orders (created_at, id);
+CREATE INDEX idx_payments_created ON payments (created_at, id);
 
--- first page
-SELECT id, amount, created_at FROM orders
-ORDER BY created_at DESC, id DESC LIMIT 20;
-
--- next page: values from the last row of the previous page
-SELECT id, amount, created_at FROM orders
-WHERE (created_at, id) < ('2026-10-01 10:00', 981)
-ORDER BY created_at DESC, id DESC LIMIT 20;
+SELECT id, amount, created_at FROM payments
+ORDER BY created_at DESC, id DESC LIMIT 3;
 ```
+
+```text output
+ id | amount |     created_at
+----+--------+---------------------
+  6 | 310.00 | 2026-10-01 11:15:00
+  5 |  75.00 | 2026-10-01 11:00:00
+  4 | 250.00 | 2026-10-01 10:00:00
+(3 rows)
+```
+
+```sql
+-- page 2: the cursor is the last row of page 1, (10:00, 4)
+SELECT id, amount, created_at FROM payments
+WHERE (created_at, id) < ('2026-10-01 10:00', 4)
+ORDER BY created_at DESC, id DESC LIMIT 3;
+```
+
+```text output
+ id | amount |     created_at
+----+--------+---------------------
+  3 | 999.00 | 2026-10-01 10:00:00
+  2 | 120.00 | 2026-10-01 09:30:00
+  1 | 500.00 | 2026-10-01 09:00:00
+(3 rows)
+```
+
+What to notice:
+
+- `(created_at, id) < (...)` means "an earlier created_at, or the same created_at and a smaller id". That is why payment 3, which shares 10:00 with payment 4, is on page 2.
+- With `WHERE created_at < '2026-10-01 10:00'` alone, page 2 returned only payments 2 and 1: payment 3 was lost.
+- On 100,000 payments, `LIMIT 20 OFFSET 90000` read 90,020 rows through the index, about 50 ms in our test; the keyset query at the same depth read 20, about 0.1 ms.
+
+## Rules and defaults
+
+- **ORDER BY is required:** without an ORDER BY that gives a unique order, the rows on each page are unpredictable, with OFFSET and with keyset.
+- **OFFSET is not free:** PostgreSQL still computes the rows an OFFSET skips, so a large OFFSET is slow.
+- **The index must match the sort:** `(created_at, id)` serves `ORDER BY created_at DESC, id DESC` by reading the index backwards.
+- **MySQL:** the row comparison returns correct rows, but the optimizer may not use it for an index range scan. Spell it out: `created_at < ? OR (created_at = ? AND id < ?)`.
 
 ## Interview Qs
 
 ### Why is OFFSET slow on deep pages?
 
-The database must still find, sort and discard every skipped row: `OFFSET 100000` reads 100,020 rows to return 20. The cost grows with the page number.
+The database must still find, sort and discard every skipped row: `OFFSET 100000 LIMIT 20` produces 100,020 rows to return 20. The cost grows with the page number, so the last pages are the slowest.
 
 ### How does keyset (cursor) pagination work?
 
-Sort by a unique order such as `(created_at, id)`, index it, and ask for rows after the last row the client saw. The database seeks straight there, so page 1 and page 5,000 cost the same.
+Sort by a unique order such as `(created_at, id)`, index it, and ask for rows after the last row the client saw, with the same ORDER BY and a LIMIT. The database seeks straight to that point, so every page costs about the same, and new rows do not shift the pages.
 
 ### When is OFFSET still fine?
 
-When users need page numbers and the offsets stay small, such as an admin screen. Always pair it with an ORDER BY on a unique order, or pages are unpredictable.
+When users need numbered pages and the offsets stay small, such as an admin screen over a few thousand rows. Always pair it with an ORDER BY that gives a unique order, or pages can repeat or miss rows.

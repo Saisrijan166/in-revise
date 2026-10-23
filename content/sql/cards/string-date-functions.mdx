@@ -5,17 +5,28 @@ title: "String and Date Functions"
 topic: querying
 level: beginner
 heat: 2
-hook: "Change case, measure, join, cut and clean text; get today, pull out a year, add an interval. Names differ by database."
+hook: "Functions reshape a value inside the query: clean or cut text, pull the year out of a date, add 7 days. Many names differ between PostgreSQL and MySQL."
 points:
-  - { k: "LENGTH", v: "PostgreSQL counts characters; MySQL counts bytes (use CHAR_LENGTH)", kind: minus }
-  - { k: "Positions", v: "SUBSTRING and POSITION count from 1; 0 means not found" }
-  - { k: "CONCAT + NULL", v: "PostgreSQL skips NULLs; MySQL CONCAT and PostgreSQL || give NULL", kind: minus }
-  - { k: "MySQL ||", v: "logical OR by default, not text joining", kind: minus }
-  - { k: "NOW()", v: "PostgreSQL: transaction start; MySQL: statement start", kind: default }
+  - { k: "Stored data unchanged", v: "a function in a SELECT changes only the result; the row in the table stays as it was" }
+  - { k: "LENGTH", v: "PostgreSQL 18 LENGTH counts characters; MySQL 9.7 LENGTH counts bytes, so use CHAR_LENGTH there", kind: minus }
+  - { k: "Positions start at 1", v: "SUBSTRING('Meena', 1, 3) is 'Mee', and POSITION returns 0 when the text is not found" }
+  - { k: "CONCAT and NULL", v: "PostgreSQL CONCAT skips NULL parts; MySQL CONCAT and PostgreSQL || return NULL if any part is NULL", kind: minus }
+  - { k: "NOW() is fixed", v: "PostgreSQL 18 NOW() gives the transaction's start time; MySQL 9.7 NOW() gives the statement's start time", kind: default }
+  - { k: "Dates as a range", v: "filter created_at >= start AND created_at < next start, with no function wrapped around the column" }
 trap:
-  wrong: "YEAR(created_at), DATEDIFF and INTERVAL 7 DAY work in every database."
-  right: "They are MySQL syntax. PostgreSQL uses EXTRACT(YEAR FROM …), date − date and INTERVAL '7 days'."
-sayIt: "For text I use UPPER, LOWER, TRIM, SUBSTRING, REPLACE and CONCAT; for dates EXTRACT and INTERVAL arithmetic. I watch NULLs in CONCAT, bytes in MySQL LENGTH, and filter dates by range."
+  wrong: "YEAR(created_at), DATEDIFF(d2, d1) and INTERVAL 7 DAY work in every database."
+  right: "They are MySQL syntax. PostgreSQL uses EXTRACT(YEAR FROM created_at), d2 - d1 for dates, and INTERVAL '7 days'."
+  why: "Many tutorials and interview sheets are written for MySQL or SQL Server, so their date functions look like standard SQL."
+sayIt: "For text I use UPPER, LOWER, TRIM, SUBSTRING, REPLACE and CONCAT; for dates EXTRACT and interval arithmetic. I watch NULLs in CONCAT, bytes in MySQL LENGTH, and I filter dates as a range so the column stays usable by an index."
+cheat:
+  idea: "String functions clean, cut and join text; date functions read and shift dates. They change only the result, never the stored row, and many names differ by database."
+  remember: "YEAR(), DATEDIFF and INTERVAL 7 DAY are MySQL; PostgreSQL uses EXTRACT, d2 - d1 and INTERVAL '7 days'."
+buildsOn: [select-and-filtering, data-types]
+scenarios:
+  - q: "Meena's city is NULL. What does SELECT CONCAT('Hi ', city) return for her in PostgreSQL 18 and in MySQL 9.7?"
+    a: "PostgreSQL returns 'Hi ', because its CONCAT skips NULL arguments. MySQL returns NULL, because any NULL argument makes its CONCAT NULL. CONCAT_WS, or COALESCE(city, ''), gives the same text in both."
+  - q: "You need payments made in 2026. Which WHERE do you write: EXTRACT(YEAR FROM created_at) = 2026, or created_at >= '2026-01-01' AND created_at < '2027-01-01'?"
+    a: "The range. Both return the same rows, but the function form computes a value for every row, so a normal index on created_at cannot be used. The topic Indexes and Performance explains why."
 confusedWith: []
 tags: [string-functions, date-functions, interval]
 visual: table
@@ -32,60 +43,85 @@ sources:
   - title: "Date and Time Functions (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/date-and-time-functions.html"
     verifiedOn: "2026-10-20"
+  - title: "Logical Operators: || as OR, deprecated (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/logical-operators.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A function takes a value and returns a new one, such as `LOWER('PAID')`, which returns 'paid'. String functions work on text: change case, trim spaces, cut out a part, join pieces. Date functions work on dates and timestamps (a date plus a time of day): get today, pull out the year, add 7 days, or round down to the first day of the month. You can use them in the SELECT list and in WHERE, and they run once for each row.
 
 ## Why it exists
 
-Questions rarely want raw columns: emails need cleaning, dates need a month. These functions shape values inside the query.
+Stored values are rarely in the shape a question wants. A report needs the month of each payment, not its exact second; a reference number needs 'PAY-' in front of the id; a name typed as ' asha ' needs cleaning before it can be compared. Without functions you would load the rows into Java and reshape them there. Functions do it inside the query, so only the finished values travel.
 
 ## How it works
 
 | Need | PostgreSQL 18 | MySQL 9.7 |
 |---|---|---|
 | Characters / bytes | `LENGTH`, `OCTET_LENGTH` | `CHAR_LENGTH`, `LENGTH` |
-| Join text | `a \|\| b`, `CONCAT(a, b)` | `CONCAT(a, b)` |
-| Case, cut, clean, find | `UPPER`, `LOWER`, `SUBSTRING(s FROM 1 FOR 3)`, `TRIM`, `REPLACE`, `POSITION('a' IN s)` | same |
+| Join text | `CONCAT(a, b)`, `a \|\| b` | `CONCAT(a, b)` |
+| Case, trim, cut, replace | `UPPER`, `LOWER`, `TRIM`, `SUBSTRING(s, 1, 3)`, `REPLACE` | same |
 | Today, now | `CURRENT_DATE`, `NOW()` | same |
 | Year of a date | `EXTRACT(YEAR FROM d)` | same, or `YEAR(d)` |
 | Add 7 days | `d + INTERVAL '7 days'` | `d + INTERVAL 7 DAY`, `DATE_ADD` |
-| Days between | `d2 - d1` (dates) | `DATEDIFF(d2, d1)` |
-| Month bucket | `DATE_TRUNC('month', ts)` | `DATE_FORMAT(ts, '%Y-%m-01')` |
-| Date of a timestamp | `ts::date` | `DATE(ts)` |
+| Days between two dates | `d2 - d1` | `DATEDIFF(d2, d1)` |
+| First day of the month | `DATE_TRUNC('month', ts)` | `DATE_FORMAT(ts, '%Y-%m-01')` |
+| Date part of a timestamp | `ts::date` | `DATE(ts)` |
 
-- `CONCAT_WS(', ', a, b)` skips NULLs in both.
-- Filter a year as a range: [a function on the column hides it from an index](card:index-not-used).
+1. WHERE keeps the rows first, using the bare column, so only the needed rows reach the functions.
+2. For each kept row, the database calls the function with that row's value. In `UPPER(TRIM(name))` the inner call runs first: trim, then upper-case.
+3. The returned value goes into the result column; the stored row does not change.
+4. If an argument is NULL, most functions return NULL. PostgreSQL's `CONCAT` and both databases' `CONCAT_WS` are exceptions: they skip NULLs.
 
 ## Example
 
+February payments with a reference, the status in lower case, the month and a follow-up date a week later, in PostgreSQL 18:
+
 ```sql
--- PostgreSQL: users who signed up, per month of 2026
--- emails: ' Asha@x.in' 5 Jan, 'asha@x.in' 20 Jan, 'ravi@x.in' 3 Feb, 'dev@x.in' 30 Dec 2025
-SELECT DATE_TRUNC('month', created_at) AS month,
-       COUNT(DISTINCT LOWER(TRIM(email))) AS users
-FROM users
-WHERE created_at >= DATE '2026-01-01'
-  AND created_at <  DATE '2027-01-01'
-GROUP BY 1
-ORDER BY 1;
+SELECT CONCAT('PAY-', id)                    AS ref,
+       LOWER(status)                         AS status,
+       DATE_TRUNC('month', created_at)::date AS month,
+       created_at::date + 7                  AS follow_up
+FROM payments
+WHERE created_at >= DATE '2026-02-01'
+  AND created_at <  DATE '2026-03-01'
+ORDER BY id;
 ```
 
 ```text output
-         month          | users
-------------------------+-------
- 2026-01-01 00:00:00+00 |     1
- 2026-02-01 00:00:00+00 |     1
+   ref   | status  |   month    | follow_up
+---------+---------+------------+------------
+ PAY-103 | failed  | 2026-02-01 | 2026-02-10
+ PAY-104 | paid    | 2026-02-01 | 2026-02-17
+ PAY-105 | pending | 2026-02-01 | 2026-02-22
+ PAY-106 | paid    | 2026-02-01 | 2026-03-07
+(4 rows)
 ```
+
+What to notice:
+
+- The WHERE uses a range on the bare `created_at`. Payment 106 at 20:10 on 28 February is included, because the end is "before 1 March".
+- `created_at::date + 7` adds whole days to a date. Adding 7 to 28 February gives 7 March: the database handles month lengths.
+- In MySQL 9.7 the same result comes from `DATE_FORMAT(created_at, '%Y-%m-01')` and `DATE(created_at) + INTERVAL 7 DAY`; `DATE_TRUNC` and `::date` do not exist there.
+
+## Rules and defaults
+
+- **NOW() is fixed:** PostgreSQL 18 returns the start time of the current transaction, so two calls in one transaction give the same value. MySQL 9.7 returns the start time of the current statement.
+- **CONCAT_WS(', ', a, b):** joins with a separator and skips NULL parts, in both databases.
+- **SUBSTRING forms:** both accept `SUBSTRING(s, 1, 3)`; PostgreSQL also accepts the standard `SUBSTRING(s FROM 1 FOR 3)`.
 
 ## Interview Qs
 
 ### LENGTH vs CHAR_LENGTH?
 
-MySQL LENGTH counts bytes, CHAR_LENGTH characters: 'josé' in utf8mb4 gives 5 and 4. In PostgreSQL both count characters; OCTET_LENGTH gives bytes.
+In MySQL, LENGTH counts bytes and CHAR_LENGTH counts characters: 'josé' in MySQL's utf8mb4 character set gives 5 and 4, because é takes two bytes. In PostgreSQL, LENGTH and CHAR_LENGTH both count characters, and OCTET_LENGTH gives bytes. Use character counts for validation rules such as "name at most 50 characters".
 
-### Orders from the last 7 days?
+### How do you find payments from the last 7 days?
 
-`WHERE created_at >= NOW() - INTERVAL '7 days'` (MySQL: `INTERVAL 7 DAY`). The column stays bare, so its index still works.
+`WHERE created_at >= NOW() - INTERVAL '7 days'` in PostgreSQL, or `INTERVAL 7 DAY` in MySQL. The function is applied to NOW(), a single value, not to the column, so an index on created_at can still be used.
 
 ### Why did CONCAT return NULL?
 
-In MySQL any NULL argument makes CONCAT NULL: use COALESCE or CONCAT_WS. PostgreSQL CONCAT ignores NULLs, but `||` returns NULL.
+In MySQL, any NULL argument makes CONCAT return NULL. Wrap the nullable column in COALESCE, or use CONCAT_WS, which skips NULLs. PostgreSQL's CONCAT already skips NULLs, but its `||` operator returns NULL when either side is NULL.

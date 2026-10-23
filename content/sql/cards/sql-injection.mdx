@@ -5,24 +5,40 @@ title: SQL Injection and Prepared Statements
 topic: backend
 level: beginner
 heat: 3
-hook: "Input glued into SQL text can rewrite the query. Send it as a bound parameter, so it is only ever data."
+hook: "If user input is glued into the SQL text, the input can rewrite the query. Send it as a bound parameter instead, so it can only ever be data."
 points:
-  - { k: "Cause", v: "string concatenation turns user input into SQL code" }
-  - { k: "Fix", v: "PreparedStatement with ? placeholders; values are bound as data" }
-  - { k: "Table or column names", v: "cannot be parameters; choose them from an allowlist" }
-  - { k: "ORM", v: "safe only with bound parameters; JPQL built with + is not", kind: minus }
-  - { k: "Extra layers", v: "least-privilege DB user; input validation helps", kind: plus }
+  - { k: "Cause", v: "joining user input into the SQL string, so the database reads part of the input as SQL code" }
+  - { k: "Fix", v: "a PreparedStatement with ? placeholders; each value is bound separately and can never change the query" }
+  - { k: "Table or column names", v: "cannot be ? parameters; pick them from a fixed allowlist in code" }
+  - { k: "ORM queries", v: "JPQL, HQL or native SQL built with + is as injectable as raw JDBC; use :name parameters", kind: minus }
+  - { k: "Extra layers", v: "a least-privilege database user and input validation limit damage, but do not replace parameters", kind: plus }
 trap:
-  wrong: "Escaping quotes or validating input is enough to stop SQL injection."
+  wrong: "Escaping quotes or validating the input is enough to stop SQL injection."
   right: "OWASP strongly discourages relying on escaping. Parameterised queries are the fix; validation is only an extra layer."
-sayIt: "SQL injection happens when input is concatenated into SQL. I bind every value with PreparedStatement or ORM parameters, allowlist dynamic column names, and give the app a least-privilege database user."
+  why: "Escaping a quote seems to close the hole, and simple tests pass. But the escaping rules differ per database and setting, and one missed case is enough for an attacker."
+sayIt: "SQL injection happens when input is concatenated into SQL, so it can change the query. I bind every value with PreparedStatement or ORM parameters, pick dynamic column names from an allowlist, and give the app a least-privilege database user."
+cheat:
+  idea: "SQL injection is an attack where user input pasted into SQL text changes the query. A prepared statement keeps the SQL fixed with ? slots and binds the input as a value, so it stays data."
+  code: |
+    ps = con.prepareStatement("SELECT * FROM payments WHERE status = ?");
+    ps.setString(1, status);   // a value, never SQL code
+  remember: "Names (tables, columns, ASC/DESC) cannot be ? parameters: pick them from an allowlist."
+buildsOn: [select-and-filtering, connection-pooling]
+scenarios:
+  - q: "A developer writes con.prepareStatement(\"SELECT * FROM payments WHERE status = '\" + status + \"'\"). It uses PreparedStatement. Is it safe?"
+    a: "No. The input is still glued into the SQL text before the statement is prepared, so the database parses it as code. Safety comes from the ? placeholder and setString, not from the PreparedStatement class itself."
+  - q: "The payments list lets users sort by a column given in the URL, ?sort=amount. How do you build the ORDER BY safely?"
+    a: "A column name cannot be a ? parameter. Check the input against a fixed set, such as amount and created_at, and use a safe default such as id for anything else. Then even 'amount; DROP TABLE payments' only produces ORDER BY id."
 confusedWith: [statement-vs-preparedstatement]
 tags: [security, sql-injection, preparedstatement, owasp]
-visual: table
+visual: code
 sources:
   - title: "SQL Injection Prevention Cheat Sheet (OWASP)"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Error Handling Cheat Sheet: no implementation details in error responses (OWASP)"
+    url: "https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html"
+    verifiedOn: "2026-10-21"
   - title: "PreparedStatement (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.sql/java/sql/PreparedStatement.html"
     verifiedOn: "2026-10-20"
@@ -34,48 +50,88 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+SQL injection is an attack in which text typed by a user ends up inside an SQL statement as code, so it changes what the query does. It happens when the app builds the SQL by joining strings: the database cannot tell which part the developer wrote and which part came from the user. A prepared statement prevents it. The SQL is written once with `?` placeholders, and each value is passed separately, so a value can fill a slot but never change the query.
+
 ## Why it exists
 
-Apps build queries from user input. If that input is pasted into the SQL text, an attacker can read, change or delete data they should never touch.
+Apps filter by user input all the time: a payments page searches by the status the user types. If that input is pasted into the SQL text, the input `' OR '1'='1` turns the filter into "always true", and the user sees every customer's payments. Other inputs can change or delete data. Prepared statements remove the problem at its root: the query's structure is fixed before any input arrives.
 
 ## How it works
 
-| Email typed by the user | SQL the database runs |
+| Status typed by the user | SQL the database runs |
 |---|---|
-| `asha@example.in` | `… WHERE email = 'asha@example.in'` |
-| `' OR '1'='1` (concatenated) | `… WHERE email = '' OR '1'='1'`: every row |
-| `' OR '1'='1` (bound to `?`) | looks for that exact text: no row |
+| `PAID` | `… WHERE status = 'PAID'` |
+| `' OR '1'='1` (joined into the text) | `… WHERE status = '' OR '1'='1'`: every row |
+| `' OR '1'='1` (bound to `?`) | looks for a status equal to that exact text: no row |
 
-- A bound value can never change the query's structure, only fill a slot.
-- A stored procedure is safe only if it does not build SQL from its input.
+1. You write the SQL once, with a `?` wherever a value goes.
+2. `prepareStatement(sql)` fixes the structure: which table, which columns, which condition.
+3. `setString(1, input)` attaches the input to slot 1 as a typed value.
+4. On `executeQuery()` the driver passes the input as data, never as SQL code, so the database cannot run it.
+5. The database compares `status` with the whole input text. No payment has that status, so no row matches.
+
+So the key is that the SQL code is fixed before the data arrives.
 
 ## Example
 
+The same attack against the payments table, first concatenated, then bound. `count()` is a small helper that counts the rows of a result.
+
 ```java
-// Unsafe: input becomes part of the SQL text
-String bad = "SELECT * FROM users WHERE email = '" + email + "'";
+String status = "' OR '1'='1";                 // typed into the search box
 
-// Safe: the value is bound as data
+// Unsafe: the input becomes part of the SQL text
+String sql = "SELECT id, amount FROM payments WHERE status = '" + status + "'";
+System.out.println(sql);
+ResultSet bad = con.createStatement().executeQuery(sql);
+
+// Safe: the SQL is fixed; the input is bound to the ? slot as a value
 PreparedStatement ps = con.prepareStatement(
-    "SELECT id, name FROM users WHERE email = ?");
-ps.setString(1, email);
-ResultSet rs = ps.executeQuery();
-
-// Dynamic sort column: allowlist it, never concatenate raw input
-String col = Set.of("name", "city").contains(sort) ? sort : "id";
-String sql = "SELECT id, name FROM users ORDER BY " + col;
+    "SELECT id, amount FROM payments WHERE status = ?");
+ps.setString(1, status);
+ResultSet good = ps.executeQuery();
+System.out.println(count(bad) + " rows vs " + count(good) + " rows");
 ```
+
+```text output
+SELECT id, amount FROM payments WHERE status = '' OR '1'='1'
+5 rows vs 0 rows
+```
+
+What to notice:
+
+- The printed SQL shows the attack: the input's first quote closes the string, and `OR '1'='1'` is true for every row, so all 5 payments come back.
+- The prepared version returns 0 rows, because no payment has the status `' OR '1'='1`. It returns the 3 paid payments when the input is `PAID`.
+- The result is the same on PostgreSQL 18 and MySQL 9.7: injection depends on how the app builds SQL, not on the database.
+
+## Rules and defaults
+
+- **Every outside value:** goes through a placeholder: `?` with `setString` or `setLong` in JDBC, `:name` with `setParameter` in JPQL and HQL.
+- **Names cannot be parameters:** a table name, a column name or `ASC`/`DESC` cannot be a `?`. In PostgreSQL `FROM ?` is a syntax error, and `ORDER BY ?` sorts by a constant text, not by the column. Pick names from an allowlist in code, such as `Set.of("amount", "created_at")`.
+- **Stored procedures:** are safe only if they do not build dynamic SQL from their inputs.
+- **Least privilege:** the app's database user gets only the rights it needs and never admin rights, so a successful injection can do less.
+- **Error messages:** log database errors on the server and show users a generic message. Raw SQL errors reveal table and column names that help an attacker.
+
+## Not to be confused with
+
+A `Statement` runs a complete SQL string that your code built, values included. A `PreparedStatement` runs fixed SQL with `?` slots, and the values are bound separately. Input validation checks that a value looks right, such as a status being one of three words; it is a useful extra check, not a replacement. Rule: a value from outside always goes into a `?`; validation only adds a second wall.
+
+## Common mistakes
+
+- **"Using the PreparedStatement class makes the query safe."** Only the placeholders make it safe. SQL concatenated before `prepareStatement(...)` is as injectable as with `Statement`.
+- **"An ORM protects me automatically."** Hibernate's generated SQL is parameterised, but a JPQL or native query you build with `+` is not. OWASP calls this HQL injection.
 
 ## Interview Qs
 
 ### How do you prevent SQL injection?
 
-Bind every value with prepared statements or ORM parameters, and allowlist anything that cannot be a parameter. Add a least-privilege database user and validation as extra layers.
+Bind every value with prepared statements or ORM parameters, never by joining strings. Pick table names, column names and sort directions from an allowlist in code. As extra layers, give the app a least-privilege database user, validate input, and never show raw database errors to users.
 
 ### Can a table or column name be a ? parameter?
 
-No. Placeholders hold values only. Map the user's choice to a fixed list of allowed names, or redesign so the name is not user input.
+No. Placeholders hold values only; the query's structure, including names, must be fixed when it is prepared. Map the user's choice to a fixed list of allowed names in code, with a safe default for anything else.
 
-### Is an ORM automatically safe?
+### Why is escaping not enough?
 
-Only when values go through parameters, such as `setParameter` or `:name`. A JPQL, HQL or native query built by string concatenation is as injectable as raw JDBC.
+Escaping tries to neutralise special characters inside the SQL text, and the rules differ between databases and settings. One missed case reopens the hole. OWASP strongly discourages relying on it. Parameters avoid the problem, because the value never becomes part of the SQL text at all.

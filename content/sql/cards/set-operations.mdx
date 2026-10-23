@@ -5,17 +5,28 @@ title: "UNION, INTERSECT and EXCEPT"
 topic: querying
 level: intermediate
 heat: 2
-hook: "Joins add columns side by side; set operations stack whole results on top of each other."
+hook: "A join puts columns side by side; a set operation stacks the rows of two queries into one result: all of them, the common ones, or those only in the first."
 points:
-  - { k: "Shape", v: "same number of columns, with compatible types in each position" }
-  - { k: "Default", v: "duplicates removed; add ALL to keep them", kind: default }
-  - { k: "UNION ALL", v: "no duplicate check, so cheaper", kind: plus }
-  - { k: "ORDER BY", v: "once, at the end; it sorts the combined result" }
-  - { k: "MySQL", v: "INTERSECT and EXCEPT only since 8.0.31", kind: default }
+  - { k: "Same shape", v: "both queries return the same number of columns, with compatible types in each position" }
+  - { k: "Matched by position", v: "the first column of one query lines up with the first of the other, whatever the names" }
+  - { k: "Duplicates", v: "UNION, INTERSECT and EXCEPT remove duplicate rows by default; add ALL to keep them", kind: default }
+  - { k: "UNION ALL", v: "skips the duplicate check, so it does less work than UNION", kind: plus }
+  - { k: "ORDER BY", v: "written once, after the last query, it sorts the combined result" }
+  - { k: "MySQL support", v: "INTERSECT and EXCEPT exist in MySQL only since 8.0.31; PostgreSQL 18 has all three", kind: default }
 trap:
   wrong: "UNION is the safe default for combining two lists."
-  right: "UNION pays to remove duplicates. If the parts cannot overlap, or duplicates are wanted, use UNION ALL."
-sayIt: "UNION stacks two results and removes duplicates; UNION ALL keeps them and is cheaper. INTERSECT keeps common rows, EXCEPT keeps rows only in the first. Columns must line up."
+  right: "UNION does extra work to remove duplicates. When the parts cannot overlap, or repeats are wanted, use UNION ALL."
+  why: "UNION is the keyword taught first and it sounds like the plain one, while ALL looks like an optional extra."
+sayIt: "Set operations stack two results with the same columns. UNION removes duplicates and UNION ALL keeps them and is cheaper; INTERSECT keeps rows in both, EXCEPT keeps rows only in the first. Columns match by position, and one ORDER BY at the end sorts it all."
+cheat:
+  idea: "Set operations combine the rows of two queries with the same columns: UNION (in either), INTERSECT (in both), EXCEPT (in the first only)."
+  remember: "Duplicates are removed unless you write ALL; prefer UNION ALL when the parts cannot overlap."
+buildsOn: [select-and-filtering, joins]
+scenarios:
+  - q: "SELECT name, city FROM customers UNION SELECT city, name FROM customers. What comes out?"
+    a: "It runs, but rows like Delhi | Ravi appear under the columns name and city. Columns are matched by position, not by name, and the names come from the first query. Write the columns in the same order in both parts."
+  - q: "You want customer ids that have a PAID payment but no FAILED one. Which operator, and what would UNION give instead?"
+    a: "EXCEPT: ids from the PAID query minus ids from the FAILED query. With our data that leaves customer 2. UNION would return everyone in either list, customers 1 and 2."
 confusedWith: [union-vs-union-all]
 tags: [union, intersect, except, set-operations]
 visual: table
@@ -23,9 +34,12 @@ sources:
   - title: "Combining Queries: UNION, INTERSECT, EXCEPT (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/queries-union.html"
     verifiedOn: "2026-10-20"
-  - title: "SELECT: UNION clause (PostgreSQL 18 docs)"
+  - title: "SELECT: UNION clause, INTERSECT precedence, ORDER BY in operands (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/sql-select.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Set Operations with UNION, INTERSECT, and EXCEPT (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/set-operations.html"
+    verifiedOn: "2026-10-21"
   - title: "INTERSECT Clause (MySQL 8.0 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/8.0/en/intersect.html"
     verifiedOn: "2026-10-20"
@@ -34,56 +48,84 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A set operation combines the full results of two `SELECT` queries into one result, by stacking rows rather than adding columns. `UNION` keeps rows found in either query, `INTERSECT` keeps rows found in both, and `EXCEPT` keeps rows of the first query that are not in the second. Both queries must return the same number of columns.
+
 ## Why it exists
 
-Some answers come from two queries of the same shape: customers from two regions, ids in one table but not another. Set operations combine them without a join.
+Some answers come from two lists of the same shape. A statement may need PAID payments and refunds in one list, or a report may need customers who paid but never failed. A [join](card:joins) is the wrong tool here: it matches rows on a condition and puts their columns side by side. Without set operations you would run two queries and merge the lists in application code. A set operation does it in one statement.
 
 ## How it works
 
-With A = {1, 2, 2, 3} and B = {2, 3, 4}:
+Take two lists of customer ids from the payments table: A has the ids with a PAID payment (1, 2, 1) and B has the ids with a FAILED payment (1).
 
-| Operator | Result |
-|---|---|
-| `A UNION B` | 1, 2, 3, 4 |
-| `A UNION ALL B` | 1, 2, 2, 3, 2, 3, 4 |
-| `A INTERSECT B` | 2, 3 |
-| `A EXCEPT B` | 1 |
+| Query | Result | Why |
+|---|---|---|
+| `A UNION B` | 1, 2 | every id in either list, each once |
+| `A UNION ALL B` | 1, 1, 1, 2 | every row of both lists, repeats kept |
+| `A INTERSECT B` | 1 | ids in both lists |
+| `A EXCEPT B` | 2 | ids in A that are not in B |
 
-- INTERSECT binds tighter than UNION and EXCEPT; use brackets when you mix them.
+1. The database runs each `SELECT` on its own and gets two results.
+2. It lines up their columns by position: first with first, second with second.
+3. It combines the rows using the operator.
+4. Unless you wrote `ALL`, it removes duplicate rows from the combined result.
+5. A final `ORDER BY` or `LIMIT` sorts or cuts the combined result, not the last query.
 
 ## Example
 
-```sql
--- users: asha@example.in (Pune), ravi@example.in (Delhi), meena@example.in (Mumbai)
-SELECT email FROM users WHERE city = 'Pune'
-UNION ALL
-SELECT email FROM users WHERE city = 'Delhi'
-ORDER BY email;
+One statement of money movements: PAID payments and refunds in one list. A row cannot be both, so nothing needs removing.
 
--- users with a paid order and no refunded one
--- orders: user 1 PAID; user 2 PAID and REFUNDED
-SELECT user_id FROM orders WHERE status = 'PAID'
-EXCEPT
-SELECT user_id FROM orders WHERE status = 'REFUNDED';
+```sql
+SELECT id, 'payment' AS kind, amount FROM payments WHERE status = 'PAID'
+UNION ALL
+SELECT id, 'refund', amount FROM refunds
+ORDER BY kind, id;
 ```
 
 ```text output
-      email
------------------
- asha@example.in
- ravi@example.in
-
- user_id
----------
-       1
+ id |  kind   | amount
+----+---------+--------
+  1 | payment | 500.00
+  3 | payment | 700.00
+  4 | payment | 700.00
+  1 | refund  | 700.00
 ```
+
+What to notice:
+
+- The column names `id`, `kind` and `amount` come from the first query; the second query's `'refund'` needs no alias.
+- `UNION ALL` is right because the `kind` column makes every row different. Plain `UNION` would give the same rows after an unneeded duplicate check.
+- `ORDER BY kind, id` sorts the whole combined list. It runs on PostgreSQL 18 and MySQL 9.7 with the same result.
+
+## Rules and defaults
+
+- **Shape:** same number of columns, and each position must have compatible types.
+- **Names:** the result takes its column names from the first query.
+- **Duplicates:** removed by default for all three operators; `UNION ALL`, `INTERSECT ALL` and `EXCEPT ALL` keep them.
+- **Precedence:** `INTERSECT` binds tighter than `UNION` and `EXCEPT`, so `A UNION B INTERSECT C` means `A UNION (B INTERSECT C)`. Use brackets when you mix them.
+- **Sort or limit one part:** put that query in brackets with its own `ORDER BY ... LIMIT`; without brackets they apply to the whole result.
+- **Versions:** PostgreSQL has all three. MySQL added `INTERSECT` and `EXCEPT` in 8.0.31.
+
+## Not to be confused with
+
+A join adds columns: each output row joins a row of one table with a matching row of another. A set operation adds rows: each output row comes from one query or the other, with the same columns. Rule: more columns, join; more rows of the same shape, set operation.
+
+## Common mistakes
+
+- **"UNION matches columns by name."** It matches by position. Swap the order in one query and names land under the city column, with no error.
 
 ## Interview Qs
 
-### UNION vs UNION ALL?
+### What is the difference between UNION and UNION ALL?
 
-UNION removes duplicate rows, which costs extra work over the whole result. UNION ALL returns every row and skips that check. Use UNION ALL unless you need the duplicates removed.
+UNION stacks the two results and then removes duplicate rows, which means comparing rows across the whole result. UNION ALL returns every row and skips that check, so it is cheaper. Use UNION ALL when the parts cannot overlap or repeats are wanted, and UNION only when duplicates must go.
 
-### UNION vs JOIN?
+### What is the difference between UNION and JOIN?
 
-UNION adds rows from queries with the same columns. JOIN adds columns from related tables, matched by a condition.
+UNION combines rows from queries that return the same columns, so the result gets longer. JOIN combines columns from related tables, matched by a condition, so the result gets wider. For example, payments plus refunds in one list is UNION ALL; each payment with its customer's name is a JOIN.
+
+### How would you find ids in one table but not in another?
+
+Use EXCEPT on the id columns: `SELECT id FROM a EXCEPT SELECT id FROM b`. It also removes duplicates. NOT EXISTS gives the same answer and can return other columns of `a`; you will see it in [Find rows with no match](card:anti-join-pattern).

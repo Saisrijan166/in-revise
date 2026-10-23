@@ -5,17 +5,30 @@ title: "Subqueries, IN and EXISTS"
 topic: querying
 level: intermediate
 heat: 2
-hook: "A subquery is a query inside a query: one value, a list for IN, a yes/no for EXISTS, or a table in FROM."
+hook: "A subquery is a SELECT inside another query. It hands the outer query one value, a list for IN, a yes or no for EXISTS, or a whole table in FROM."
 points:
-  - { k: "Scalar", v: "returns one value; more than one row is an error" }
-  - { k: "Correlated", v: "uses the outer row's columns, so it is logically run per row" }
-  - { k: "EXISTS (SELECT 1 …)", v: "only whether a row exists matters; the 1 is a convention" }
-  - { k: "Derived table", v: "a subquery in FROM; give it an alias" }
-  - { k: "Optimiser", v: "often rewrites IN and EXISTS as the same semi-join", kind: plus }
+  - { k: "Scalar subquery", v: "returns one value; more than one row is a run-time error, and no rows gives NULL" }
+  - { k: "EXISTS (subquery)", v: "true when the subquery returns at least one row; its columns are ignored, so SELECT 1 is a convention" }
+  - { k: "Correlated", v: "uses a column of the outer row, so logically it runs again for every outer row" }
+  - { k: "Derived table", v: "a subquery in FROM; MySQL 9.7 requires an alias, PostgreSQL 18 lets you leave it out", kind: default }
+  - { k: "Planner rewrites", v: "PostgreSQL and MySQL often run IN and EXISTS with the same join plan, so neither is faster by rule", kind: plus }
 trap:
-  wrong: "A correlated subquery always runs once per outer row, so it is always slow."
-  right: "That is the logical model. The optimiser may turn it into a join; check the plan with EXPLAIN."
-sayIt: "A subquery returns a value, a list or a table. Correlated ones refer to the outer row. For existence checks I use EXISTS, and NOT EXISTS for 'no match' because NOT IN breaks on NULLs."
+  wrong: "A correlated subquery runs once per outer row, so it is always slow."
+  right: "Once per row is the logical model. The planner may rewrite it as a join or semi-join; check the real plan with EXPLAIN."
+  why: "Textbooks explain correlation as a loop over outer rows, and without an index that loop can really be slow."
+sayIt: "A subquery returns a value, a list or a table to the outer query; a correlated one uses the outer row. I use EXISTS for 'has at least one' and NOT EXISTS for 'has none', because NOT IN breaks on a NULL."
+cheat:
+  idea: "A subquery is a SELECT inside another query. It returns one value, a list for IN, a yes or no for EXISTS, or a table in FROM."
+  code: |
+    WHERE EXISTS (SELECT 1 FROM payments p
+                  WHERE p.customer_id = c.id)
+  remember: "For 'has none' use NOT EXISTS, not NOT IN: one NULL in the list makes NOT IN return no rows."
+buildsOn: [aggregates-group-by, joins, query-order]
+scenarios:
+  - q: "WHERE id = (SELECT customer_id FROM payments WHERE status = 'PAID') runs on a table where two customers have PAID payments. What happens?"
+    a: "The query fails at run time: PostgreSQL says more than one row returned by a subquery used as an expression, MySQL says Subquery returns more than 1 row. = expects one value. Use IN for a list, or make the subquery return one row."
+  - q: "You need customer names that have at least one PAID payment, each name once. Asha has two PAID payments. JOIN or EXISTS?"
+    a: "EXISTS. A JOIN returns one row per matching payment, so Asha appears twice and you need DISTINCT. EXISTS only asks whether a match exists, so each customer comes back once, and it stops at the first match."
 confusedWith: [in-vs-exists, cte-vs-subquery]
 tags: [subquery, exists, in, correlated]
 visual: table
@@ -23,9 +36,12 @@ sources:
   - title: "Subquery Expressions: EXISTS, IN (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/functions-subquery.html"
     verifiedOn: "2026-10-20"
-  - title: "Scalar Subqueries (PostgreSQL 18 docs)"
+  - title: "Scalar Subqueries: more than one row is an error, no rows is null (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/sql-expressions.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "SELECT: sub-SELECT in FROM, alias optional in PostgreSQL (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/18/sql-select.html"
+    verifiedOn: "2026-10-21"
   - title: "Correlated Subqueries (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/correlated-subqueries.html"
     verifiedOn: "2026-10-20"
@@ -37,47 +53,83 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A subquery is a complete `SELECT` written in brackets inside another query, called the outer query. The outer query uses its result as a value, a list or a table. A subquery is correlated when it refers to a column of the outer query, such as the current customer's id. One that does not is non-correlated and can be worked out once, on its own.
+
 ## Why it exists
 
-Some questions need one answer before another: "users who spent more than the average". A subquery computes the inner answer in place.
+Some questions need one answer before another: "payments above the average amount" needs the average first. Without a subquery you would run two queries and paste the first result into the second, and the pasted number goes stale when data changes. A subquery computes the inner answer in place, in the same statement, so the outer query always uses the current value.
 
 ## How it works
 
-| Kind | Returns | Example |
-|---|---|---|
-| Scalar | one value | `WHERE amount > (SELECT AVG(amount) FROM orders)` |
-| IN | a list | `WHERE id IN (SELECT user_id FROM orders)` |
-| EXISTS | true or false | `WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)` |
-| Derived table | a table | `FROM (SELECT user_id, SUM(amount) AS t FROM orders GROUP BY user_id) AS s` |
+Four kinds, run on the running example. Payment amounts are 500, 300, 700, 700 and 200, so the average is 480; the IN and EXISTS rows filter `customers c`.
 
-- The EXISTS row is correlated: `u.id` comes from the outer query.
-- NOT IN with NULLs: see [NULL](card:null-handling).
+| Kind | Returns | Written as | Result |
+|---|---|---|---|
+| Scalar | one value | `WHERE amount > (SELECT AVG(amount) FROM payments)` | payments 1, 3, 4 |
+| IN | one column of values | `WHERE id IN (SELECT customer_id FROM payments WHERE status = 'FAILED')` | Asha |
+| EXISTS | true or false | `WHERE EXISTS (SELECT 1 FROM payments p WHERE p.customer_id = c.id)` | Asha, Ravi, Meena (Kabir has no payment) |
+| Derived table | a table | `FROM (SELECT customer_id, SUM(amount) AS total FROM payments GROUP BY customer_id) AS t` | one row per customer who has payments |
+
+For a correlated EXISTS, the logical steps are:
+
+1. The outer query takes one customer row, for example Asha with `id = 1`.
+2. The subquery runs with `c.id` replaced by 1 and looks for a matching payment.
+3. As soon as it finds one row, EXISTS is true; it does not need the rest.
+4. The outer query keeps Asha and moves to the next customer.
+5. The planner may replace this loop with a semi-join: a join that keeps each outer row once, as soon as one match is found. It gives the same rows, often faster.
 
 ## Example
 
+Customers with at least one PAID payment. Asha has two PAID payments, Ravi has one, Meena and Kabir have none.
+
 ```sql
--- users with at least one order over 5000
--- orders: Asha 7000, Ravi 3000
-SELECT u.name
-FROM users u
+SELECT c.name
+FROM customers c
 WHERE EXISTS (
-  SELECT 1 FROM orders o
-  WHERE o.user_id = u.id AND o.amount > 5000
-);
+  SELECT 1 FROM payments p
+  WHERE p.customer_id = c.id     -- c.id comes from the outer row
+    AND p.status = 'PAID'
+)
+ORDER BY c.name;
 ```
 
 ```text output
  name
 ------
  Asha
+ Ravi
 ```
+
+What to notice:
+
+- `p.customer_id = c.id` makes the subquery correlated: it is checked for each customer.
+- Asha appears once even though she has two PAID payments. The same question written as `JOIN payments` returns Asha twice, one row per matching payment.
+- `SELECT 1` could be `SELECT *`; EXISTS ignores the columns and only asks whether a row exists.
+
+## Rules and defaults
+
+- **Scalar subquery:** must return one column and at most one row. Two rows is an error at run time; no rows gives NULL, so `amount > (empty subquery)` keeps nothing.
+- **IN subquery:** must return exactly one column.
+- **NOT IN and NULL:** if the subquery returns a NULL, `NOT IN` keeps no rows at all; see [NULL](card:null-handling). Use `NOT EXISTS` for "has none".
+- **Derived table:** standard SQL requires an alias, and MySQL 9.7 fails with "Every derived table must have its own alias". PostgreSQL 18 accepts it without one, but write `AS t` to stay portable.
+- **Where it can go:** in `SELECT`, `FROM`, `WHERE` and `HAVING`.
+
+## Not to be confused with
+
+A [join](card:joins) puts columns from two tables side by side and repeats a row for every match. A subquery in `WHERE` only tests or supplies a value, so the outer rows are never repeated. Rule: need columns from the other table, use a join; only need to check it, use EXISTS or IN.
 
 ## Interview Qs
 
-### Correlated vs non-correlated subquery?
+### What is the difference between a correlated and a non-correlated subquery?
 
-A non-correlated subquery stands alone and can run once. A correlated one refers to the outer row, so logically it runs for each outer row.
+A non-correlated subquery does not use the outer query's columns, so it can run once and its result is reused. A correlated subquery uses a column of the outer row, so logically it is evaluated again for each outer row. The planner may still rewrite it as a join; check with EXPLAIN.
 
-### What happens if a scalar subquery returns two rows?
+### What happens if a scalar subquery returns two rows, or none?
 
-The query fails at run time. Make it return one row with an aggregate, a unique key or LIMIT 1 with ORDER BY.
+Two rows makes the statement fail at run time, because a single value was expected. No rows is not an error: the result is NULL, so a comparison with it is never true. Return one row with an aggregate such as MAX, a filter on a unique key, or ORDER BY with LIMIT 1.
+
+### When would you use EXISTS instead of a JOIN?
+
+When you only need to know whether a related row exists. A join returns one row per match, so a customer with two payments appears twice and needs DISTINCT. EXISTS returns each outer row once and can stop at the first match. If you need columns from the other table, use the join.

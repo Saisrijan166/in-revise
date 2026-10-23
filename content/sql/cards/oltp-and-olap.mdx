@@ -5,17 +5,29 @@ title: OLTP vs OLAP
 topic: design
 level: intermediate
 heat: 2
-hook: "OLTP runs the app: many small, fast reads and writes. OLAP answers business questions: big scans and sums over history."
+hook: "OLTP runs the app: many small, fast reads and writes of single rows. OLAP answers business questions: big scans and sums over months of history."
 points:
-  - { k: "OLTP", v: "orders, payments, logins; normalised tables, ACID transactions" }
-  - { k: "OLAP", v: "revenue by month or region; read-heavy, few large queries" }
-  - { k: "Column store", v: "keeps each column together: scans few columns, compresses well" }
-  - { k: "Star schema", v: "one big fact table joined to small dimension tables" }
-  - { k: "ETL / ELT", v: "move OLTP data to the warehouse; transform before (ETL) or after (ELT) load" }
+  - { k: "OLTP", v: "the app's live database: create a payment, update a status, read one customer, each in a short transaction" }
+  - { k: "OLAP", v: "analytics such as revenue by month and city: few queries, each reading and summing many rows" }
+  - { k: "Row store", v: "PostgreSQL and MySQL InnoDB keep whole rows together, which suits reading or writing one row at a time" }
+  - { k: "Column store", v: "keeps each column's values together, so a sum over one column reads little and compresses well" }
+  - { k: "Star schema", v: "a warehouse design: one large fact table of events, joined to small dimension tables like date and city" }
+  - { k: "ETL / ELT", v: "jobs that copy OLTP data into the warehouse; ETL reshapes it before loading, ELT after loading" }
 trap:
   wrong: "Just run the heavy reports on the production database."
-  right: "Big aggregates on an OLTP database are slow and can block app transactions. Move them to a replica or a warehouse."
-sayIt: "OLTP serves the app with many short ACID transactions on normalised, row-stored tables. OLAP serves analytics with large aggregate queries, usually in a warehouse with a star schema, loaded from OLTP by ETL."
+  right: "Big aggregates on the OLTP database compete with app transactions for CPU, memory and disk. Run them on a replica or a warehouse."
+  why: "The data is already there and the report query works on small test data, so the cost only shows up when tables grow and traffic is real."
+sayIt: "OLTP serves the app with many short ACID transactions on normalised, row-stored tables. OLAP serves analytics with large aggregate queries, usually in a warehouse with a star schema and column storage, loaded from OLTP by ETL or ELT."
+cheat:
+  idea: "OLTP is the app's live database: many small reads and writes of single rows. OLAP is analytics: few large queries that scan and sum history."
+  flow: "App → OLTP database → ETL job → warehouse → reports"
+  remember: "Do not run heavy reports on the OLTP primary; copy the data to a replica or a warehouse."
+buildsOn: [normalization, aggregates-group-by, joins]
+scenarios:
+  - q: "The finance team runs a query summing three years of payments by month every hour on the main payments database. Checkout becomes slow at those times. Why, and what would you change?"
+    a: "The report scans millions of rows and uses CPU, memory and disk that checkout transactions need. Move it off the primary: to a read replica for a quick fix, or to a warehouse loaded by ETL, where a column store sums one column cheaply."
+  - q: "A dashboard needs total revenue per city per month. Which table design fits a warehouse: the normalised app tables, or a fact table with date and city dimensions?"
+    a: "The fact table with dimensions, a star schema. Each payment is one fact row with its amount and keys to the date and city dimensions, so the query groups by dimension columns with few, simple joins."
 confusedWith: []
 tags: [oltp, olap, data-warehouse, star-schema, etl]
 visual: table
@@ -32,43 +44,83 @@ sources:
   - title: "Understand star schema (Microsoft Learn, Power BI guidance)"
     url: "https://learn.microsoft.com/en-us/power-bi/guidance/star-schema"
     verifiedOn: "2026-10-20"
+  - title: "Columnstore indexes: overview (Microsoft Learn, SQL Server)"
+    url: "https://learn.microsoft.com/en-us/sql/relational-databases/indexes/columnstore-indexes-overview"
+    verifiedOn: "2026-10-20"
   - title: "SQL Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/sql/sql-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+OLTP and OLAP are two kinds of database workload. OLTP (online transaction processing) is the app's day-to-day work: create a payment, mark it PAID, show one customer's history, each as a short transaction touching a few rows. OLAP (online analytical processing) is the business asking questions of that data, such as revenue per city per month, where each query reads and sums a large share of the history. Each workload is usually served by a differently designed store.
+
 ## Why it exists
 
-The app needs quick single-row changes; managers need totals over millions of rows. Running both on one database slows the app.
+The checkout needs a payment insert to finish in milliseconds; finance needs a sum over three years of payments. If both run on the same database, the big scan uses the CPU, memory and disk that checkout transactions need, and checkout slows down. The normalised tables that keep app writes correct also make reports long, with many joins. Separating the two lets each side use the design that suits it.
 
 ## How it works
 
 <Compare id="oltp-vs-olap" />
 
-- PostgreSQL and MySQL InnoDB store whole rows in each page: row stores, built for OLTP.
-- A warehouse keeps history, so its fact tables grow while dimensions stay small.
+Follow one payment from the app to a report:
+
+1. The app inserts the payment into the OLTP database in a short transaction, into normalised, row-stored tables.
+2. On a schedule, or as changes arrive, an ETL or ELT job copies new rows out of the OLTP database.
+3. The job loads them into a data warehouse, a separate store that collects data from many systems for analysis.
+4. In the warehouse the data is laid out as a star schema: each payment becomes a row in a fact table, with keys to dimension tables such as date and city.
+5. Reports query the warehouse, often in a column store, and the OLTP database never sees that load.
+
+So the key is to keep heavy reads away from the database that takes the app's writes.
 
 ## Example
 
+The same payments data, used both ways, run on PostgreSQL 18. All five payments were made in January 2026.
+
 ```sql
--- star schema: revenue per year and category
-SELECT d.year, p.category, SUM(f.amount) AS revenue
-FROM   sales_fact  f
-JOIN   date_dim    d ON d.date_key    = f.date_key
-JOIN   product_dim p ON p.product_key = f.product_key
-GROUP  BY d.year, p.category;
+-- OLTP: one customer action, one row, found by its key
+UPDATE payments SET status = 'PAID' WHERE id = 5;
+
+-- OLAP: a business question that reads every PAID row
+SELECT date_trunc('month', p.created_at)::date AS month,
+       c.city, SUM(p.amount) AS revenue
+FROM payments p JOIN customers c ON c.id = p.customer_id
+WHERE p.status = 'PAID'
+GROUP BY 1, 2
+ORDER BY 1, 2;
 ```
+
+```text output
+   month    | city  | revenue
+------------+-------+---------
+ 2026-01-01 | Delhi |  700.00
+ 2026-01-01 | Pune  | 1400.00
+```
+
+What to notice:
+
+- The UPDATE uses the primary key, so it touches one row however large the table grows. That is the OLTP shape.
+- The report touches every PAID row and joins customers. With five rows it is instant; with fifty million, it is a long scan that competes with checkout.
+- `date_trunc` is PostgreSQL; in MySQL, group by `DATE_FORMAT(p.created_at, '%Y-%m-01')`.
+
+## Rules and defaults
+
+- **Storage:** PostgreSQL and MySQL InnoDB are row stores, built for OLTP. Warehouses usually store data by column.
+- **Fact and dimension tables:** the fact table keeps growing with every event; dimension tables stay small and describe the events.
+- **ETL vs ELT:** ETL transforms the data in a separate engine before loading; ELT loads raw data first and transforms it inside the target store.
+- **First step before a warehouse:** send reports to a read replica, a copy of the database that serves reads; you will see it in [Replication](card:replication).
 
 ## Interview Qs
 
 ### What is a star schema?
 
-A fact table in the middle holds events with numeric measures, such as sales amounts, plus keys to dimension tables. Dimension tables, such as date, product and store, describe those events and are used to filter and group.
+A fact table in the middle holds events with numeric measures, such as payment amounts, plus keys to dimension tables. Dimension tables, such as date, customer and city, describe those events and are used to filter and group. Reports join the fact table to a few dimensions, which keeps queries short.
 
 ### What is the difference between ETL and ELT?
 
-Both move data from sources into an analytics store. ETL transforms it in a separate engine before loading. ELT loads raw data first and transforms it inside the target store.
+Both move data from source systems into an analytics store. ETL transforms it in a separate engine before loading. ELT loads the raw data first and transforms it inside the target store, using the warehouse's own power.
 
 ### Why not run analytics on the OLTP database?
 
-Large aggregates scan many rows, use a lot of resources and can block business transactions. Highly normalised tables also make report queries long, with many joins.
+Large aggregates scan many rows and use a lot of CPU, memory and disk, so they slow down or block business transactions. Highly normalised tables also make report queries long, with many joins. A replica or warehouse takes that load away from the primary.

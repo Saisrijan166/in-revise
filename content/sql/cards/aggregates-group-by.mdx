@@ -5,20 +5,32 @@ title: "Aggregates, GROUP BY and HAVING"
 topic: querying
 level: beginner
 heat: 3
-hook: "GROUP BY folds rows into one row per group; aggregates sum them up; WHERE filters rows before, HAVING filters groups after."
+hook: "GROUP BY puts rows with the same value into one group, aggregates such as SUM give one number per group, and HAVING keeps only the groups you want."
 points:
-  - { k: "COUNT(*)", v: "counts rows, NULLs included" }
-  - { k: "COUNT(col)", v: "counts non-NULL values; COUNT(DISTINCT col) counts unique ones" }
-  - { k: "SUM, AVG, MIN, MAX", v: "skip NULLs; on zero rows return NULL, not 0", kind: minus }
-  - { k: "Select rule", v: "each column is grouped, aggregated or depends on the grouped key" }
-  - { k: "MySQL", v: "ONLY_FULL_GROUP_BY is on by default and enforces that rule", kind: default }
+  - { k: "COUNT(*)", v: "counts rows, including rows whose columns are NULL" }
+  - { k: "COUNT(col)", v: "counts rows where col is not NULL; COUNT(DISTINCT col) counts the different non-NULL values" }
+  - { k: "SUM, AVG, MIN, MAX", v: "skip NULL values; over zero rows they return NULL, not 0, while COUNT returns 0", kind: minus }
+  - { k: "WHERE, then HAVING", v: "WHERE removes rows before grouping; HAVING removes whole groups after the aggregates are computed" }
+  - { k: "Select rule", v: "each selected column must be grouped, inside an aggregate, or fixed by the grouped key" }
+  - { k: "ONLY_FULL_GROUP_BY", v: "on by default in MySQL 9.7, so MySQL rejects a query that breaks the select rule", kind: default }
 trap:
-  wrong: "WHERE COUNT(*) > 5 keeps the big groups."
-  right: "Aggregates are not allowed in WHERE, which runs before grouping. Use HAVING COUNT(*) > 5."
-sayIt: "GROUP BY makes one row per group and aggregates compute over each group. WHERE filters rows before grouping, HAVING filters groups after. COUNT(*) counts rows; COUNT(col) skips NULLs."
-confusedWith: [group-by-vs-partition-by]
+  wrong: "WHERE COUNT(*) > 5 keeps the groups with more than five rows."
+  right: "WHERE runs before grouping, so aggregates are not allowed in it. Filter groups with HAVING COUNT(*) > 5."
+  why: "WHERE is the filter people learn first, and the sentence reads naturally, so they use it before learning that groups are formed only after WHERE."
+sayIt: "GROUP BY makes one row per group and aggregates compute over each group. WHERE filters rows before grouping, HAVING filters groups after. COUNT(*) counts rows; COUNT(col) skips NULLs, and SUM of no rows is NULL."
+cheat:
+  idea: "GROUP BY collects rows that share a value into groups; aggregates (COUNT, SUM, AVG, MIN, MAX) return one value per group. HAVING then keeps only some groups."
+  flow: "WHERE rows → GROUP BY → aggregates → HAVING groups"
+  remember: "WHERE cannot use COUNT or SUM; HAVING can. COUNT(col) skips NULLs; SUM of no rows is NULL."
+buildsOn: [select-and-filtering, null-handling]
+scenarios:
+  - q: "No payment has the status REFUNDED. What does SELECT SUM(amount), COUNT(*) FROM payments WHERE status = 'REFUNDED' return?"
+    a: "SUM is NULL and COUNT(*) is 0. With no input rows there is nothing to add, so SUM, AVG, MIN and MAX return NULL; COUNT returns 0. Write COALESCE(SUM(amount), 0) when the screen needs 0."
+  - q: "You want cities with at least two customers, counting only customers who have a city. Where does each condition go?"
+    a: "WHERE city IS NOT NULL, because it tests single rows before grouping. HAVING COUNT(*) >= 2, because a count exists only after the rows are grouped by city."
+confusedWith: [where-vs-having, group-by-vs-partition-by]
 tags: [group-by, having, count, aggregates]
-visual: table
+visual: flow
 sources:
   - title: "Aggregate Functions (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/functions-aggregate.html"
@@ -32,58 +44,94 @@ sources:
   - title: "MySQL Handling of GROUP BY (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/group-by-handling.html"
     verifiedOn: "2026-10-20"
+  - title: "ORDER BY Optimization: GROUP BY does not sort implicitly (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/order-by-optimization.html"
+    verifiedOn: "2026-10-21"
+  - title: "Working with NULL Values: NULLs are equal in GROUP BY (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/working-with-null.html"
+    verifiedOn: "2026-10-21"
   - title: "SQL Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/sql/sql-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An aggregate function takes many rows and returns one value: `COUNT` counts them, `SUM` adds a column, `AVG` averages it, and `MIN` and `MAX` find the smallest and largest. `GROUP BY customer_id` splits the rows into groups, one group per customer, and runs the aggregates once per group, so the result has one row per group. `HAVING` is a filter on those groups, written after GROUP BY.
+
 ## Why it exists
 
-Reports ask per-group questions: orders per user, revenue per city. Aggregates turn many rows into one number; GROUP BY says which rows belong together.
+"Total paid per customer" is a typical report. Without GROUP BY you would run one SUM query per customer, or load every payment into Java and add them up yourself. GROUP BY answers it in one query, and the database sends back one row per customer instead of every payment.
 
 ## How it works
 
-<Compare id="where-vs-having" />
+<Mermaid
+  alt="Six payment rows go through WHERE, which keeps the four PAID ones. GROUP BY puts them into one group per customer. Aggregates compute a count and a sum per group. HAVING keeps only the groups whose sum is above 1000, which leaves customer 1 with a total of 1300."
+  chart={`flowchart LR
+  P[6 payment rows] --> W[WHERE status = PAID: 4 rows]
+  W --> G[GROUP BY customer_id: 3 groups]
+  G --> A[COUNT, SUM per group]
+  A --> H[HAVING SUM > 1000: 1 group]`}
+/>
 
-- Total of nothing should be 0: write `COALESCE(SUM(amount), 0)`.
+1. `FROM payments` reads all six rows.
+2. `WHERE status = 'PAID'` removes single rows; four paid payments remain.
+3. `GROUP BY customer_id` puts the rows with the same customer_id into one group: customer 1 has two rows, customers 2 and 3 have one each.
+4. The aggregates run once per group: customer 1 gets a count of 2 and a sum of 1300.
+5. `HAVING SUM(amount) > 1000` drops whole groups; only customer 1 is left.
+6. The SELECT list outputs one row for each remaining group.
+
+So the key is: WHERE works on rows, HAVING works on groups.
 
 ## Example
 
+Customers who have paid more than 1000 in total. Customer 1 paid 500 and 800; customer 2 paid 900 and has one FAILED payment; customer 3 paid 800 and has one PENDING payment.
+
 ```sql
--- orders: user 1 paid 800 and 400; user 2 paid 900, refunded 500
-SELECT user_id, COUNT(*) AS orders, SUM(amount) AS total
-FROM orders
-WHERE status = 'PAID'          -- rows first
-GROUP BY user_id
-HAVING SUM(amount) > 1000;     -- then groups
+SELECT customer_id, COUNT(*) AS paid_count, SUM(amount) AS paid_total
+FROM payments
+WHERE status = 'PAID'
+GROUP BY customer_id
+HAVING SUM(amount) > 1000
+ORDER BY customer_id;
 ```
 
 ```text output
- user_id | orders | total
----------+--------+-------
-       1 |      2 |  1200
+ customer_id | paid_count | paid_total
+-------------+------------+------------
+           1 |          2 |    1300.00
+(1 row)
 ```
 
-Counting a column holding 10, 10, NULL:
+What to notice:
 
-```sql
-SELECT COUNT(*) AS all_rows, COUNT(col) AS non_null,
-       COUNT(DISTINCT col) AS distinct_values
-FROM (SELECT 10 AS col UNION ALL SELECT 10 UNION ALL SELECT NULL) t;
-```
+- `WHERE status = 'PAID'` runs before grouping, so the FAILED and PENDING payments are never counted or added.
+- `HAVING SUM(amount) > 1000` is the only place this condition can go; in WHERE it would be an error, because no sums exist yet.
+- `ORDER BY customer_id` is needed for a fixed order. GROUP BY does not sort the output in PostgreSQL 18 or MySQL 9.7.
+- The result is the same in both databases.
 
-```text output
- all_rows | non_null | distinct_values
-----------+----------+-----------------
-        3 |        2 |               1
-```
+## Rules and defaults
+
+- **The select rule:** a selected column must appear in GROUP BY, sit inside an aggregate, or depend on the grouped key. Grouping by a primary key lets you select that row's other columns, in both PostgreSQL 18 and MySQL 9.7.
+- **COUNT forms:** a column holding 10, 10 and NULL gives `COUNT(*)` = 3, `COUNT(col)` = 2 and `COUNT(DISTINCT col)` = 1.
+- **NULL group:** rows whose grouped column is NULL form one group together, even though `NULL = NULL` is not true ([NULL](card:null-handling)); Meena's NULL city becomes its own group.
+- **HAVING without GROUP BY:** the whole result is treated as one group, so `HAVING COUNT(*) > 3` returns one row or none.
+
+## Not to be confused with
+
+- **WHERE and HAVING:** WHERE tests single rows before any grouping; HAVING tests groups after the aggregates exist. Rule: plain column conditions in WHERE, aggregate conditions in HAVING.
+- **GROUP BY and PARTITION BY:** GROUP BY folds each group into one output row. PARTITION BY, used with window functions, keeps every row and puts its group's total beside it. Rule: one row per group = GROUP BY; every row plus its group's number = PARTITION BY. You will see it in [Window functions](card:window-functions).
 
 ## Interview Qs
 
 ### COUNT(*) vs COUNT(column)?
 
-COUNT(*) counts every row. COUNT(column) counts rows where that column is not NULL. They differ exactly when the column has NULLs.
+COUNT(*) counts every row. COUNT(column) counts only the rows where that column is not NULL. With four customers, one of whom has a NULL city, COUNT(*) is 4 and COUNT(city) is 3. They give the same answer only when the column has no NULLs.
 
-### Why does SELECT name, city, COUNT(*) FROM users GROUP BY city fail?
+### Why does SELECT name, city, COUNT(*) FROM customers GROUP BY city fail?
 
-Each group has many names, so the database cannot pick one. PostgreSQL and MySQL reject it, unless `name` depends on the grouped key, such as when you group by the primary key.
+The Pune group holds two customers with different names, so the database cannot pick one name for the group's single row. PostgreSQL and MySQL both reject it. Either group by name too, or wrap name in an aggregate, such as MIN(name).
+
+### Can HAVING use a column that is not aggregated?
+
+Yes, if the column is in GROUP BY, for example HAVING city = 'Pune'. But that condition tests single rows, so it belongs in WHERE, which removes the rows before grouping and saves work. Keep HAVING for conditions on aggregates.

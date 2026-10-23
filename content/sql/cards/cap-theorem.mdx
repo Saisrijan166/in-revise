@@ -5,17 +5,29 @@ title: CAP Theorem and Consistency
 topic: scaling
 level: interview
 heat: 3
-hook: "When the network splits a distributed database, each side must either refuse requests (C) or answer with maybe-stale data (A)."
+hook: "When the network between database copies breaks, each copy must either refuse requests to stay correct (C) or keep answering with possibly old data (A)."
 points:
-  - { k: "C (consistency)", v: "every read sees the latest write (linearizable); not ACID's C" }
-  - { k: "A (availability)", v: "every request to a working node gets a reply" }
-  - { k: "P (partition)", v: "messages between nodes get lost; you cannot opt out", kind: minus }
-  - { k: "CP / AP", v: "HBase picks C; Cassandra by default picks A (Abadi, 2012)" }
-  - { k: "PACELC", v: "no partition? still trade latency against consistency" }
+  - { k: "C (consistency)", v: "every read returns the latest write, as if there were one copy; this is not the C in ACID" }
+  - { k: "A (availability)", v: "every request to a node that is still running gets an answer, not an error or a timeout" }
+  - { k: "P (partition)", v: "the network between nodes breaks; it will happen, so a distributed system cannot opt out", kind: minus }
+  - { k: "Only during a partition", v: "with a healthy network a system can give both C and A; CAP is about the split" }
+  - { k: "CP and AP examples", v: "HBase refuses requests to stay consistent; Cassandra by default keeps answering (Abadi, 2012)" }
+  - { k: "PACELC", v: "even with no partition, waiting for other copies costs time: you trade latency against consistency" }
 trap:
   wrong: "CAP means pick any two of the three; we chose CA."
-  right: "Partitions will happen in a distributed system. CAP says what you give up during one: C or A."
-sayIt: "CAP says that during a network partition a distributed system must choose consistency or availability. PACELC adds that, without a partition, you still trade latency against consistency."
+  right: "Partitions will happen in a distributed system. CAP says what you give up while one lasts: consistency or availability."
+  why: "CAP is often taught as \"pick two of three\", which makes CA look like a valid third option."
+sayIt: "CAP says that during a network partition a distributed system must choose consistency, refusing some requests, or availability, answering with maybe stale data. Partitions will happen, so CA is not a real option. PACELC adds latency versus consistency when there is no partition."
+cheat:
+  idea: "CAP says that when the network between database copies breaks, each copy must either refuse requests to stay consistent or answer with maybe stale data."
+  flow: "Network splits → CP: refuse, or AP: answer with old data"
+  remember: "CAP's C means the latest write, not ACID's C, and \"CA\" is not a real choice."
+buildsOn: [replication, acid]
+scenarios:
+  - q: "A shopping cart service runs in two data centres. The link between them breaks for ten minutes. Business wants customers to keep adding items. CP or AP?"
+    a: "AP. Each side keeps accepting items, and the copies are merged when the link heals. A cart that is briefly out of date costs little, while refusing to take items costs sales."
+  - q: "The last unit of a product is in stock, and during a partition two nodes each get a buy request. Overselling is not allowed. CP or AP?"
+    a: "CP. A node that cannot confirm the latest stock count with the other side must refuse or wait, so only one sale can succeed. An AP choice could sell the same unit twice."
 confusedWith: [strong-vs-eventual-consistency]
 tags: [cap, consistency, availability, pacelc]
 visual: flow
@@ -34,30 +46,66 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The CAP theorem is a rule about databases that keep copies of data on several servers, called nodes. It says that when the network between nodes breaks, which is called a network partition, the system cannot give both consistency (every read returns the latest write) and availability (every request to a running node gets an answer). It must give up one of them until the network heals. P stands for partition tolerance: the system keeps working while nodes cannot reach each other.
+
 ## Why it exists
 
-Copies on several machines must agree, but networks fail. CAP names the one choice left when the copies cannot talk to each other.
+[Replication](card:replication) puts copies of the payments data on several machines, and the network between machines does fail. When node A has the new balance and node B cannot reach A, B must either answer with what it has, which may be old, or refuse. No design avoids this choice. CAP names it, so you decide it for each kind of data in advance instead of discovering it during an outage.
 
 ## How it works
 
 <Mermaid
-  alt="A client writes balance 500 to node A. The link between node A and node B is broken. Another client reads from node B. A CP system makes node B refuse or time out. An AP system makes node B answer with the old balance."
+  alt="A client writes balance 500 to node A. The link between node A and node B is broken. Another client reads from node B. A CP system makes node B refuse or time out. An AP system makes node B answer with the old balance, 1000."
   chart={`flowchart LR
-  W[Write: balance 500] --> A[(Node A)]
-  A -. "link broken" .- B[(Node B)]
-  R[Read balance] --> B
-  B --> CP["CP: refuse or time out"]
-  B --> AP["AP: answer old value"]`}
+  W["1. Write: balance 500"] --> A[(Node A)]
+  A -. "2. link broken" .- B[(Node B)]
+  R["3. Read balance"] --> B
+  B --> CP["4. CP: refuse or time out"]
+  B --> AP["4. AP: answer 1000, the old value"]`}
 />
 
-- With no partition, a system can give both C and A; the choice applies only during the split.
-- See [Strong vs Eventual](compare:strong-vs-eventual-consistency) for what an AP read may return.
+1. A customer's balance is 1000 on both nodes. A payment changes it to 500 on node A.
+2. The link between the nodes breaks before node B receives the change.
+3. Another request reads the balance from node B.
+4. A CP system makes node B refuse or time out, because it cannot confirm it has the latest value. An AP system makes node B answer 1000, the old value.
+5. When the link heals, the nodes exchange changes and agree again.
+
+So the key is: the choice exists only while the partition lasts. With a healthy network, a system can be both consistent and available.
+
+## Example
+
+The payment service makes the choice per kind of data, by asking what a stale read would cost:
+
+| Data | What a stale read costs | Choice during a partition |
+|---|---|---|
+| Wallet balance checked before a refund | Money: the same refund could be paid twice | CP: refuse until the latest value is known |
+| A customer's payment history page | A payment shows up a few seconds late | AP: answer now with what this node has |
+
+What to notice:
+
+- One system can make different choices for different data. CAP is a decision per operation, not a label for a whole product.
+- The AP side is [eventual consistency](card:eventual-consistency): the copies agree again once updates stop flowing and the link is back.
+
+## Rules and defaults
+
+- **C means linearizable:** every operation looks as if it ran at one instant on one copy. ACID's C means a transaction keeps constraints valid. They are different properties.
+- **P is not optional:** a system on several machines cannot promise the network never splits, so "CA" fits only a system whose network can never split, in practice a single node.
+- **Examples (Abadi, 2012):** HBase is CP. Cassandra and Dynamo, in their default setup, are AP.
+- **PACELC:** if there is a Partition, choose Availability or Consistency; Else, choose Latency or Consistency. A read from an asynchronous replica is fast but may be stale; waiting for the primary is fresh but slower.
+- **For SQL databases:** CAP matters once you read from replicas or run several nodes. A single PostgreSQL or MySQL server has no partition to tolerate.
+
+## Not to be confused with
+
+- **Strong consistency** means every read sees the latest write. **Eventual consistency** means copies may differ for a while but agree once updates stop. Rule: CP keeps strong consistency; AP accepts eventual consistency.
+- **[ACID's consistency](card:acid)** means every transaction leaves the data valid under its rules and constraints. Rule: CAP's C is about copies agreeing; ACID's C is about rules holding.
 
 ## Interview Qs
 
 ### Why is "CA" not a real choice?
 
-Dropping P works only if nodes can never lose contact, and no real network promises that. So the real question is what the system gives up, C or A, while a partition lasts.
+Giving up P works only if nodes can never lose contact, and no real network promises that. So the real question is what the system gives up, consistency or availability, while a partition lasts.
 
 ### Is the C in CAP the same as the C in ACID?
 
@@ -65,4 +113,4 @@ No. CAP's C means every read returns the latest write, as if there were one copy
 
 ### When would you choose AP over CP?
 
-When an answer now beats a perfectly fresh one, like a shopping cart or a feed. Choose CP when a stale read costs money or safety, like an account balance or stock count.
+When an answer now is worth more than a perfectly fresh one, as for a shopping cart, a feed or a like count. Choose CP when a stale read costs money or safety, as for an account balance or the last unit of stock.

@@ -5,23 +5,41 @@ title: "Distributed Transactions: 2PC and Saga"
 topic: scaling
 level: interview
 heat: 2
-hook: "Across databases, 2PC commits all-or-nothing but blocks; a saga runs local steps and undoes them with compensations."
+hook: "When one action must change two databases, 2PC makes them commit together but can block; a saga commits step by step and undoes finished steps if a later one fails."
 points:
-  - { k: "2PC", v: "a coordinator asks all to prepare, then tells all to commit" }
-  - { k: "Blocking", v: "prepared work keeps its locks until the coordinator decides", kind: minus }
-  - { k: "Saga", v: "local transactions in order; on failure, compensating steps undo" }
-  - { k: "Saga cost", v: "no automatic rollback, no isolation between sagas", kind: minus }
-  - { k: "Outbox", v: "write the event in the same local transaction; a relay sends it" }
+  - { k: "Distributed transaction", v: "one business action that must change more than one database or service as a unit" }
+  - { k: "2PC", v: "a coordinator asks every database to prepare, then tells all of them to commit, or all to roll back" }
+  - { k: "Blocking", v: "a prepared database keeps its locks until the coordinator decides, even if it crashes", kind: minus }
+  - { k: "Saga", v: "a chain of local transactions; if a step fails, compensating steps undo the steps already committed" }
+  - { k: "Saga cost", v: "no automatic rollback and no isolation: others see a half-finished saga", kind: minus }
+  - { k: "Outbox", v: "save the event in the same local transaction as the data; a relay publishes it afterwards", kind: plus }
 trap:
-  wrong: "One @Transactional around calls to two services makes them atomic."
-  right: "A local transaction covers one database. Across services use a saga with compensations, and an outbox for events."
-sayIt: "Inside one database I use a normal transaction. Across services I use a saga: each step commits locally and a failure triggers compensating steps. Events go out through an outbox table."
+  wrong: "Wrapping the calls to two services in one local transaction makes them atomic."
+  right: "A local transaction covers one database connection. The other service commits on its own database, so use a saga with compensations."
+  why: "In a single app, a transaction around the whole method really does roll everything back, so it feels as if it should also cover whatever the method calls."
+sayIt: "Inside one database I use a normal transaction. Across services I use a saga: each step commits locally, and a failure triggers compensating steps. Events go out through an outbox table in the same transaction. 2PC is atomic but blocks, and every participant must support it."
+cheat:
+  idea: "A distributed transaction changes several databases as one action. 2PC makes them all commit together; a saga commits each step locally and undoes earlier steps on failure."
+  flow: "Saga: step 1 commits → step 2 fails → step 1 undone"
+  remember: "A local transaction never covers another service's database: use a saga and an outbox."
+buildsOn: [transactions, sharding]
+scenarios:
+  - q: "A refund saga first marks the payment REFUNDED in the payments database, then asks the wallet service to credit the customer. The wallet call fails for good. What should happen?"
+    a: "A compensating transaction runs in the payments service: it sets the payment back to PAID, or records that the refund failed. The first step already committed, so no ROLLBACK can undo it; only a new step that reverses its effect can."
+  - q: "The payment service commits a payment, then publishes a PaymentPaid message to the broker. The process crashes between the two. What is lost, and how do you prevent it?"
+    a: "The message is lost: the payment exists, but no other service hears about it. Write the event into an outbox table in the same transaction as the payment, and let a relay publish unsent outbox rows. Both rows commit together, so the event cannot be lost."
 confusedWith: []
 tags: [two-phase-commit, saga, outbox, microservices]
 visual: table
 sources:
-  - title: "PREPARE TRANSACTION (PostgreSQL 18)"
+  - title: "PREPARE TRANSACTION: for transaction managers, locks held (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/sql-prepare-transaction.html"
+    verifiedOn: "2026-10-21"
+  - title: "max_prepared_transactions: default 0 disables prepared transactions (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/runtime-config-resource.html"
+    verifiedOn: "2026-10-21"
+  - title: "XA Transactions (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/xa.html"
     verifiedOn: "2026-10-20"
   - title: "Pattern: Saga (microservices.io, Chris Richardson)"
     url: "https://microservices.io/patterns/data/saga.html"
@@ -31,40 +49,85 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A distributed transaction is one business action that must change data in more than one database, or in a database and a message broker, as one unit. A local [transaction](card:transactions) cannot do it, because COMMIT covers only one database. This happens with [shards](card:sharding), and with microservices, where each service owns its own database. There are two common answers: two-phase commit (2PC) and the saga.
+
 ## Why it exists
 
-An order may touch an orders database, a payments database and a message broker. No local transaction spans them, so a crash halfway leaves them disagreeing.
+A refund changes the payments database (the payment becomes REFUNDED) and the wallet service's database (the customer is credited). If the first commits and the wallet service then crashes, the payment says "refunded" but no money came back, and no single ROLLBACK can fix both databases. You need either one commit across both, or a planned way to undo the finished part.
 
 ## How it works
 
 <Compare id="two-phase-commit-vs-saga" />
 
-- Saga styles: [choreography](card:choreography-saga) (services react to events) or [orchestration](card:orchestration-saga) (one coordinator gives orders).
-- The [outbox](card:transactional-outbox) relay may send an event twice, so consumers must be idempotent.
+Two-phase commit, run by a coordinator (a transaction manager):
+
+1. Each database does its part of the work but does not commit yet.
+2. Prepare phase: the coordinator asks every database to prepare. Each one stores its changes durably, keeps its locks and answers yes or no.
+3. Commit phase: if all said yes, the coordinator tells all of them to commit; if any said no, it tells all of them to roll back.
+
+A saga, for the same refund:
+
+1. The payments service commits its local step (payment REFUNDED) and sends a message to the wallet service.
+2. The wallet service commits its local step (customer credited).
+3. If step 2 fails, the saga runs a compensating transaction for each step already committed, such as setting the payment back to PAID.
+
+So the key is: 2PC holds everything locked until one decision; a saga never waits, but must undo by hand.
 
 ## Example
 
+A saga step must commit its data and send a message. Writing both into one database, with an outbox table, makes them one local transaction.
+
 ```sql
+-- outbox(id bigserial, aggregate_id, event_type, payload jsonb, sent_at)
 BEGIN;
-INSERT INTO orders (id, user_id, amount, status)
-VALUES (42, 7, 999.00, 'PENDING');
+INSERT INTO payments (id, customer_id, amount, status)
+VALUES (42, 7, 999.00, 'PAID');
 INSERT INTO outbox (aggregate_id, event_type, payload)
-VALUES (42, 'OrderCreated', '{"orderId": 42}');
-COMMIT;   -- both rows or neither; a relay publishes the outbox row later
+VALUES (42, 'PaymentPaid', '{"paymentId": 42, "amount": 999.00}');
+COMMIT;   -- both rows or neither
+
+-- the relay later reads unsent events and publishes them
+SELECT id, event_type, payload FROM outbox WHERE sent_at IS NULL ORDER BY id;
 ```
 
-## Defaults
+```text output
+ id | event_type  |               payload
+----+-------------+-------------------------------------
+  1 | PaymentPaid | {"amount": 999.00, "paymentId": 42}
+(1 row)
+```
 
-| What | Default | Where |
-|---|---|---|
-| `max_prepared_transactions` | 0: 2PC prepare is turned off | PostgreSQL 18 |
+What to notice:
+
+- The payment and its event commit together, so the event exists exactly when the payment does. No 2PC with the message broker is needed.
+- Without the outbox, the app would commit the payment and then publish to the broker. A crash between the two loses the event.
+- The relay can crash after publishing but before it sets `sent_at`, so it may publish the same event twice. Consumers must be [idempotent](term:idempotent-write): handling an event twice has the same effect as once.
+
+## Rules and defaults
+
+- **PostgreSQL 2PC:** `PREPARE TRANSACTION 'id'`, later `COMMIT PREPARED 'id'` or `ROLLBACK PREPARED 'id'`. It is off by default: `max_prepared_transactions = 0` in PostgreSQL 18, and PREPARE fails with "prepared transactions are disabled".
+- **Meant for transaction managers:** the PostgreSQL docs say PREPARE TRANSACTION is not for application code.
+- **Prepared work keeps its locks:** a forgotten prepared transaction blocks other sessions and holds back VACUUM until someone finishes it.
+- **MySQL 2PC:** XA transactions (`XA START`, `XA END`, `XA PREPARE`, `XA COMMIT`); InnoDB supports them.
+- **Saga styles:** in [choreography](card:choreography-saga), each service reacts to the previous step's event; in [orchestration](card:orchestration-saga), one orchestrator tells each service what to do next.
+- **No isolation in a saga:** between steps, other requests can see a payment marked REFUNDED whose credit has not happened yet. Design for it, for example with a `PENDING` status.
+
+## Common mistakes
+
+- **"A compensation is a rollback."** A rollback erases uncommitted work. A compensation is a new, committed step that reverses an earlier effect, such as a refund that reverses a charge, and it can itself fail and need a retry.
 
 ## Interview Qs
 
 ### In 2PC, what if the coordinator crashes after everyone prepared?
 
-Participants stay prepared and keep their locks. They cannot commit or roll back alone; they wait until the coordinator, or an operator, finishes each one with COMMIT PREPARED or ROLLBACK PREPARED.
+The participants stay prepared and keep their locks. They cannot commit or roll back on their own, because they do not know the decision. They wait until the coordinator recovers, or an operator finishes each one with COMMIT PREPARED or ROLLBACK PREPARED.
 
 ### Why do microservices use sagas instead of 2PC?
 
-Each service owns its database, and the database or message broker may not support 2PC. 2PC also adds latency and blocking. A saga needs only local transactions plus messages.
+Each service owns its database, and the databases or the message broker may not support 2PC. 2PC also adds round trips and holds locks across services, so one slow service blocks the others. A saga needs only local transactions and messages.
+
+### What is the transactional outbox, and why use it?
+
+An outbox is a table where a service saves the events it must publish, in the same local transaction as its data change. A separate relay reads unsent rows and publishes them. It solves the "commit, then crash before publishing" problem without 2PC.

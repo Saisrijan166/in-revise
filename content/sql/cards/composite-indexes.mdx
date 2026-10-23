@@ -5,17 +5,27 @@ title: Composite and Covering Indexes
 topic: indexes
 level: intermediate
 heat: 3
-hook: "A composite index is sorted by its first column, then the next, like a phone book: it serves filters on a leftmost prefix."
+hook: "A composite index is sorted by its first column, then the next, like a phone book. It serves filters that start from its leftmost column."
 points:
-  - { k: "Leftmost prefix", v: "(a, b, c) serves a; a and b; a, b and c" }
-  - { k: "Column order", v: "equality columns first, the range column last" }
-  - { k: "Skip scan", v: "can skip a missing first column with few values (MySQL 8.0.13+, PostgreSQL 18)", kind: plus }
-  - { k: "Covering", v: "holds every column the query needs: no table visit", kind: plus }
-  - { k: "INCLUDE", v: "PostgreSQL 11+: extra stored columns that are not search keys", kind: default }
+  - { k: "Leftmost prefix", v: "an index on (a, b, c) can seek on a; on a and b; or on a, b and c, but not on b alone" }
+  - { k: "Column order", v: "put the columns compared with = first and the one compared with a range or ORDER BY last" }
+  - { k: "Skip scan", v: "can skip a missing first column that has few distinct values (MySQL 8.0.13+, PostgreSQL 18)", kind: plus }
+  - { k: "Covering index", v: "holds every column the query reads, so the database answers from the index alone", kind: plus }
+  - { k: "INCLUDE (PostgreSQL 11+)", v: "adds stored columns that are returned by the index but are not part of the search key", kind: default }
 trap:
-  wrong: "An index on (user_id, status) also serves WHERE status = 'PAID'."
-  right: "Not as a normal seek: status is not the leftmost column. Add an index on status; skip scan helps only when user_id has few values."
-sayIt: "A composite index is sorted by its columns in order, so it serves filters on a leftmost prefix. I put equality columns first and the range column last. If it also holds every selected column it is covering, and the table is never read."
+  wrong: "An index on (customer_id, status) also serves WHERE status = 'PAID'."
+  right: "Not as a normal seek: status is not the leftmost column. Add an index that starts with status; skip scan helps only if customer_id has few values."
+  why: "The index contains status, so it seems any filter on status can use it. But entries are sorted by customer_id first, so status values are scattered across the index."
+sayIt: "A composite index is sorted by its columns in order, so it serves filters on a leftmost prefix. I put equality columns first and the range or sort column last. If it also holds every column the query reads, it is covering and the table is skipped."
+cheat:
+  idea: "A composite index is sorted by its first column, then the next, so it serves filters on its leftmost columns. A covering index holds every column a query reads, so the table is skipped."
+  remember: "Equality columns first, range or sort column last; (a, b) cannot seek on WHERE b = ? alone."
+buildsOn: [indexes, clustered-indexes]
+scenarios:
+  - q: "payments has an index on (customer_id, status). Which of these can seek on it: (a) customer_id = 7, (b) status = 'FAILED', (c) status = 'FAILED' AND customer_id = 7?"
+    a: "(a) and (c). The order of conditions in the WHERE does not matter, so (c) fixes both leading columns. (b) has no condition on customer_id, the first column, so there is no single place to start; PostgreSQL ran a Seq Scan for it."
+  - q: "EXPLAIN ANALYZE shows an Index Only Scan with Heap Fetches: 4000. Why is the table still read?"
+    a: "Many table pages changed since the last VACUUM, so PostgreSQL's visibility map does not mark them all-visible, and each row on them must be checked in the heap. After VACUUM, Heap Fetches drops towards 0."
 confusedWith: []
 tags: [indexes, composite-index, covering-index]
 visual: table
@@ -26,51 +36,100 @@ sources:
   - title: "Multicolumn Indexes (PostgreSQL 18 docs, 11.3)"
     url: "https://www.postgresql.org/docs/18/indexes-multicolumn.html"
     verifiedOn: "2026-10-20"
+  - title: "Indexes and ORDER BY: forward and backward scans (PostgreSQL 18 docs, 11.4)"
+    url: "https://www.postgresql.org/docs/18/indexes-ordering.html"
+    verifiedOn: "2026-10-21"
   - title: "Index-Only Scans and Covering Indexes (PostgreSQL 18 docs, 11.9)"
     url: "https://www.postgresql.org/docs/18/indexes-index-only-scans.html"
     verifiedOn: "2026-10-20"
+  - title: "CREATE INDEX: INCLUDE supported by B-tree, GiST and SP-GiST (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/18/sql-createindex.html"
+    verifiedOn: "2026-10-21"
   - title: "Combining Multiple Indexes (PostgreSQL 18 docs, 11.5)"
     url: "https://www.postgresql.org/docs/18/indexes-bitmap-scans.html"
     verifiedOn: "2026-10-20"
+  - title: "PostgreSQL 18 release notes: skip scans of B-tree indexes"
+    url: "https://www.postgresql.org/docs/18/release-18.html"
+    verifiedOn: "2026-10-21"
   - title: "Skip Scan, as of 8.0.13 (MySQL 8.0 manual)"
     url: "https://dev.mysql.com/doc/refman/8.0/en/range-optimization.html"
     verifiedOn: "2026-10-20"
+  - title: "Skip Scan Range Access Method: conditions (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/range-optimization.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A composite index, also called a multicolumn index, is one index on several columns, such as `(customer_id, status)`. Its entries are sorted by the first column, then by the second within each value of the first, like a phone book sorted by surname and then by first name. A covering index is any index that holds every column a query reads, so the database can answer from the index without visiting the table.
 
 ## Why it exists
 
-Real queries filter on two or three columns together. One index sorted by all of them finds the rows in one seek, and can even answer the query by itself.
+Real queries filter on more than one column: "failed payments of customer 7". With an index on `customer_id` only, the database finds customer 7's rows and then checks `status` on each row in the table. A composite index on both columns finds exactly the matching entries in one seek. If the index also carries `amount`, the query never touches the table at all.
 
 ## How it works
 
-| `WHERE` (index on `user_id, status, created_at`) | Seek uses |
+| `WHERE` (index on `customer_id, status, created_at`) | Seek uses |
 |---|---|
-| `user_id = 7` | `user_id` |
-| `user_id = 7 AND status = 'PAID'` | `user_id, status` |
-| `user_id = 7 AND status = 'PAID' AND created_at > '2026-01-01'` | all three |
-| `user_id = 7 AND created_at > '2026-01-01'` | `user_id`; `created_at` is checked inside the index |
+| `customer_id = 7` | `customer_id` |
+| `customer_id = 7 AND status = 'PAID'` | `customer_id, status` |
+| `customer_id = 7 AND status = 'PAID' AND created_at > '2026-06-01'` | all three |
+| `customer_id = 7 AND created_at > '2026-06-01'` | `customer_id`; `created_at` is checked inside the index |
 | `status = 'PAID'` | no seek (skip scan at best) |
 
-- PostgreSQL: an index-only scan still checks the visibility map; recently changed pages need a table visit.
+1. The index stores its entries sorted by `customer_id`, then `status`, then `created_at`.
+2. For `customer_id = 7 AND status = 'PAID'`, the database seeks to the first (7, 'PAID') entry and reads forward while both still match. All matching entries sit next to each other.
+3. A range on the next column, `created_at > '2026-06-01'`, narrows that same run of entries. This is why equality columns go first and the range column last.
+4. For `status = 'PAID'` alone, the matching entries are spread under every customer, so there is no single place to start. This is the leftmost-prefix rule.
+5. If every column the query reads is in the index, the database returns rows from the index alone. This is called an index-only scan.
 
 ## Example
 
+A composite index, a filter it cannot serve, and a covering version, on 100,000 payments in PostgreSQL 18.
+
 ```sql
-CREATE INDEX idx_orders_user_status ON orders (user_id, status);
+CREATE INDEX idx_payments_cust_status ON payments (customer_id, status);
+EXPLAIN SELECT id FROM payments WHERE customer_id = 7 AND status = 'FAILED';
+EXPLAIN SELECT id FROM payments WHERE status = 'FAILED';
 
--- PostgreSQL 11+: amount is stored in the index, not searchable
-CREATE INDEX idx_orders_user_cover ON orders (user_id) INCLUDE (amount);
-
-EXPLAIN SELECT amount FROM orders WHERE user_id = 7;
--- PostgreSQL: Index Only Scan using idx_orders_user_cover
+-- amount is stored in the index, but you cannot search on it
+CREATE INDEX idx_payments_cover ON payments (customer_id, status)
+  INCLUDE (amount);
+VACUUM payments;
+EXPLAIN ANALYZE SELECT amount FROM payments
+WHERE customer_id = 7 AND status = 'PAID';
 ```
+
+What to notice:
+
+- The first query got `Index Scan using idx_payments_cust_status` with both columns in the `Index Cond`.
+- The second query got `Seq Scan on payments`: `status` is not the leftmost column, and with 10,000 distinct customers a skip scan was not worth it.
+- The last query got `Index Only Scan using idx_payments_cover` with `Heap Fetches: 0`: `amount` came from the index, and the table was never read.
+- `VACUUM` updated the visibility map first. Without it, recently changed pages would still need a visit to the table.
+
+## Rules and defaults
+
+- **Leftmost prefix:** a B-tree on `(a, b, c)` seeks on `a`; `a, b`; or `a, b, c`. The order of conditions inside the WHERE does not matter.
+- **Equality, then sort:** for `WHERE customer_id = ? ORDER BY created_at DESC`, an index on `(customer_id, created_at)` returns rows already sorted; PostgreSQL reads it backward for DESC.
+- **Skip scan:** MySQL 8.0.13+ and PostgreSQL 18 can use the index with no condition on the first column, by seeking each of its distinct values. It pays off only when that column has few values. MySQL also needs a range condition and a query that reads only indexed columns.
+- **INCLUDE (PostgreSQL 11+):** adds non-key columns that an index-only scan can return. B-tree, GiST and SP-GiST support it.
+- **Visibility map (PostgreSQL):** an index-only scan still checks whether each row's page is all-visible; pages changed since the last VACUUM need a heap visit, shown as `Heap Fetches`.
+- **InnoDB:** every secondary index already holds the primary key, so `(customer_id)` covers `SELECT id ... WHERE customer_id = ?`, as in [clustered indexes](card:clustered-indexes).
+
+## Not to be confused with
+
+A composite index is about how many key columns an index has. A covering index is about one query: does the index hold every column that query reads? An index on `(customer_id)` covers `SELECT customer_id`, and a composite index fails to cover `SELECT *`. Rule: composite = several key columns; covering = enough columns for this query.
 
 ## Interview Qs
 
 ### What is a covering index?
 
-An index holding every column a query reads, so the answer comes from the index alone. In PostgreSQL 11+ add non-key columns with `INCLUDE`.
+An index holding every column a query reads, so the answer comes from the index alone, without reading table rows. In PostgreSQL 11+, add non-key columns with `INCLUDE`. In InnoDB, secondary indexes already contain the primary key.
 
 ### Two single-column indexes or one composite index?
 
-For queries that filter on both, one composite index is usually faster. PostgreSQL can combine two indexes with a bitmap, at extra cost; separate indexes also serve each column alone.
+For queries that filter on both columns, one composite index is usually faster: one seek finds exactly the matching entries. PostgreSQL can combine two single-column indexes with a bitmap, at extra cost. Separate indexes also serve each column alone, so the right answer depends on the queries you run.
+
+### Why does column order matter in a composite index?
+
+Entries are sorted by the first column, so a seek needs a condition on it. Put equality columns first and the range or sort column last. After a range column, later columns are only checked inside the index; they do not necessarily narrow the part of the index that is read.

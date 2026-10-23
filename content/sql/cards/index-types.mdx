@@ -5,16 +5,27 @@ title: Index Types
 topic: indexes
 level: intermediate
 heat: 2
-hook: "B-tree for nearly everything; GIN when one row holds many values; BRIN for huge tables stored in time order."
+hook: "Most indexes are B-trees, which serve equality, ranges and sorting. GIN finds values inside JSONB or arrays, and BRIN suits huge tables stored in time order."
 points:
-  - { k: "B-tree", v: "the default: =, ranges, sorting, LIKE 'abc%'", kind: default }
-  - { k: "GIN", v: "PostgreSQL: many values per row, like arrays, JSONB, full-text" }
-  - { k: "BRIN", v: "PostgreSQL: tiny min/max summary per block range", kind: plus }
-  - { k: "InnoDB", v: "B-tree only, plus FULLTEXT and SPATIAL; no hash, no partial", kind: minus }
+  - { k: "B-tree", v: "the default in PostgreSQL and MySQL; serves =, <, >, BETWEEN, IN, ORDER BY and LIKE 'abc%'", kind: default }
+  - { k: "GIN (PostgreSQL)", v: "one entry per element inside a value, so it finds rows whose JSONB, array or text contains something" }
+  - { k: "BRIN (PostgreSQL)", v: "stores only the min and max per block range, so it stays tiny on huge append-only tables", kind: plus }
+  - { k: "Partial (PostgreSQL)", v: "CREATE INDEX ... WHERE holds only the matching rows, so it is small; MySQL has no partial index", kind: plus }
+  - { k: "MySQL InnoDB", v: "B-tree only, plus FULLTEXT and SPATIAL; USING HASH is accepted but builds a B-tree", kind: minus }
 trap:
   wrong: "A normal B-tree index on a JSONB column speeds up 'contains' searches."
-  right: "A B-tree compares whole documents. For @> or ? on JSONB or arrays, use a GIN index (PostgreSQL)."
-sayIt: "B-tree is the default and handles equality, ranges and sorting. PostgreSQL adds hash, GIN for JSONB, arrays and full-text, GiST for geometry and BRIN for huge ordered tables. Partial and expression indexes cover a subset or a computed value."
+  right: "A B-tree compares whole documents, so it cannot look inside one. For @> or ? on JSONB or arrays, use a GIN index (PostgreSQL)."
+  why: "The column is indexed and the query filters on it, so it seems the index must apply. The plan shows a Seq Scan, because 'contains' is not an operator a B-tree can search."
+sayIt: "B-tree is the default and handles equality, ranges and sorting. PostgreSQL adds hash for equality only, GIN for JSONB, arrays and full-text, GiST for geometry and BRIN for huge ordered tables. Partial and expression indexes cover a subset of rows or a computed value."
+cheat:
+  idea: "The index type is the structure behind an index. B-tree, the default, keeps values sorted; PostgreSQL adds GIN for values inside JSONB or arrays and BRIN for huge time-ordered tables."
+  remember: "Match the index to the operator in the WHERE: =, ranges and sorting need a B-tree; JSONB @> needs GIN."
+buildsOn: [indexes, data-types]
+scenarios:
+  - q: "A table of sensor readings is only ever appended to, holds billions of rows, and queries ask for one hour by recorded_at. A B-tree on recorded_at is very large. What could you use instead in PostgreSQL?"
+    a: "A BRIN index. Rows arrive in time order, so each block range covers a narrow span of time, and BRIN stores just its min and max. The index stays tiny, and the query reads only the block ranges whose span overlaps that hour."
+  - q: "You index a JSONB column with GIN using jsonb_path_ops, then run WHERE meta ? 'retry'. Is the index used?"
+    a: "No. jsonb_path_ops supports the containment operator @> but not the key-exists operator ?. Use the default jsonb_ops class, or rewrite the filter as containment, such as meta @> '{\"retry\": true}'."
 confusedWith: [btree-vs-hash-index]
 tags: [indexes, gin, brin, jsonb]
 visual: table
@@ -25,8 +36,20 @@ sources:
   - title: "CREATE INDEX (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/sql-createindex.html"
     verifiedOn: "2026-10-20"
+  - title: "Partial Indexes: the query's WHERE must imply the index predicate (PostgreSQL 18 docs, 11.8)"
+    url: "https://www.postgresql.org/docs/18/indexes-partial.html"
+    verifiedOn: "2026-10-21"
+  - title: "Unique Indexes: NULLS NOT DISTINCT (PostgreSQL 18 docs, 11.6)"
+    url: "https://www.postgresql.org/docs/18/indexes-unique.html"
+    verifiedOn: "2026-10-21"
+  - title: "PostgreSQL 15 release notes: unique NULLS NOT DISTINCT"
+    url: "https://www.postgresql.org/docs/15/release-15.html"
+    verifiedOn: "2026-10-21"
   - title: "jsonb Indexing (PostgreSQL 18 docs, 8.14.4)"
     url: "https://www.postgresql.org/docs/18/datatype-json.html"
+    verifiedOn: "2026-10-21"
+  - title: "Operator Classes: text_pattern_ops for LIKE (PostgreSQL 18 docs, 11.10)"
+    url: "https://www.postgresql.org/docs/18/indexes-opclass.html"
     verifiedOn: "2026-10-20"
   - title: "CREATE INDEX Statement (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/create-index.html"
@@ -36,9 +59,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The index type is the data structure an index uses. In PostgreSQL you choose it with `USING` in `CREATE INDEX`; with no `USING` you get a B-tree, the sorted tree from [Indexes](card:indexes). Some options change which rows or values go into an index, not its structure: unique, partial (only some rows) and expression (a computed value).
+
 ## Why it exists
 
-One structure cannot serve every query. A sorted tree is great for `=` and ranges, but not for "which rows contain this tag", and huge on a billion log rows.
+A sorted tree answers `customer_id = 7` or "payments in October" well. It cannot answer "which payments have `retry: true` inside their JSONB details", because each whole document is one sorted value and there is nothing to search inside it. Indexing all 100,000 payments is also wasteful when queries only ever look for the 3,000 pending ones. Other types and options fit these shapes of query.
 
 ## How it works
 
@@ -46,35 +73,63 @@ One structure cannot serve every query. A sorted tree is great for `=` and range
 |---|---|---|
 | B-tree | `=`, `<`, `BETWEEN`, `IN`, `ORDER BY`, `LIKE 'abc%'` | Default in both |
 | Hash | `=` only | PostgreSQL; not InnoDB |
-| GIN | Arrays, JSONB `@>` and `?`, full-text | PostgreSQL |
+| GIN | JSONB `@>` and `?`, arrays, full-text | PostgreSQL |
 | GiST, SP-GiST | Geometry, ranges, nearest neighbour | PostgreSQL |
 | BRIN | Huge tables whose values follow insert order | PostgreSQL |
 | FULLTEXT, SPATIAL | Word search, geometry | MySQL InnoDB |
 
-- **Unique**: rejects duplicate keys. In PostgreSQL only B-tree can be unique.
-- **`LIKE 'abc%'`** in PostgreSQL needs the C collation or `text_pattern_ops`.
-- **Partial** (PostgreSQL only): `CREATE INDEX ... WHERE`; holds only the rows you search.
-- **Expression**: indexes a computed value such as `lower(email)` ([the classic fix](card:index-not-used)).
+To choose, follow the query:
+
+1. Look at the operator in the WHERE clause. `=`, ranges, `ORDER BY` and `LIKE 'abc%'` point to a B-tree, the default.
+2. If the column holds many values per row, such as JSONB, an array or a text document, and the query asks "contains", use GIN. It stores one entry per element, pointing to every row that contains it.
+3. If the table is huge and the column grows with insert order, like `created_at` in a log, BRIN keeps only the min and max per range of table blocks and skips ranges that cannot match.
+4. Then decide what goes in: UNIQUE to reject duplicates, a WHERE clause for a partial index, or an expression such as `lower(email)`.
 
 ## Example
 
+Two indexes on `payments`, where `meta` is a JSONB column holding gateway details.
+
 ```sql
--- partial: only pending orders are indexed
-CREATE INDEX idx_orders_pending ON orders (created_at)
+-- partial: only the pending payments are in the index
+CREATE INDEX idx_payments_pending ON payments (created_at)
   WHERE status = 'PENDING';
--- GIN on the JSONB column attrs
-CREATE INDEX idx_products_attrs ON products USING GIN (attrs);
-SELECT id FROM products WHERE attrs @> '{"colour": "red"}';
+SELECT id FROM payments
+WHERE status = 'PENDING' AND created_at < '2026-02-01';
+
+-- GIN on the JSONB column
+CREATE INDEX idx_payments_meta ON payments USING GIN (meta);
+SELECT id FROM payments WHERE meta @> '{"retry": true}';
 ```
 
-MySQL calls an expression index a functional key part (8.0.13+): `CREATE INDEX idx_users_lower_email ON users ((LOWER(email)));`
+What to notice:
+
+- On 100,000 payments the partial index holds only the 3,000 pending ones, and the first query used it. The same query with `status = 'PAID'` ran a Seq Scan, because those rows are not in the index.
+- PostgreSQL uses a partial index only when the query's WHERE clearly implies the index's WHERE. The check happens at planning time, so write `status = 'PENDING'` as a literal, not a parameter.
+- `@>` means "contains". With a plain B-tree on `meta`, PostgreSQL still ran a Seq Scan; with the GIN index it used a Bitmap Index Scan.
+
+## Rules and defaults
+
+- **Default type:** B-tree, in PostgreSQL 18 and MySQL 9.7 InnoDB, when you name no type.
+- **Unique:** in PostgreSQL only a B-tree can be unique. NULLs count as distinct by default, so a unique index allows many NULL rows; PostgreSQL 15+ `NULLS NOT DISTINCT` allows only one.
+- **JSONB operator classes:** the default `jsonb_ops` supports `@>`, `?`, `?|` and `?&`. `jsonb_path_ops` is usually smaller and faster, but drops the `?` operators.
+- **Prefix LIKE in PostgreSQL:** a B-tree serves `LIKE 'abc%'` only with the C collation or the `text_pattern_ops` operator class.
+- **Expression index:** PostgreSQL indexes any expression; MySQL calls it a functional key part (8.0.13+), written with double brackets: `((LOWER(email)))`.
+- **MySQL InnoDB:** no hash, GIN, BRIN or partial indexes; `CREATE INDEX ... WHERE` is a syntax error, and `USING HASH` quietly builds a B-tree.
+
+## Not to be confused with
+
+A B-tree keeps values sorted, so it answers `=`, ranges and `ORDER BY`. A hash index stores a hash code of each value, so it answers only `=`, and in PostgreSQL it cannot be unique or span several columns. Rule: B-tree unless you have measured a reason for hash.
 
 ## Interview Qs
 
 ### Which index would you use on a JSONB column?
 
-GIN. The default class supports containment `@>` and key-exists `?`. `jsonb_path_ops` is usually smaller and faster but drops `?`.
+GIN. The default operator class supports containment `@>` and the key-exists operators such as `?`. `jsonb_path_ops` is usually smaller and faster and supports `@>`, but not the `?` operators. A B-tree on the column cannot look inside documents.
 
 ### What is a partial index, and when is it useful?
 
-An index over only the rows that match a `WHERE`, such as pending orders. It is smaller and cheaper to maintain. PostgreSQL has it; MySQL's CREATE INDEX has no `WHERE` clause.
+An index over only the rows that match its WHERE, such as pending payments. It is smaller and cheaper to maintain, and a query whose filter implies that WHERE can use it. PostgreSQL has it; MySQL's CREATE INDEX has no WHERE clause.
+
+### When would you choose a BRIN index?
+
+For a very large table whose column follows the physical row order, such as `created_at` in an append-only log. BRIN stores a min and max per block range, so it is tiny, and range queries skip block ranges that cannot match. On randomly ordered data it helps little.

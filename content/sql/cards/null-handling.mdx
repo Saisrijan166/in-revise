@@ -5,17 +5,28 @@ title: "NULL and Three-Valued Logic"
 topic: querying
 level: beginner
 heat: 3
-hook: "NULL means unknown. Anything compared with unknown is UNKNOWN, and WHERE keeps only TRUE rows."
+hook: "NULL means the value is unknown. Any comparison with it is UNKNOWN, not true or false, and WHERE keeps only rows where the condition is true."
 points:
-  - { k: "Test it", v: "IS NULL / IS NOT NULL; = NULL is never true" }
-  - { k: "Not a value", v: "NULL is not 0 and not ''" }
-  - { k: "COALESCE(a, b)", v: "first non-NULL argument: a default for display" }
-  - { k: "NULL-safe equal", v: "IS NOT DISTINCT FROM; MySQL writes <=>" }
-  - { k: "Sort ASC", v: "PostgreSQL: NULLs last. MySQL: NULLs first", kind: default }
+  - { k: "Test for NULL", v: "write city IS NULL or city IS NOT NULL; city = NULL is never true, so it matches no rows" }
+  - { k: "Not a value", v: "NULL is not 0 and not the empty text ''; it means no value is known" }
+  - { k: "Lost in both filters", v: "a row with a NULL city is returned by neither city = 'Pune' nor city <> 'Pune'", kind: minus }
+  - { k: "COALESCE(a, b)", v: "returns the first argument that is not NULL, so COALESCE(city, 'Unknown') fills in a default" }
+  - { k: "NULL-safe equal", v: "IS NOT DISTINCT FROM (PostgreSQL 18) and <=> (MySQL 9.7) treat two NULLs as equal" }
+  - { k: "Sorting (ASC)", v: "PostgreSQL 18 puts NULLs last and accepts NULLS FIRST; MySQL 9.7 puts NULLs first", kind: default }
 trap:
-  wrong: "WHERE id NOT IN (SELECT user_id FROM orders) finds users with no orders."
-  right: "If any user_id is NULL, NOT IN is never TRUE and returns no rows. Use NOT EXISTS."
-sayIt: "NULL is unknown, so comparisons with it give UNKNOWN and WHERE drops those rows. I test with IS NULL, default with COALESCE, and avoid NOT IN over a nullable column."
+  wrong: "WHERE id NOT IN (SELECT customer_id FROM payments) finds customers with no payments."
+  right: "If any customer_id in that list is NULL, NOT IN is never true for any row, so the query returns nothing. Use NOT EXISTS."
+  why: "It reads like plain English and works on test data without NULLs. It fails only when a NULL reaches the list, often much later."
+sayIt: "NULL means unknown, so a comparison with NULL gives UNKNOWN and WHERE drops the row. I test with IS NULL, fill defaults with COALESCE, and use NOT EXISTS instead of NOT IN when a NULL can appear."
+cheat:
+  idea: "NULL marks a missing or unknown value, not 0 and not ''. A comparison with NULL is UNKNOWN, and WHERE keeps only TRUE rows, so test with IS NULL, never = NULL."
+  remember: "NOT IN over a list that holds a NULL returns no rows; use NOT EXISTS."
+buildsOn: [select-and-filtering]
+scenarios:
+  - q: "Four customers: two in Pune, one in Delhi and Meena, whose city is NULL. How many rows does WHERE city <> 'Pune' return?"
+    a: "One, Ravi in Delhi. For Meena, NULL <> 'Pune' is UNKNOWN, and WHERE keeps only TRUE rows. To include her, add OR city IS NULL."
+  - q: "SELECT total / NULLIF(count, 0) runs on a row where count is 0. What happens in PostgreSQL?"
+    a: "NULLIF(0, 0) returns NULL, and dividing by NULL gives NULL, so the row shows NULL. Without NULLIF, PostgreSQL stops the query with a division by zero error. MySQL returns NULL with a warning either way."
 confusedWith: [in-vs-exists]
 tags: ["null", three-valued-logic, coalesce]
 visual: table
@@ -32,60 +43,95 @@ sources:
   - title: "Sorting Rows: NULLS FIRST/LAST (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/queries-order.html"
     verifiedOn: "2026-10-20"
-  - title: "Working with NULL Values (MySQL 9.7 Reference Manual)"
+  - title: "Working with NULL Values: ORDER BY and GROUP BY (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/working-with-null.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Comparison Operators: <=>, IN and NULL (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/comparison-operators.html"
     verifiedOn: "2026-10-20"
+  - title: "Arithmetic Operators: division by zero gives NULL (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/arithmetic-functions.html"
+    verifiedOn: "2026-10-21"
+  - title: "MySQL 9.7 Reference Manual: Server SQL Modes (default strict mode, ERROR_FOR_DIVISION_BY_ZERO)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/sql-mode.html"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+NULL is the marker SQL puts in a column when the value is missing or unknown: Meena is a customer, but her city is not known, so `city` is NULL. NULL is not a value like 0 or empty text. Because the database cannot know whether an unknown city equals 'Pune', any comparison with NULL gives a third result, UNKNOWN. So SQL conditions have three possible results, TRUE, FALSE and UNKNOWN; this is called three-valued logic.
 
 ## Why it exists
 
-Real data has gaps: no phone number, no end date yet. SQL marks a gap as NULL and will not guess, so a test against it is neither true nor false.
+Without NULL you would store a fake value for "not known", such as '' or 0. Then a balance of 0 and an unknown balance look the same, and an average counts the fake 0 as a real number. NULL says "no value" clearly, and SQL refuses to guess about it. The price is that every filter on a nullable column must say what to do with NULL.
 
 ## How it works
 
 | Expression | Result |
 |---|---|
+| `NULL = 'Pune'`, `NULL <> 'Pune'` | UNKNOWN |
 | `NULL = NULL` | UNKNOWN |
-| `5 <> NULL` | UNKNOWN |
 | `TRUE AND UNKNOWN` | UNKNOWN |
 | `FALSE AND UNKNOWN` | FALSE |
 | `TRUE OR UNKNOWN` | TRUE |
 | `NULL IS NULL` | TRUE |
 
-- `NOT IN (1, NULL)` means `<> 1 AND <> NULL`: never TRUE, so no rows.
-- Counting and summing NULLs: see [Aggregates](card:aggregates-group-by).
+Follow Meena's row through `WHERE city <> 'Pune'`:
+
+1. The database compares her city with 'Pune': `NULL <> 'Pune'` is UNKNOWN.
+2. WHERE keeps only rows where the condition is TRUE, so her row is dropped.
+3. `WHERE city = 'Pune'` drops her too, for the same reason: she is in neither result.
+4. Only `city IS NULL` is TRUE for her, because IS NULL asks "is it unknown?" instead of comparing values.
+
+So the key is: a NULL row falls out of every ordinary comparison; ask for it with IS NULL.
 
 ## Example
 
-```sql
--- users: Asha (Pune, no email), Ravi (no city, no email), Meena (has email)
-SELECT name, COALESCE(city, 'Unknown') AS city
-FROM users
-WHERE email IS NULL;
+Customers outside Pune, including those whose city is unknown. The `customers` table has Asha and Arjun in Pune, Ravi in Delhi and Meena with a NULL city.
 
-SELECT NULLIF(10, 10) AS equal, NULLIF(10, 5) AS not_equal;
+```sql
+SELECT name, COALESCE(city, 'Unknown') AS city
+FROM customers
+WHERE city <> 'Pune' OR city IS NULL
+ORDER BY id;
 ```
 
 ```text output
- name |  city
-------+---------
- Asha | Pune
- Ravi | Unknown
-
- equal | not_equal
--------+-----------
-  NULL |        10
+ name  |  city
+-------+---------
+ Ravi  | Delhi
+ Meena | Unknown
+(2 rows)
 ```
+
+What to notice:
+
+- `OR city IS NULL` is what brings Meena back. Without it, only Ravi is returned.
+- `COALESCE(city, 'Unknown')` changes only what the result shows. The stored city is still NULL.
+- The query returns the same two rows in PostgreSQL 18 and MySQL 9.7.
+
+## Rules and defaults
+
+- **Arithmetic:** any arithmetic with NULL gives NULL: `NULL + 5` is NULL.
+- **NULLIF(a, b):** returns NULL when `a` equals `b`, otherwise `a`. `total / NULLIF(count, 0)` avoids a division by zero error in PostgreSQL 18. In a SELECT, MySQL 9.7 returns NULL with a warning instead; an INSERT or UPDATE in its default strict mode fails.
+- **NULL-safe equality:** `IS NOT DISTINCT FROM` works in PostgreSQL 18 but is a syntax error in MySQL 9.7, which uses `<=>`.
+- **Sort order:** PostgreSQL 18 sorts NULLs as larger than any value: last in ASC, first in DESC, unless you write `NULLS FIRST` or `NULLS LAST`. MySQL 9.7 puts NULLs first in ASC and last in DESC, and has no NULLS FIRST syntax; sort by `city IS NULL` first to move them.
+
+## Not to be confused with
+
+- **NULL, '' and 0:** NULL means no value is known, '' is a text value of length zero, and 0 is a number. Rule: `IS NULL` finds only NULL; `= ''` finds only empty text.
+- **NOT IN and NOT EXISTS:** NOT IN compares the value with every item of a list, so one NULL in the list makes the result UNKNOWN. NOT EXISTS only asks whether a matching row exists, so NULLs cannot hide results. Rule: for "has no match", use NOT EXISTS. You will meet both in [Subqueries](card:subqueries).
 
 ## Interview Qs
 
 ### Why does WHERE city = NULL return nothing?
 
-`city = NULL` is UNKNOWN for every row, never TRUE, so WHERE drops all of them. Write `city IS NULL`.
+`city = NULL` compares a value with an unknown, so it is UNKNOWN for every row, even for rows whose city is NULL. WHERE keeps only TRUE rows, so all of them are dropped. Write `city IS NULL`, which tests for the marker instead of comparing.
 
-### NOT IN vs NOT EXISTS with NULLs?
+### Is NULL equal to NULL? How do you compare two nullable columns?
 
-If the subquery returns a NULL, NOT IN gives UNKNOWN for rows that do not match, so they vanish. NOT EXISTS only asks whether a matching row exists, so NULLs cannot hide results.
+No: `NULL = NULL` is UNKNOWN, so a plain `a = b` never matches two NULLs. To treat two NULLs as equal, write `a IS NOT DISTINCT FROM b` in PostgreSQL, or `a <=> b` in MySQL. Both return TRUE or FALSE, never UNKNOWN.
+
+### How do you show 0 instead of NULL in a result?
+
+Use `COALESCE(column, 0)`, which returns the first argument that is not NULL. It changes only the output; the stored value stays NULL.

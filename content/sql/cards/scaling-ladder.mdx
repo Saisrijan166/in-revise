@@ -5,16 +5,28 @@ title: Scaling a Database Step by Step
 topic: scaling
 level: interview
 heat: 2
-hook: "Climb the cheapest rung first: fix queries, pool, cache, replicate, scale up, partition, and shard only at the top."
+hook: "Climb the cheapest rung first: fix queries and indexes, pool connections, cache, add replicas, scale up, partition, and shard only at the very top."
 points:
-  - { k: "Order", v: "each rung adds cost and complexity; stop when the load fits" }
-  - { k: "Reads only", v: "cache and replicas do not help a write bottleneck", kind: minus }
-  - { k: "Scale up", v: "keeps joins and transactions simple; hits a hardware ceiling" }
-  - { k: "Shard last", v: "only when writes or data outgrow one server", kind: minus }
+  - { k: "Measure first", v: "find what is saturated (CPU, connections, reads or writes) before choosing a fix" }
+  - { k: "Cheapest first", v: "each rung adds cost and complexity, so stop climbing as soon as the load fits" }
+  - { k: "Reads only", v: "a cache and read replicas take read load away; they do nothing for a write bottleneck", kind: minus }
+  - { k: "Scale up", v: "a bigger server keeps joins, transactions and constraints simple, until hardware runs out", kind: plus }
+  - { k: "Shard last", v: "only when one server cannot carry the writes or the data, because it makes joins and transactions hard", kind: minus }
 trap:
   wrong: "The database is slow, so add read replicas."
   right: "Check the query plans first. A missing index or N+1 queries is a common cause, and replicas just run the same slow queries."
-sayIt: "First I fix slow queries and indexes and pool connections. Then I cache hot reads, add read replicas and scale the server up. Only then I partition big tables, and shard as the last step."
+  why: "Replicas are a well-known scaling tool and a few clicks on a managed service, so they feel like the default answer to any slowness."
+sayIt: "First I find the slow queries, fix them with indexes and pool connections. Then I cache hot reads, add read replicas and scale the server up. Only after that I partition big tables, and shard as the last step."
+cheat:
+  idea: "The scaling ladder orders database fixes from cheapest to hardest: queries and indexes, pooling, caching, replicas, a bigger server, partitioning, then sharding."
+  flow: "Indexes → pool → cache → replicas → scale up → partition → shard"
+  remember: "Caches and replicas help reads only; for writes, scale up, partition, then shard."
+buildsOn: [query-optimization, replication, sharding]
+scenarios:
+  - q: "Checkout is slow. The primary's CPU is at 95%, and pg_stat_statements shows one payments query that runs a sequential scan 2,000 times a minute. Your lead asks whether to shard. What do you say?"
+    a: "Not yet. The first rung fits: add an index for that query's WHERE clause and check the new plan. One missing index can explain the CPU, and sharding would only spread the same slow scans over more servers at a much higher cost."
+  - q: "After indexes, pooling and caching, the primary is still saturated, and 90% of its work is INSERTs into payments. Which rungs are left?"
+    a: "Read replicas and caching do not help, because the load is writes. Drop indexes no query uses, since each one slows every INSERT, then move to a bigger server, partition payments by month, and shard by customer_id only if one server still cannot keep up."
 confusedWith: []
 tags: [scaling, performance, system-design]
 visual: flow
@@ -30,27 +42,70 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The scaling ladder is an order for making a database handle more load, from the cheapest fix to the most complex. Each rung is a concept you have already met: fix queries and indexes, pool connections, cache hot reads, add read replicas, move to a bigger server, partition big tables, and shard as the last resort. You climb one rung only when measurements show the one below is used up.
+
 ## Why it exists
 
-Teams often jump to the hardest fix, like sharding, when an index would do. Each rung costs more money and complexity, so climb only when the one below runs out.
+Under pressure, teams often reach for the most impressive fix. Sharding a payments database that is slow because of one missing index costs months of work and makes every join and transaction harder, while the index takes minutes. The ladder makes you first find what is actually saturated, then apply the cheapest fix that removes that limit.
 
 ## How it works
 
 <Steps label="Rungs, and the sign to move up">
-  <Step title="Fix queries and indexes">Read the [plan](card:explain-query-plans), add [indexes](card:indexes). Next if good plans still saturate the server.</Step>
-  <Step title="Pool connections">Use a [connection pool](card:connection-pooling). Next if load, not connection count, is the limit.</Step>
-  <Step title="Cache hot reads">Put repeated reads in a [cache](card:caching-redis). Next if uncached reads still dominate.</Step>
-  <Step title="Add read replicas">[Replicas](card:replication) share reads. Next if writes are the bottleneck.</Step>
-  <Step title="Scale up">A bigger server. Next at the largest size you can buy.</Step>
-  <Step title="Partition big tables">[Partitions](card:partitioning) prune scans and drop old data fast. Next if one server still cannot hold the writes or data.</Step>
-  <Step title="Shard">[Split rows across servers](card:sharding). Last: joins and transactions get hard.</Step>
+  <Step title="Fix queries and indexes">Read the [plan](card:explain-query-plans), add [indexes](card:indexes), remove [N+1 queries](card:n-plus-one). Move up if good plans still saturate the server.</Step>
+  <Step title="Pool connections">Use a [connection pool](card:connection-pooling). Move up if the load, not the number of connections, is the limit.</Step>
+  <Step title="Cache hot reads">Keep repeated reads in a [cache](card:caching-redis). Move up if uncached reads still dominate.</Step>
+  <Step title="Add read replicas">[Replicas](card:replication) share the reads. Move up if writes are the bottleneck.</Step>
+  <Step title="Scale up">Move to a bigger server. Move up when you reach the largest size you can buy.</Step>
+  <Step title="Partition big tables">[Partitions](card:partitioning) prune scans and drop old data fast. Move up if one server still cannot hold the writes or the data.</Step>
+  <Step title="Shard">[Split rows across servers](card:sharding). Last, because cross-shard joins and transactions get hard.</Step>
 </Steps>
+
+To use the ladder:
+
+1. Measure: find the slowest and most frequent queries, and see what is saturated: CPU, memory, disk or connections.
+2. Decide whether the pressure comes from reads or from writes, because caches and replicas help only reads.
+3. Apply the lowest rung that removes that limit, then measure again.
+4. Climb to the next rung only when the current one is used up.
+
+## Example
+
+The payment service grows, and each symptom points to one rung:
+
+| Symptom | Rung |
+|---|---|
+| The payment history page takes 4 s; EXPLAIN shows a sequential scan on `payments` | Index on `(customer_id, created_at)` |
+| "Too many connections" errors at peak | Connection pool |
+| The same merchant dashboard is reloaded thousands of times a minute | Cache |
+| Monthly reports slow down checkout | Read replica for reports |
+| INSERTs alone saturate the primary after all of the above | Scale up, then partition by month, then shard by `customer_id` |
+
+What to notice:
+
+- Every symptom names what is saturated before naming a fix; the fix follows from the measurement.
+- Only the last row is a write problem, and only there do the top rungs make sense.
+
+## Rules and defaults
+
+- **Reads and writes differ:** caches and replicas never reduce write load, because every write still runs on the primary and is replayed on each replica.
+- **Indexes cost writes:** each index must be updated on every INSERT, so unused indexes slow a write-heavy table for nothing.
+- **Scale up keeps one server:** joins, transactions and constraints stay simple, but there is a hardware ceiling.
+- **Shard only when needed:** when writes or data outgrow one server, not as the first fix.
+
+## Not to be confused with
+
+Vertical scaling (scaling up) gives one server more CPU, memory or disk. Horizontal scaling (scaling out) adds servers: replicas for reads, shards for writes. Rule: up = a bigger machine, simple but limited; out = more machines, further growth but lag and routing.
 
 ## Interview Qs
 
+### How do you make a database-backed application fast?
+
+Measure first, then climb from the cheapest fix: indexes and better queries, no N+1 queries, paginated results, a connection pool and a cache for hot reads. When the load still grows, add read replicas and a bigger server, then partition large tables, and shard only when one server cannot keep up.
+
 ### Vertical or horizontal scaling: what is the difference?
 
-Vertical: a bigger machine, simple, but it reaches a hardware limit. Horizontal: more machines, as replicas for reads or shards for writes; it grows further but adds lag and routing.
+Vertical means a bigger machine: simple, with no change to the app, but it reaches a hardware limit. Horizontal means more machines, as replicas for reads or shards for writes: it grows further but adds replication lag, routing and cross-server queries.
 
 ### Writes are the bottleneck. What helps?
 

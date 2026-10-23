@@ -5,27 +5,45 @@ title: Backup, Recovery and High Availability
 topic: scaling
 level: intermediate
 heat: 1
-hook: "A standby keeps you running after a crash; a backup plus the log takes you back to the minute before a mistake."
+hook: "A standby replica keeps you running when a server dies; a backup plus the change log takes you back to the minute before a mistake."
 points:
-  - { k: "Logical backup", v: "pg_dump, mysqldump: SQL text, portable, slow for big data" }
-  - { k: "Physical backup", v: "pg_basebackup: a copy of the data files, fast for big data" }
-  - { k: "PITR", v: "base backup + replayed WAL or binlog = any moment since", kind: plus }
-  - { k: "RPO / RTO", v: "most data you may lose / longest you may be down" }
-  - { k: "Failover", v: "promote a standby; PostgreSQL needs an outside tool to detect failure", kind: minus }
+  - { k: "Logical backup", v: "pg_dump or mysqldump writes SQL that rebuilds tables and rows; portable, but slow for big data" }
+  - { k: "Physical backup", v: "pg_basebackup copies the data files; fast for big databases, restores the whole server only" }
+  - { k: "PITR", v: "restore a base backup, then replay the archived log up to a chosen moment", kind: plus }
+  - { k: "RPO and RTO", v: "RPO is how much data, in time, you may lose; RTO is how long you may be down" }
+  - { k: "Failover", v: "promote a standby to primary; PostgreSQL needs an outside tool or a person to detect the failure", kind: minus }
+  - { k: "Binary log (MySQL 9.7)", v: "on by default, which point-in-time recovery needs", kind: default }
 trap:
   wrong: "The nightly backup job succeeds, so we can recover."
-  right: "Only a tested restore proves it. Restore regularly and time it against your RTO."
-sayIt: "I keep a standby for failover and physical backups with archived WAL or binlogs for point-in-time recovery. RPO and RTO set how often and how fast, and I test restores."
+  right: "Only a tested restore proves it. Restore regularly on a spare server and time it against your RTO."
+  why: "A green backup job only proves a copy was written; a broken or incomplete backup stays invisible until someone tries to restore it."
+sayIt: "I keep a standby for failover and physical backups with archived WAL or binlogs for point-in-time recovery. RPO decides how often I back up and ship the log, RTO how fast restore must be, and I test restores regularly."
+cheat:
+  idea: "A backup is a copy to rebuild the database from; a standby keeps the service up when a server dies. Point-in-time recovery replays the log onto a backup."
+  flow: "Base backup → archived log → restore → replay to 10:59"
+  remember: "Replicas copy mistakes at once; only a backup plus the log undoes them. Test your restores."
+buildsOn: [wal, replication]
+scenarios:
+  - q: "At 11:00 someone runs DELETE FROM payments without a WHERE. You have a standby replica and nightly base backups with archived WAL. What do you do?"
+    a: "The standby is no help: it deleted the rows too. Restore the last base backup on a spare server, replay the archived WAL up to 10:59 with recovery_target_time, then copy the payments rows back to production, or switch over to the restored server."
+  - q: "The business says it can lose at most 5 minutes of payments and be down at most 30 minutes. What do these numbers set?"
+    a: "5 minutes is the RPO: the log must be shipped or archived at least every 5 minutes, or replicated continuously. 30 minutes is the RTO: restore or failover must finish within it, which usually means a ready standby, not a restore from scratch."
 confusedWith: [logical-vs-physical-backup]
 tags: [backup, pitr, failover, high-availability]
-visual: flow
+visual: code
 sources:
   - title: "Continuous Archiving and Point-in-Time Recovery (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/continuous-archiving.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Recovery target settings: recovery_target_time, recovery_target_action (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/runtime-config-wal.html"
+    verifiedOn: "2026-10-21"
   - title: "Point-in-Time Recovery Using Binary Log (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/point-in-time-recovery-binlog.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "mysqlbinlog: --start-datetime, --stop-datetime (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/mysqlbinlog.html"
+    verifiedOn: "2026-10-21"
   - title: "Disaster recovery (DR) objectives (AWS Well-Architected, Reliability Pillar)"
     url: "https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/disaster-recovery-dr-objectives.html"
     verifiedOn: "2026-10-20"
@@ -37,44 +55,84 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A backup is a copy of the database, kept somewhere safe, from which you can rebuild it. Recovery is using that copy, and usually the log of later changes, to bring the data back after a failure. High availability (HA) is a related but different goal: staying up when a server dies, usually by failing over to a [standby replica](card:replication). Backups fix lost or damaged data; HA fixes downtime.
+
 ## Why it exists
 
-Disks die, servers crash, and people run a bad DELETE. High availability handles the crash; only a backup undoes the mistake, because a [replica](card:replication) copies it at once.
+Two different disasters need two different tools. If the primary's server dies, a standby can take over in minutes. If someone runs `DELETE FROM payments` without a WHERE, the standby deletes the rows too, within a second. Only a backup taken earlier, plus the [log](card:wal) of changes up to just before the mistake, brings those rows back. This is point-in-time recovery (PITR).
 
 ## How it works
 
-<Steps label="Point-in-time recovery after a DROP TABLE at 11:00">
-  <Step title="Base backup">Take a physical copy regularly, such as with pg_basebackup.</Step>
-  <Step title="Keep the log">Archive every WAL file (PostgreSQL) or keep the binary logs (MySQL).</Step>
-  <Step title="Restore">Put the latest base backup from before 11:00 on a server.</Step>
-  <Step title="Replay">Apply the log up to 10:59, just before the mistake.</Step>
-</Steps>
+<Mermaid
+  alt="Timeline: a base backup is taken at night, WAL files are archived all day, and a DROP TABLE happens at 11:00. Recovery: restore the base backup on a spare server, replay the archived WAL up to 10:59, and the data is as it was at 10:59."
+  chart={`flowchart LR
+  B["1. Base backup, 02:00"] --> W["2. WAL archived all day"] --> M["3. 11:00: DROP TABLE"]
+  M --> R["4. Restore base backup on a spare server"] --> P["5. Replay WAL up to 10:59"]`}
+/>
 
-- The recovery stop point must be after the base backup finished.
+1. Every night, take a physical base backup, a copy of the data files, with `pg_basebackup`.
+2. All day, archive every finished WAL file (PostgreSQL) or keep the binary logs (MySQL).
+3. At 11:00 someone drops a table. You note the time of the mistake.
+4. On a spare server, restore the latest base backup taken before 11:00.
+5. Replay the archived log up to a target just before the mistake, such as 10:59, and stop there. The data is now as it was at 10:59.
+
+So the key is: the base backup is the starting point, and the log carries you forward to any moment after it.
 
 ## Example
 
-```text
-# PostgreSQL 18: in postgresql.conf, plus a recovery.signal file
-restore_command = 'cp /mnt/archive/%f %p'
-recovery_target_time = '2026-10-20 10:59:00+05:30'
-# MySQL: restore the full backup, then
-#   mysqlbinlog --stop-datetime="2026-10-20 10:59:00" \
-#     <binlogs written after the backup> | mysql
+The `payments` table was dropped at 16:30:13. On a spare server holding the restored base backup, PostgreSQL 18 replays the archived WAL up to 16:30:12.
+
+```bash
+# in the restored base backup's data directory
+cat >> postgresql.conf <<'EOF'
+restore_command = 'cp /archive/%f %p'
+recovery_target_time = '2026-10-21 16:30:12+00'
+EOF
+touch recovery.signal                       # start in recovery mode
+pg_ctl -D . start                           # replays WAL up to the target, then pauses
+psql -c "SELECT pg_wal_replay_resume();"    # end recovery, accept writes
+psql -c "SELECT * FROM payments;"
 ```
 
-## Defaults
+```text output
+ id | amount
+----+--------
+  1 | 500.00
+  2 | 250.00
+(2 rows)
+```
 
-| What | Default | Where |
-|---|---|---|
-| Binary logging (needed for PITR) | on | MySQL 9.7 |
+What to notice:
+
+- `restore_command` tells PostgreSQL how to fetch each archived WAL file: `%f` is the file name, `%p` where to put it.
+- Replay stops before the first commit after the target time, so the DROP at 16:30:13 is not replayed and the rows are back. A target after 16:30:13 would replay the DROP too.
+- `recovery.signal` makes the server start in recovery instead of as a normal primary. By default it pauses at the target (`recovery_target_action = pause`); `pg_wal_replay_resume()` ends recovery.
+
+## Rules and defaults
+
+- **Whole server only:** a PostgreSQL physical backup restores the entire server, never one table. To get one table back, restore on a spare server and copy the table over.
+- **Keep every log file:** PITR needs an unbroken chain of WAL files from the start of the base backup, and the target time must be after the base backup finished.
+- **MySQL PITR:** restore the full backup, then replay later binary logs with `mysqlbinlog --stop-datetime="..." binlog.000007 | mysql`. Binary logging is on by default in MySQL 9.7.
+- **RPO and RTO:** RPO decides how often you back up and ship the log; RTO decides how fast restore or failover must be.
+- **Failover:** PostgreSQL does not detect a failed primary by itself. Promote the standby with `pg_ctl promote` or `pg_promote()`, and make sure the old primary cannot take writes again.
+- **Test restores:** schedule real restores and time them; an untested backup may not work.
+
+## Not to be confused with
+
+A [logical backup](card:logical-backup) is SQL text, made by `pg_dump` or `mysqldump`, that rebuilds the tables and rows; you can restore one table or load it into a newer version. A [physical backup](card:physical-backup) is a copy of the data files; it is faster for big databases and is the base for PITR in PostgreSQL. Rule: logical for one table or an upgrade; physical plus the log for production recovery.
 
 ## Interview Qs
 
 ### What is the difference between RPO and RTO?
 
-RPO is how much data, measured in time, you can afford to lose: hourly backups mean up to an hour. RTO is how long the service may stay down before it is back.
+RPO, the recovery point objective, is how much data, measured in time, you can afford to lose: hourly backups mean up to an hour. RTO, the recovery time objective, is how long the service may stay down before it is back.
 
 ### How do you recover a table someone dropped an hour ago?
 
-Restore the last base backup on a separate server and replay the WAL or binlog to just before the DROP. Then copy the table back, or switch over to the restored server.
+Restore the last base backup on a separate server and replay the WAL or binary log to just before the DROP. Then copy the table back to production, or switch over to the restored server. A replica cannot help, because it replayed the DROP too.
+
+### Logical or physical backup for a 2 TB production database?
+
+Physical, with continuous log archiving: copying files is much faster than dumping and reloading rows, and it allows point-in-time recovery. Keep logical dumps for moving single tables or upgrading to a new major version.

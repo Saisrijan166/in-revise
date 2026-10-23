@@ -5,17 +5,31 @@ title: "Choosing Data Types"
 topic: basics
 level: beginner
 heat: 2
-hook: "A type is a rule: NUMERIC keeps money exact, FLOAT only approximates, and timestamptz stores one instant for every zone."
+hook: "A column's type is a rule: NUMERIC keeps money exact, FLOAT only approximates it, and timestamptz stores one instant that reads correctly in every time zone."
 points:
-  - { k: "INT", v: "4 bytes, max 2,147,483,647; BIGINT is 8 bytes", kind: default }
-  - { k: "NUMERIC = DECIMAL", v: "exact digits; slower than integers and floats" }
-  - { k: "CHAR(n)", v: "padded with spaces to n; VARCHAR(n) rejects longer text" }
-  - { k: "timestamptz", v: "PostgreSQL converts input to UTC; the zone name is not kept" }
-  - { k: "MySQL TIMESTAMP", v: "stored as UTC, ends 2038-01-19; DATETIME has no zone", kind: minus }
+  - { k: "INT and BIGINT", v: "INT is 4 bytes, up to 2,147,483,647; BIGINT is 8 bytes, so use it for ids that can grow", kind: default }
+  - { k: "NUMERIC = DECIMAL", v: "stores exact decimal digits, so money adds up to the paisa; slower than integers and floats", kind: plus }
+  - { k: "FLOAT, REAL, DOUBLE", v: "binary approximations: 0.1 + 0.2 gives 0.30000000000000004, so never use them for money", kind: minus }
+  - { k: "VARCHAR(n) and CHAR(n)", v: "VARCHAR(n) rejects longer text with an error; CHAR(n) pads shorter text with spaces to n" }
+  - { k: "timestamptz (PostgreSQL)", v: "converts the input to UTC and shows it in the session's time zone; the original zone is not kept" }
+  - { k: "MySQL TIMESTAMP", v: "stored as UTC and ends on 2038-01-19; DATETIME stores the value as given, up to year 9999", kind: minus }
 trap:
   wrong: "FLOAT or DOUBLE is precise enough for money."
-  right: "Floats are binary approximations, so sums drift. Store money in NUMERIC or DECIMAL."
-sayIt: "I use BIGINT for ids, NUMERIC for money because floats are approximate, TEXT or VARCHAR for strings, timestamptz for moments in time, and JSONB in PostgreSQL when I query inside JSON."
+  right: "Floats are binary approximations, so sums drift by tiny amounts. Store money in NUMERIC or DECIMAL with a fixed scale, such as NUMERIC(12,2)."
+  why: "Floats print values like 500.5 correctly, and the error appears only after many additions, so small tests pass."
+sayIt: "I use BIGINT for ids, NUMERIC(12,2) for money because floats are approximate, TEXT or VARCHAR for strings, timestamptz in PostgreSQL for moments in time, and JSONB when I need to query inside JSON."
+cheat:
+  idea: "Each column has a type that decides what it accepts, how it sorts and compares, and how much space it takes."
+  code: |
+    amount NUMERIC(12,2)   -- exact money; never FLOAT
+    created_at TIMESTAMPTZ -- one instant, any time zone
+  remember: "0.1 + 0.2 as float is 0.30000000000000004; as NUMERIC it is 0.3. Use BIGINT for ids that may pass 2.1 billion."
+buildsOn: [relational-databases]
+scenarios:
+  - q: "payments.id is INT and the app has just stored payment 2,147,483,647. What happens on the next insert, and how do you avoid it?"
+    a: "The next id does not fit in a 4-byte INT, so the insert fails with an out-of-range error. Use BIGINT for ids that can grow; its 8 bytes go up to about 9.2 quintillion."
+  - q: "An Indian user creates a payment at 15:30 IST, stored in a PostgreSQL timestamptz column. A server set to UTC reads it. What does it see?"
+    a: "10:00 UTC, the same instant. timestamptz stores the moment as UTC and shows it in each session's time zone, so both are correct. It does not remember that the input was IST."
 confusedWith: [decimal-vs-float, auto-increment-vs-uuid]
 tags: [data-types, numeric, timestamp, json]
 visual: table
@@ -23,20 +37,36 @@ sources:
   - title: "PostgreSQL 18 docs: Chapter 8 Data Types (numeric, character, date/time, JSON)"
     url: "https://www.postgresql.org/docs/18/datatype.html"
     verifiedOn: "2026-10-20"
+  - title: "PostgreSQL 18 docs: 8.3 Character Types"
+    url: "https://www.postgresql.org/docs/18/datatype-character.html"
+    verifiedOn: "2026-10-21"
+  - title: "PostgreSQL 18 docs: 8.1 Numeric Types"
+    url: "https://www.postgresql.org/docs/18/datatype-numeric.html"
+    verifiedOn: "2026-10-20"
   - title: "MySQL 9.7 Reference Manual: DATE, DATETIME and TIMESTAMP Types"
     url: "https://dev.mysql.com/doc/refman/9.7/en/datetime.html"
     verifiedOn: "2026-10-20"
   - title: "MySQL 9.7 Reference Manual: Numeric Data Type Syntax"
     url: "https://dev.mysql.com/doc/refman/9.7/en/numeric-type-syntax.html"
     verifiedOn: "2026-10-20"
+  - title: "MySQL 9.7 Reference Manual: Out-of-Range and Overflow Handling"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/out-of-range-and-overflow.html"
+    verifiedOn: "2026-10-21"
   - title: "SQL interview questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/sql/sql-interview-questions/"
     verifiedOn: "2026-10-20"
+  - title: "MySQL 9.7 Reference Manual: Server SQL Modes (default strict mode, ERROR_FOR_DIVISION_BY_ZERO)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/sql-mode.html"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+A data type is the kind of value a column holds: whole numbers, exact decimals, text, dates or JSON. You choose it in `CREATE TABLE`, and the database then accepts only values of that kind. The type also decides how values compare and sort (numbers by size, text by letters) and how many bytes each value takes.
 
 ## Why it exists
 
-The type decides what a column accepts, how it compares and sorts, and its size. A wrong type causes silent rounding, overflow or time-zone bugs.
+If every column were plain text, `'100' < '9'` would be true, because text compares letter by letter, and nothing would stop `'abc'` in an amount column. A wrong type causes quieter bugs too: money stored as FLOAT loses paise in sums, an INT id runs out after about 2.1 billion rows, and a time stored without a zone means different moments to servers in different countries. Picking the right type makes the database reject bad values and store good ones correctly.
 
 ## How it works
 
@@ -46,34 +76,59 @@ The type decides what a column accepts, how it compares and sorts, and its size.
 | Money | `numeric(12,2)` | `DECIMAL(12,2)` |
 | Text | `text`, `varchar(n)` | `VARCHAR(n)`, `TEXT` |
 | A moment in time | `timestamptz` | `TIMESTAMP` or `DATETIME` |
-| True / false | `boolean` | `BOOLEAN` = `TINYINT(1)` |
-| JSON | `jsonb` (or `json`) | `JSON` (binary) |
+| True / false | `boolean` | `BOOLEAN`, a synonym for `TINYINT(1)` |
+| JSON | `jsonb` (or `json`) | `JSON`, stored in a binary form |
 
-- JSONB indexes are in [index types](card:index-types); id choices are in [ID generation](card:id-generation).
+1. When you create the table, each column gets a type, such as `amount NUMERIC(12,2)`: 12 digits in total, 2 of them after the decimal point.
+2. On every insert or update, the database converts the value to that type. If it cannot, it rejects the row: text too long for `VARCHAR(10)` or a number too big for `INT` gives an error.
+3. It stores the value in the type's own format: exact digits for NUMERIC, a binary approximation for FLOAT, UTC for `timestamptz`.
+4. When you query, comparisons and sorting follow the type, and `timestamptz` is shown in your session's time zone.
 
 ## Example
 
+Adding 0.1 and 0.2 as a float and as an exact decimal, and rounding to the money scale, in PostgreSQL 18:
+
 ```sql
-SELECT 0.1::float8  + 0.2::float8  AS f,
-       0.1::numeric + 0.2::numeric AS n;
+SELECT 0.1::float8  + 0.2::float8  AS as_float,
+       0.1::numeric + 0.2::numeric AS as_numeric,
+       1999.999::numeric(12,2)     AS rounded;
 ```
 
 ```text output
-          f          |  n
----------------------+-----
- 0.30000000000000004 | 0.3
+      as_float       | as_numeric | rounded
+---------------------+------------+---------
+ 0.30000000000000004 |        0.3 | 2000.00
+(1 row)
 ```
+
+What to notice:
+
+- `::float8` turns the value into a double-precision float. 0.1 has no exact binary form, so the sum is off in the 17th digit. Add that error over millions of payments and totals stop matching.
+- `numeric` keeps decimal digits exactly, so 0.1 + 0.2 is exactly 0.3.
+- `numeric(12,2)` keeps two decimal places, so 1999.999 is rounded to 2000.00 rather than rejected. MySQL 9.7 gives the same three results with `DOUBLE` and `DECIMAL(12,2)`.
+
+## Rules and defaults
+
+- **Integers:** `INT` is 4 bytes (−2,147,483,648 to 2,147,483,647); `BIGINT` is 8 bytes. Storing a value outside the range is an error. MySQL does this in its default strict SQL mode; with strict mode off, it clips the value to the limit and only warns.
+- **Text:** `VARCHAR(n)` counts characters, not bytes. Longer text is an error (in MySQL, under its default strict SQL mode). PostgreSQL's `text` and plain `varchar` accept any length (up to about 1 GB), and its docs advise them over `char(n)`, which is usually the slowest there.
+- **Time in PostgreSQL:** `timestamptz` stores an instant in UTC. Plain `timestamp` has no time zone at all, so it is only safe when every writer uses the same zone.
+- **Time in MySQL:** `TIMESTAMP` converts from the session time zone to UTC and back, from 1970 to 2038-01-19 03:14:07 UTC. `DATETIME` stores the value exactly as given, from year 1000 to 9999, with no zone.
+- **JSON in PostgreSQL:** `json` keeps the exact text; `jsonb` stores a parsed binary form and can be indexed (see [index types](card:index-types) later).
+
+## Not to be confused with
+
+`CHAR(n)` is fixed length: shorter text is padded with spaces up to n. `VARCHAR(n)` stores only what you give, and rejects anything longer than n. Rule: CHAR pads, VARCHAR limits. For money versus measurements, see the DECIMAL vs FLOAT comparison below.
 
 ## Interview Qs
 
 ### CHAR vs VARCHAR?
 
-CHAR(n) is fixed length and pads short values with spaces. VARCHAR(n) stores only what you give, up to n characters. PostgreSQL docs advise text or varchar: char is usually the slowest there.
+`CHAR(n)` is fixed length and pads short values with spaces to n. `VARCHAR(n)` stores only the characters you give, up to n, and rejects longer text. In PostgreSQL the docs advise `text` or `varchar`, because `char(n)` is usually the slowest of the three there.
 
 ### JSON vs JSONB in PostgreSQL?
 
-`json` stores the exact text and reparses it on every use. `jsonb` stores a binary form: a little slower to write, much faster to query, and it can be indexed. It drops whitespace, key order and duplicate keys.
+`json` stores the exact input text and parses it again on every use. `jsonb` stores a parsed binary form: a little slower to write, much faster to query, and it can be indexed. It drops whitespace and key order, and keeps only the last value of a duplicate key.
 
 ### TIMESTAMP vs DATETIME in MySQL?
 
-TIMESTAMP converts the value to UTC using the session time zone and back on read; its range ends in 2038. DATETIME stores the value exactly as given, up to year 9999, with no zone.
+`TIMESTAMP` converts the value from the session time zone to UTC when it stores it, and back when it reads it; its range ends on 19 January 2038. `DATETIME` stores the value exactly as given, up to year 9999, with no time zone conversion.

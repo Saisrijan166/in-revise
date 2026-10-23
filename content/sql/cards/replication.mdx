@@ -5,17 +5,29 @@ title: Replication and Read Replicas
 topic: scaling
 level: intermediate
 heat: 2
-hook: "Writes go to the primary; replicas copy its changes and serve reads, a little behind."
+hook: "Replication keeps live copies of a database on other servers. Every write goes to one primary; the replicas copy its changes a moment later and serve reads."
 points:
-  - { k: "Primary", v: "the only node that takes writes" }
-  - { k: "Replicas", v: "replay the primary's log; serve reads, stand by for failover", kind: plus }
-  - { k: "Async by default", v: "PostgreSQL 18 and MySQL 9.7: commit does not wait for replicas", kind: default }
-  - { k: "Replication lag", v: "a replica may return data older than the last write", kind: minus }
-  - { k: "Read your own write", v: "read it from the primary just after writing it" }
+  - { k: "Primary", v: "the one server that accepts writes: every INSERT, UPDATE and DELETE goes there" }
+  - { k: "Replica", v: "a read-only copy that replays the primary's log, serves reads and can take over if the primary dies", kind: plus }
+  - { k: "Async by default", v: "PostgreSQL 18 and MySQL 9.7: COMMIT returns without waiting for any replica", kind: default }
+  - { k: "Replication lag", v: "a replica can be behind, so a read sent there just after a write may return the old value", kind: minus }
+  - { k: "Read your own writes", v: "send a user's reads to the primary for a short time after that user writes" }
+  - { k: "Writes do not scale", v: "every replica applies every write too, so adding replicas never adds write capacity", kind: minus }
 trap:
   wrong: "We have replicas, so we do not need backups."
-  right: "A replica replays every change, a DROP TABLE too. Only a backup takes you back in time."
-sayIt: "I send writes to the primary and reads to replicas. Replication is usually asynchronous, so replicas lag; reads that must see a fresh write go to the primary."
+  right: "A replica replays every change within seconds, a DROP TABLE too. Only a backup, or a deliberately delayed replica, takes you back in time."
+  why: "A replica is a full copy on another machine, which sounds like a backup, and it really does save you when a disk or a whole server dies."
+sayIt: "I send writes to the primary and most reads to replicas, which replay the primary's log. Replication is asynchronous by default, so replicas lag: reads that must see a fresh write go to the primary. Replicas scale reads, not writes, and are not backups."
+cheat:
+  idea: "Replication keeps copies of the database on other servers. The primary takes every write and streams its log; replicas replay it and serve reads."
+  flow: "App writes → primary → log streamed → replicas replay → app reads"
+  remember: "Replicas lag and copy mistakes too: read fresh data from the primary, and keep backups."
+buildsOn: [wal, transactions]
+scenarios:
+  - q: "A customer pays, and the receipt page, which reads from a replica, still shows the payment as PENDING. The database is healthy. What happened, and how do you fix it?"
+    a: "Replication lag: the read reached the replica before it had replayed the UPDATE. Replication is asynchronous, so a short delay is normal. Read that customer's payments from the primary for a few seconds after they write (read-your-writes), or always read the receipt from the primary."
+  - q: "Writes keep the primary's CPU at 90%. A colleague proposes adding three read replicas. Will it help?"
+    a: "No. All writes still run on the one primary, and each replica must replay every write as well. Replicas take read load away. For writes, tune or reduce the writes, move to a bigger server, or, much later, shard."
 confusedWith: [sync-vs-async-replication, replication-vs-sharding]
 tags: [replication, read-replica, high-availability]
 visual: flow
@@ -23,40 +35,108 @@ sources:
   - title: "Log-Shipping Standby Servers, streaming and synchronous replication (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/warm-standby.html"
     verifiedOn: "2026-10-20"
-  - title: "Chapter 19 Replication (MySQL 9.7 Reference Manual)"
-    url: "https://dev.mysql.com/doc/refman/9.7/en/replication.html"
+  - title: "Replication settings: synchronous_standby_names, hot_standby, recovery_min_apply_delay (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/runtime-config-replication.html"
+    verifiedOn: "2026-10-21"
+  - title: "Hot Standby: read-only queries on a standby, lag (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/hot-standby.html"
+    verifiedOn: "2026-10-21"
+  - title: "Failover (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/warm-standby-failover.html"
     verifiedOn: "2026-10-20"
+  - title: "Chapter 19 Replication: asynchronous by default, writes on the source (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/replication.html"
+    verifiedOn: "2026-10-21"
+  - title: "Delayed Replication: SOURCE_DELAY (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/replication-delayed.html"
+    verifiedOn: "2026-10-21"
   - title: "Eventually Consistent: read-your-writes (Werner Vogels)"
     url: "https://www.allthingsdistributed.com/2008/12/eventually_consistent.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Replication is keeping copies of the same database on several servers, updated automatically. One server, the primary, accepts all writes. The others, called replicas or standbys, receive the primary's change log and replay it, so a moment later they hold the same data. That log is the change log you met in [the write-ahead log](card:wal): the WAL in PostgreSQL, the binary log in MySQL (where the primary is called the "source").
+
 ## Why it exists
 
-One server is a single point of failure and has limited read capacity. Copies on other servers can take over after a crash and share the reads, but they are not [backups](card:backup-recovery).
+With one database server, a crash stops every payment until someone repairs the machine, and every read and write competes for that one server. With a replica, you can promote the standby to be the new primary in minutes; this switch is called failover. Read-heavy work, such as payment history pages and reports, moves to the replicas, which leaves the primary free for writes.
 
 ## How it works
 
 <Mermaid
-  alt="The app sends writes to the primary. The primary writes its log (WAL in PostgreSQL, binary log in MySQL) and the log is streamed to two replicas. The app sends reads to the replicas."
+  alt="The app sends writes to the primary. The primary writes its log (WAL in PostgreSQL, binary log in MySQL) and streams it to two replicas, which replay it. The app sends reads to the replicas."
   chart={`flowchart LR
-  App -- writes --> P[(Primary)]
-  P -- "WAL / binlog" --> R1[(Replica 1)]
-  P -- "WAL / binlog" --> R2[(Replica 2)]
-  App -. reads .-> R1
-  App -. reads .-> R2`}
+  App -- "1. writes" --> P[(Primary)]
+  P -- "2. log streamed" --> R1[(Replica 1)]
+  P -- "2. log streamed" --> R2[(Replica 2)]
+  App -. "4. reads" .-> R1
+  App -. "4. reads" .-> R2`}
 />
 
-- PostgreSQL: [streaming replication](card:streaming-replication) copies the whole server; [logical replication](card:logical-replication) copies chosen tables.
-- MySQL: replicas pull the source's binary log; GTIDs mark each transaction.
-- To stop losing commits on a crash, make it synchronous: [Sync vs Async](compare:sync-vs-async-replication).
+1. The app sends `UPDATE payments SET status = 'PAID' ...` to the primary, which commits it and records it in its log.
+2. The primary streams the new log records to each replica. By default it tells the app "committed" without waiting for them.
+3. Each replica replays the records in order, so its copy catches up a little later. That gap is the replication lag.
+4. The app sends reads that can accept slightly old data to a replica. A replica accepts only reads; a write sent there fails.
+5. If the primary dies, a tool or an operator promotes a replica to primary, and the app sends its writes there.
+
+So the key is: one place for writes, many places for reads, and a small delay in between.
+
+## Example
+
+The payment service keeps two connection sources: the primary for writes and a replica for reads. A customer who has just paid reads from the primary, so their receipt is never stale.
+
+```java
+public class PaymentDb {
+    private final DataSource primary;   // takes every write
+    private final DataSource replica;   // read-only copy that may lag
+
+    public PaymentDb(DataSource primary, DataSource replica) {
+        this.primary = primary;
+        this.replica = replica;
+    }
+
+    public Connection forWrite() throws SQLException { return primary.getConnection(); }
+    public Connection forRead(boolean userJustWrote) throws SQLException {
+        // read-your-writes: a user who just wrote reads from the primary
+        return (userJustWrote ? primary : replica).getConnection();
+    }
+}
+```
+
+What to notice:
+
+- Writes always use `primary`. An UPDATE sent through `replica` would fail, because a replica is read-only.
+- `forRead(true)` is the read-your-writes rule: right after a write, that user reads from the primary, which already has the change.
+- Other reads, such as the monthly statement, use `replica` and take load off the primary. If you always read the replica, a receipt can show `PENDING` for a payment that is already `PAID`.
+
+## Rules and defaults
+
+- **Asynchronous by default:** in PostgreSQL 18 and MySQL 9.7 a commit does not wait for any replica. If the primary crashes, commits that had not reached the replica are lost after failover. Synchronous replication closes that gap at the cost of slower commits.
+- **PostgreSQL:** [streaming replication](card:streaming-replication) replays the WAL and copies the whole server; queries on a standby are allowed by default (`hot_standby = on`). [Logical replication](card:logical-replication) copies chosen tables and works across major versions.
+- **MySQL:** replicas pull the source's binary log; GTIDs give each transaction an id, so a replica knows what it has already applied.
+- **Delayed replica:** `recovery_min_apply_delay` (PostgreSQL) or `SOURCE_DELAY` (MySQL) keeps a replica deliberately behind, for example by one hour, so a mistake can be caught before it is replayed there. Both default to 0.
+- **Failover is not built into PostgreSQL:** it does not detect a failed primary by itself; an outside tool or an operator promotes the standby.
+
+## Not to be confused with
+
+Replication copies the **same** data to every server. [Sharding](card:sharding), which you will see two concepts later, splits **different** rows across servers. Rule: replication = copy, which scales reads; sharding = split, which scales writes.
+
+## Common mistakes
+
+- **"Send every read to the replicas to spread the load."** Some reads must be fresh, such as the balance check before a refund or the page right after a payment. Send those to the primary.
 
 ## Interview Qs
 
 ### A user updates a profile and the page still shows old data. Why?
 
-The read went to a replica that had not yet applied the write (replication lag). Read that user's data from the primary right after a write, or pin the session to the primary.
+The read went to a replica that had not yet replayed the write: replication lag. Replication is asynchronous by default, so this is normal. Read that user's data from the primary for a short time after a write, or pin their session to the primary.
 
 ### Does adding replicas scale writes?
 
-No. Every write still goes to the one primary, and each replica must apply every write too. Replicas scale reads and availability; to scale writes, see [sharding](card:sharding).
+No. Every write still runs on the one primary, and each replica must replay every write too. Replicas scale reads and availability. To scale writes, reduce or tune them, move to a bigger server, and only then consider sharding.
+
+### What happens to committed data if the primary crashes?
+
+With asynchronous replication, commits the replica had not received yet are lost when you fail over to it. With synchronous replication, each commit waited until a standby had stored it, so it survives unless both servers fail.

@@ -5,17 +5,28 @@ title: Isolation Levels and Read Anomalies
 topic: transactions
 level: intermediate
 heat: 3
-hook: "Each level up blocks one more anomaly: dirty read, then non-repeatable read, then phantom; SERIALIZABLE blocks them all."
+hook: "An isolation level decides how much a transaction sees of other transactions running at the same time. Each stricter level blocks one more read problem."
 points:
-  - { k: "PostgreSQL 18", v: "default READ COMMITTED", kind: default }
-  - { k: "MySQL 9.7 InnoDB", v: "default REPEATABLE READ", kind: default }
-  - { k: "PG REPEATABLE READ", v: "snapshot isolation: no phantoms, but write skew is possible" }
-  - { k: "PG SERIALIZABLE", v: "SSI: no extra blocking; conflicts abort with SQLSTATE 40001" }
-  - { k: "PG READ UNCOMMITTED", v: "acts as READ COMMITTED: no dirty reads ever" }
+  - { k: "Dirty read", v: "seeing another transaction's change before it commits; that transaction may still roll it back" }
+  - { k: "Non-repeatable read", v: "reading the same row twice in one transaction and getting two different committed values" }
+  - { k: "Phantom read", v: "re-running the same WHERE and getting extra or missing rows that others inserted or deleted" }
+  - { k: "Default level", v: "READ COMMITTED in PostgreSQL 18; REPEATABLE READ in MySQL 9.7 InnoDB", kind: default }
+  - { k: "Serialization failure", v: "PostgreSQL REPEATABLE READ and SERIALIZABLE abort a conflicting transaction with SQLSTATE 40001", kind: minus }
+  - { k: "PG READ UNCOMMITTED", v: "runs as READ COMMITTED, so PostgreSQL never shows a dirty read at any level" }
 trap:
-  wrong: "A stricter level only makes queries slower; the code stays the same."
-  right: "In PostgreSQL, REPEATABLE READ and SERIALIZABLE can abort a transaction with a serialization failure; the app must retry the whole transaction."
-sayIt: "Four levels: read uncommitted, read committed, repeatable read, serializable. Each stops more anomalies. PostgreSQL defaults to read committed, MySQL to repeatable read; at the strict levels I retry on serialization failures."
+  wrong: "A stricter level only makes queries slower; the application code stays the same."
+  right: "PostgreSQL REPEATABLE READ and SERIALIZABLE can abort a transaction with error 40001, so the app must catch it and retry the whole transaction."
+  why: "Most explanations show only which anomalies each level blocks, not how. PostgreSQL blocks some of them by aborting the later transaction, and that error reaches your code."
+sayIt: "Four levels: read uncommitted, read committed, repeatable read, serializable; each stops more anomalies. PostgreSQL defaults to read committed, MySQL to repeatable read. At the strict levels I catch serialization failures and retry the whole transaction."
+cheat:
+  idea: "An isolation level sets how much a transaction sees of other transactions running at the same time. From READ UNCOMMITTED up to SERIALIZABLE, each level blocks one more read problem."
+  remember: "Defaults: PostgreSQL READ COMMITTED, MySQL InnoDB REPEATABLE READ. PostgreSQL's strict levels can abort with 40001, so retry."
+buildsOn: [transactions, acid]
+scenarios:
+  - q: "Payment 1 is ₹500. Two refund requests run at once in PostgreSQL REPEATABLE READ. Each sums the existing refunds (₹0), sees room for ₹300, and inserts a ₹300 refund. What happens?"
+    a: "Both commit, and the refunds total ₹600. This is write skew: each transaction read a snapshot without the other's insert, and they wrote different rows, so no conflict was found. At SERIALIZABLE, PostgreSQL aborts one with 40001; the retry then sees ₹300 already refunded."
+  - q: "You move an app from MySQL to PostgreSQL with default settings. Inside one transaction, the code reads payment 2 twice and now sometimes gets two different statuses. Why?"
+    a: "The defaults differ. MySQL InnoDB uses REPEATABLE READ, so both reads used one snapshot. PostgreSQL uses READ COMMITTED, so each statement sees the latest commits. Run that transaction at REPEATABLE READ if it needs a stable view."
 confusedWith: [dirty-vs-nonrepeatable-vs-phantom-read, read-committed-vs-repeatable-read]
 tags: [isolation, read-committed, repeatable-read, serializable, anomalies]
 visual: table
@@ -23,9 +34,15 @@ sources:
   - title: "Transaction Isolation (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/18/transaction-iso.html"
     verifiedOn: "2026-10-20"
+  - title: "SET TRANSACTION: when the level can be set (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/sql-set-transaction.html"
+    verifiedOn: "2026-10-21"
   - title: "Transaction Isolation Levels (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-transaction-isolation-levels.html"
     verifiedOn: "2026-10-20"
+  - title: "SET TRANSACTION: next transaction only (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/set-transaction.html"
+    verifiedOn: "2026-10-21"
   - title: "A Critique of ANSI SQL Isolation Levels (Berenson et al., 1995)"
     url: "https://arxiv.org/abs/cs/0701157"
     verifiedOn: "2026-10-20"
@@ -34,9 +51,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+When two [transactions](card:transactions) run at the same time, one may read rows that the other is changing. An isolation level is the setting that decides what a transaction is allowed to see of that other work. The SQL standard defines four levels, from weakest to strongest: READ UNCOMMITTED, READ COMMITTED, REPEATABLE READ and SERIALIZABLE. It is the I of [ACID](card:acid), made adjustable.
+
 ## Why it exists
 
-Full isolation costs waits or retries. Levels let an app accept known anomalies in return for more concurrency.
+Perfect isolation means the result is the same as if the transactions had run one after another. That costs something: transactions wait for each other, or the database aborts one so it can be retried. Many requests can live with small read problems in return for speed, such as a dashboard that shows a status changed a moment ago. Levels let each transaction choose that trade-off instead of paying the full price everywhere.
 
 ## How it works
 
@@ -47,29 +68,61 @@ Full isolation costs waits or retries. Levels let an app accept known anomalies 
 | REPEATABLE READ | no | no | possible |
 | SERIALIZABLE | no | no | no |
 
-- The standard sets the minimum; a product may block more, like PostgreSQL REPEATABLE READ blocking phantoms.
-- Beyond the table: [lost update](card:lost-update) and [write skew](card:write-skew); only SERIALIZABLE stops write skew.
-- MySQL InnoDB: plain `SELECT` reads a snapshot; locking reads use next-key [locks](card:locking) instead.
+The three read problems, called anomalies, appear in this order when transaction A reads while transaction B writes:
+
+1. A reads payment 2: `PENDING`.
+2. B sets payment 2 to `PAID` but has not committed. If A could see `PAID` now, that would be a dirty read: B may still roll back.
+3. B commits. If A reads payment 2 again and now sees `PAID`, that is a non-repeatable read.
+4. B inserts payment 8 as `PENDING` and commits. If A re-runs `WHERE status = 'PENDING'` and gets an extra row, that is a phantom read.
+5. A's isolation level decides which of steps 2 to 4 it can notice.
+
+So each level up closes one more of these doors. Two more anomalies sit outside the table: the [lost update](card:lost-update), where a later write erases an earlier one, and [write skew](card:write-skew), which only SERIALIZABLE stops.
 
 ## Example
 
+Session A works at REPEATABLE READ in PostgreSQL 18 while session B marks payment 2 as paid:
+
 ```sql
-BEGIN ISOLATION LEVEL REPEATABLE READ;              -- PostgreSQL
-SELECT balance FROM accounts WHERE id = 1;          -- 1000
--- another session sets balance = 500 and commits
-SELECT balance FROM accounts WHERE id = 1;          -- still 1000
-UPDATE accounts SET balance = balance - 100 WHERE id = 1;
--- ERROR: could not serialize access due to concurrent update (40001)
+-- Session A
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT status FROM payments WHERE id = 2;            -- PENDING
+-- Session B, autocommit: UPDATE payments SET status = 'PAID' WHERE id = 2;
+SELECT status FROM payments WHERE id = 2;            -- still PENDING
+UPDATE payments SET status = 'FAILED' WHERE id = 2;
+-- ERROR: could not serialize access due to concurrent update
+ROLLBACK;
 ```
 
-MySQL InnoDB at REPEATABLE READ does not fail here: the `UPDATE` changes the latest committed row (500 → 400).
+What to notice:
+
+- The second SELECT still shows `PENDING`: the whole transaction reads one snapshot, a fixed picture of the data committed at its first statement. At READ COMMITTED the same SELECT shows `PAID`.
+- The UPDATE fails because the row changed after A's snapshot. Writing `FAILED` would silently erase B's `PAID`, so PostgreSQL aborts A with SQLSTATE 40001. A must retry from `BEGIN`.
+- MySQL 9.7 at REPEATABLE READ does not fail here. Its UPDATE works on the latest committed row, so `FAILED` overwrites `PAID` without an error.
+
+## Rules and defaults
+
+- **Defaults:** READ COMMITTED in PostgreSQL 18; REPEATABLE READ in MySQL 9.7 InnoDB.
+- **Setting it, PostgreSQL:** `BEGIN ISOLATION LEVEL …`, or `SET TRANSACTION ISOLATION LEVEL …` before the transaction's first query. After that the level cannot change.
+- **Setting it, MySQL:** `SET TRANSACTION ISOLATION LEVEL …` before `START TRANSACTION` applies to the next transaction only; inside an open transaction it is an error.
+- **PostgreSQL is stricter than the standard:** READ UNCOMMITTED behaves as READ COMMITTED, and REPEATABLE READ also blocks phantoms. It is snapshot isolation, which still allows write skew.
+- **SERIALIZABLE, PostgreSQL:** adds no blocking beyond REPEATABLE READ. It watches for patterns that could not happen one-at-a-time and aborts one transaction with 40001.
+- **SERIALIZABLE, MySQL InnoDB:** with autocommit off, a plain SELECT becomes `SELECT … FOR SHARE`, so readers lock rows and can block writers.
+- **Retry:** at REPEATABLE READ or SERIALIZABLE in PostgreSQL, catch 40001 and rerun the whole transaction, not just the failed statement.
+
+## Not to be confused with
+
+A non-repeatable read is about one row whose values changed between two reads. A phantom read is about a set of rows, chosen by a WHERE, that gained or lost members. A lost update is two transactions writing the same row; write skew is two transactions writing different rows that together break a rule. Rule: changed values = non-repeatable; changed membership = phantom.
 
 ## Interview Qs
 
 ### What are the isolation levels, and what does each prevent?
 
-READ UNCOMMITTED allows dirty reads. READ COMMITTED stops them. REPEATABLE READ also stops non-repeatable reads. SERIALIZABLE also stops phantoms and every other anomaly: the result equals some one-at-a-time order.
+READ UNCOMMITTED allows dirty reads. READ COMMITTED stops them. REPEATABLE READ also stops non-repeatable reads. SERIALIZABLE also stops phantoms and every other anomaly: the result equals some one-at-a-time order of the transactions. Products may be stricter than the standard, as PostgreSQL is.
 
-### What is write skew?
+### Why not run everything at SERIALIZABLE?
 
-Two transactions read the same rows, each writes a different row, and together they break a rule: two withdrawals each see enough in the joint total, and the total goes negative. Snapshot isolation allows it; SERIALIZABLE prevents it.
+It costs throughput. In PostgreSQL, more transactions abort with 40001 and must be retried. In MySQL, plain reads take shared locks and block writers. Most requests are fine at READ COMMITTED with a targeted row lock or an atomic UPDATE; use SERIALIZABLE where a rule spans several rows.
+
+### How does PostgreSQL REPEATABLE READ differ from MySQL's?
+
+Both give plain reads one snapshot for the whole transaction. PostgreSQL also refuses to update a row changed after that snapshot and aborts with 40001. MySQL InnoDB updates the latest committed version without an error, and its locking reads use [next-key locks](card:next-key-lock), which you will see in Locks, to block phantoms.

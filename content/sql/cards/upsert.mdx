@@ -5,30 +5,46 @@ title: Upsert and RETURNING
 topic: backend
 level: intermediate
 heat: 2
-hook: "Upsert: insert the row, or update it if the key already exists, in one atomic statement. It needs a unique index."
+hook: "Upsert: insert the row, or update it if a row with that key already exists, in one atomic statement. It needs a primary key or unique index to clash on."
 points:
-  - { k: "PostgreSQL", v: "INSERT … ON CONFLICT (col) DO UPDATE SET x = EXCLUDED.x" }
-  - { k: "MySQL", v: "INSERT … AS new ON DUPLICATE KEY UPDATE x = new.x" }
-  - { k: "VALUES() in MySQL", v: "deprecated since 8.0.20; use a row alias (8.0.19+)", kind: minus }
-  - { k: "RETURNING", v: "PostgreSQL returns the changed rows; MySQL has no RETURNING", kind: minus }
-  - { k: "MERGE", v: "PostgreSQL 15+: insert, update or delete from a source table" }
+  - { k: "PostgreSQL", v: "INSERT … ON CONFLICT (col) DO UPDATE SET x = EXCLUDED.x; EXCLUDED holds the proposed row" }
+  - { k: "MySQL", v: "INSERT … VALUES (…) AS new ON DUPLICATE KEY UPDATE x = new.x" }
+  - { k: "Needs a unique key", v: "without a matching unique index PostgreSQL raises an error, and MySQL has nothing to clash on, so it inserts", kind: minus }
+  - { k: "VALUES() in MySQL", v: "deprecated since 8.0.20 and warns in 9.7; use the row alias (8.0.19+)", kind: minus }
+  - { k: "RETURNING", v: "PostgreSQL returns the changed rows, with old and new values since 18; MySQL has no RETURNING" }
 trap:
   wrong: "SELECT first; if there is no row, INSERT, else UPDATE."
-  right: "Two requests can both see no row; then one fails or a duplicate appears. One upsert statement is atomic."
-sayIt: "For insert-or-update I use one atomic statement on a unique key: ON CONFLICT DO UPDATE in PostgreSQL, ON DUPLICATE KEY UPDATE in MySQL. Check-then-insert races. In PostgreSQL, RETURNING gives me the id back."
+  right: "Two requests can both see no row, and then one fails on the unique key or a duplicate appears. One upsert statement is atomic."
+  why: "In a test with one user, check-then-insert always works. The race appears only when two requests for the same key run at the same moment, which is exactly what retries and repeated webhooks do."
+sayIt: "For insert-or-update I use one atomic statement on a unique key: ON CONFLICT DO UPDATE in PostgreSQL, ON DUPLICATE KEY UPDATE in MySQL. Check-then-insert races. In PostgreSQL, RETURNING gives me the row back in the same round trip."
+cheat:
+  idea: "An upsert inserts a row, or updates the existing row with the same key, in one atomic statement, so retries and concurrent requests are safe."
+  code: |
+    INSERT INTO customers (id, email, name) VALUES (1, 'asha@example.in', 'Asha')
+    ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name;
+  remember: "It needs a primary key or unique index; MySQL writes it ON DUPLICATE KEY UPDATE."
+buildsOn: [constraints, transactions]
+scenarios:
+  - q: "You run INSERT INTO customers … ON CONFLICT (name) DO NOTHING in PostgreSQL, but name has no unique constraint. What happens?"
+    a: "It fails with 'there is no unique or exclusion constraint matching the ON CONFLICT specification'. PostgreSQL detects a conflict only through a unique index or constraint, so the column named in ON CONFLICT must have one."
+  - q: "In MySQL, an INSERT … ON DUPLICATE KEY UPDATE for payment 105 is followed by SELECT ROW_COUNT(), which returns 0. What happened?"
+    a: "Payment 105 already existed and already had the new values, so nothing changed. MySQL reports 1 for a new row, 2 for an updated row and 0 for an existing row set to its current values."
 confusedWith: [postgresql-vs-mysql]
 tags: [upsert, on-conflict, on-duplicate-key-update, returning]
-visual: table
+visual: code
 sources:
-  - title: "INSERT (PostgreSQL 18)"
+  - title: "INSERT: ON CONFLICT, RETURNING with OLD and NEW (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/sql-insert.html"
-    verifiedOn: "2026-10-20"
-  - title: "INSERT ... ON DUPLICATE KEY UPDATE (MySQL 8.0 manual)"
-    url: "https://dev.mysql.com/doc/refman/8.0/en/insert-on-duplicate.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "PostgreSQL 18 release notes: OLD/NEW support in RETURNING"
+    url: "https://www.postgresql.org/docs/18/release-18.html"
+    verifiedOn: "2026-10-21"
   - title: "MERGE (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/sql-merge.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "INSERT ... ON DUPLICATE KEY UPDATE (MySQL 9.7 manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/insert-on-duplicate.html"
+    verifiedOn: "2026-10-21"
   - title: "INSERT Statement (MySQL 9.7 manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/insert.html"
     verifiedOn: "2026-10-20"
@@ -37,9 +53,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An upsert (update + insert) is one statement that inserts a row, or updates the existing row if one with the same key is already there. The key is the primary key or a column with a [UNIQUE constraint](card:constraints); the database uses it to detect the clash. PostgreSQL writes an upsert as `INSERT … ON CONFLICT`, and MySQL as `INSERT … ON DUPLICATE KEY UPDATE`.
+
 ## Why it exists
 
-Sync jobs, imports and retries must write a row whether or not it already exists. Doing that in two steps races when requests run at the same time.
+A payment gateway calls the payment service with "payment 105 is now PAID", and it may send the same call again when a reply is slow. With check-then-insert, two such calls arriving together can both run the `SELECT`, both see no row, and both `INSERT`: one fails on the primary key, or, without a unique key, a duplicate row appears. An upsert decides insert-or-update inside the database in one statement, and running it twice leaves the same row, so retries are safe.
 
 ## How it works
 
@@ -48,42 +68,83 @@ Sync jobs, imports and retries must write a row whether or not it already exists
 | Insert or update | `ON CONFLICT (k) DO UPDATE` | `ON DUPLICATE KEY UPDATE` |
 | Insert or skip | `ON CONFLICT DO NOTHING` | `INSERT IGNORE` (also hides other ignorable errors) |
 | The proposed row's values | `EXCLUDED.col` | row alias, `new.col` |
-| Get the row back | `RETURNING` | no; `LAST_INSERT_ID()` for the id |
+| Get the row back | `RETURNING` | no RETURNING; `LAST_INSERT_ID()` for an auto-increment id |
 
-- Needs a unique index: without one, PostgreSQL errors and MySQL inserts a duplicate.
-- With `SET x = EXCLUDED.x`, running it twice leaves the same row, so retries are safe.
+1. The database tries to insert the proposed row.
+2. It checks the unique index or constraint: the one named in `ON CONFLICT (id)` in PostgreSQL, any unique key in MySQL.
+3. No clash: the row is inserted.
+4. Clash: instead of raising an error, it runs the update part on the existing row. Even when another session inserts the same key at the same moment, PostgreSQL guarantees one of the two outcomes, insert or update.
+5. In PostgreSQL, `RETURNING` sends back values from the row just written.
 
 ## Example
 
+The gateway reports that payment 105, now `PENDING`, is `PAID`. PostgreSQL 18:
+
 ```sql
--- PostgreSQL 18: email has a UNIQUE constraint
--- asha@example.in is already row 1
-INSERT INTO users (email, name, city)
-VALUES ('asha@example.in', 'Asha', 'Pune')
-ON CONFLICT (email)
-DO UPDATE SET name = EXCLUDED.name, city = EXCLUDED.city
-RETURNING id, (old.id IS NULL) AS inserted;  -- old/new: PostgreSQL 18+
+-- PostgreSQL 18: payment 105 exists, status PENDING
+INSERT INTO payments (id, customer_id, amount, status, created_at)
+VALUES (105, 2, 75.00, 'PAID', '2026-10-05 15:45')
+ON CONFLICT (id)
+DO UPDATE SET status = EXCLUDED.status
+RETURNING id, old.status AS before, new.status AS after;
 ```
 
 ```text output
- id | inserted
-----+----------
-  1 | f
+ id  | before  | after
+-----+---------+-------
+ 105 | PENDING | PAID
 ```
 
+The same in MySQL 9.7:
+
 ```sql
--- MySQL 9.7
-INSERT INTO users (email, name, city)
-VALUES ('asha@example.in', 'Asha', 'Pune') AS new
-ON DUPLICATE KEY UPDATE name = new.name, city = new.city;
+-- MySQL 9.7: payment 105 exists, status PENDING
+INSERT INTO payments (id, customer_id, amount, status, created_at)
+VALUES (105, 2, 75.00, 'PAID', '2026-10-05 15:45') AS new
+ON DUPLICATE KEY UPDATE status = new.status;
+SELECT ROW_COUNT();   -- 1 inserted, 2 updated, 0 unchanged
 ```
+
+```text output
++-------------+
+| ROW_COUNT() |
++-------------+
+|           2 |
++-------------+
+```
+
+What to notice:
+
+- `EXCLUDED.status` and `new.status` both mean "the value I tried to insert", here `PAID`. Only `status` is in the update list, so the stored amount and date stay as they are.
+- `old.status` is `PENDING` and `new.status` is `PAID`, so the row was updated. For a new payment, such as 106, `old.status` would be NULL.
+- Run either statement a second time and the row stays the same: PostgreSQL shows `PAID | PAID`, and MySQL's `ROW_COUNT()` is 0. The retry is harmless.
+
+## Rules and defaults
+
+- **Unique key required:** PostgreSQL raises an error if no unique index matches the `ON CONFLICT` target. A target is required for `DO UPDATE` and optional for `DO NOTHING`.
+- **One row once (PostgreSQL):** `DO UPDATE` may not change the same row twice in one statement. Two proposed rows with the same key raise a cardinality violation error.
+- **Several unique keys (MySQL):** the manual advises avoiding `ON DUPLICATE KEY UPDATE` on a table with more than one unique index, because a clash on any of them triggers the update.
+- **VALUES() in MySQL:** referring to the new row with `VALUES(col)` is deprecated since 8.0.20, and 9.7 shows a warning. Use the row alias `AS new` (8.0.19+).
+- **Generated ids:** PostgreSQL returns them with `RETURNING id`. MySQL has no RETURNING: read `LAST_INSERT_ID()` on the same connection, or use JDBC `getGeneratedKeys()`. See [id generation](card:id-generation).
+
+## Not to be confused with
+
+`INSERT … ON CONFLICT` is an insert with a fallback: built to stay correct when many sessions write the same key at once. `MERGE` (PostgreSQL 15+) syncs a table from a source table or query, with separate branches to insert, update or delete. The PostgreSQL docs point to `ON CONFLICT` when a concurrent insert must turn into an update, and say the two are not interchangeable. Rule: one row that may already exist = `ON CONFLICT`; syncing a whole set = `MERGE`.
+
+## Common mistakes
+
+- **"An upsert needs only the columns I want to update."** The proposed row must also be a valid insert. In PostgreSQL 18, `INSERT INTO payments (id, status) VALUES (105, 'PAID') ON CONFLICT …` fails with a not-null error on `customer_id`, even though payment 105 exists.
 
 ## Interview Qs
 
+### How do you make a webhook or retry handler safe to run twice?
+
+Write the change as an idempotent upsert on a unique key, such as the payment id or an event id: `ON CONFLICT DO UPDATE` or `DO NOTHING` in PostgreSQL, `ON DUPLICATE KEY UPDATE` in MySQL. A second delivery then updates the same row to the same values instead of inserting a duplicate or failing.
+
 ### ON CONFLICT or MERGE in PostgreSQL?
 
-ON CONFLICT is the upsert for concurrent writes: if another insert wins the race, it updates instead. MERGE syncs a table from a source with insert, update and delete branches; the docs say the two are not interchangeable.
+ON CONFLICT is the upsert for concurrent writes: if another insert wins the race, it takes the update path instead of failing. MERGE syncs a table from a source with insert, update and delete branches. The docs say the two are not interchangeable.
 
 ### How do you get the generated id after an insert?
 
-PostgreSQL: `INSERT … RETURNING id` in the same round trip. MySQL has no RETURNING: read `LAST_INSERT_ID()` on the same connection, or JDBC `getGeneratedKeys()`. See [id generation](card:id-generation).
+PostgreSQL: `INSERT … RETURNING id`, in the same round trip. MySQL has no RETURNING: read `LAST_INSERT_ID()` on the same connection, or JDBC `getGeneratedKeys()`.

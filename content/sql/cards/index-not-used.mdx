@@ -5,16 +5,27 @@ title: Why an Index Is Not Used
 topic: indexes
 level: interview
 heat: 2
-hook: "An index is skipped when a scan looks cheaper, or when the query hides the column behind a function, a cast or a leading %."
+hook: "The database skips an index when reading the whole table looks cheaper, or when the query hides the column inside a function, a type conversion or a leading %."
 points:
-  - { k: "Selectivity", v: "share of rows a filter keeps; small share = index helps" }
-  - { k: "Cardinality", v: "number of distinct values in a column" }
-  - { k: "Match rule", v: "WHERE must use the indexed column or expression as written" }
-  - { k: "Statistics", v: "stale ones mislead the planner; run ANALYZE", kind: minus }
+  - { k: "Selectivity", v: "the share of rows a condition keeps; the smaller the share, the more an index helps" }
+  - { k: "Cardinality", v: "the number of distinct values in a column: email is high, status is low" }
+  - { k: "Match rule", v: "the WHERE must use the indexed column or expression exactly as indexed, not wrapped in a function" }
+  - { k: "Leading wildcard", v: "LIKE '%kumar' has no fixed start, so a B-tree cannot seek; LIKE 'kumar%' can", kind: minus }
+  - { k: "Statistics", v: "the planner's row estimates come from sampled statistics; after a bulk load, run ANALYZE", kind: minus }
 trap:
   wrong: "An index on status (3 values) speeds up WHERE status = 'PAID'."
-  right: "Only if 'PAID' is rare. If most rows match, a full scan is cheaper; a partial index on a rare value can help."
-sayIt: "I check EXPLAIN. Usually the filter matches too many rows, the column is wrapped in a function or cast, LIKE starts with %, the first index column is missing, or statistics are stale. I fix the query, add an expression index, or run ANALYZE."
+  right: "Only if 'PAID' is rare. When 90% of rows are PAID, one full read is cheaper; the index helps for a rare value such as 'PENDING'."
+  why: "People expect the database to use any index on the filtered column. The planner compares costs, and fetching 90% of rows one by one through an index costs more than one sequential pass."
+sayIt: "I read EXPLAIN. Usually the filter matches too many rows, the column is wrapped in a function or cast, LIKE starts with %, the index's first column is missing, or statistics are stale. I rewrite the query, add an expression index, or run ANALYZE."
+cheat:
+  idea: "An index is skipped when the planner expects many rows to match, or when the query changes the column first: a function, a type conversion or a leading %."
+  remember: "Filter on the raw column: write date filters as a range, created_at >= day AND created_at < next day."
+buildsOn: [indexes, composite-indexes, string-date-functions]
+scenarios:
+  - q: "On MySQL, phone is a VARCHAR column with an index, and WHERE phone = 9810012345 ignores the index. Why?"
+    a: "The number is compared with a string column, so MySQL converts each phone value to a number before comparing. The index stores strings in string order, so it cannot be searched for a number. Compare with a string: phone = '9810012345'."
+  - q: "Which query can use an index on payments (created_at): WHERE date(created_at) = '2026-03-01', or WHERE created_at >= '2026-03-01' AND created_at < '2026-03-02'?"
+    a: "The range. The index stores raw created_at values, not date(created_at), so the first query cannot seek and PostgreSQL ran a Seq Scan. The range asks for the same day on the raw column, and it used an Index Scan."
 confusedWith: []
 tags: [indexes, selectivity, cardinality, statistics]
 visual: table
@@ -37,43 +48,79 @@ sources:
   - title: "pg_trgm (PostgreSQL 18 docs, F.35)"
     url: "https://www.postgresql.org/docs/18/pgtrgm.html"
     verifiedOn: "2026-10-20"
+  - title: "Configuring Persistent Optimizer Statistics: innodb_stats_auto_recalc (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-persistent-stats.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+This concept is the checklist of reasons a query does not use an index you created. Some reasons are by design: the planner estimates that most rows match, so one full read is cheaper. The others come from how the query is written: the index stores the raw column, but the query asks for something computed from it, so the sorted values cannot be searched. You see the result as a `Seq Scan` in the plan; reading plans is the next concept, [EXPLAIN](card:explain-query-plans).
 
 ## Why it exists
 
-An index helps only when the planner can match it to the query and expects it to be cheaper.
+Adding an index and finding the query just as slow is common. Without knowing the causes, people add more indexes, which slow every write and still go unused. Knowing them turns this into a quick check: find the cause in the plan, then fix the query, the index or the statistics.
 
 ## How it works
 
 | Cause | Example | Fix |
 |---|---|---|
-| Matches a big share of rows | `status = 'PAID'` on most rows | Fine as is; partial index on rare values |
-| Function on the column | `lower(email) = '...'` | Expression index on `lower(email)` |
-| Type mismatch | MySQL: VARCHAR `phone = 98100` | Compare with a string: `'98100'` |
+| Matches a big share of rows | `status = 'PAID'` on 90% of rows | Fine as it is; index rare values only |
+| Function on the column | `date(created_at) = '2026-03-01'` | A range on the raw column, or an expression index |
+| Type mismatch | MySQL: VARCHAR `phone = 9810012345` | Compare with a string: `'9810012345'` |
 | Leading wildcard | `name LIKE '%kumar'` | PostgreSQL `pg_trgm` GIN index |
-| First index column missing | index `(user_id, status)`, `WHERE status = ...` | Index on `status` |
+| First index column missing | index `(customer_id, status)`, `WHERE status = ...` | An index that starts with `status` |
 | Stale statistics | right after a bulk load | `ANALYZE` / MySQL `ANALYZE TABLE` |
-| OR on two columns | `user_id = 7 OR city = 'Pune'` | An index on each column, or `UNION` |
 
-- Read the plan first: [EXPLAIN](card:explain-query-plans).
+1. The planner reads its statistics: sampled facts about each column, such as how many distinct values it has and which values are most common.
+2. From them it estimates the selectivity of each condition and so the number of rows that will match.
+3. It looks for an index whose column or expression appears in the WHERE exactly as indexed, starting from the index's first column.
+4. It compares the estimated cost of using that index, roughly one jump per matching row, with one sequential pass over the whole table, and picks the cheaper.
+5. If no index matches the condition as written, or most rows match, the plan shows a Seq Scan.
 
 ## Example
 
-```sql
-CREATE INDEX idx_users_email ON users (email);
--- skipped: the index holds email, the query asks for lower(email)
-SELECT id FROM users WHERE lower(email) = 'asha@example.com';
+The same day of payments asked for in two ways, on 100,000 payments in PostgreSQL 18.
 
--- fix: index the same expression
-CREATE INDEX idx_users_lower_email ON users (lower(email));
+```sql
+CREATE INDEX idx_payments_created ON payments (created_at);
+
+-- not used: the index holds created_at, not date(created_at)
+SELECT id, amount FROM payments WHERE date(created_at) = '2026-03-01';
+
+-- used: the same day, written as a range on the raw column
+SELECT id, amount FROM payments
+WHERE created_at >= '2026-03-01' AND created_at < '2026-03-02';
 ```
+
+What to notice:
+
+- `EXPLAIN` showed `Seq Scan` with `Filter: (date(created_at) = ...)` for the first query, and `Index Scan using idx_payments_created` for the second. Both return the same 360 rows.
+- The range uses `<` the next day, so every time on 1 March is included and nothing from 2 March is.
+- With an index on `status`, `status = 'PAID'` (90% of rows) still got a Seq Scan, while `status = 'PENDING'` (3%) used the index through a Bitmap Index Scan: same index, different selectivity.
+
+## Rules and defaults
+
+- **Expression must match:** PostgreSQL uses an expression index such as `(lower(email))` only when the query uses that same expression.
+- **Implicit conversion (MySQL):** comparing a string column with a number converts every value to a number, so the string index cannot be searched.
+- **LIKE:** `'abc%'` can use a B-tree (in PostgreSQL with the setup in [Index types](card:index-types)); `'%abc'` cannot. A `pg_trgm` GIN index handles both.
+- **OR on two columns:** PostgreSQL can combine an index on each column with a BitmapOr; with an index on only one, it must read the table.
+- **Automatic statistics:** PostgreSQL's autovacuum runs ANALYZE after enough rows change. MySQL InnoDB recalculates statistics in the background when more than 10% of a table's rows change (`innodb_stats_auto_recalc`, on by default).
+
+## Not to be confused with
+
+Cardinality is a property of a column: the number of distinct values in it. Selectivity is a property of one condition: the share of rows it keeps. `status` has low cardinality, yet `status = 'PENDING'` is selective, because only 3% of rows match. Rule: the planner judges the selectivity of the value you ask for, not the column's cardinality alone.
 
 ## Interview Qs
 
 ### Why does a function on an indexed column stop the index?
 
-The index stores `email`, not `lower(email)`, so the database cannot seek on the computed value. Index the expression, or store the value already normalised.
+The index stores `created_at`, not `date(created_at)`, so the database cannot search the sorted values for the computed one and must compute it for every row. Rewrite the filter on the raw column, often as a range, or create an index on the same expression.
 
-### What are selectivity and cardinality?
+### Your index exists, but EXPLAIN shows a Seq Scan. What do you check?
 
-Selectivity: the share of rows a condition keeps; smaller helps an index. Cardinality: distinct values in a column; email is high, status is low.
+Whether the filter keeps a large share of rows, whether the column is wrapped in a function or cast, whether LIKE starts with %, whether the index's first column is in the WHERE, and whether the estimated rows are far from actual, which points to stale statistics.
+
+### Can an index on a low-cardinality column help?
+
+Yes, for rare values. An index on `status` helps `status = 'PENDING'` when few rows are pending, but not `status = 'PAID'` when most are. A partial index on the rare value is even smaller.

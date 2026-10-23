@@ -5,16 +5,30 @@ title: "Joins"
 topic: querying
 level: beginner
 heat: 3
-hook: "A join pairs each row with every row that matches the ON condition. Outer joins also keep the rows that found no match."
+hook: "A join puts a row of one table next to each matching row of another, matched by the ON condition. LEFT JOIN also keeps left rows that found no match."
 points:
-  - { k: "Row count", v: "a user with 3 orders appears 3 times; with none, INNER drops them" }
-  - { k: "Fan-out", v: "join two one-to-many tables, then SUM: totals get multiplied", kind: minus }
-  - { k: "Equi vs non-equi", v: "ON a.x = b.x, or ranges such as BETWEEN" }
-  - { k: "MySQL", v: "no FULL OUTER JOIN: UNION a LEFT and a RIGHT join", kind: minus }
+  - { k: "One row per match", v: "a customer with two payments appears twice; a customer with none is dropped by INNER JOIN" }
+  - { k: "INNER JOIN", v: "keeps only pairs of rows that meet the ON condition; plain JOIN means INNER JOIN" }
+  - { k: "LEFT JOIN", v: "keeps every left row; where nothing matched, the right table's columns are NULL" }
+  - { k: "ON vs WHERE", v: "ON decides which rows match; WHERE then filters the joined rows" }
+  - { k: "Fan-out", v: "join two one-to-many tables, then SUM, and the same amount is counted several times", kind: minus }
+  - { k: "MySQL 9.7", v: "has no FULL OUTER JOIN; combine a LEFT JOIN and a RIGHT JOIN with UNION instead", kind: minus }
 trap:
-  wrong: "A filter on the right table works the same in ON or WHERE of a LEFT JOIN."
-  right: "In ON it only limits matches, so all left rows stay. In WHERE it drops the NULL rows, so it acts like INNER JOIN."
-sayIt: "INNER keeps matched pairs, LEFT keeps every left row with NULLs where nothing matched, FULL keeps both sides, CROSS pairs everything. Conditions in ON shape matching; WHERE filters the joined result."
+  wrong: "In a LEFT JOIN, a filter on the right table works the same in ON or in WHERE."
+  right: "In ON it only limits which rows match, so every left row stays. In WHERE it removes the NULL-filled rows, so the LEFT JOIN acts like an INNER JOIN."
+  why: "With an INNER JOIN the two placements do give the same result, and the queries look almost identical, so people assume it holds for LEFT JOIN too."
+sayIt: "INNER keeps matched pairs, LEFT keeps every left row with NULLs where nothing matched, FULL keeps both sides, CROSS pairs everything. ON shapes the matching; WHERE filters the joined result."
+cheat:
+  idea: "A join combines rows of two tables that match the ON condition, usually foreign key = primary key. INNER keeps only matches; LEFT also keeps unmatched left rows, with NULLs."
+  remember: "A right-table filter in WHERE turns a LEFT JOIN into an INNER JOIN; put it in ON to keep every left row."
+buildsOn: [keys, relationships, select-and-filtering]
+scenarios:
+  - q: "customers LEFT JOIN payments ON p.customer_id = c.id WHERE p.status = 'PAID'. Arjun has no payments. Is he in the result?"
+    a: "No. His joined row has NULL in every payment column, and NULL = 'PAID' is UNKNOWN, so WHERE drops it. Move the condition into ON (ON p.customer_id = c.id AND p.status = 'PAID') to keep him with NULLs."
+  - q: "4 customers and 6 payments. How many rows does customers CROSS JOIN payments return, and how many does the INNER JOIN on customer_id return?"
+    a: "CROSS JOIN pairs every customer with every payment: 4 × 6 = 24 rows. The INNER JOIN returns one row per payment that has a matching customer: 6 rows. A join's row count follows the matches, not the table sizes."
+  - q: "You need each department with its number of employees, including departments that have none. INNER JOIN or LEFT JOIN, and what do you count?"
+    a: "departments LEFT JOIN employees, then COUNT(e.id). The LEFT JOIN keeps empty departments with NULL employee columns, and COUNT(e.id) skips that NULL, giving 0. COUNT(*) would count the NULL-filled row and give 1."
 confusedWith: [inner-vs-left-join]
 tags: [joins, inner-join, left-join, self-join]
 visual: table
@@ -25,72 +39,95 @@ sources:
   - title: "Joins Between Tables: self join (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/18/tutorial-join.html"
     verifiedOn: "2026-10-20"
-  - title: "JOIN Clause (MySQL 9.7 Reference Manual)"
+  - title: "JOIN Clause: JOIN = INNER JOIN, prefer LEFT over RIGHT (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/join.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "SQL Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/sql/sql-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A join combines rows from two tables into one result row whenever a condition is true. The condition comes after `ON` and usually says that a [foreign key](card:keys) equals a primary key: `p.customer_id = c.id` pairs each payment with its customer. An INNER JOIN keeps only the pairs that match. A LEFT JOIN also keeps every row of the left table, the one written first, and fills the right table's columns with NULL where nothing matched.
+
 ## Why it exists
 
-Normalised data lives in separate tables: users in one, orders in another. A join puts the related rows back side by side for one answer.
+A good design stores each fact once, as you saw in [relationships](card:relationships): names live in `customers`, amounts in `payments`. But a report needs "customer name and amount" in one row. Without a join you would load both tables into Java and match them by hand, or copy the name into every payment. A join matches them inside the database and returns the combined rows.
 
 ## How it works
 
 | Join | Keeps | Unmatched rows |
 |---|---|---|
-| INNER | matching pairs only | dropped |
+| INNER | only matching pairs | dropped |
 | LEFT | every left row | right columns are NULL |
 | RIGHT | every right row | left columns are NULL |
-| FULL OUTER | every row from both | NULL on the missing side |
-| CROSS | every pairing: 3 × 4 = 12 rows | no condition at all |
-| SELF | a table with itself, two aliases | as the join type used |
+| FULL OUTER | every row of both tables | NULL on the missing side |
+| CROSS | every pairing, no ON: 4 × 6 = 24 rows | none: everything pairs |
+| Self join | a table joined to itself, under two aliases | depends on the join used |
 
-- "Users with no orders" is an anti-join: see [rows with no match](card:anti-join-pattern).
+Follow `customers c LEFT JOIN payments p ON p.customer_id = c.id`:
+
+1. The database takes a customer row from the left table.
+2. It finds every payment row for which the ON condition is true.
+3. It outputs one combined row per matching payment, so Asha, with two payments, appears twice.
+4. If no payment matches, an INNER JOIN outputs nothing for that customer; a LEFT JOIN outputs her once, with NULL in every payment column.
+5. Only after all rows are joined does WHERE filter them.
+
+So the key is: ON decides what matches; WHERE filters what the join produced.
 
 ## Example
 
+Every customer with their paid payments, if any. `c` and `p` are aliases, short names for the two tables inside this query. Asha has two paid payments, Ravi and Meena one each (plus a failed and a pending one), and Arjun has none.
+
 ```sql
--- every user, with their PAID orders if any
--- users: Asha, Ravi; orders: Asha 500 PAID, Asha 200 REFUNDED
-SELECT u.name, o.amount
-FROM users u
-LEFT JOIN orders o ON o.user_id = u.id AND o.status = 'PAID'
-ORDER BY u.name;
+SELECT c.name, p.id AS payment_id, p.amount
+FROM customers c
+LEFT JOIN payments p
+       ON p.customer_id = c.id
+      AND p.status = 'PAID'
+ORDER BY c.id, p.id;
 ```
 
 ```text output
- name | amount
-------+--------
- Asha |    500
- Ravi |   NULL
+ name  | payment_id | amount
+-------+------------+--------
+ Asha  |        101 | 500.00
+ Asha  |        102 | 800.00
+ Ravi  |        104 | 900.00
+ Meena |        106 | 800.00
+ Arjun |       NULL |   NULL
+(5 rows)
 ```
 
-```sql
--- each employee with their manager's name
--- employees: Asha (no manager); Ravi and Meena report to Asha
-SELECT e.name, m.name AS manager
-FROM employees e
-LEFT JOIN employees m ON m.id = e.manager_id
-ORDER BY e.id;
-```
+What to notice:
 
-```text output
- name  | manager
--------+---------
- Asha  | NULL
- Ravi  | Asha
- Meena | Asha
-```
+- Arjun stays, with NULLs, because this is a LEFT JOIN and the status test is inside ON.
+- Move `p.status = 'PAID'` into a WHERE and Arjun disappears: his NULL status is not 'PAID', so the result has the same 4 rows as an INNER JOIN.
+- Ravi's failed payment does not appear, but Ravi does, because his paid payment matched.
+- PostgreSQL 18 and MySQL 9.7 return the same five rows.
+
+## Rules and defaults
+
+- **Plain JOIN:** means INNER JOIN in both databases; `LEFT JOIN` and `LEFT OUTER JOIN` are the same.
+- **NULL keys never match:** a payment whose customer_id is NULL joins to no customer, because `NULL = 1` is UNKNOWN.
+- **RIGHT JOIN:** a LEFT JOIN with the tables swapped. The MySQL 9.7 manual advises writing LEFT JOIN for portability.
+- **Join conditions:** most joins test equality (an equi join); a non-equi join uses another test, such as `p.amount BETWEEN band.low AND band.high`.
+
+## Not to be confused with
+
+An INNER JOIN returns only rows that matched on both sides. A LEFT JOIN returns those same rows plus each unmatched left row once, filled with NULLs. Rule: if every row of the first table must appear, use LEFT JOIN, and keep right-table filters in ON.
 
 ## Interview Qs
 
-### Why did my SUM double after adding a join?
+### Why did my SUM get bigger after I added a join?
 
-The left row repeats once per match, so joining two one-to-many tables multiplies rows. Aggregate each many side in a subquery first, then join one row per key.
+A join repeats a row once per match. Asha paid 1300 in total, but if payment 102 has two refunds, joining refunds makes payment 102 appear twice, and SUM(p.amount) shows 2100. Aggregate each many side first, for example the refunds per payment in a subquery, then join one row per key.
 
-### How do you do a FULL OUTER JOIN in MySQL?
+### How do you get a FULL OUTER JOIN in MySQL?
 
-MySQL has no FULL JOIN. UNION a LEFT JOIN with a RIGHT JOIN of the same tables. UNION drops the matched rows that appear twice, but also real duplicate rows; to keep those, use UNION ALL and a RIGHT JOIN filtered to rows with no left match.
+MySQL has no FULL JOIN. Take a LEFT JOIN of the two tables, then UNION ALL a RIGHT JOIN filtered to rows with no left match, `WHERE c.id IS NULL`. Plain UNION of a LEFT and a RIGHT JOIN also works, but it removes real duplicate rows as well as the overlap.
+
+### How do you list each employee with their manager's name?
+
+A self join: join `employees` to itself under two aliases. `FROM employees e LEFT JOIN employees m ON m.id = e.manager_id` puts each employee next to the row of their manager. LEFT JOIN keeps the top manager, whose manager_id is NULL, with a NULL manager name.

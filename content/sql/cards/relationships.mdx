@@ -5,16 +5,28 @@ title: "One-to-One, One-to-Many, Many-to-Many"
 topic: basics
 level: beginner
 heat: 2
-hook: "One-to-many: FK on the many side. One-to-one: make that FK UNIQUE. Many-to-many: a junction table with two FKs."
+hook: "One-to-many: put the foreign key on the many side. One-to-one: make that foreign key UNIQUE. Many-to-many: add a junction table with two foreign keys."
 points:
-  - { k: "One-to-many", v: "orders.user_id references users.id" }
-  - { k: "One-to-one", v: "the same FK plus UNIQUE: at most one child each" }
-  - { k: "Many-to-many", v: "junction table; its PK is both FKs together" }
-  - { k: "Self-reference", v: "employees.manager_id references employees.id" }
+  - { k: "One-to-many", v: "the child table holds the foreign key: payments.customer_id points to customers.id" }
+  - { k: "One-to-one", v: "the same foreign key with UNIQUE added, so each parent has at most one child row" }
+  - { k: "Many-to-many", v: "a junction table with one foreign key to each side; both columns together form its primary key" }
+  - { k: "Facts about the link", v: "belong in the junction table, such as the date a customer claimed an offer" }
+  - { k: "Self-reference", v: "a foreign key to its own table, such as employees.manager_id pointing to employees.id" }
 trap:
-  wrong: "For many-to-many, store a list of course ids in the students table."
-  right: "Add a junction table enrolments(student_id, course_id), one row per link. PostgreSQL docs also advise a row per item over arrays."
-sayIt: "One-to-many puts the foreign key on the many side. One-to-one is the same FK with a UNIQUE constraint. Many-to-many needs a junction table holding both foreign keys, usually as its composite primary key."
+  wrong: "For many-to-many, store a list of offer ids in a column of the customers table."
+  right: "Add a junction table customer_offers(customer_id, offer_id), one row per link. Lists in one column cannot have foreign keys and are hard to search."
+  why: "A list in one column looks shorter, and it matches how the data is shown on screen, so it feels natural to store it that way."
+sayIt: "One-to-many puts the foreign key on the many side. One-to-one is the same foreign key with a UNIQUE constraint. Many-to-many needs a junction table holding both foreign keys, usually as its composite primary key, plus any facts about the link."
+cheat:
+  idea: "A relationship says how many rows on each side can link. Where the foreign key goes decides it."
+  flow: "1:N → FK on child · 1:1 → FK + UNIQUE · M:N → junction table"
+  remember: "A junction table's primary key is both foreign keys together, so a link cannot be stored twice."
+buildsOn: [keys]
+scenarios:
+  - q: "A payment can be refunded in parts, so one payment can have several refunds, but a refund belongs to one payment. Which table gets the foreign key?"
+    a: "refunds gets payment_id REFERENCES payments (id). It is one-to-many, and the foreign key always goes on the many side, because each refund row has exactly one payment to point to."
+  - q: "customer_offers has PRIMARY KEY (customer_id, offer_id). A customer claims offer 1 a second time. What happens, and is it what you want?"
+    a: "The insert fails with a duplicate key error, because the pair (customer, offer) already exists. That is the point: one claim per customer per offer. If repeat claims were allowed, you would add an id or a claimed_on column to the key."
 confusedWith: []
 tags: [relationships, foreign-key, er-diagram]
 visual: flow
@@ -30,46 +42,90 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A relationship describes how many rows of one table can link to rows of another. There are three kinds. One-to-many: one customer makes many payments. One-to-one: one customer has at most one wallet. Many-to-many: a customer can claim many offers, and an offer can be claimed by many customers. Each kind is built from [foreign keys](card:keys); what changes is where the foreign key goes.
+
 ## Why it exists
 
-Real data is linked: users place orders, students take courses. Each kind of link needs the foreign key in a different place, or data repeats or cannot be stored.
+A foreign key column holds one value per row, so it can point to only one parent. Put it on the wrong side and the data cannot be stored: a `payment_id` column in `customers` would allow only one payment per customer. Many-to-many does not fit in either table at all. Knowing the three patterns tells you where each link goes, so data is stored once and every link can be checked.
 
 ## How it works
 
 <Mermaid
-  alt="Entity diagram. One user has many orders. One user has at most one profile. Students and courses meet in an enrolments junction table, so each side has many links. An employee can manage many employees."
+  alt="Entity diagram for the payments example. One customer makes many payments, and one payment has many refunds. One customer owns at most one wallet. Customers and offers meet in the customer_offers junction table, so each side has many links. An employee can manage many employees."
   chart={`erDiagram
-  USERS ||--o{ ORDERS : places
-  USERS ||--o| PROFILES : has
-  STUDENTS ||--o{ ENROLMENTS : joins
-  COURSES ||--o{ ENROLMENTS : has
+  CUSTOMERS ||--o{ PAYMENTS : makes
+  PAYMENTS ||--o{ REFUNDS : has
+  CUSTOMERS ||--o| WALLETS : owns
+  CUSTOMERS ||--o{ CUSTOMER_OFFERS : claims
+  OFFERS ||--o{ CUSTOMER_OFFERS : "claimed in"
   EMPLOYEES |o--o{ EMPLOYEES : manages`}
 />
 
-- A junction table can carry facts about the link itself, such as `enrolled_on`.
-- Walk a self-referencing tree (org chart) with a [recursive CTE](card:ctes).
+1. Ask, for one row on each side: "how many rows on the other side can it link to?"
+2. If one side is "many" (one customer, many payments), put the foreign key in the many-side table: `payments.customer_id`.
+3. If both sides are "at most one" (customer and wallet), use the same foreign key and add `UNIQUE` to it, so a second wallet for the same customer is rejected.
+4. If both sides are "many" (customers and offers), create a junction table holding a foreign key to each side, one row per link. Make the pair its primary key.
+5. If a table links to itself (an employee's manager is also an employee), the foreign key points to its own table.
 
 ## Example
 
+Two new tables in the payments example. `offers(id, code)` already holds CASHBACK50 (id 1) and FESTIVE10 (id 2).
+
 ```sql
-CREATE TABLE enrolments (
-  student_id  BIGINT REFERENCES students (id),
-  course_id   BIGINT REFERENCES courses (id),
-  enrolled_on DATE NOT NULL,
-  PRIMARY KEY (student_id, course_id)
+CREATE TABLE wallets (                      -- one-to-one
+  id          BIGINT PRIMARY KEY,
+  customer_id BIGINT NOT NULL UNIQUE REFERENCES customers (id),
+  balance     NUMERIC(12,2) NOT NULL
 );
-CREATE TABLE profiles (
-  user_id BIGINT NOT NULL UNIQUE REFERENCES users (id),
-  bio     TEXT
+CREATE TABLE customer_offers (              -- many-to-many
+  customer_id BIGINT REFERENCES customers (id),
+  offer_id    BIGINT REFERENCES offers (id),
+  claimed_on  DATE NOT NULL,
+  PRIMARY KEY (customer_id, offer_id)
 );
+INSERT INTO wallets VALUES (1, 1, 0), (2, 1, 0);
+INSERT INTO customer_offers VALUES (1, 1, '2026-10-01'), (1, 2, '2026-10-02'), (2, 1, '2026-10-03');
+INSERT INTO customer_offers VALUES (1, 1, '2026-10-05');
 ```
+
+```text output
+CREATE TABLE
+CREATE TABLE
+ERROR:  duplicate key value violates unique constraint "wallets_customer_id_key"
+DETAIL:  Key (customer_id)=(1) already exists.
+INSERT 0 3
+ERROR:  duplicate key value violates unique constraint "customer_offers_pkey"
+DETAIL:  Key (customer_id, offer_id)=(1, 1) already exists.
+```
+
+What to notice:
+
+- `UNIQUE` on `wallets.customer_id` turns one-to-many into one-to-one: the second wallet for customer 1 is rejected. The whole statement fails, so neither wallet row is stored.
+- In `customer_offers`, customer 1 appears twice and offer 1 appears twice; only the pair must be new. That is how both sides get "many".
+- `claimed_on` is a fact about the link itself, so it lives in the junction table, not in `customers` or `offers`.
+
+## Rules and defaults
+
+- **Where the foreign key goes:** always on the side that has "one parent per row". For many-to-many, neither side qualifies, so a third table holds it.
+- **Lists in a column:** PostgreSQL has array columns, but its docs warn that searching inside arrays often signals a design mistake, and advise a separate table with one row per item.
+- **Self-reference:** the column must allow NULL for the top of the tree, such as the CEO, who has no manager.
+
+## Common mistakes
+
+- **"One-to-one needs the same id in both tables, so no constraint is required."** Without `UNIQUE` (or making the foreign key the primary key), nothing stops a second wallet for the same customer, and the link silently becomes one-to-many.
 
 ## Interview Qs
 
 ### How do you model a many-to-many relationship?
 
-With a junction table holding a foreign key to each side, one row per link. Make the pair its primary key so a link cannot be stored twice.
+With a junction table that holds a foreign key to each side, one row per link, for example `customer_offers(customer_id, offer_id)`. Make the pair its primary key so the same link cannot be stored twice. Facts about the link, such as the claim date, go in the same table.
 
 ### How do you store each employee's manager?
 
-A nullable `manager_id` column that references `employees.id` in the same table. The top manager has NULL. Query the chain with a self join or a recursive CTE.
+Add a nullable `manager_id` column that references `employees.id` in the same table. The top manager has NULL. To list an employee with their manager, join the table to itself; to walk the whole chain upwards you use a recursive query, covered in [CTEs](card:ctes).
+
+### How do you build a one-to-one relationship?
+
+Put a foreign key in one table and make it `UNIQUE`, or make the foreign key the primary key of the child table. Either way each parent can have at most one child row. Put it in the table that is optional, such as `wallets`, so customers without a wallet need no row.

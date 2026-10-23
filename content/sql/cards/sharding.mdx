@@ -5,22 +5,35 @@ title: Sharding
 topic: scaling
 level: intermediate
 heat: 2
-hook: "Split the rows across several database servers by a shard key, so each server holds and serves only its slice."
+hook: "Sharding splits a table's rows across several database servers by a shard key, such as customer_id, so each server stores and serves only its slice."
 points:
-  - { k: "Shard key", v: "decides each row's server; high cardinality, rarely changes" }
-  - { k: "Scales", v: "writes and storage, not only reads", kind: plus }
-  - { k: "Cross-shard work", v: "joins and transactions across shards get slow and complex", kind: minus }
-  - { k: "Hot shard", v: "a skewed key, or rising ids with range routing, overloads one shard", kind: minus }
-  - { k: "Tools", v: "Vitess shards MySQL; Citus shards PostgreSQL" }
+  - { k: "Shard", v: "one database server holding a slice of the rows; all shards have the same tables" }
+  - { k: "Shard key", v: "the column that decides each row's shard; pick one most queries filter on, with many values, never changed" }
+  - { k: "Scales writes", v: "each shard takes only the writes for its own rows, so more shards add write capacity and storage", kind: plus }
+  - { k: "Cross-shard work", v: "a query without the shard key must ask every shard; joins and transactions across shards get hard", kind: minus }
+  - { k: "Hot shard", v: "a skewed key, or rising ids with range routing, sends most traffic to one shard", kind: minus }
+  - { k: "Tools", v: "Vitess shards MySQL; Citus is a PostgreSQL extension that shards tables" }
 trap:
   wrong: "Pick any shard key for now; we can change it later."
-  right: "Changing the key moves most rows between servers. Choose the column most queries filter on, and keep it."
-sayIt: "Sharding splits rows across servers by a shard key, so it scales writes and data size. I pick a key that keeps a user's queries on one shard, and I shard only after simpler steps run out."
+  right: "Changing the shard key moves most rows to other servers. Choose the column most queries filter on, and keep it."
+  why: "Inside one database a new key is just an ALTER TABLE, so people assume a shard key is just as cheap to change."
+sayIt: "Sharding splits rows across servers by a shard key, so unlike replicas it scales writes and data size. I pick a key like customer_id that keeps each customer on one shard, and shard only after simpler steps run out, because cross-shard joins and transactions get hard."
+cheat:
+  idea: "Sharding splits a table's rows across separate database servers by a shard key, such as customer_id. Each shard holds one slice and takes only its own writes."
+  code: |
+    int shard = Math.floorMod(customerId, 4);   // which server owns this customer
+  remember: "Shard last, on a key most queries use: cross-shard queries are slow, and changing the key moves data."
+buildsOn: [replication, partitioning]
+scenarios:
+  - q: "payments is sharded by customer_id across 4 servers. Finance asks for the total paid today across all customers. How does that query run?"
+    a: "It has no shard key, so the router sends it to all 4 shards. Each shard sums its own rows, and the router or the app adds the 4 sums. The slowest shard sets the response time, so such queries are better run on a reporting copy."
+  - q: "Payments are range-sharded by payment id: ids up to 1 million on shard 1, the next million on shard 2, and so on. What goes wrong as traffic grows?"
+    a: "Every new payment gets the highest id, so all inserts hit the last shard while the others sit idle: a hot shard. Shard by a hash of customer_id instead, which spreads new rows over all shards and keeps each customer on one."
 confusedWith: [partitioning-vs-sharding]
 tags: [sharding, shard-key, horizontal-scaling]
-visual: table
+visual: code
 sources:
-  - title: "Sharding pattern (Azure Architecture Center)"
+  - title: "Sharding pattern: strategies, rebalancing, cross-shard queries (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding"
     verifiedOn: "2026-10-20"
   - title: "What is Vitess (Vitess docs)"
@@ -29,37 +42,98 @@ sources:
   - title: "What is Citus? (Citus docs)"
     url: "https://docs.citusdata.com/en/stable/get_started/what_is_citus.html"
     verifiedOn: "2026-10-20"
+  - title: "Math.floorMod (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/Math.html#floorMod(long,long)"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Sharding is splitting the rows of a table across several separate database servers. Each server, called a shard, has the same tables but holds a different slice of the rows. A column called the shard key, such as `customer_id`, decides which shard owns each row. It is the same idea as [partitioning](card:partitioning), but the pieces live on different machines.
 
 ## Why it exists
 
-Replicas spread reads, but every write still hits one primary on one machine. When writes or data outgrow the biggest server, the data itself must be split.
+[Replicas](card:replication) share the reads, but every write still goes to one primary on one machine. When the payment system takes more writes than the biggest server can handle, or stores more data than one server can hold, more replicas do not help. With sharding, each server takes only part of the writes and the data, so four shards can take about four times the writes, if the key spreads the load evenly.
 
 ## How it works
 
-<Compare id="replication-vs-sharding" />
+<Mermaid
+  alt="The app sends a query for customer 10 to a router. The router computes the shard from the customer_id and sends the query only to shard 2. A query without customer_id goes to all shards, and the router merges the answers."
+  chart={`flowchart LR
+  App -- "payments of customer 10" --> Rt{"Router: shard = id mod 4"}
+  Rt -- "only shard 2" --> S2[(Shard 2)]
+  Rt -. "no key: ask all" .-> S0[(Shard 0)]
+  Rt -.-> S1[(Shard 1)]
+  Rt -.-> S2
+  Rt -.-> S3[(Shard 3)]`}
+/>
 
-- Routing: [range](card:range-sharding), [hash](card:hash-sharding) or a [lookup directory](card:directory-sharding).
-- A query without the shard key fans out to every shard; the slowest shard sets the latency.
-- Shard last, after the cheaper steps of the [scaling ladder](card:scaling-ladder).
+1. You choose the shard key, here `customer_id`, and a rule that maps a key to a shard: by [range](card:range-sharding), by [hash](card:hash-sharding), or through a [lookup table](card:directory-sharding).
+2. On each write, a router computes the shard from the key and sends the statement only to that server. The router can be your app, a proxy, or a tool such as Vitess or Citus.
+3. A read that includes the key, such as one customer's payment history, also goes to one shard.
+4. A read without the key, such as today's total, goes to every shard, and the router merges the answers. The slowest shard sets the response time.
+5. When the shards fill up, you add servers and move part of the rows to them. This is called resharding, and it is slow work that must not lose writes.
 
 ## Example
 
-Plain `hash mod N` moves most keys when a shard is added; [consistent hashing](card:consistent-hashing) moves only a small share.
+The payment service routes each customer by `customer_id` modulo the number of shards, the simplest hash rule. The program shows which customers move when a fifth shard is added.
 
-```text
-user_id   % 4 (4 shards)   % 5 (5 shards)
-10        2                0    moves
-11        3                1    moves
-20        0                0    stays
+```java
+public class ShardRouter {
+    static int shardFor(long customerId, int shards) {
+        return (int) Math.floorMod(customerId, (long) shards);  // 0 to shards - 1, even for a negative id
+    }
+
+    public static void main(String[] args) {
+        System.out.println("customer  4 shards  5 shards");
+        for (long id : new long[] {10, 11, 20, 21}) {
+            int before = shardFor(id, 4), after = shardFor(id, 5);
+            System.out.printf("%-9d %-9d %d%s%n", id, before, after,
+                    before == after ? "" : "  moves");
+        }
+    }
+}
 ```
+
+```text output
+customer  4 shards  5 shards
+10        2         0  moves
+11        3         1  moves
+20        0         0
+21        1         1
+```
+
+What to notice:
+
+- `Math.floorMod` takes the sign of the divisor, so with 4 shards it always returns 0 to 3. Plain `%` would return a negative number for a negative id.
+- All payments of customer 10 live on shard 2, so their history is a one-shard query. Refunds should use the same key, so a payment and its refunds can be joined on one shard.
+- Going from 4 to 5 shards moves customers 10 and 11. With modulo routing, most keys move whenever the count changes. [Consistent hashing](card:consistent-hashing) moves only a small share.
+
+## Rules and defaults
+
+- **Someone must route:** the app, a proxy or a sharding tool decides which server gets each query. Vitess does this for MySQL; Citus for PostgreSQL.
+- **Keep related rows together:** shard every table a request joins (payments, refunds) by the same key, so those joins stay on one shard.
+- **A good shard key:** many distinct values, spread evenly, present in most queries and never updated. A `status` column with three values is a bad key: at most three shards would ever get rows.
+- **Unique ids:** an auto-increment counter on each shard starts at 1 on every shard, so ids collide. Use [UUIDs or another global scheme](card:id-generation).
+- **Each shard is a full database:** it needs its own replicas, backups and monitoring.
+
+## Not to be confused with
+
+- [Partitioning](compare:partitioning-vs-sharding) splits one table into pieces **inside one server**; sharding spreads rows **over many servers**.
+- [Replication](compare:replication-vs-sharding) **copies** the same data to every server; sharding **splits** different rows across servers.
+
+Rule: partitioning = one server, replication = same data everywhere, sharding = different rows on different servers.
 
 ## Interview Qs
 
 ### How do you choose a shard key?
 
-Pick a value most queries filter on, with many distinct values, spread evenly and rarely changed, such as `user_id` or a tenant id. Avoid ever-growing ids or timestamps with range routing: new rows all hit one shard.
+Pick a value that most queries filter on, with many distinct values, spread evenly and never changed, such as `customer_id` or a tenant id. Avoid ever-growing ids or timestamps with range routing, because all new rows then hit one shard.
 
 ### How do you join or run a transaction across shards?
 
-Avoid it by design: keep related rows on one shard with the same key. Otherwise query each shard in parallel and merge in the app, and use a [saga](card:distributed-transactions) instead of one transaction.
+Avoid it by design: shard related tables by the same key, so a customer's rows stay on one shard. Otherwise query each shard in parallel and merge the results in the app, and use a [saga](card:distributed-transactions) instead of one transaction.
+
+### What is a hot shard, and how do you fix it?
+
+A hot shard gets far more traffic than the others, for example because one huge tenant or all new ids map to it. Fix it with a better key, such as a hash of a high-cardinality column, or by splitting the busy range onto its own shard.

@@ -5,17 +5,28 @@ title: "Constraints"
 topic: basics
 level: beginner
 heat: 2
-hook: "Constraints are rules the database checks on every write, so bad rows are rejected even when the app has a bug."
+hook: "Constraints are rules the database checks on every insert and update, so a bad row is rejected even when the app that sends it has a bug."
 points:
-  - { k: "CHECK and NULL", v: "a NULL result passes; add NOT NULL to forbid NULL", kind: minus }
-  - { k: "DEFAULT", v: "applies when the column is omitted; an explicit NULL stays NULL" }
-  - { k: "UNIQUE", v: "can span columns; many NULLs allowed by default" }
-  - { k: "FK action", v: "NO ACTION if none given: refuse while children exist", kind: default }
-  - { k: "MySQL CHECK", v: "enforced since 8.0.16; parsed and ignored before", kind: default }
+  - { k: "The six", v: "PRIMARY KEY, FOREIGN KEY, UNIQUE, NOT NULL and CHECK reject bad rows; DEFAULT fills a column you leave out" }
+  - { k: "CHECK and NULL", v: "a CHECK whose result is NULL passes, so CHECK (amount > 0) accepts a NULL amount; add NOT NULL", kind: minus }
+  - { k: "DEFAULT", v: "used only when the insert leaves the column out; an insert that says NULL stores NULL" }
+  - { k: "UNIQUE", v: "can cover several columns together; by default many rows may hold NULL in a UNIQUE column" }
+  - { k: "Default FK action", v: "NO ACTION: deleting a customer who still has payments is refused", kind: default }
+  - { k: "MySQL CHECK", v: "enforced since MySQL 8.0.16; older versions parsed CHECK and ignored it", kind: default }
 trap:
   wrong: "CHECK (amount > 0) also stops NULL amounts."
-  right: "A CHECK passes when its result is NULL. Add NOT NULL to forbid NULL."
-sayIt: "SQL constraints are PRIMARY KEY, FOREIGN KEY, UNIQUE, NOT NULL and CHECK, plus column DEFAULTs. The database enforces them on every insert and update, so data stays valid whichever app writes it."
+  right: "A CHECK fails only when its result is false. NULL > 0 is NULL, not false, so the row passes. Add NOT NULL to forbid NULL."
+  why: "In everyday logic \"is NULL greater than 0?\" sounds like a no, but SQL answers \"unknown\", and CHECK lets unknown through."
+sayIt: "SQL constraints are PRIMARY KEY, FOREIGN KEY, UNIQUE, NOT NULL and CHECK, plus column defaults. The database enforces them on every write, so data stays valid whichever app or script writes it. A CHECK lets NULL through, so I pair it with NOT NULL."
+cheat:
+  idea: "Constraints are rules stored with the table: unique ids, valid links, no missing values, and conditions such as amount > 0. The database rejects any row that breaks them."
+  remember: "CHECK lets NULL through, so pair it with NOT NULL. DEFAULT applies only when the column is left out."
+buildsOn: [keys, data-types]
+scenarios:
+  - q: "payments.status has NOT NULL DEFAULT 'PENDING'. One insert leaves status out; another sends status = NULL. What happens to each?"
+    a: "The first gets 'PENDING', because DEFAULT fills a column that the insert leaves out. The second fails: an explicit NULL is a value you chose, so DEFAULT does not apply, and NOT NULL rejects it."
+  - q: "payments.customer_id references customers.id with no ON DELETE clause. You run DELETE FROM customers WHERE id = 1, and customer 1 has payments. What happens?"
+    a: "The delete fails. Without an ON DELETE clause the action is NO ACTION, which refuses to delete a parent that still has child rows. You would choose CASCADE only if payments should disappear with the customer, which is wrong for money records."
 confusedWith: [primary-key-vs-unique-key]
 tags: [constraints, check, foreign-key, cascade]
 visual: table
@@ -23,9 +34,12 @@ sources:
   - title: "PostgreSQL 18 docs: 5.5 Constraints"
     url: "https://www.postgresql.org/docs/18/ddl-constraints.html"
     verifiedOn: "2026-10-20"
+  - title: "PostgreSQL 18 docs: 5.2 Default Values"
+    url: "https://www.postgresql.org/docs/18/ddl-default.html"
+    verifiedOn: "2026-10-21"
   - title: "MySQL 9.7 Reference Manual: FOREIGN KEY Constraints"
     url: "https://dev.mysql.com/doc/refman/9.7/en/create-table-foreign-keys.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "MySQL 8.0 Reference Manual: CHECK Constraints"
     url: "https://dev.mysql.com/doc/refman/8.0/en/create-table-check-constraints.html"
     verifiedOn: "2026-10-20"
@@ -34,44 +48,88 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A constraint is a rule about the data that you declare on a table, and that the database checks itself on every insert and update. You already met two: the [primary key and foreign key](card:keys). The others are `UNIQUE` (no two rows may share the value), `NOT NULL` (a value is required) and `CHECK` (a condition such as `amount > 0` must hold). `DEFAULT` is listed with them, but it rejects nothing: it fills in a value when you leave a column out.
+
 ## Why it exists
 
-Many apps and scripts write to one database, and each can have bugs. Constraints reject bad rows at the source, in one place.
+Many writers touch one database: the payments service, an admin tool, a nightly import script, a developer fixing data by hand. If the rule "amount must be positive" lives only in the service's Java code, the script can still store a payment of 0. A constraint puts the rule next to the data, so every writer obeys it and a bad row is refused at once, before it spreads into reports.
 
 ## How it works
 
-| Rule | Rejects | Example |
+| Rule | Rejects | Payments example |
 |---|---|---|
-| `PRIMARY KEY` | duplicate or NULL ids | `id` |
-| `FOREIGN KEY` | links to missing parents | `user_id REFERENCES users` |
-| `UNIQUE` | repeated values | `email`, or `(user_id, sku)` |
-| `NOT NULL` | missing values | `name` |
-| `CHECK` | rows that fail a condition | `amount > 0` |
-| `DEFAULT` | nothing: fills omitted columns | `status DEFAULT 'NEW'` |
+| `PRIMARY KEY` | a duplicate or NULL id | `id` |
+| `FOREIGN KEY` | a link to a missing parent | `customer_id REFERENCES customers` |
+| `UNIQUE` | a repeated value | a customer's `email` |
+| `NOT NULL` | a missing value | `amount` |
+| `CHECK` | a row where the condition is false | `amount > 0` |
+| `DEFAULT` | nothing; fills a left-out column | `status DEFAULT 'PENDING'` |
 
-- `ON DELETE` actions: `CASCADE` deletes the children; `SET NULL` clears the link; `RESTRICT` and `NO ACTION` refuse.
-- PostgreSQL can defer `NO ACTION` to commit; `RESTRICT` never waits. InnoDB treats them the same and rejects `SET DEFAULT`.
+1. An insert or update arrives. For each column the statement leaves out, the database first fills in the `DEFAULT`, or NULL if there is none.
+2. It checks the rules that need only the new row: `NOT NULL` and each `CHECK`. A condition that is false rejects the row; true or NULL lets it pass.
+3. It checks the rules that need other rows: `PRIMARY KEY` and `UNIQUE` against the rows already stored, and the `FOREIGN KEY` against the parent table.
+4. If any rule fails, the whole statement fails with an error naming the constraint, and nothing from it is stored.
 
 ## Example
 
+The full `payments` table, with a rule on every column. Customer 1 exists.
+
 ```sql
-CREATE TABLE orders (
-  id         BIGINT PRIMARY KEY,
-  user_id    BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
-  amount     NUMERIC(10,2) NOT NULL CHECK (amount > 0),
-  status     TEXT NOT NULL DEFAULT 'NEW',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE payments (
+  id          BIGINT PRIMARY KEY,
+  customer_id BIGINT NOT NULL REFERENCES customers (id),
+  amount      NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  status      VARCHAR(10) NOT NULL DEFAULT 'PENDING'
+              CHECK (status IN ('PAID', 'FAILED', 'PENDING')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-INSERT INTO orders (id, user_id, amount) VALUES (1, 1, 0);
--- fails the CHECK; with 500 (and user 1 present) status becomes 'NEW'
+INSERT INTO payments (id, customer_id, amount) VALUES (10, 1, 500.00);
+INSERT INTO payments (id, customer_id, amount) VALUES (11, 1, 0);
+INSERT INTO payments (id, customer_id, amount, status) VALUES (12, 1, 50, 'DONE');
+SELECT id, amount, status FROM payments;
 ```
+
+```text output
+CREATE TABLE
+INSERT 0 1
+ERROR:  new row for relation "payments" violates check constraint "payments_amount_check"
+ERROR:  new row for relation "payments" violates check constraint "payments_status_check"
+ id | amount | status
+----+--------+---------
+ 10 | 500.00 | PENDING
+(1 row)
+```
+
+What to notice:
+
+- Payment 10 leaves out `status` and `created_at`, so the defaults fill them: `PENDING` and the current time.
+- Payment 11 breaks `amount > 0`, and payment 12 uses a status outside the allowed list. Both are refused, whichever app sent them.
+- Remove `NOT NULL` from `amount` and an insert with a NULL amount would pass the CHECK. MySQL 9.7 rejects and accepts the same rows (with `DECIMAL` and `TIMESTAMP`).
+
+## Rules and defaults
+
+- **Foreign key actions** decide what happens to payments when their customer is deleted or its id changes: `CASCADE` deletes or updates them too, `SET NULL` clears their `customer_id`, and `RESTRICT` or `NO ACTION` refuses the change.
+- **Default action:** with no `ON DELETE` clause the action is `NO ACTION`, in PostgreSQL 18 and MySQL 9.7. In the payments example, `DELETE FROM customers WHERE id = 1` fails while customer 1 has payments.
+- **RESTRICT vs NO ACTION:** in PostgreSQL, `NO ACTION` can be deferred to the end of the transaction (a group of changes saved together), while `RESTRICT` always checks at once. In MySQL InnoDB they behave the same.
+- **UNIQUE and NULL:** many NULLs are allowed in a UNIQUE column by default, in both products. PostgreSQL 15+ can forbid that with `UNIQUE NULLS NOT DISTINCT`.
+- **MySQL CHECK:** enforced since 8.0.16. Earlier versions accepted the syntax and silently ignored it.
+
+## Common mistakes
+
+- **"ON DELETE CASCADE keeps things tidy, so use it everywhere."** One delete can then remove far more rows than intended. Use it only when the child is part of the parent, such as the lines of one order. Payments are records of money, so they should block the delete instead.
 
 ## Interview Qs
 
 ### What does ON DELETE CASCADE do, and when is it a bad idea?
 
-Deleting a parent also deletes every row that references it. Good when the child is part of the parent (order items of an order). Bad between independent things, where one delete could silently remove much more data.
+Deleting a parent row also deletes every row that references it. It suits children that are part of the parent and mean nothing alone, such as an order's line items. It is a bad idea between independent records, such as customers and payments, where one delete could silently remove financial history.
 
 ### What is the difference between RESTRICT and NO ACTION?
 
-Both refuse to delete a parent that still has children. In PostgreSQL, NO ACTION can be checked at commit if the constraint is deferred; RESTRICT checks at once. In MySQL InnoDB they are identical.
+Both refuse to delete a parent that still has children. In PostgreSQL, `NO ACTION` can be deferred to commit if the constraint is declared deferrable; `RESTRICT` checks at once and cannot be deferred. In MySQL InnoDB the two are identical.
+
+### Why put rules in the database when the app already validates input?
+
+The app's checks protect only that app. Scripts, admin tools, other services and manual fixes write to the same tables. Constraints protect every writer, cannot be skipped by a bug, and also tell the next developer what valid data looks like. I keep app validation for friendly error messages and constraints as the final guard.

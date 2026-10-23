@@ -5,24 +5,39 @@ title: "Transactions: COMMIT, ROLLBACK, SAVEPOINT"
 topic: transactions
 level: beginner
 heat: 2
-hook: "BEGIN opens one unit of work; COMMIT keeps all of it, ROLLBACK throws all of it away, SAVEPOINT lets you undo just a part."
+hook: "A transaction groups several statements into one unit: COMMIT keeps all their changes, ROLLBACK undoes all of them, and a savepoint lets you undo only the last part."
 points:
-  - { k: "Autocommit", v: "on by default: without BEGIN, each statement commits alone", kind: default }
-  - { k: "SAVEPOINT", v: "ROLLBACK TO undoes work after the mark; the rest stays" }
-  - { k: "MySQL DDL", v: "CREATE, ALTER, DROP, TRUNCATE commit the open transaction", kind: minus }
-  - { k: "PostgreSQL DDL", v: "most DDL can be rolled back like data changes", kind: plus }
-  - { k: "Error (PostgreSQL)", v: "block is aborted; only ROLLBACK or ROLLBACK TO recovers", kind: minus }
+  - { k: "Transaction", v: "statements the database keeps together at COMMIT or undoes together at ROLLBACK" }
+  - { k: "Autocommit", v: "without BEGIN, each statement is its own transaction and commits when it finishes (PostgreSQL, MySQL, JDBC)", kind: default }
+  - { k: "SAVEPOINT", v: "ROLLBACK TO a savepoint undoes only the work after it; earlier work stays" }
+  - { k: "Error in PostgreSQL", v: "the transaction is marked failed, and every later statement is refused until ROLLBACK or ROLLBACK TO", kind: minus }
+  - { k: "Error in MySQL", v: "usually only the failed statement is undone; if the code then commits, the earlier statements are saved", kind: minus }
+  - { k: "DDL in MySQL", v: "CREATE, ALTER and DROP commit the open transaction first, so ROLLBACK cannot undo it", kind: minus }
 trap:
-  wrong: "In MySQL, ROLLBACK undoes everything since START TRANSACTION, including an ALTER TABLE."
-  right: "Most DDL in MySQL commits implicitly, so earlier changes are already saved. PostgreSQL can roll back most DDL."
-sayIt: "A transaction groups statements so they succeed or fail together: BEGIN, then COMMIT or ROLLBACK. Savepoints undo part of it. I keep transactions short."
+  wrong: "If one statement in a transaction fails, the database rolls back the whole transaction by itself."
+  right: "PostgreSQL only refuses further work until you roll back; MySQL undoes just the failed statement. Your code must call ROLLBACK on every error."
+  why: "In PostgreSQL a COMMIT after an error quietly ends as a ROLLBACK, so it looks automatic. MySQL behaves differently: a COMMIT there saves the half-done work."
+sayIt: "A transaction groups statements so they succeed or fail as one unit: BEGIN, then COMMIT or ROLLBACK. Without BEGIN each statement autocommits. On any error my code rolls back, and I keep transactions short because they hold their locks until they end."
+cheat:
+  idea: "A transaction is a group of SQL statements that the database treats as one unit. COMMIT keeps all their changes together; ROLLBACK undoes all of them."
+  flow: "BEGIN → statements → COMMIT (keep all) or ROLLBACK (undo all)"
+  remember: "Without BEGIN each statement commits on its own (autocommit). On any error, call ROLLBACK yourself."
+buildsOn: [sql-commands]
+scenarios:
+  - q: "In MySQL, a transaction inserts payment 5, then the wallet debit fails its CHECK (balance >= 0), and the code still runs COMMIT. What is saved?"
+    a: "Payment 5 is saved without the debit. MySQL undid only the failed UPDATE, and COMMIT kept the INSERT before it. In PostgreSQL the same COMMIT ends as a ROLLBACK, because the error had already marked the transaction as failed."
+  - q: "In psql you run UPDATE payments SET status = 'PAID' WHERE id = 2 with no BEGIN, then type ROLLBACK. Is the change undone?"
+    a: "No. Without BEGIN the UPDATE ran in autocommit mode and was committed as soon as it finished. The ROLLBACK has no open transaction to undo; PostgreSQL only warns that no transaction is in progress."
 confusedWith: []
 tags: [transaction, commit, rollback, savepoint, autocommit]
 visual: flow
 sources:
   - title: "Transactions tutorial: savepoints, aborted state (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/18/tutorial-transactions.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "ROLLBACK TO SAVEPOINT: savepoint stays valid, later ones destroyed (PostgreSQL 18 documentation)"
+    url: "https://www.postgresql.org/docs/18/sql-rollback-to.html"
+    verifiedOn: "2026-10-21"
   - title: "Transactional DDL in PostgreSQL (PostgreSQL wiki)"
     url: "https://wiki.postgresql.org/wiki/Transactional_DDL_in_PostgreSQL:_A_Competitive_Analysis"
     verifiedOn: "2026-10-20"
@@ -32,16 +47,26 @@ sources:
   - title: "Statements That Cause an Implicit Commit (MySQL 9.7 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/9.7/en/implicit-commit.html"
     verifiedOn: "2026-10-20"
+  - title: "InnoDB Error Handling: statement vs transaction rollback (MySQL 9.7 Reference Manual)"
+    url: "https://dev.mysql.com/doc/refman/9.7/en/innodb-error-handling.html"
+    verifiedOn: "2026-10-21"
+  - title: "java.sql.Connection: auto-commit by default, commit, rollback (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.sql/java/sql/Connection.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A transaction is a group of SQL statements that the database treats as one unit of work. You start it with `BEGIN` (the standard spelling is `START TRANSACTION`), run your statements, and end it with `COMMIT`, which keeps every change, or `ROLLBACK`, which undoes every change. These are the TCL commands from [SQL command types](card:sql-commands).
 
 ## Why it exists
 
-A money transfer is two updates. If the app crashes between them, money vanishes. A transaction makes the group succeed or fail together.
+In this topic each customer also has a wallet: `wallets(customer_id, balance)`, with `CHECK (balance >= 0)`. Paying ₹500 from a wallet takes two statements: lower the balance, then insert a `PAID` row in `payments`. If the app crashes, or the INSERT fails, between the two, the customer has lost ₹500 and has no payment to show for it. Fixing that by hand means writing undo code for every point of failure. In a transaction the database does the undo: both changes are saved, or neither is.
 
 ## How it works
 
 <Mermaid
-  alt="A transaction starts with BEGIN, runs statements, and may set a SAVEPOINT. ROLLBACK TO the savepoint undoes only later work and the transaction continues. At the end, COMMIT keeps all changes, or ROLLBACK discards all of them."
+  alt="A transaction starts with BEGIN and runs statements. It may set a SAVEPOINT; ROLLBACK TO the savepoint undoes only the later statements, and the transaction continues. At the end, COMMIT keeps all changes, or ROLLBACK discards all of them."
   chart={`flowchart LR
   B([BEGIN]) --> W[statements]
   W --> S[SAVEPOINT sp]
@@ -51,31 +76,77 @@ A money transfer is two updates. If the app crashes between them, money vanishes
   W2 --> R([ROLLBACK: undo all])`}
 />
 
-- `START TRANSACTION` is the standard spelling; `BEGIN` works in both PostgreSQL and MySQL.
-- Keep transactions short: an open one holds its [locks](card:locking) until it ends.
+1. `BEGIN` opens the transaction. Nothing you change from now on is permanent yet.
+2. Each statement runs, and its changes are held inside the transaction.
+3. `SAVEPOINT name` sets a named mark. `ROLLBACK TO SAVEPOINT name` undoes only the work done after the mark, and the transaction stays open.
+4. `COMMIT` makes all the changes permanent at once. `ROLLBACK` throws all of them away instead.
+5. Either way the transaction ends, and the row locks it took are released (you will see these in [Locks](card:locking)).
+
+So the key is: nothing inside a transaction is permanent until `COMMIT`.
 
 ## Example
 
+A nightly import inserts payments one by one. A savepoint before each row lets one bad row be skipped without losing the rows before it (PostgreSQL 18):
+
 ```sql
 BEGIN;
-UPDATE accounts SET balance = balance - 500 WHERE id = 1;
-SAVEPOINT after_debit;
-UPDATE accounts SET balance = balance + 500 WHERE id = 3;  -- wrong account
-ROLLBACK TO SAVEPOINT after_debit;                         -- undo only that
-UPDATE accounts SET balance = balance + 500 WHERE id = 2;
-COMMIT;                                                    -- debit + right credit
+INSERT INTO payments (id, customer_id, amount, status) VALUES (5, 1, 500, 'PAID');
+SAVEPOINT before_next;
+INSERT INTO payments (id, customer_id, amount, status) VALUES (6, 9, 300, 'PAID');
+-- ERROR: violates foreign key constraint (customer 9 does not exist)
+ROLLBACK TO SAVEPOINT before_next;   -- undo only the failed insert
+INSERT INTO payments (id, customer_id, amount, status) VALUES (7, 2, 300, 'PAID');
+COMMIT;                              -- payments 5 and 7 are saved
 ```
+
+What to notice:
+
+- The foreign key rejects payment 6. In PostgreSQL that error marks the whole transaction as failed: without the `ROLLBACK TO`, the next INSERT fails with "current transaction is aborted".
+- `ROLLBACK TO` undoes only the work after the savepoint. Payment 5, inserted before it, stays and is committed.
+
+In Java, a JDBC connection starts in autocommit mode, so the app turns it off to group the debit and the payment:
+
+```java
+void payFromWallet(Connection con, int customerId, int paymentId, BigDecimal amount) throws SQLException {
+    con.setAutoCommit(false);                    // start a transaction: no commit per statement
+    try (PreparedStatement debit = con.prepareStatement(
+             "UPDATE wallets SET balance = balance - ? WHERE customer_id = ?");
+         PreparedStatement pay = con.prepareStatement(
+             "INSERT INTO payments (id, customer_id, amount, status) VALUES (?, ?, ?, 'PAID')")) {
+        debit.setBigDecimal(1, amount); debit.setInt(2, customerId); debit.executeUpdate();
+        pay.setInt(1, paymentId); pay.setInt(2, customerId); pay.setBigDecimal(3, amount); pay.executeUpdate();
+        con.commit();                            // both changes become permanent together
+    } catch (SQLException e) {
+        con.rollback();                          // undo whatever ran before the failure
+        throw e;
+    }
+}
+```
+
+What to notice:
+
+- `setAutoCommit(false)` is what starts the transaction. Without it, each `executeUpdate` commits on its own, and a failed INSERT would leave the debit saved.
+- The `catch` calls `rollback()`, so a failure in either statement leaves both tables unchanged. Customer 2's wallet holds ₹300, so paying ₹500 from it fails the `balance >= 0` check and saves nothing.
+
+## Rules and defaults
+
+- **Autocommit:** on by default in PostgreSQL 18, MySQL 9.7 and JDBC. A statement outside `BEGIN` is committed as soon as it finishes.
+- **After an error, PostgreSQL:** the transaction is aborted. Every later statement fails until `ROLLBACK` or `ROLLBACK TO SAVEPOINT`, and a `COMMIT` ends it as a rollback.
+- **After an error, MySQL InnoDB:** most errors, such as a duplicate key or a failed constraint, undo only that statement and leave the transaction open. A [deadlock](card:deadlocks), which comes later in this topic, undoes the whole transaction.
+- **DDL:** PostgreSQL can roll back most DDL, such as `CREATE TABLE` and `ALTER TABLE`. MySQL commits the open transaction before most DDL (an implicit commit), so neither the DDL nor the work before it can be rolled back.
+- **Savepoints:** you can roll back to the same savepoint more than once. Rolling back to a savepoint also removes the savepoints set after it.
+- **Keep it short:** an open transaction holds its locks until it ends, so never wait for a user or a slow remote call inside one.
 
 ## Interview Qs
 
-### What is a transaction?
+### What is a transaction, and why do we need one?
 
-A group of statements that the database treats as one unit: either all changes are committed or none are. It is how a transfer avoids a debit without the matching credit.
+A group of statements the database treats as one unit: either all changes are committed or none are. Without it, a crash between a wallet debit and the payment insert would leave money taken and no payment recorded. With it, the database undoes the unfinished part for you.
 
-### What is a savepoint?
+### What is a savepoint, and when would you use one?
 
-A named mark inside a transaction. `ROLLBACK TO` it undoes only the work done after it; earlier work stays, and the transaction can still commit.
+A named mark inside a transaction. `ROLLBACK TO` it undoes only the work done after the mark; earlier work stays, and the transaction can still commit. It is useful for skipping one bad row in a batch, especially in PostgreSQL, where an error otherwise blocks the rest of the transaction.
 
-### Can you roll back a CREATE TABLE?
+### Can you roll back a CREATE TABLE or ALTER TABLE?
 
-In PostgreSQL, yes for most DDL. In MySQL, no: most DDL ends the open transaction with an implicit commit first.
+In PostgreSQL, yes, for most DDL: it is part of the transaction like any data change. In MySQL, no: most DDL first commits the open transaction with an implicit commit, so the DDL and everything before it are already permanent.

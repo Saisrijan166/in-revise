@@ -5,17 +5,27 @@ title: Denormalisation
 topic: design
 level: intermediate
 heat: 2
-hook: "Copy or precompute data on purpose so a hot read skips joins; every write then has to keep the copies in sync."
+hook: "Copy or precompute some data on purpose so a frequent read skips a join or a big sum. Every write must then keep those copies in step."
 points:
-  - { k: "Copied column", v: "orders.user_name copied from users, so order lists need no join" }
-  - { k: "Precomputed", v: "a counter like comment_count, or a summary table of daily totals" }
-  - { k: "Faster", v: "the targeted reads: fewer joins and less work per query", kind: plus }
-  - { k: "Costs", v: "more storage, slower writes, and copies that can drift", kind: minus }
-  - { k: "Rule", v: "normalise first; denormalise only for a measured slow read" }
+  - { k: "Copied column", v: "payments.customer_name copied from customers, so a payment list needs no join to show the name" }
+  - { k: "Precomputed value", v: "a stored total or count, such as a daily revenue table, instead of summing all payments on every read" }
+  - { k: "Faster reads", v: "only the reads it was built for get faster: they skip joins or aggregates", kind: plus }
+  - { k: "Cost", v: "more storage, slower writes, and copies that drift if any write path forgets to update them", kind: minus }
+  - { k: "Rule", v: "normalise first; denormalise one read at a time, only after measuring that it is too slow" }
 trap:
   wrong: "Denormalisation makes the database faster."
-  right: "It speeds up only the reads it targets. Writes get slower, because every copy must be updated too."
-sayIt: "Denormalisation adds redundant or precomputed data so frequent reads avoid joins. It costs storage, extra writes and a risk of stale copies, so I normalise first and denormalise only for a measured need."
+  right: "It speeds up only the reads it targets. Writes get slower and riskier, because every copy must be updated as well."
+  why: "Denormalisation is usually introduced as the performance option, and the read it targets does get faster, so people forget the price is paid on every write."
+sayIt: "Denormalisation adds copied or precomputed data so a frequent read avoids joins or aggregates. It costs storage, extra writes and a risk of stale copies, so I normalise first, try an index, and denormalise only a measured slow read."
+cheat:
+  idea: "Denormalisation copies or precomputes data on purpose, such as a customer's name inside payments, so a frequent read skips a join or a big sum."
+  remember: "Only the targeted read gets faster; every write must update the copies too. Normalise first, measure, then denormalise."
+buildsOn: [normalization, joins]
+scenarios:
+  - q: "payments has a copied customer_name column. A developer renames a customer with UPDATE customers SET name = 'Asha K' WHERE id = 1 and nothing else. What does the payment list show?"
+    a: "The old name, Asha. The copy in payments is a separate value that nothing updated, so the two tables now disagree. The rename must also update payments, in the same transaction, or a trigger must do it."
+  - q: "A dashboard shows today's revenue and is refreshed every minute; summing ten million payment rows each time is too slow. Index, or denormalise?"
+    a: "Denormalise into a summary table of totals per day, updated by a job or as payments arrive. An index helps find rows, but the query would still have to add up every matching row, which is the slow part."
 confusedWith: []
 tags: [denormalisation, schema-design, performance]
 visual: table
@@ -34,40 +44,74 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Denormalisation means storing some data more than once, or storing a precomputed answer, on purpose. It starts from a [normalised](card:normalization) schema and adds redundancy in one chosen place. There are two common forms: a copied column, such as the customer's name kept inside each payment row, and a precomputed value, such as a table of revenue per day. The original data stays where it was; the copy is extra.
+
 ## Why it exists
 
-A normalised schema can need several joins for one screen. When that read runs constantly and is too slow, storing the answer ready-made is cheaper.
+In a normalised schema, the payments screen joins payments to customers on every request just to show a name, and the revenue dashboard sums every payment row each time it loads. When such a read runs thousands of times a minute and measurements show it is too slow, doing that work once and storing the result is cheaper. The price moves to the writes: every change to the original must also change the copy.
 
 ## How it works
 
 <Compare id="normalization-vs-denormalization" />
 
-- Keep copies in sync in the same transaction, with a trigger, or with a scheduled job.
-- In PostgreSQL, a [materialized view](card:materialized-view) is denormalisation the database rebuilds on each REFRESH.
+1. Measure first: find the one read that is too slow and confirm that the join or the aggregate is the cause.
+2. Try an index; if the query still has to join or sum many rows, choose what to store, a copied column or a precomputed table.
+3. Fill the copy once from the original data.
+4. Change every write path so the copy is updated too: in the same transaction as the original, by a trigger (code the database runs on each change; you will see it in [Stored procedures and triggers](card:stored-procedures-triggers)), or by a scheduled job when slightly old data is acceptable.
+5. Point the slow read at the copy, and keep the original as the source of truth.
+
+So the key is that the copy is never the master: if they disagree, rebuild the copy from the original.
 
 ## Example
 
-```sql
--- the read: no join to users
-SELECT id, amount, user_name FROM orders WHERE user_id = 7;
+This copies the customer's name into payments, then shows the read it speeds up and the write it slows down.
 
--- the price: a rename must also fix every copy
+```sql
+ALTER TABLE payments ADD COLUMN customer_name text;
+UPDATE payments p SET customer_name = c.name
+FROM customers c WHERE c.id = p.customer_id;     -- fill the copy once
+
+-- the hot read: no join to customers
+SELECT id, customer_name, amount FROM payments WHERE status = 'PAID';
+
+-- the price: a rename must fix every copy, in one transaction
 BEGIN;
-UPDATE users  SET name = 'Asha K' WHERE id = 7;
-UPDATE orders SET user_name = 'Asha K' WHERE user_id = 7;
+UPDATE customers SET name = 'Asha K' WHERE id = 1;
+UPDATE payments  SET customer_name = 'Asha K' WHERE customer_id = 1;
 COMMIT;
 ```
+
+What to notice:
+
+- The SELECT reads one table. Without the copy it would join customers on every call.
+- The rename now touches one customer row plus every one of her payment rows; a customer with 10,000 payments means 10,000 extra row updates.
+- Both UPDATEs sit in one transaction, so no reader sees the new name in one table and the old one in the other. Drop the second UPDATE and the payment list shows the old name for good.
+- The fill uses PostgreSQL's `UPDATE ... FROM`. MySQL writes it as `UPDATE payments p JOIN customers c ON c.id = p.customer_id SET p.customer_name = c.name`.
+
+## Rules and defaults
+
+- **Source of truth:** the normalised table stays the master; the copy can always be rebuilt from it.
+- **Keep copies in sync:** same transaction (always current), trigger (current, but hidden from app code), or a job or materialized view refresh (cheaper, but stale between runs; materialized views come in [Views](card:views)).
+- **Try cheaper fixes first:** an index, a better query or a cache may fix the read without redundant data.
+- **No automatic sync:** neither PostgreSQL nor MySQL updates a copied column for you; only your write paths do.
+
+## Common mistakes
+
+- **"We will fix the copy later in a nightly job, it is fine."** Only if users can live with a stale value all day. For a name or a balance shown to the customer, update it in the same transaction.
+- **"Denormalise everything up front for speed."** That multiplies write paths before any read is proven slow. Denormalise one measured read at a time.
 
 ## Interview Qs
 
 ### When would you denormalise?
 
-When a frequent read is measurably slow because of joins or aggregates, and indexes or caching did not fix it. Typical cases: feed counters, dashboards and reporting tables.
+When a frequent read is measurably slow because of joins or aggregates, and an index, a better query or caching did not fix it. Typical cases are counters on a feed, dashboards with daily totals, and reporting tables. I keep the normalised tables as the source of truth.
 
 ### How do you keep denormalised data correct?
 
-Update the copy in the same transaction as the source, or use a trigger. If slightly old data is fine, rebuild it with a job or a materialized view refresh.
+Update the copy in the same transaction as the original, so they always agree, or use a trigger so every writer is covered. If slightly old data is fine, rebuild it with a scheduled job or a materialized view refresh, and say how stale it can be.
 
 ### Denormalise or add an index?
 
-Try the index first: the database keeps it in sync for you. Denormalise when the query still needs joins or aggregates that an index cannot remove.
+Try the index first, because the database keeps it in sync for you and it adds no new facts. An index helps find rows quickly. If the query still has to join several tables or add up many rows, denormalise.

@@ -5,17 +5,28 @@ title: "MVCC: Readers Don't Block Writers"
 topic: transactions
 level: intermediate
 heat: 2
-hook: "A write adds a new row version instead of overwriting; each reader sees its own snapshot, so plain reads do not wait for row writes."
+hook: "An UPDATE adds a new version of the row instead of overwriting it, and each reader sees the version its snapshot allows, so plain reads never wait for writes."
 points:
-  - { k: "Reads vs writes", v: "plain SELECTs and row writes do not block each other", kind: plus }
-  - { k: "Two writers, one row", v: "the second still waits for the first to finish", kind: minus }
-  - { k: "PostgreSQL", v: "old versions stay in the table as dead tuples until VACUUM" }
-  - { k: "MySQL InnoDB", v: "old versions are rebuilt from undo logs, then purged" }
-  - { k: "Long transactions", v: "keep old versions alive: bloat, growing undo", kind: minus }
+  - { k: "New version", v: "an UPDATE writes a new version of the row and keeps the old one for transactions that still need it" }
+  - { k: "Snapshot", v: "the set of committed changes a transaction may see, taken per statement or per transaction" }
+  - { k: "Readers and writers", v: "a plain SELECT never waits for a row being updated, and the UPDATE never waits for the SELECT", kind: plus }
+  - { k: "Two writers, one row", v: "the second UPDATE still waits until the first transaction commits or rolls back", kind: minus }
+  - { k: "Cleanup", v: "PostgreSQL removes dead row versions with VACUUM; InnoDB purges old versions from its undo log" }
+  - { k: "Long transactions", v: "an old open snapshot stops cleanup, so PostgreSQL tables bloat and InnoDB's undo log grows", kind: minus }
 trap:
   wrong: "With MVCC the database takes no locks."
   right: "Plain reads take no row locks, but UPDATE and DELETE still lock the row, so two writers on one row still queue."
-sayIt: "MVCC keeps several versions of a row. Each transaction reads from a snapshot, so readers and writers do not block each other. Old versions are cleaned up later: VACUUM in PostgreSQL, purge in InnoDB."
+  why: "MVCC is summed up as 'readers do not block writers', and people stretch that to 'nothing blocks', forgetting conflicts between two writers."
+sayIt: "MVCC keeps several versions of a row. Each transaction reads from a snapshot, so readers and writers do not block each other, though two writers on one row still do. Old versions are cleaned up later: VACUUM in PostgreSQL, purge in InnoDB."
+cheat:
+  idea: "MVCC (multi-version concurrency control) keeps the old version of a row when it is updated. Each transaction reads the versions its snapshot allows, so plain reads never wait for writes."
+  remember: "Two writers on one row still queue. A long-open transaction stops cleanup: VACUUM in PostgreSQL, purge in InnoDB."
+buildsOn: [isolation-levels]
+scenarios:
+  - q: "A report runs one SELECT on payments for 20 minutes in PostgreSQL while payments keep being updated. Do the updates wait for the report, and is there any cost?"
+    a: "They do not wait: the report reads the versions in its snapshot, and each update writes a new version. The cost is cleanup: for those 20 minutes VACUUM cannot remove old versions the report might still need, so dead row versions pile up and the table grows."
+  - q: "An UPDATE-heavy PostgreSQL table keeps growing on disk although its row count stays the same. Why?"
+    a: "Every UPDATE writes a new row version and leaves the old one behind as a dead tuple. The space is reused only after VACUUM marks it free. If autovacuum falls behind, or a long transaction holds back cleanup, the table bloats."
 confusedWith: []
 tags: [mvcc, snapshot, vacuum, undo-log]
 visual: flow
@@ -34,45 +45,70 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+MVCC (multi-version concurrency control) is how PostgreSQL and MySQL InnoDB give [isolation](card:isolation-levels) without making readers wait. When a row is updated, the database keeps the old version and adds a new one instead of overwriting it. Each transaction reads through a snapshot: a record of which committed changes it may see. So a reader keeps seeing the old version while a writer works on the new one.
+
 ## Why it exists
 
-With only locks, a long report blocks every update, and every update blocks readers. Keeping old versions lets both run at once.
+The older way to isolate transactions is with locks alone: a writer locks the row, and every reader waits until it commits. Then a twenty-minute report blocks every payment update on the rows it reads, and every busy row stalls the reports. With versions, a reader takes the version its snapshot allows and never waits for the writer, so reads and writes run side by side.
 
 ## How it works
 
 <Mermaid
-  alt="T2 updates a row, creating version 2 with balance 500. T1, with an older snapshot, still reads version 1 with balance 1000. Once no snapshot needs version 1, VACUUM (PostgreSQL) or purge (InnoDB) removes it."
+  alt="Transaction A updates payment 2, creating a new version with status PAID. Transaction B, whose snapshot does not include that uncommitted change, still reads the old version with status PENDING. When no snapshot needs the old version any more, VACUUM in PostgreSQL or purge in InnoDB removes it."
   chart={`flowchart LR
-  T2([T2: UPDATE]) --> V2[v2: balance 500]
-  V2 -. "older version" .-> V1[v1: balance 1000]
-  T1([T1: older snapshot]) --> V1
-  V1 --> GC[cleanup when unused: VACUUM or purge]`}
+  A([A: UPDATE, not committed]) --> V2[new version: PAID]
+  V2 -. "older version" .-> V1[old version: PENDING]
+  B([B: SELECT, older snapshot]) --> V1
+  V1 --> GC[removed when unused: VACUUM or purge]`}
 />
 
-- When the snapshot is taken depends on the level: see [READ COMMITTED vs REPEATABLE READ](compare:read-committed-vs-repeatable-read).
+1. Transaction A updates payment 2 to `PAID`. The database writes a new version of the row; the old `PENDING` version stays.
+2. Transaction B runs a plain SELECT. Its snapshot does not include A's uncommitted change, so it reads `PENDING` at once, without waiting.
+3. B tries to UPDATE the same row. One row cannot take two changes at once, so B waits for A's row lock.
+4. A commits. New snapshots now see `PAID`, and at READ COMMITTED B's UPDATE goes ahead on the new version.
+5. When no open snapshot needs the old version any more, cleanup removes it: VACUUM in PostgreSQL, purge in InnoDB.
+
+When a snapshot is taken depends on the level: see [READ COMMITTED vs REPEATABLE READ](compare:read-committed-vs-repeatable-read).
 
 ## Example
+
+Two sessions on payment 2, run on PostgreSQL 18 and on MySQL 9.7 with the same result:
 
 ```sql
 -- Session A
 BEGIN;
-UPDATE accounts SET balance = 500 WHERE id = 1;   -- new version, not committed
--- Session B: not blocked, sees the old version
-SELECT balance FROM accounts WHERE id = 1;        -- 1000
--- Session B: a second writer on the same row waits for A
-UPDATE accounts SET balance = 900 WHERE id = 1;
+UPDATE payments SET status = 'PAID' WHERE id = 2;      -- new version, not committed
+-- Session B: not blocked, reads the old version
+SELECT status FROM payments WHERE id = 2;             -- PENDING
+-- Session B: a second writer on the same row
+UPDATE payments SET status = 'FAILED' WHERE id = 2;   -- waits until A commits
 ```
+
+What to notice:
+
+- B's SELECT answered at once with `PENDING`, even though A had changed the row. That is MVCC: B read the old version.
+- B's UPDATE waited until A committed (about two seconds in the test run), then ran. Readers skip the wait; a second writer does not.
+- If A had rolled back instead, its new version would be thrown away, and B's SELECT would never have seen it.
+
+## Rules and defaults
+
+- **PostgreSQL storage:** old versions stay in the table as dead tuples. VACUUM marks their space reusable; the autovacuum daemon runs it automatically and is on by default.
+- **MySQL InnoDB storage:** the row is changed in place, and the old values go to the undo log. A read that needs an old version rebuilds it from there; purge removes undo records nobody needs.
+- **Long transactions:** an old snapshot keeps old versions alive, so cleanup cannot remove them. Commit reports and batch jobs promptly.
+- **Wraparound (PostgreSQL):** transaction IDs are 32-bit, so each table must be vacuumed before about two billion transactions pass. Autovacuum does this even when it is turned off.
 
 ## Interview Qs
 
 ### What is MVCC?
 
-Multi-version concurrency control: a write creates a new version of the row, and each transaction reads the versions visible in its snapshot. Readers and writers do not block each other.
+Multi-version concurrency control: a write creates a new version of the row, and each transaction reads the versions visible in its snapshot. Readers and writers do not block each other. Two writers on the same row still do, because the second waits for the first one's row lock.
 
 ### Why does PostgreSQL need VACUUM?
 
-An UPDATE or DELETE leaves the old version in the table. VACUUM removes dead versions so the space is reused, and freezes old rows to prevent transaction ID wraparound.
+An UPDATE or DELETE leaves the old row version in the table. VACUUM marks the space of dead versions reusable, so the table does not keep growing. It also freezes old rows to prevent transaction ID wraparound, which is why autovacuum must keep running.
 
 ### Why is a long-running transaction harmful under MVCC?
 
-Its snapshot keeps old versions alive, so VACUUM or purge cannot remove them: tables bloat in PostgreSQL and the undo history grows in InnoDB.
+Its snapshot keeps old versions alive, so VACUUM or purge cannot remove them. Tables bloat in PostgreSQL and the undo history grows in InnoDB. The transaction also holds any locks it took until it ends.
