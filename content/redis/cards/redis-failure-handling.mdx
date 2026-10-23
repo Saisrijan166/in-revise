@@ -5,17 +5,28 @@ title: When Redis Is Slow or Down
 topic: java
 level: intermediate
 heat: 2
-hook: "Decide per use before it happens: a cache error becomes a miss, a limiter fails open or closed, a lock you cannot get is not held."
+hook: "Decide before an outage what each Redis use does when Redis fails, and make the app give up on Redis fast instead of waiting."
 points:
-  - { k: "Cache down", v: "treat it as a miss and read the DB, but cap the DB load" }
-  - { k: "Limiter down", v: "fail open (allow) or fail closed (deny): a business choice" }
-  - { k: "Command timeout", v: "Lettuce: 60 s unless spring.data.redis.timeout is set (Boot 4.1)", kind: default }
-  - { k: "@Cacheable errors", v: "rethrown by default (SimpleCacheErrorHandler)", kind: minus }
-  - { k: "Lettuce reconnects", v: "automatically, buffering commands meanwhile", kind: plus }
+  - { k: "Cache down", v: "treat a Redis error as a cache miss and read the database, but cap how many reads reach it" }
+  - { k: "Limiter down", v: "fail open (allow the request) or fail closed (deny it); choose per endpoint by business cost" }
+  - { k: "Lock down", v: "a lock you cannot take is not held: retry later, and never run the guarded work without it", kind: minus }
+  - { k: "Command timeout", v: "Lettuce waits 60 s for a reply unless spring.data.redis.timeout is set (Spring Boot 4.1)", kind: default }
+  - { k: "@Cacheable errors", v: "rethrown by default (SimpleCacheErrorHandler); LoggingCacheErrorHandler turns them into misses", kind: minus }
+  - { k: "Circuit breaker", v: "after repeated failures, skips Redis at once instead of waiting out a timeout on every call", kind: plus }
 trap:
   wrong: "If Redis is down, just send every request to the database."
-  right: "Fall back with limits: short timeouts, a circuit breaker and capped database load, or the database fails next."
-sayIt: "I decide per use: cache errors become misses with the database protected, limiters fail open or closed by business choice, locks fail closed. Short timeouts and a circuit breaker keep a dead Redis from hanging requests."
+  right: "Fall back with limits: short timeouts, a circuit breaker and a cap on database load, or the database fails next."
+  why: "The database holds all the data, so it looks like a full backup for the cache. But it was sized for the few reads the cache let through."
+sayIt: "I decide per use: cache errors become misses with the database protected, limiters fail open or closed by business choice, and locks fail closed. Short timeouts and a circuit breaker keep a dead Redis from hanging requests."
+cheat:
+  idea: "Plan what each Redis use does when Redis fails: a cache error becomes a miss, a limiter fails open or closed, and a lock you cannot take is not held."
+  remember: "Lettuce waits 60 s per command by default; set spring.data.redis.timeout short and add a circuit breaker."
+buildsOn: [cache-problems, spring-cache-abstraction, spring-data-redis]
+scenarios:
+  - q: "Redis stops. The service uses Spring Boot's defaults and @Cacheable on the merchant config lookup. What does a caller see?"
+    a: "Each lookup waits for Lettuce's 60 s command timeout, and then the default SimpleCacheErrorHandler rethrows, so the request fails after a minute. A short timeout plus LoggingCacheErrorHandler turns it into a quick miss that reads the database."
+  - q: "Redis fails over for 10 seconds. Meanwhile 500 requests per second ask for merchant:42:config and all of them miss. What protects PostgreSQL?"
+    a: "Only a cap on the fallback: let one request per key load from the database while the others wait for it, and limit concurrent database calls. A circuit breaker also stops each request from first waiting on Redis. Without these, all 500 per second reach PostgreSQL."
 confusedWith: []
 tags: [resilience, timeout, circuit-breaker, monitoring]
 visual: table
@@ -23,37 +34,57 @@ sources:
   - title: "Circuit Breaker pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker"
     verifiedOn: "2026-10-20"
-  - title: "Token bucket rate limiter with Java and Lettuce: error handling (redis.io)"
+  - title: "Token bucket rate limiter with Java and Lettuce: error handling, fail open or fail closed (redis.io)"
     url: "https://redis.io/docs/latest/develop/use-cases/rate-limiter/java-lettuce/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "CachingConfigurer.errorHandler() (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/cache/annotation/CachingConfigurer.html"
-    verifiedOn: "2026-10-20"
-  - title: "LettuceClientConfiguration source (Spring Data Redis)"
-    url: "https://github.com/spring-projects/spring-data-redis/blob/main/src/main/java/org/springframework/data/redis/connection/lettuce/LettuceClientConfiguration.java"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "LoggingCacheErrorHandler and AbstractCacheInvoker.doGet: a handled error is a miss (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/cache/interceptor/AbstractCacheInvoker.html"
+    verifiedOn: "2026-10-21"
+  - title: "LettuceClientConfiguration: default command timeout 60 s (Spring Data Redis 4.1.1 source)"
+    url: "https://github.com/spring-projects/spring-data-redis/blob/4.1.1/src/main/java/org/springframework/data/redis/connection/lettuce/LettuceClientConfiguration.java"
+    verifiedOn: "2026-10-21"
+  - title: "DataRedisProperties: timeout and connect-timeout (Spring Boot 4.1.1 source)"
+    url: "https://github.com/spring-projects/spring-boot/blob/v4.1.1/module/spring-boot-data-redis/src/main/java/org/springframework/boot/data/redis/autoconfigure/DataRedisProperties.java"
+    verifiedOn: "2026-10-21"
+  - title: "Command execution reliability: auto-reconnect and buffering (Lettuce docs)"
+    url: "https://redis.github.io/lettuce/advanced-usage/command-execution-reliability/"
+    verifiedOn: "2026-10-21"
   - title: "Redis latency monitoring (redis.io)"
     url: "https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/latency-monitor/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Failure handling is the plan for what each Redis use does when Redis is slow or unreachable, for example during a restart, a [failover](card:sentinel) to a replica, or one slow command that holds up every other client. The plan has two parts. First, the app must notice the failure fast, through short timeouts and a circuit breaker. Second, each use has its own fallback: a cache, a rate limiter, a lock and a session each fail in a different way.
+
 ## Why it exists
 
-Redis can restart, fail over or stall on a slow command. Without a plan, every request waits on it, then the database drowns.
+Without a plan, every request waits on Redis. Lettuce's default command timeout is 60 seconds, so each request thread can hang for a minute, and the server soon has no free threads. If the cache then falls back to the database for every request, PostgreSQL gets the full read load that the cache used to absorb, and fails next. A plan made in advance keeps a Redis outage small: some requests get slower, but the service stays up.
 
 ## How it works
 
 | Use | When Redis fails | Detail |
 |---|---|---|
 | Cache | Miss: read the database | Cap the flood: [cache problems](card:cache-problems) |
-| Rate limit | Fail open or fail closed | Availability vs protection, per endpoint |
+| Rate limit | Fail open or fail closed | Availability or protection, chosen per endpoint |
 | Lock | Not acquired: retry later | Never run guarded work unlocked: [locks](card:distributed-locks) |
-| Session | Lookups fail; lost data means sign in again | [Sessions](card:session-storage) |
+| Session | Lookups fail; lost data means signing in again | [Sessions](card:session-storage) |
 
-- Short client timeouts: `spring.data.redis.timeout` (read) and `spring.data.redis.connect-timeout`.
-- A circuit breaker, such as Resilience4j, skips Redis at once after repeated failures, then tests it again.
+1. The client sends a command and waits for the reply, at most for the command timeout.
+2. If Redis is unreachable, Lettuce keeps the command in a buffer and tries to reconnect. If the timeout ends first, the call fails, and Spring throws a `QueryTimeoutException`.
+3. Your code, or Spring's cache error handler, catches the error and runs the fallback for that use, from the table above.
+4. After many failures in a row, a circuit breaker opens and skips Redis at once, so no request waits for a timeout.
+5. After a pause, the breaker lets a few test calls through, and closes again once they succeed.
+
+So the key is to fail fast first, and then fall back in a way the rest of the system can carry.
 
 ## Example
+
+The payment service caches the merchant config with `@Cacheable`. This configuration makes a Redis error behave like a cache miss instead of failing the request.
 
 ```java
 @Configuration
@@ -66,16 +97,39 @@ class CacheConfig implements CachingConfigurer {
 }
 ```
 
+What to notice:
+
+- Without this bean, Spring uses `SimpleCacheErrorHandler`, which rethrows. A Redis outage would then turn every `@Cacheable` call into an error.
+- `LoggingCacheErrorHandler` logs a warning and does not rethrow. Spring treats a failed read as a miss, so the method runs and loads the merchant config from PostgreSQL; a failed write is logged too, and the result is returned uncached.
+- It does not make the call fast: each failed read still waits for the command timeout. Pair it with a short `spring.data.redis.timeout`.
+
+## Rules and defaults
+
+- **Command timeout:** 60 seconds in Lettuce when `spring.data.redis.timeout` is not set (Spring Boot 4.1, Spring Data Redis 4.1). Set a short value, such as `2s`.
+- **Connect timeout:** `spring.data.redis.connect-timeout` limits how long opening a connection may take.
+- **Reconnect:** Lettuce reconnects automatically and buffers the commands sent while it is disconnected, then sends them once it is back. The buffer lives in memory, so it is lost if the app restarts.
+- **Measured:** with Redis stopped and a 5-second timeout, a GET through `StringRedisTemplate` failed after 5.0 seconds with `QueryTimeoutException` (Lettuce 7.5, Spring Data Redis 4.1.1).
+- **Circuit breaker:** it comes from a library such as Resilience4j, wrapped around your Redis calls.
+
+## Not to be confused with
+
+Failing open means that when a check such as a rate limiter cannot run, the request is allowed anyway. Failing closed means the request is denied. Rule: fail open where an outage hurts more than some abuse, such as a product search; fail closed where abuse hurts more, such as login attempts or payment capture.
+
+## Common mistakes
+
+- **"Lettuce reconnects by itself, so there is nothing to do."** Reconnecting does not stop callers from waiting: buffered commands still wait up to the command timeout before they fail.
+- **"If the lock service is down, run the job anyway."** Then two workers can capture the same payment. Treat a lock you cannot take as not held, and retry later.
+
 ## Interview Qs
 
 ### Redis goes down. What happens to your payment app?
 
-Merchant config comes from the database, with capped load. The UPI limiter follows its fail-open or fail-closed rule. Workers cannot take `lock:payment:PAY101`, so they retry later. Payment records stay safe in the database.
+Merchant config is read from the database, with the load capped. The login limiter follows its fail-open or fail-closed rule. Workers cannot take `lock:payment:9001`, so they retry later. Payment records are safe, because they live in the database. Short timeouts and a circuit breaker keep requests from hanging.
 
 ### Should a rate limiter fail open or fail closed?
 
-It depends on the cost. Fail open keeps users served but drops protection; fail closed guards login or payment endpoints but takes them down with Redis.
+It depends on the cost of each mistake. Failing open keeps users served but drops protection while Redis is down. Failing closed keeps login and payment endpoints protected, but takes them down together with Redis. So the choice is made per endpoint, not once for the whole app.
 
 ### How do you find what makes Redis slow?
 
-`SLOWLOG GET` lists slow commands, `LATENCY DOCTOR` explains latency spikes once the monitor is on, and `INFO` shows memory, clients and hit counts. Then look for [big keys](card:memory-optimization).
+`SLOWLOG GET` lists recent slow commands, `LATENCY DOCTOR` explains latency spikes once the latency monitor is switched on, and `INFO` shows memory, clients and hit counts. Then look for [big keys](card:memory-optimization) and for [KEYS](card:key-design), which walks the whole keyspace.

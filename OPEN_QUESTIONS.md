@@ -608,3 +608,66 @@ The owner approved the Spring Boot pilot, both the concept rewrite (section Q) a
 - **Left out (no primary source):** that Istio proxies keep their last configuration when the control plane is down; that a BFF is usually owned by the client team.
 - **Design judgement, not a doc quote:** "retry a timed-out charge with the same idempotency key, or query its status, before compensating" (saga, Common mistakes).
 - **Re-check later:** OAuth 2.1 is described as still an Internet-Draft in 2026 (draft 16).
+
+### R4. SQL & Databases
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 60 | 33 | 270 | ~1,880 / 17 / 2 | ~15 min |
+
+- **Order:** NULL handling now comes right after SELECT, and "Logical order of a SELECT" comes after GROUP BY and joins.
+- **Running example:** a customers / payments / refunds schema, plus `employees` for the Nth-highest and self-join questions. Every query ran on PostgreSQL 18.6, and on MySQL 9.7.2 where the two differ.
+- **Corrections worth knowing:**
+  - MySQL rejects `IS NOT DISTINCT FROM` and `NULLS FIRST/LAST`.
+  - After an error, MySQL undoes only the failed statement, so a COMMIT saves the rest.
+  - MySQL's binary log is not a write-ahead log.
+  - In MySQL, dividing by zero gives NULL in a SELECT but an error in INSERT or UPDATE.
+  - Materialized views exist only on MySQL HeatWave (9.5+).
+- **Observed in runs but not stated in the docs (left out of the text):**
+  - MySQL 9.7.2 silently accepts `CREATE MATERIALIZED VIEW` and `ON DELETE SET DEFAULT`.
+  - The MySQL 9.7.2 container defaults to `explain_format = TREE`.
+- **Rests on runs only:** in PostgreSQL 18, COMMIT in an aborted transaction reports ROLLBACK.
+- **For the owner:**
+  - The Backend and Patterns parts use slightly different sample customer rows.
+  - Eight concepts still cite GeeksforGeeks for "commonly asked" interview questions.
+  - Transactions stays at heat 2, but the coverage file suggests 3.
+
+### R5. REST API
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 40 | 20 | 285 | ~1,370 / 32 / 2 | ~10 min |
+
+- **Order:** the opening concept is now "Anatomy of an HTTP request and response", which teaches client, server, request and response before "What REST is".
+- **Running example:** the ₹500 payment API (`POST /payments`, refunds, `Idempotency-Key`, a merchant webhook). It ends in the payment API walkthrough.
+- **Corrections worth knowing:**
+  - Injection was its own item only in OWASP's 2019 API list.
+  - RFC 6749 says a client-credentials refresh token SHOULD NOT be issued.
+  - With `issuer-uri`, Spring trusts the issuer's published key algorithms.
+  - `@ResponseStatus(reason)` sends JSON to a JSON client.
+  - OpenAI's SDKs retry 429 and 5xx twice by default.
+  - Offset pagination gets slower the deeper you page.
+- **Code:** runs used Spring Boot 4.0.3 / Spring Framework 7.0.5 jars (the 4.1 jars are not cached locally; the APIs used are unchanged). No live OpenAI call was made.
+- **Left out:** whether Stripe returns 402 specifically for card declines (the text says "4xx"); `springdoc.swagger-ui.enabled`.
+
+### R6. Redis
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 39 | 14 | 227 | ~1,280 / 27 / 0 | ~10 min |
+
+- **Order:** "Expiry and Memory" (TTL, eviction) now comes before Caching, because cache-aside relies on TTL.
+- **Running example:** a payment service caching `payment:9001` and `merchant:42:config` from PostgreSQL, plus a login rate limiter (`rate:user:7:login`), a payment lock and a leaderboard. Every redis-cli output panel ran on Redis 8.10.2, and the Java examples ran on Spring Data Redis 4.1.1 with Lettuce or Jedis.
+- **Corrections worth knowing:**
+  - A plain SET drops the old TTL.
+  - Redisson's 30 s is the lock's expiry, not the renewal interval.
+  - Hash tags use the first `{` and the next `}`, and only when the text between is not empty.
+  - `sync = true` does not lock with the default Redis cache writer.
+  - Cached classes need Java serialisation by default.
+  - Vector sets are no longer beta.
+- **Left out (new or not in the docs):**
+  - Redis 8.8 Arrays: only one Rules line; there is no tree node yet.
+  - Redis 8.10 `BACKUP` commands, `WAITAOF`, and compact hashes.
+  - Whether a hash shrinks back to listpack.
+  - Which Java clients besides Jedis support client-side caching.
+- **Run-dependent numbers:** SCAN cursors, stream ids, `evicted_keys`, MEMORY USAGE and TTLs come from one real run and differ on re-runs. The "What to notice" text says so.

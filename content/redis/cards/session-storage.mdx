@@ -5,80 +5,147 @@ title: Shared Sessions in Redis
 topic: coordination
 level: intermediate
 heat: 2
-hook: "Keep sessions in Redis, not in app memory, so any server can serve the user and an app restart logs no one out."
+hook: "Keep each user's session in Redis instead of one server's memory, so any app server can serve the user and an app restart logs no one out."
 points:
-  - { k: "Shape", v: "one hash per session id; attributes are fields" }
-  - { k: "TTL", v: "the idle timeout, pushed forward on every request" }
-  - { k: "Spring", v: "Spring Session swaps HttpSession; app code stays the same", kind: plus }
-  - { k: "No secrets", v: "keep sensitive data out of the session", kind: minus }
+  - { k: "Session", v: "what a server remembers about a signed-in user between requests, found by an id in a cookie" }
+  - { k: "One hash per session", v: "Spring Session stores each session as a hash at spring:session:sessions:<id>, one field per attribute" }
+  - { k: "Idle timeout as TTL", v: "the key expires at the last access time plus the idle timeout, so each request pushes it forward" }
+  - { k: "Same app code", v: "Spring Session replaces HttpSession underneath; setAttribute and getAttribute stay the same", kind: plus }
+  - { k: "Timeout default", v: "30 minutes, from server.servlet.session.timeout, unless spring.session.timeout is set (Spring Boot 4.1)", kind: default }
+  - { k: "Redis is now critical", v: "if Redis is down, requests needing the session fail; if it loses data, users sign in again", kind: minus }
 trap:
-  wrong: "Use sticky sessions so each user always hits the server that holds their session."
-  right: "Sticky sessions hurt scaling and complicate deploys. Keep sessions in a shared store such as Redis instead."
-sayIt: "I keep sessions in Redis with Spring Session, so any instance can serve any request. Each session is a hash whose TTL is the idle timeout, reset on each request."
+  wrong: "Use sticky sessions, so each user always reaches the server holding their session."
+  right: "Sticky sessions tie users to one server, so its restart logs them out and load cannot move. Keep sessions in a shared store such as Redis."
+  why: "Sticky sessions are one switch on the load balancer and need no code change, so they look like the cheapest fix."
+sayIt: "I keep sessions in Redis with Spring Session, so any instance can serve any request and a deploy logs no one out. Each session is a hash whose TTL, the idle timeout, moves forward on each request."
+cheat:
+  idea: "A shared session store keeps each signed-in user's session in Redis instead of in one server's memory, so any app server can read it."
+  code: |
+    # spring-boot-starter-session-data-redis on the classpath, then:
+    spring.session.timeout=15m     # idle timeout = the key's TTL
+  remember: "App code still uses HttpSession; Spring Session stores it as a hash at spring:session:sessions:<id>."
+buildsOn: [hashes, ttl-and-expiration]
+scenarios:
+  - q: "The payment service runs on two servers with sessions in local memory. A user signs in on server 1, and the next request goes to server 2. What happens?"
+    a: "Server 2 has no session with that id, so the user looks signed out and is asked to sign in again. With sessions in Redis, both servers read the same hash, so the second request works."
+  - q: "spring.session.timeout is 15m. A user clicks something every 10 minutes for an hour. Is the session ever lost?"
+    a: "No. Each request updates the last access time, and Spring Session resets the key to expire 15 minutes after it. The session ends only after 15 minutes with no request."
 confusedWith: []
 tags: [session, spring-session, scaling]
 visual: flow
 sources:
-  - title: "Spring Boot 4.1: Spring Session"
+  - title: "Spring Session (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/web/spring-session.html"
-    verifiedOn: "2026-10-20"
-  - title: "Spring Session 4.1: Redis configuration"
+    verifiedOn: "2026-10-21"
+  - title: "Redis configuration (Spring Session 4.1 reference)"
     url: "https://docs.spring.io/spring-session/reference/configuration/redis.html"
-    verifiedOn: "2026-10-20"
-  - title: "Spring Session source: RedisSessionRepository"
+    verifiedOn: "2026-10-21"
+  - title: "HttpSession integration (Spring Session 4.1 reference)"
+    url: "https://docs.spring.io/spring-session/reference/http-session.html"
+    verifiedOn: "2026-10-21"
+  - title: "API documentation: DefaultCookieSerializer (Spring Session 4.1 reference)"
+    url: "https://docs.spring.io/spring-session/reference/api.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Session source: RedisSessionRepository and RedisSessionMapper"
     url: "https://github.com/spring-projects/spring-session/blob/main/spring-session-data-redis/src/main/java/org/springframework/session/data/redis/RedisSessionRepository.java"
-    verifiedOn: "2026-10-20"
-  - title: "Microsoft Learn: Session and state management"
+    verifiedOn: "2026-10-21"
+  - title: "Session and state management (Microsoft Learn)"
     url: "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/app-state"
     verifiedOn: "2026-10-20"
-  - title: "Spring Boot 4.1: Common application properties"
+  - title: "Common application properties (Spring Boot 4.1)"
     url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A session is what a server remembers about a user between requests, such as "this browser is signed in as user 7". The browser keeps only the session id, in a cookie; the data stays on the server side. A shared session store keeps that data in Redis instead of in one app server's memory. Each session becomes a [hash](card:hashes) with a [TTL](card:ttl-and-expiration) equal to the idle timeout.
 
 ## Why it exists
 
-A session kept in one server's memory works only on that server. With many servers behind a load balancer, every server must read the same sessions.
+The payment service runs on two app servers behind a load balancer. If sessions live in each server's memory, a user who signed in on server 1 looks signed out when the next request reaches server 2. A restart or deploy also wipes every session on that server. With sessions in Redis, every server reads the same data, so any server can serve any request and a restart logs no one out.
 
 ## How it works
 
 <Mermaid
-  alt="A load balancer sends the user to app server 1 or 2. Both read and write the same session hash in Redis."
+  alt="A user's browser sends its session cookie to a load balancer, which sends the request to app server 1 or app server 2. Both servers read and write the same session hash in Redis."
   chart={`flowchart LR
-  U([User, session cookie]) --> LB[Load balancer]
+  U([Browser, SESSION cookie]) --> LB[Load balancer]
   LB --> A1[App server 1]
   LB --> A2[App server 2]
   A1 <--> R[(Redis: one hash per session)]
   A2 <--> R`}
 />
 
-- Spring Session stores the hash as spring:session:sessions:id, with fields such as lastAccessedTime and sessionAttr:userId.
-- Each save sets the key to expire at last access plus the idle timeout.
+1. The user signs in, and Spring Session creates a session with a random id and sends it to the browser in a cookie named `SESSION`.
+2. It saves the session as a hash at `spring:session:sessions:<id>`, with fields such as `creationTime`, `lastAccessedTime`, `maxInactiveInterval` and one `sessionAttr:<name>` field per attribute.
+3. On the next request, whichever server receives it reads the id from the cookie and loads the hash from Redis.
+4. When the request ends, Spring Session saves the changes and sets the key to expire at the last access time plus the idle timeout.
+5. If no request comes within the idle timeout, Redis expires the key and the session is gone.
+
+Spring Session does this with a servlet filter that wraps each request, so `HttpSession` calls go to Redis while your code stays the same.
 
 ## Example
+
+The payment service turns on Redis sessions with one dependency and a few properties; the login code uses a plain `HttpSession`.
 
 ```properties
 # dependency: spring-boot-starter-session-data-redis (Spring Boot 4.1)
 spring.data.redis.host=redis.internal
 spring.session.timeout=15m
-spring.session.data.redis.namespace=pay:session
 ```
 
-## Defaults
+```java
+@RestController
+public class LoginController {
+
+    @PostMapping("/login")
+    public String login(@RequestParam long userId, HttpSession session) {
+        // after the password check passes:
+        session.setAttribute("userId", userId);   // Spring Session writes it to Redis
+        return "logged in";
+    }
+
+    @GetMapping("/me")
+    public Object me(HttpSession session) {
+        return session.getAttribute("userId");    // works on any app server
+    }
+}
+```
+
+What to notice:
+
+- Nothing in the controller mentions Redis. Remove the starter and the same code keeps sessions in server memory again.
+- `setAttribute("userId", ...)` becomes the hash field `sessionAttr:userId`.
+- With `spring.session.timeout=15m`, a user who sends no request for 15 minutes is signed out. Without it, Boot uses `server.servlet.session.timeout`, which defaults to 30 minutes.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Session idle timeout | 30m, via server.servlet.session.timeout | Spring Boot 4.1 |
-| Key namespace | spring:session | Spring Session 4.1 |
-| Repository type | default (not indexed) | Spring Boot 4.1, spring.session.data.redis.repository-type |
+| Idle timeout | `server.servlet.session.timeout`, 30m | Spring Boot 4.1 |
+| Key namespace | `spring:session` (`spring.session.data.redis.namespace`) | Spring Boot 4.1 |
+| Repository type | `default` (`spring.session.data.redis.repository-type`) | Spring Boot 4.1 |
+| Cookie name | `SESSION` | Spring Session 4.1 |
+
+- **Indexed repository:** set `repository-type` to `indexed` when you need to find all sessions of one user or listen for session events, such as expiry. The default repository looks a session up only by its id.
+- **Several apps on one Redis:** give each its own namespace, so their session keys do not clash.
+- **What to store:** small values such as a user id. Keep sensitive data, such as card numbers, out of the session.
+
+## Not to be confused with
+
+Sticky sessions make the load balancer send a user to the same server every time, so the session can stay in that server's memory. A shared session store lets any server handle any request. Rule: sticky sessions hide the problem; a shared store removes it.
 
 ## Interview Qs
 
 ### How do you share sessions across many instances?
 
-Store them outside the app, in Redis. With Spring Boot, add the Spring Session Data Redis starter: HttpSession reads and writes go to Redis, and any instance can serve the user.
+Store them outside the app, in Redis. With Spring Boot, add the Spring Session Data Redis starter: `HttpSession` reads and writes go to Redis, and any instance can serve the user. Each session is one hash, and its TTL is the idle timeout.
 
 ### What happens to sessions if Redis goes down?
 
-Session lookups fail, so those requests fail too; if Redis loses its data, every user must sign in again. Run Redis with a replica and failover, and decide the fallback in advance: see [failure handling](card:redis-failure-handling).
+Requests that need the session fail while Redis is unreachable, and if Redis loses its data, every user must sign in again. Run Redis with a replica and automatic failover, and decide the fallback in advance; you will see how in [When Redis Is Slow or Down](card:redis-failure-handling).
 
+### Why not use sticky sessions?
+
+A user's session then lives on one server. If that server crashes or is redeployed, its users are signed out, and the load balancer cannot move them to a less busy server. A shared store lets you add, remove or restart servers freely.

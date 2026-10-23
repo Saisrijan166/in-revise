@@ -5,58 +5,135 @@ title: Cache Invalidation and Stale Data
 topic: caching
 level: intermediate
 heat: 2
-hook: "After the database commit succeeds, delete the cached key; a TTL catches anything you miss."
+hook: "When a row changes, delete its cached copy after the database commit succeeds; the next read loads the new row, and a TTL catches any delete you miss."
 points:
-  - { k: "Delete, not update", v: "a delete is safe to retry; racing updates can cache an old value" }
-  - { k: "After commit", v: "evict only once the DB transaction has committed" }
-  - { k: "TTL", v: "a safety net: limits how long stale data can live" }
-  - { k: "Other writers", v: "a job that edits the DB directly leaves Redis stale", kind: minus }
-  - { k: "Change data capture", v: "read the DB's commit log and delete keys in one place", kind: plus }
+  - { k: "Stale data", v: "a cached copy that no longer matches the database row it was copied from" }
+  - { k: "Delete, not update", v: "a DEL can be retried safely; two racing SETs can leave the older value cached" }
+  - { k: "After commit", v: "delete only once the database transaction has committed, never inside it" }
+  - { k: "TTL backstop", v: "a TTL limits how long stale data can live when a delete fails or is forgotten" }
+  - { k: "Other writers", v: "a job or SQL console that edits the database directly skips your delete and leaves Redis stale", kind: minus }
+  - { k: "Change data capture", v: "read the database's commit log and delete keys from one place, for every writer", kind: plus }
 trap:
   wrong: "Evict the key inside the transaction, before it commits."
-  right: "Evict after the commit. A reader that misses before the commit loads the old row and caches it again."
-sayIt: "After a successful commit I delete the key rather than update it, so the next read loads fresh data. A TTL limits staleness if an invalidation is missed; with many writers I delete keys from a change-data-capture feed."
+  right: "Evict after the commit. A reader that misses before the commit still sees the old row, loads it and caches it again."
+  why: "The delete sits inside the same @Transactional method, so it looks part of the transaction. Redis is not in the database transaction, so the delete runs at once."
+sayIt: "After a successful commit I delete the key rather than update it, so the next read loads fresh data. A TTL limits staleness if an invalidation is missed, and with many writers I drive the deletes from a change-data-capture feed."
+cheat:
+  idea: "Cache invalidation removes a cached copy when its database row changes, so readers stop seeing stale data. In Redis this is usually a DEL; the next read reloads the row."
+  remember: "Delete, do not update, and only after the commit succeeds; a TTL limits a missed delete."
+buildsOn: [cache-aside, ttl-and-expiration]
+scenarios:
+  - q: "Two admins change merchant 42's fee at the same moment, and each one SETs the new value in Redis after its database update. The database ends at 4%, but Redis shows 3%. How?"
+    a: "Admin B's update committed after admin A's, but A's SET reached Redis after B's SET. Writes to two systems can arrive in different orders. With DEL instead of SET there is no value to get wrong: the next read loads 4% from the database."
+  - q: "A nightly SQL job raises the fee for 500 merchants directly in PostgreSQL. Next morning some payments still use the old fee. Why, and what fixes it?"
+    a: "The job bypassed the app's write path, so no keys were deleted, and the old copies live until their TTL ends. Let the job delete the matching keys, or drive deletes from change data capture, and keep the TTL as short as the business can accept."
 confusedWith: []
 tags: [caching, invalidation, stale-data, cdc]
 visual: flow
 sources:
-  - title: "Cache-Aside pattern: order of update and invalidation (Azure Architecture Center)"
+  - title: "Cache-Aside pattern: order of update and invalidation, consistency (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
-    verifiedOn: "2026-10-20"
-  - title: "Scaling Memcache at Facebook: delete over update, leases, commit-log invalidation (NSDI 2013)"
+    verifiedOn: "2026-10-21"
+  - title: "Scaling Memcache at Facebook: deletes are idempotent, stale sets and leases, commit-log invalidation (NSDI 2013)"
     url: "https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf"
-    verifiedOn: "2026-10-20"
-  - title: "TransactionAwareCacheDecorator (Spring Framework 7.0 API)"
+    verifiedOn: "2026-10-21"
+  - title: "TransactionSynchronization.afterCommit (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/transaction/support/TransactionSynchronization.html"
+    verifiedOn: "2026-10-21"
+  - title: "TransactionAwareCacheDecorator: put and evict after commit (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/cache/transaction/TransactionAwareCacheDecorator.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Redis Cache: transaction aware off by default, transactionAware() (Spring Data Redis 4.1 reference)"
+    url: "https://docs.spring.io/spring-data/redis/reference/redis/redis-cache.html"
+    verifiedOn: "2026-10-21"
   - title: "Redis Data Integration: CDC from a database into Redis (Redis docs)"
     url: "https://redis.io/docs/latest/integrate/redis-data-integration/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Cache invalidation means removing a cached copy when the data in the database changes, so readers stop getting the old version. A copy that no longer matches its database row is called stale. With [cache-aside](card:cache-aside), invalidation is a `DEL` on the key right after the database change; the next read misses and loads the fresh row.
+
 ## Why it exists
 
-A cached copy goes stale the moment the database changes. Invalidation removes that copy, so readers do not see old merchant settings or an old payment status for long.
+`merchant:42:config` holds a 2% fee, and an admin changes it to 3% in PostgreSQL. Without invalidation, every payment keeps using 2% until the TTL ends, which could be 30 minutes of wrong fees. A very short TTL alone would shrink that window but cause many more misses. Deleting the key right after the change ends the stale window at once, and the TTL stays as a safety net.
 
 ## How it works
 
-<Steps label="Change merchant 42's configuration">
-  <Step title="Write the database">Update merchant 42 inside a transaction.</Step>
-  <Step title="Commit">Wait until the commit succeeds.</Step>
-  <Step title="Delete the key">`DEL merchant:42:config`.</Step>
-  <Step title="Next read reloads">The miss reads the new row and caches it with a TTL.</Step>
-</Steps>
+<Mermaid
+  alt="Sequence. The writer updates merchant 42 in PostgreSQL and commits. Only after the commit does it delete merchant:42:config in Redis. A reader then runs GET, misses, reads the committed row from PostgreSQL and stores it in Redis with a TTL."
+  chart={`sequenceDiagram
+  participant W as Writer
+  participant DB as PostgreSQL
+  participant R as Redis
+  participant Rd as Reader
+  W->>DB: UPDATE fee = 3%, then COMMIT
+  W->>R: DEL merchant:42:config
+  Rd->>R: GET merchant:42:config (miss)
+  Rd->>DB: SELECT (sees 3%)
+  Rd->>R: SET ... EX 1800`}
+/>
 
-- Spring: `RedisCacheManager.builder(factory).transactionAware()` holds cache puts and evicts until the commit.
-- Facebook's memcache reads committed SQL and broadcasts deletes; Redis Data Integration (Redis Software, Cloud) syncs Redis by CDC.
-- Telling other app instances through [Pub/Sub](card:pub-sub) also works, within its delivery limits.
+1. The service updates merchant 42 in PostgreSQL inside a transaction. Until it commits, other readers still see the old row.
+2. The transaction commits, and the new fee becomes visible to everyone.
+3. The service deletes `merchant:42:config`.
+4. The next read misses, loads the committed row and stores it with a TTL.
+5. If the delete fails, for example on a network error, the TTL removes the stale copy later, so the damage has a time limit.
+
+So the key is: delete after the commit, and always keep a TTL behind it.
+
+## Example
+
+`changeFee` runs in one database transaction (`@Transactional` commits when the method returns) and registers the delete to run only after a successful commit.
+
+```java
+@Transactional
+public void changeFee(long merchantId, BigDecimal fee) {
+    merchants.updateFee(merchantId, fee);                    // UPDATE, not committed yet
+    String key = "merchant:" + merchantId + ":config";
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+            redis.delete(key);                               // runs only after a successful commit
+        }
+    });
+}
+```
+
+What to notice:
+
+- `afterCommit` runs once the commit has succeeded. On a rollback it never runs, and the cached copy stays, which is correct because the row did not change.
+- Calling `redis.delete(key)` directly in the method body would run before the commit. A reader in that gap would reload the old row and cache it for the full TTL.
+- With Spring's `@CacheEvict`, which you will see in [Spring Cache](card:spring-cache-abstraction), a transaction-aware cache manager gives the same after-commit timing without this code.
+
+## Rules and defaults
+
+- **Delete rather than update:** a `DEL` can be retried safely, and the next reader loads the truth. Facebook's memcache chose deletes for this reason.
+- **After the commit:** delete only once the database change is visible to other readers.
+- **TTL backstop:** keep a TTL on every cached copy, so a missed or failed delete is wrong only for a bounded time.
+- **Spring Cache timing:** a `RedisCacheManager` is not transaction-aware by default (Spring Data Redis 4.1). `RedisCacheManager.builder(factory).transactionAware()` holds cache puts and evicts until after the commit.
+- **Many writers:** if batch jobs or other services change the same table, capture changes from the database log (change data capture) and delete keys from one place. Redis Data Integration (Redis Software and Redis Cloud) can feed changes into Redis this way.
+- **Many app instances:** to clear copies that each instance keeps in its own memory, broadcast the change with [Pub/Sub](card:pub-sub), within its delivery limits.
+
+## Not to be confused with
+
+TTL expiry removes a key when its timer runs out, whether the data changed or not. Eviction removes keys when Redis reaches its memory limit. Invalidation removes a key because its data changed. Rule: TTL = time, eviction = memory, invalidation = a data change.
+
+## Common mistakes
+
+- **"Update the database, then delete the key, and the cache can never be stale."** A rare race remains. A reader that loaded the old row just before your update can store it after your delete. Facebook calls this a stale set and fixes it with leases; for most apps the TTL bounds it.
 
 ## Interview Qs
 
 ### Why delete the cached key instead of writing the new value?
 
-A delete can be retried safely, and the next read loads the truth. With updates, two writers can reach Redis in the wrong order and leave the older value cached until its TTL runs out.
+A delete can be retried safely, and the next read loads the truth from the database. With updates, two writers can reach Redis in a different order from the database and leave the older value cached until its TTL runs out.
 
 ### Many services write the same table. How do you keep Redis fresh?
 
-Do not rely on every service to remember. Capture changes from the database log (CDC) and delete the matching keys from one place, with TTLs as the backstop.
+Do not rely on every service remembering to delete. Capture committed changes from the database log (change data capture) and delete the matching keys from one place, with TTLs as the backstop.
+
+### What if the delete fails after the commit?
+
+The database is already correct, so do not roll anything back. Retry the delete, because deletes are safe to repeat, and log the failure. If every retry fails, the TTL removes the stale copy later, which is why every cached copy needs one.

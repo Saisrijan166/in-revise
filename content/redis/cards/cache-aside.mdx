@@ -5,39 +5,59 @@ title: Cache-Aside (Lazy Loading)
 topic: caching
 level: beginner
 heat: 3
-hook: "Read: try Redis; on a miss, load the database and SET it with a TTL. Write: update the database, then delete the key."
+hook: "The app looks in Redis first. On a miss it reads the database and saves a copy in Redis with a TTL; on a change it updates the database, then deletes the copy."
 points:
-  - { k: "Key", v: "one per object, e.g. merchant:42:config" }
-  - { k: "Cache holds", v: "only data someone has read, not the whole table", kind: plus }
-  - { k: "Miss cost", v: "3 trips: Redis, the DB, then Redis again", kind: minus }
-  - { k: "Hit ratio", v: "keyspace_hits / (hits + misses) from INFO stats" }
+  - { k: "Read path", v: "GET the key; on a hit use it, on a miss read the database and SET the copy with a TTL" }
+  - { k: "Write path", v: "update the database first, then DEL the key, so the next read loads the new row" }
+  - { k: "Lazy loading", v: "only data that someone has asked for gets cached", kind: plus }
+  - { k: "Redis goes down", v: "every read becomes a miss and goes to the database: slower, but the app still works", kind: plus }
+  - { k: "Miss cost", v: "a miss takes three trips: Redis, the database, then Redis again", kind: minus }
+  - { k: "Hit ratio", v: "hits / (hits + misses), from keyspace_hits and keyspace_misses in INFO stats" }
 trap:
   wrong: "On an update, delete the cached key first, then write the database."
-  right: "Write the database first, then delete. Deleting first lets a reader miss, load the old row and cache it again."
-sayIt: "With cache-aside the app reads Redis first; on a miss it loads the database and caches the value with a TTL. On a write it updates the database, then deletes the key. Data can be briefly stale."
+  right: "Write the database first, then delete the key. Deleting first lets a reader miss, load the old row and cache it again."
+  why: "Deleting first feels safer, because the old copy is gone before the change starts. The gap between the delete and the database write is easy to miss."
+sayIt: "With cache-aside the app reads Redis first; on a miss it loads the database and caches the value with a TTL. On a write it updates the database, then deletes the key. Redis never talks to the database, and data can be briefly stale."
+cheat:
+  idea: "Cache-aside (lazy loading) means the app itself keeps copies of database rows in Redis, so repeated reads skip the database. Redis never talks to the database."
+  flow: "GET key → hit: return → miss: read DB → SET key EX ttl → return"
+  remember: "On a write, update the database first, then delete the key."
+buildsOn: [strings, ttl-and-expiration]
+scenarios:
+  - q: "merchant:42:config is cached with EX 1800. An admin changes merchant 42's fee directly in PostgreSQL from a SQL console. What do payment requests see, and for how long?"
+    a: "The old fee, until the key expires (up to 30 minutes) or someone deletes it. Redis does not watch PostgreSQL. Only the app's write path deletes the key, and the console bypassed it, so the TTL is the only thing that ends the stale copy."
+  - q: "Under memory pressure Redis evicts merchant:42:config. What happens on the next payment request?"
+    a: "GET returns nil, which is an ordinary miss. The app reads PostgreSQL, stores the copy again and returns it. The caller only sees a slower response, because cache-aside treats a key that is missing for any reason the same way."
 confusedWith: [cache-aside-vs-read-through-vs-write-through-vs-write-behind]
 tags: [caching, cache-aside, lazy-loading]
 visual: flow
 sources:
-  - title: "Cache-Aside pattern (Azure Architecture Center)"
+  - title: "Cache-Aside pattern: order of update and invalidation, when not to use it (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
-    verifiedOn: "2026-10-20"
-  - title: "Caching strategies: lazy loading (Amazon ElastiCache docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Caching strategies: lazy loading, three trips on a miss, empty node (Amazon ElastiCache docs)"
     url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html"
-    verifiedOn: "2026-10-20"
-  - title: "INFO command (Redis docs)"
+    verifiedOn: "2026-10-21"
+  - title: "INFO command: keyspace_hits, keyspace_misses (Redis docs)"
     url: "https://redis.io/docs/latest/commands/info/"
     verifiedOn: "2026-10-20"
+  - title: "StringRedisTemplate (Spring Data Redis 4.1 API)"
+    url: "https://docs.spring.io/spring-data/redis/docs/current/api/org/springframework/data/redis/core/StringRedisTemplate.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Cache-aside is the most common way to use Redis as a cache. A cache is a fast copy of data whose real home, the source of truth, is somewhere else: here PostgreSQL. The application keeps the copy itself: it looks in Redis first and, on a miss (the key is not in Redis), reads the database and stores the result in Redis. It is also called lazy loading, because data enters the cache only when someone asks for it.
 
 ## Why it exists
 
-A payment service reads the same merchant configuration from PostgreSQL on every request. A copy in Redis turns most of those reads into memory lookups.
+The payment service reads merchant 42's configuration (fee, allowed payment methods) from PostgreSQL on every payment request. That is the same row thousands of times a minute, and each read costs a network round trip and database work, so at peak the database becomes the bottleneck. With cache-aside, only the first read after the copy expires goes to PostgreSQL. All the others are memory lookups in Redis.
 
 ## How it works
 
 <Mermaid
-  alt="Cache-aside. Read path: the app runs GET merchant:42:config. On a hit it returns the value. On a miss it reads PostgreSQL, stores the value in Redis with a TTL, then returns it. Write path: the app updates PostgreSQL first, then deletes the key in Redis."
+  alt="Cache-aside. Read path: the app runs GET merchant:42:config. On a hit it returns the value. On a miss it reads PostgreSQL, stores the value in Redis with SET and a 1800-second TTL, then returns it. Write path: the app updates PostgreSQL first, then deletes the key in Redis."
   chart={`flowchart TD
   R([Read merchant 42]) --> C{"GET merchant:42:config"}
   C -- hit --> RET([Return value])
@@ -48,37 +68,70 @@ A payment service reads the same merchant configuration from PostgreSQL on every
   U --> DEL["2. DEL merchant:42:config"]`}
 />
 
-- AWS calls it lazy loading: only data that someone reads gets cached.
-- Keeping the copy fresh after writes: [cache invalidation](card:cache-invalidation).
+1. The app builds the key `merchant:42:config` and sends `GET`.
+2. On a hit, Redis returns the stored JSON and the app uses it. The database is not touched.
+3. On a miss (the key was never stored, has expired or was evicted), `GET` returns nil and the app runs its SQL query.
+4. The app stores the result with `SET ... EX 1800`, so the copy removes itself after 30 minutes, and returns it.
+5. When merchant 42's configuration changes, the app updates PostgreSQL first and then deletes the key. The next read misses and loads the new row.
+
+So the key is: the app owns both paths, and Redis only stores what it is given.
+
+## Analogy
+
+<Analogy title="A notepad of looked-up phone numbers" limit="The notepad never learns that a number changed; you must cross it out yourself, which is the delete on the write path.">
+You look up a number in the directory once, write it on a notepad, and next time read the notepad. A number you never needed is never written down.
+</Analogy>
 
 ## Example
 
+The payment service reads and updates merchant configuration with a `StringRedisTemplate`, the Spring Data Redis helper for string keys and values.
+
 ```java
-String merchantConfig(long id) {                      // redis: a StringRedisTemplate
+String merchantConfig(long id) {
     String key = "merchant:" + id + ":config";
-    String json = redis.opsForValue().get(key);       // 1. try Redis
-    if (json == null) {                               // miss
-        json = configRepo.loadJson(id);               // 2. read the database
-        redis.opsForValue().set(key, json, Duration.ofMinutes(30));  // 3. cache with a TTL
+    String json = redis.opsForValue().get(key);                     // 1. try Redis
+    if (json == null) {                                             // miss: absent, expired or evicted
+        json = configRepo.loadJson(id);                             // 2. read PostgreSQL
+        redis.opsForValue().set(key, json, Duration.ofMinutes(30)); // 3. store with a 30-minute TTL
     }
     return json;
 }
+
 void updateConfig(long id, String json) {
-    configRepo.save(id, json);                        // database first
-    redis.delete("merchant:" + id + ":config");       // then delete the key
+    configRepo.save(id, json);                                      // database first
+    redis.delete("merchant:" + id + ":config");                     // then delete the cached copy
 }
 ```
+
+What to notice:
+
+- `get` returns `null` for every kind of miss, so one `if` handles a key that never existed, expired or was evicted.
+- `set(key, json, Duration.ofMinutes(30))` sends one `SET` with a TTL. Drop the `Duration` and the copy never expires, so a single forgotten delete leaves wrong data for good.
+- `updateConfig` writes the database before deleting. Swap the two lines and a reader that runs in between caches the old row again.
+- Two requests that miss at the same moment both read the database. That is harmless for one key; you will see the fix for a very popular key in [cache problems](card:cache-problems).
+
+## Rules and defaults
+
+- **Source of truth:** PostgreSQL keeps the real data. The Redis copy can disappear at any time (expiry, eviction, restart), and the app must still work without it.
+- **TTL on every copy:** a key stored with a plain `SET` has no TTL, so it lives until deleted or evicted. Always store cached copies with one.
+- **Memory limit:** for a Redis that holds only cache copies, set `maxmemory` with `allkeys-lru` or `allkeys-lfu` (see [eviction policies](card:eviction-policies)).
+- **Measuring it:** the hit ratio is `keyspace_hits / (keyspace_hits + keyspace_misses)` from `INFO stats`. It counts every key lookup on the instance, not one cache.
+- **Not a good fit:** data where most reads miss (each miss costs three trips), and sensitive data in a cache that many applications share.
+
+## Not to be confused with
+
+In cache-aside the application loads a miss from the database. In read-through, which you will see in [caching strategies](card:caching-strategies), a cache layer loads the miss and the app only ever talks to the cache. Redis Open Source cannot do read-through by itself, so with plain Redis you write cache-aside. Rule: cache-aside = the app loads; read-through = the cache loads.
 
 ## Interview Qs
 
 ### Two requests miss the same key at once. Is that a problem?
 
-Both read the database and both store the same value, which is harmless for one key. For a hot key with thousands of requests it becomes a stampede: see [cache problems](card:cache-problems).
+Both read the database and both store the same value, which is harmless for one ordinary key. For a hot key read thousands of times a second, every waiting request reloads it at once and floods the database. That is a cache stampede, and the fix, letting one caller rebuild, comes in [cache problems](card:cache-problems).
 
 ### What happens when Redis goes down?
 
-Reads become misses and go to the database, so the app keeps working, only slower. Protect the database from that flood: see [failure handling](card:redis-failure-handling).
+Every read becomes a miss and goes to the database, so the app keeps working, only slower. The danger is that the database now gets all the traffic the cache used to absorb. Limit that flood and treat Redis errors as misses; you will see how in [failure handling](card:redis-failure-handling).
 
 ### Which data is worth caching?
 
-Data read often and changed rarely, like merchant configuration. Skip it when most reads would miss, and keep sensitive data out of a shared cache.
+Data that is read often and changes rarely, like merchant configuration or a product catalogue. Skip data that most requests read only once, because each miss costs three trips and saves nothing. Keep sensitive data out of a cache that many applications share.

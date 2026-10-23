@@ -5,24 +5,42 @@ title: Streams and Consumer Groups
 topic: data-types
 level: intermediate
 heat: 2
-hook: "A stream is an append-only log of entries; consumer groups share it out and track what each worker has acknowledged."
+hook: "A stream is a log of events that keeps each entry after it is read; a consumer group shares entries among workers and tracks which ones each has finished."
 points:
-  - { k: "Entry ID", v: "<milliseconds>-<sequence>, always increasing; XADD * makes one" }
-  - { k: "Kept after reading", v: "entries stay until trimmed, so readers can replay", kind: plus }
-  - { k: "Consumer group", v: "each entry goes to one consumer of the group" }
-  - { k: "At-least-once", v: "unacked entries can be redelivered; make handlers idempotent", kind: minus }
-  - { k: "Capping", v: "XADD MAXLEN or MINID trims old entries; else it grows" }
+  - { k: "Append-only log", v: "XADD adds an entry at the end; entries are never changed and stay until you trim them" }
+  - { k: "Entry ID", v: "each entry gets an id <milliseconds>-<sequence> that always increases; XADD * lets Redis pick it" }
+  - { k: "Consumer group", v: "a named set of workers on one stream; each entry goes to only one worker of the group" }
+  - { k: "Pending until XACK", v: "an entry handed to a worker stays in the group's pending list until acknowledged" }
+  - { k: "At-least-once", v: "an entry not acknowledged can be delivered again, so the handler must be safe to run twice", kind: minus }
+  - { k: "Trimming", v: "without MAXLEN or MINID on XADD the stream grows forever", kind: minus }
 trap:
-  wrong: "Once XREADGROUP hands an entry to a consumer, it is done."
-  right: "It stays in the pending entries list until XACK. If the consumer dies, another one claims it with XAUTOCLAIM."
-sayIt: "A stream is a persisted append-only log. Producers XADD, consumer groups split entries across workers, and each worker XACKs after processing. Unacked entries stay pending, so a crash means redelivery: at-least-once."
+  wrong: "Once XREADGROUP hands an entry to a worker, Redis treats it as done."
+  right: "It stays in the group's pending entries list until the worker sends XACK. If the worker dies, another worker can claim it with XAUTOCLAIM."
+  why: "A list pop really removes the item, so people expect any queue read to finish the job."
+sayIt: "A stream is a stored append-only log. Producers XADD; a consumer group splits entries across workers, who XACK after processing. Unacknowledged entries stay pending and can be claimed by another worker, so delivery is at-least-once."
+cheat:
+  idea: "A stream is an append-only log of events that Redis keeps after they are read. A consumer group shares entries among workers and tracks which ones each has acknowledged."
+  flow: "XADD → XREADGROUP (pending) → XACK (done)"
+  remember: "Without XACK an entry stays pending and may be delivered again, so handlers must be safe to repeat."
+buildsOn: [lists, hashes]
+scenarios:
+  - q: "Worker A reads payment 9001's event, crashes before XACK, restarts and calls XREADGROUP ... STREAMS payments >. Does it get the event again?"
+    a: "No. The id > asks only for entries never delivered to anyone in the group, and this one was already delivered. It is still in A's pending list, so A must first read with id 0 to get its own pending entries, then switch to >."
+  - q: "Billing and analytics both need every payment event. One consumer group or two?"
+    a: "Two groups, one per service. Each group gets every entry and tracks its own progress, while workers inside a group share the entries. One shared group would split the events between billing and analytics, so each would see only some."
 confusedWith: [pub-sub-vs-lists-vs-streams]
 tags: [streams, consumer-groups, messaging]
 visual: flow
 sources:
-  - title: "Redis Streams (Redis docs)"
+  - title: "Redis Streams: entry ids, consumer groups, XAUTOCLAIM (6.2), performance (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/streams/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "XREADGROUP: > versus other ids, pending entries list, NOACK (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/xreadgroup/"
+    verifiedOn: "2026-10-21"
+  - title: "XGROUP CREATE: $ versus 0, MKSTREAM (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/xgroup-create/"
+    verifiedOn: "2026-10-21"
   - title: "Idempotent message processing for streams (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/streams/idempotency/"
     verifiedOn: "2026-10-20"
@@ -31,9 +49,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A stream is a key that holds an append-only log: new entries are only added at the end, and reading them does not remove them. Each entry has an id made from the time in milliseconds and a sequence number, plus a few field-value pairs, like a small [hash](card:hashes). A consumer group is a named set of workers reading one stream together: Redis gives each entry to one worker of the group and remembers which entries each worker has not yet confirmed.
+
 ## Why it exists
 
-Pub/Sub loses messages when a reader is away, and a popped list item is gone. A stream keeps every event, and lets several workers share the load with acknowledgements.
+A [list](card:lists) works as a job queue, but a popped job is gone: if the worker crashes halfway, the payment event is lost, and no second service can read the same events. A stream keeps every entry, so several services can each read all of them, and a consumer group tracks each delivery until the worker confirms it. A crashed worker's events wait to be retried instead of disappearing.
 
 ## How it works
 
@@ -48,26 +70,77 @@ Pub/Sub loses messages when a reader is away, and a popped list item is gone. A 
   B -- XACK --> G`}
 />
 
-- XREADGROUP with ID `>` gives new entries; with `0` it re-reads your own pending ones.
-- Since Redis 8.6, XADD can drop duplicate retries from a producer (IDMP).
-- Stream, list or Pub/Sub for a queue: [queues](card:queues-with-redis).
+1. The payment service calls `XADD payments * ...`. Redis gives the entry a new, larger id and appends it.
+2. `XGROUP CREATE` makes the group `billing` once. The id `$` means "start with entries added from now on"; `0` would mean "from the start".
+3. A worker calls `XREADGROUP ... STREAMS payments >`. The `>` asks for entries never given to anyone in the group. Redis hands them over and records them in the group's pending entries list (PEL).
+4. The worker processes the event and calls `XACK`. Redis removes the id from the pending list.
+5. If a worker never acknowledges, its entries stay pending. Another worker can take them over with `XAUTOCLAIM` once they have been idle long enough.
+
+So the key is: reading hands an entry out, and only XACK marks it done.
 
 ## Example
 
-```text
-XGROUP CREATE payments billing $ MKSTREAM     -- OK (only new entries)
-XADD payments MAXLEN ~ 100000 * order PAY101 status SUCCESS  -- "1792490400000-0"
-XREADGROUP GROUP billing worker-a COUNT 10 BLOCK 2000 STREAMS payments >
-XACK payments billing 1792490400000-0          -- 1
-XPENDING payments billing                      -- what is still unacked
+The payment service publishes "payment 9001 paid", and a billing worker reads it.
+
+```bash
+redis-cli XGROUP CREATE payments billing '$' MKSTREAM
+redis-cli XADD payments MAXLEN '~' 100000 '*' payment 9001
+redis-cli XREADGROUP GROUP billing worker-a COUNT 10 STREAMS payments '>'
 ```
+
+```text output
+OK
+"1792647617474-0"
+1) 1) "payments"
+   2) 1) 1) "1792647617474-0"
+         2) 1) "payment"
+            2) "9001"
+```
+
+After processing, the worker acknowledges the entry, and the pending list is empty again.
+
+```bash
+redis-cli XACK payments billing 1792647617474-0
+redis-cli XPENDING payments billing
+```
+
+```text output
+(integer) 1
+1) (integer) 0
+2) (nil)
+3) (nil)
+4) (nil)
+```
+
+What to notice:
+
+- `MKSTREAM` created the empty stream together with the group. Without it, `XGROUP CREATE` fails on a missing key.
+- The id `1792647617474-0` is the server time in milliseconds plus sequence 0, so you can also read entries by time range.
+- `MAXLEN ~ 100000` keeps the stream near 100,000 entries; `~` lets Redis trim in whole blocks, which is cheaper than an exact cut.
+- `XPENDING` reports 0 pending entries because `XACK` removed the id. Without the XACK it would report 1 entry, owned by worker-a.
+
+## Rules and defaults
+
+- **Entry ids:** `<milliseconds>-<sequence>`, always increasing, even if the server clock moves back.
+- **`>` versus another id:** `>` returns new entries; any other id, such as `0`, returns the worker's own pending entries, which is how a restarted worker finishes old work.
+- **Delivery:** at-least-once with XACK. `NOACK` skips the pending list, so a crash loses the entry.
+- **Duplicates from producers:** since Redis 8.6, XADD can use producer and message ids (IDMP) to drop a retried XADD.
+- **Cost:** adding an entry is O(1); trimming during XADD costs more.
+
+## Not to be confused with
+
+A consumer group is one reader of the whole stream, usually one per service: it gets every entry. A consumer is one worker inside a group: it gets only its share of that group's entries. Rule: one group per service that needs all events; one consumer per worker that splits the load. How a stream differs from a [list](card:lists) is covered there.
 
 ## Interview Qs
 
 ### What happens if a consumer crashes before XACK?
 
-The entry stays in the group's pending entries list. When it restarts it re-reads with ID 0; if it never returns, another consumer takes the entry with XAUTOCLAIM (Redis 6.2+) after an idle time.
+The entry stays in the group's pending entries list. When the consumer restarts, it re-reads its pending entries with id 0 and processes them. If it never returns, another consumer takes them with XAUTOCLAIM (Redis 6.2+) after a minimum idle time. The entry may be processed twice, so handlers must be idempotent: running them twice has the same effect as once.
+
+### Why does a stream need trimming, and how do you trim it?
+
+Reading does not remove entries, so a stream grows until you trim it. Add `MAXLEN ~ 100000` or `MINID` (Redis 6.2+) to XADD, or run XTRIM. The `~` lets Redis remove only whole internal nodes, which is much cheaper than an exact cut and keeps at least the number you asked for.
 
 ### Redis Streams or Kafka?
 
-Streams fit when you already run Redis and the history fits in memory: groups, acks, replay. Kafka keeps events on disk for as long as you configure and spreads topics over partitions, so it suits long retention and big volumes.
+Streams fit when you already run Redis and the history fits in memory: groups, acknowledgements and replay. Kafka keeps events on disk for as long as you configure and spreads topics over partitions and brokers, so it suits long retention and very high volumes.

@@ -5,85 +5,153 @@ title: Distributed Locks with Redis
 topic: coordination
 level: interview
 heat: 3
-hook: "SET NX PX takes a self-expiring lock; only the token holder may delete it, and the lease can expire under you."
+hook: "App servers agree that only one of them does a job by creating one Redis key that expires on its own; only the holder of its token may delete it."
 points:
-  - { k: "Acquire", v: "SET key token NX PX 30000: one atomic step, with a lease" }
-  - { k: "Release", v: "delete only if the value is still my token" }
-  - { k: "Lease runs out", v: "a GC pause or slow job can outlive the lock", kind: minus }
-  - { k: "Fencing token", v: "storage rejects writes that carry an older number", kind: plus }
+  - { k: "Take the lock", v: "SET key <token> NX PX 30000 creates the key only if missing; OK means you hold it, nil means you do not" }
+  - { k: "Owner token", v: "a random value unique to each lock request, stored in the key so a release can check who owns it" }
+  - { k: "Safe release", v: "delete the key only if it still holds your token: DELEX ... IFEQ on Redis 8.4+, or a short Lua script before", kind: plus }
+  - { k: "Lease can run out", v: "if the work outlasts the expiry, a second worker gets the lock while the first still runs", kind: minus }
+  - { k: "Fencing token", v: "a number that rises with every grant; the database rejects writes that carry an older number", kind: plus }
 trap:
-  wrong: "Release the lock with DEL lock:payment:PAY101."
-  right: "After your lease expires, DEL can remove another worker's lock. Compare the token and delete atomically."
-sayIt: "I lock with SET key token NX PX and release with a compare-and-delete script. The lock saves duplicate work; for correctness the database must also reject duplicates."
+  wrong: "Release the lock with DEL lock:payment:9001."
+  right: "If your lease expired, the key may now be another worker's lock. Delete only if it still holds your token, in one atomic step."
+  why: "On a normal day the work finishes in time, so plain DEL always removes your own key. The bug shows up only after a slow run or a long pause, which tests rarely cause."
+sayIt: "I lock with SET key token NX PX, which is atomic and expires if I crash, and release only if the key still holds my token. The lock saves duplicate work; for correctness the database must also reject duplicates."
+cheat:
+  idea: "A distributed lock is one Redis key that several app servers compete to create. The server that creates it does the job; the key expires on its own if that server dies."
+  code: |
+    SET lock:payment:9001 7f3a91c2 NX PX 30000    # OK = you hold it, nil = someone else does
+    DELEX lock:payment:9001 IFEQ 7f3a91c2         # release only your own lock (Redis 8.4+)
+  remember: "Never release with plain DEL, and never trust the lock alone for money: the database must reject duplicates."
+buildsOn: [single-command-atomicity, ttl-and-expiration, lua-and-functions]
+scenarios:
+  - q: "Worker A takes lock:payment:9001 with a 30-second expiry, then stalls for 40 seconds in a garbage-collection pause. Worker B takes the lock at second 31. What can go wrong when A wakes up?"
+    a: "A still believes it holds the lock, so A and B both capture payment 9001. If A then calls plain DEL, it also removes B's lock. A token-checked release stops the DEL, and a fencing token or a unique constraint in the database stops the double capture."
+  - q: "SET lock:payment:9001 c0d4e815 NX PX 30000 returns (nil). What does that mean, and what should worker B do?"
+    a: "The key already exists, so another worker holds the lock and B does not. B should skip the job, or retry after a short random delay, and must not start the work."
+  - q: "Your team wants a Redis lock to guarantee each payment is charged exactly once. Is that enough?"
+    a: "No. Expiry, a long pause or a failover can let two workers in. Keep the lock to avoid wasted work, and make the charge itself idempotent: a unique idempotency key in the database and the same key sent to the payment provider."
 confusedWith: []
 tags: [lock, redlock, fencing]
 visual: flow
 sources:
-  - title: "Redis docs: Distributed locks"
+  - title: "Distributed Locks with Redis (Redis docs)"
     url: "https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "DELEX (Redis commands, since 8.4.0)"
+    url: "https://redis.io/docs/latest/commands/delex/"
+    verifiedOn: "2026-10-21"
   - title: "Kleppmann: How to do distributed locking (2016)"
     url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html"
     verifiedOn: "2026-10-20"
   - title: "Is Redlock safe? (antirez)"
     url: "http://antirez.com/news/101"
     verifiedOn: "2026-10-20"
-  - title: "Redisson docs: Locks"
+  - title: "Redisson docs: Locks and synchronizers"
     url: "https://redisson.pro/docs/data-and-services/locks-and-synchronizers/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Redisson docs: Configuration (lockWatchdogTimeout)"
+    url: "https://redisson.pro/docs/configuration/"
+    verifiedOn: "2026-10-21"
   - title: "Stripe API: Idempotent requests"
     url: "https://docs.stripe.com/api/idempotent_requests"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A distributed lock lets processes on different machines agree that only one of them does a piece of work at a time. A Java `synchronized` block cannot do this, because it only stops threads inside one JVM. With Redis the lock is one key, such as `lock:payment:9001`: the worker that creates the key holds the lock. The key has a TTL, which here is called a lease, so it disappears even if the holder crashes.
+
 ## Why it exists
 
-Several app servers may pick up the same job, such as capturing PAY101. A lock lets one do it while the others skip.
+The payment service runs on three app servers, each polling for payments to capture. Without a lock, two servers can pick up payment 9001 at the same moment and both call the bank. With a lock, the first server to create the key does the capture and the others see the key and skip it. The lease matters too: without it, a server that crashed while holding the lock would block payment 9001 forever.
 
 ## How it works
 
 <Mermaid
-  alt="Worker 1 gets the lock with fence 33, pauses, and its lease expires. Worker 2 gets fence 34 and writes. Worker 1's late write with 33 is rejected."
+  alt="Worker 1 gets the lock with fencing number 33, then pauses and its lease expires. Worker 2 gets the lock with number 34 and writes to the payments database, which accepts it. Worker 1 wakes and writes with number 33, and the database rejects it because 33 is older than 34."
   chart={`sequenceDiagram
   participant W1 as Worker 1
   participant L as Redis
   participant W2 as Worker 2
   participant DB as Payments DB
-  W1->>L: SET NX PX, granted, fence 33
-  Note over W1: GC pause, lease expires
-  W2->>L: SET NX PX, granted, fence 34
+  W1->>L: lock granted, fence 33
+  Note over W1: long pause, lease expires
+  W2->>L: lock granted, fence 34
   W2->>DB: write with fence 34, accepted
   W1->>DB: write with fence 33, rejected`}
 />
 
-- The same lock in Java: [code templates](card:redis-code-templates). Plain SET NX gives no fencing number; Redisson's [RFencedLock](card:lock-redisson-fenced) returns one.
-- [Redlock](card:lock-redlock)'s safety is debated: Kleppmann says it relies on timing; antirez disagrees.
-- Failover can lose a lock: [replication](card:replication) is asynchronous.
+1. A worker makes a random token and sends `SET lock:payment:9001 <token> NX PX 30000`. `NX` creates the key only if it does not exist; `PX 30000` gives it a 30-second lease.
+2. Redis replies `OK` to exactly one worker. The others get `nil` and skip the job or retry after a short random delay.
+3. The holder does the work well inside the lease, then deletes the key only if it still holds its token.
+4. If the holder crashes instead, the key expires after 30 seconds and another worker can take the lock.
+
+The diagram shows the weak spot of step 3: a lease can expire while its holder still runs. A fencing token is a number that grows with every grant. The holder sends it with each write, and the database refuses a number older than one it has already seen. Plain `SET NX` gives no such number; Redisson's `RFencedLock` returns one with each grant.
 
 ## Example
 
+Worker A locks payment 9001, worker B tries the same lock, and then each tries to release it.
+
+```bash
+redis-cli SET lock:payment:9001 7f3a91c2 NX PX 30000   # worker A
+redis-cli SET lock:payment:9001 c0d4e815 NX PX 30000   # worker B
+redis-cli PTTL lock:payment:9001                        # lease left, in ms
+redis-cli DELEX lock:payment:9001 IFEQ c0d4e815         # B tries to release
+redis-cli DELEX lock:payment:9001 IFEQ 7f3a91c2         # A releases its own
+```
+
+```text output
+OK
+(nil)
+(integer) 29347
+(integer) 0
+(integer) 1
+```
+
+Before Redis 8.4 the release is this Lua script, run with `EVAL` and the lock key in `KEYS[1]` and the token in `ARGV[1]`:
+
 ```lua
-SET lock:payment:PAY101 7f3a91c2 NX PX 30000   -> OK     worker 1
-SET lock:payment:PAY101 c0d4e815 NX PX 30000   -> (nil)  worker 2
--- release: EVAL with KEYS[1] = lock key, ARGV[1] = my token
-if redis.call("get", KEYS[1]) == ARGV[1] then
-  return redis.call("del", KEYS[1])
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
 end
 return 0
--- Redis 8.4+, same in one command
-DELEX lock:payment:PAY101 IFEQ 7f3a91c2        -> (integer) 1
 ```
+
+What to notice:
+
+- Worker B gets `(nil)`, not an error: the key exists, so `NX` refuses to overwrite it and B must not start the work.
+- `DELEX ... IFEQ` with B's token returns 0 and leaves A's lock alone. A plain `DEL` from B would have removed it.
+- The script checks and deletes in one atomic step. A `GET` in the app followed by `DEL` leaves a gap in which the lease can expire.
+- You will see the same lock in Java in [Redis Code Templates](card:redis-code-templates).
+
+## Rules and defaults
+
+- **Token:** must be unique across all clients and requests; the Redis docs suggest 20 random bytes.
+- **Lease length:** longer than the slowest normal run, short enough that a crash does not block work for long. Redis never extends it for you.
+- **Extending a lease:** Redisson's `RLock` watchdog renews the lock while its holder lives; unrenewed, it expires after 30 seconds by default (`lockWatchdogTimeout`). It runs only if you lock without a lease time.
+- **Failover:** replicas get writes asynchronously, so a primary can crash before the lock key reaches its replica, letting a second worker lock on the new primary. You will see this in [Replication](card:replication).
+- **Redlock:** locks the same key on N independent primaries (for example 5) and counts it as held if a majority grant it within the lease. Its safety is debated: Kleppmann says it relies on timing assumptions; antirez disagrees. Redisson deprecated `RedissonRedLock`.
+
+## Not to be confused with
+
+A local lock, such as `ReentrantLock`, works inside one JVM. A distributed lock works across machines and ends by a delete or by expiry. An idempotency key does not prevent a second attempt; it makes the second attempt change nothing. Rule: the lock avoids duplicate work; the idempotency key makes duplicates safe.
+
+## Common mistakes
+
+- **"SET the key, then call EXPIRE."** If the app dies between the two calls, the key never expires and the job is blocked for good. Use `SET ... NX PX` in one command.
+- **"A fixed value such as locked is fine."** Then every worker writes the same value, and a release cannot tell who owns the lock. Use a random token per request.
 
 ## Interview Qs
 
 ### How do you build a distributed lock with Redis?
 
-SET the key to a random token with NX and PX 30000; OK means you hold it. Release by deleting it only if it still holds your token, atomically.
+Send `SET lock:payment:9001 <random token> NX PX 30000`. `OK` means you hold the lock; `nil` means someone else does. Do the work inside the lease, then release by deleting the key only if it still holds your token, with `DELEX ... IFEQ` on Redis 8.4+ or a compare-and-delete Lua script.
 
-### What if the work takes longer than the lease?
+### What happens if the work takes longer than the lease?
 
-The key expires, a second worker gets the lock, and both run. Keep work short, extend the lease (Redisson's watchdog), and fence writes.
+The key expires, a second worker takes the lock, and both run at once. Keep the work short, extend the lease while working (Redisson's watchdog does this), and pass a fencing token so the database rejects writes from the older holder.
 
 ### Does a Redis lock make a payment happen exactly once?
 
-No. Expiry or failover can let two workers in. Give the payment an idempotency key with a unique constraint in the database, and send it to the provider.
+No. Expiry, a long pause or a failover can let two workers in. Give each payment an idempotency key with a unique constraint in the database, and send the same key to the payment provider, so a second attempt changes nothing.

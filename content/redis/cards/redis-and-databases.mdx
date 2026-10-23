@@ -5,16 +5,28 @@ title: Redis vs a Relational Database
 topic: basics
 level: beginner
 heat: 3
-hook: "Keep business records in the database; put Redis beside it to speed up reads, count, coordinate and hold short-lived state."
+hook: "Keep the business records in the database. Put Redis beside it to speed up reads, count, coordinate and hold short-lived state."
 points:
-  - { k: "Redis as a cache", v: "holds copies of hot rows; a miss reads the database" }
-  - { k: "Redis as main store", v: "only if its persistence settings meet your loss budget", kind: minus }
-  - { k: "Payments", v: "records in the database; Redis for locks, limits, status" }
-  - { k: "Size", v: "a Redis Open Source data set must fit in RAM", kind: minus }
+  - { k: "Database", v: "stores rows on disk, enforces rules such as unique ids, and answers SQL queries with joins" }
+  - { k: "Redis", v: "stores values in RAM and finds them by key; it has no joins and no rules between keys" }
+  - { k: "Source of truth", v: "the store whose data wins when copies disagree; for payments that is the database" }
+  - { k: "Redis as a cache", v: "holds copies of often-read rows; a missing or lost copy is read again from the database", kind: plus }
+  - { k: "Crash loss", v: "Redis can lose its most recent writes in a crash, depending on its persistence settings", kind: minus }
+  - { k: "Size", v: "a Redis Open Source data set must fit in RAM; a database can be far larger than its RAM", kind: minus }
 trap:
   wrong: "Redis has persistence, so it can replace PostgreSQL for payment records."
-  right: "Redis persistence is tunable and can lose recent writes. Keep payments in a durable database; use Redis beside it."
-sayIt: "Redis is a fast in-memory store with key-based access; a relational database is disk-backed with SQL, constraints and durable commits. I keep payments in the database and use Redis for caching, counters, locks and short-lived state."
+  right: "Redis persistence is tunable and can lose recent writes. Keep payments in a durable database and use Redis beside it."
+  why: "Redis can save its data to disk and reload it after a restart, so it looks like a database. The gap is in how many recent writes survive a crash."
+sayIt: "A relational database is disk-backed, with SQL, constraints and durable commits; Redis is in-memory, with key access and tunable durability. I keep payments in PostgreSQL as the source of truth and use Redis beside it for caching, counters, locks and short-lived state."
+cheat:
+  idea: "A relational database keeps the durable records, with SQL and rules. Redis sits beside it in RAM for fast copies, counters, locks and short-lived state."
+  remember: "Payments live in PostgreSQL. A Redis copy can be stale, evicted or lost, so it is never the record."
+buildsOn: [what-is-redis]
+scenarios:
+  - q: "Your team wants to keep payments only in Redis, with saving to disk switched on, and drop PostgreSQL. What do you say?"
+    a: "Not for payments. Depending on its disk-sync setting, Redis can still lose the last writes in a crash. It has no constraints or SQL for reports, and the data must fit in RAM. Keep PostgreSQL as the record and use Redis for copies and helpers."
+  - q: "Which store would you pick for a user's login session, the payment ledger and a leaderboard of top merchants?"
+    a: "Session: Redis, because losing it only logs the user out. Ledger: PostgreSQL, because it must survive crashes and obey constraints. Leaderboard: a Redis sorted set, because it can be rebuilt from the database."
 confusedWith: []
 tags: [redis-vs-database, source-of-truth, durability]
 visual: table
@@ -28,37 +40,81 @@ sources:
   - title: "Write-Ahead Logging (PostgreSQL 18)"
     url: "https://www.postgresql.org/docs/18/wal-intro.html"
     verifiedOn: "2026-10-20"
+  - title: "Write Ahead Log settings: synchronous_commit default on (PostgreSQL 18)"
+    url: "https://www.postgresql.org/docs/18/runtime-config-wal.html"
+    verifiedOn: "2026-10-21"
+  - title: "SET: NX option (redis.io command reference)"
+    url: "https://redis.io/docs/latest/commands/set/"
+    verifiedOn: "2026-10-21"
   - title: "Redis Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/system-design/top-25-redis-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Redis and a relational database such as PostgreSQL are two different kinds of store, and most backends use both. A relational database keeps rows in tables on disk, checks rules such as "each payment id is unique", and answers SQL queries that join tables. [Redis](card:what-is-redis) keeps values in RAM and finds them only by key. The question is not which one is better, but which data belongs where.
+
 ## Why it exists
 
-Teams often ask whether Redis can replace their database. The answer depends on durability and query needs, not on speed alone.
+Redis is so fast that teams ask whether it can replace the database. For payments the answer matters: if a crash loses the last writes, a customer's ₹500 payment could vanish. With its default settings, PostgreSQL confirms a commit only after the change is safely logged to disk, and it rejects data that breaks its rules. Knowing what each store guarantees tells you where each piece of data should live.
 
 ## How it works
 
 <Compare id="redis-vs-database" />
 
-- How much Redis keeps after a crash: [RDB and AOF](card:persistence-rdb-aof).
-- A lock alone does not make a payment exactly-once: [distributed locks](card:distributed-locks).
+1. The payment service writes each payment to PostgreSQL. The commit returns only after the change is logged, so it survives a crash.
+2. For data it reads often, such as payment 9001 or the merchant settings, the service keeps a copy in Redis under a key such as `payment:9001`, with a lifetime.
+3. Reads check Redis first. On a miss they read PostgreSQL and store a fresh copy; you will see this pattern in [cache-aside](card:cache-aside).
+4. Data that is short-lived or shared between servers, such as a request counter or a lock, lives only in Redis, because losing it in a crash does little harm.
+
+So the key is: decide per piece of data, by asking what happens if it is lost.
 
 ## Example
 
-```text
--- PostgreSQL holds the payment row for PAY101. Redis only helps:
-SET payment:PAY101:status PENDING EX 300   -- status copy, gone in 5 min
-INCR rate:user:7:upi                       -- request counter
-SET lock:payment:PAY101 w1 NX PX 30000     -- one worker at a time
+Besides the payment row in PostgreSQL, the payment service uses Redis for three helpers.
+
+```bash
+redis-cli SET payment:9001 '{"status":"PENDING","amount":500}' EX 300
+redis-cli INCR rate:user:7:upi
+redis-cli SET lock:payment:9001 worker-1 NX PX 30000
+redis-cli SET lock:payment:9001 worker-2 NX PX 30000
 ```
+
+```text output
+OK
+(integer) 1
+OK
+(nil)
+```
+
+What to notice:
+
+- `payment:9001` is only a copy of the PostgreSQL row. It expires after 300 seconds and can be rebuilt from the database at any time.
+- `rate:user:7:upi` counts the user's UPI requests. If Redis loses it, the user only gets a fresh limit.
+- `NX` means "only if the key does not exist", so worker 2 gets `(nil)` and knows worker 1 holds the lock. A lock alone does not prevent a double charge; [distributed locks](card:distributed-locks) explains why.
+
+## Rules and defaults
+
+- **Source of truth:** for each kind of data, choose one store whose copy wins. For payments, orders and accounts, that is the database.
+- **Durability is a setting:** how much Redis keeps after a crash depends on its [RDB and AOF](card:persistence-rdb-aof) settings. A successful write is not always on disk yet.
+- **Size:** Redis Open Source keeps all data in RAM, so the data set must fit in memory.
+- **No rules between keys:** Redis has no foreign keys, no constraints across keys and no joins. The app keeps related keys consistent.
+
+## Common mistakes
+
+- **"Put everything in Redis to make the app fast."** Data you query in many ways, such as payments by date, merchant and status, fits SQL far better. Redis finds values by key unless you add search indexes.
 
 ## Interview Qs
 
 ### Can Redis be your primary database?
 
-Yes, for data whose crash-loss window fits its persistence settings, such as sessions or leaderboards. For orders and payments, keep a relational database as the source of truth and add Redis for speed.
+Yes, for data whose possible crash loss is acceptable, such as sessions or leaderboards, with persistence configured to match. For orders and payments, keep a relational database as the source of truth and add Redis beside it for speed.
 
 ### When is Redis the wrong choice?
 
-When the data is larger than RAM, or when you need ad hoc queries, joins, constraints and durable transactions across related records.
+When the data is larger than the RAM you can afford, or when you need ad hoc queries, joins, constraints and durable transactions across related records, such as a payment ledger.
+
+### Redis and the database disagree. Which one is right?
+
+The database, because it is the source of truth. The Redis copy is stale: delete it or refresh it from the database. [Cache invalidation](card:cache-invalidation) shows how to keep the two in step.

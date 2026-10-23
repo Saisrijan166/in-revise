@@ -5,77 +5,142 @@ title: Key Naming and Key Scanning
 topic: basics
 level: intermediate
 heat: 2
-hook: "Name keys type:id:field, keep them short but readable, and walk the keyspace with SCAN, never KEYS."
+hook: "Name keys type:id:field, such as payment:9001:attempts, and find keys with SCAN, a few per call, never with KEYS."
 points:
-  - { k: "Pattern", v: "object-type:id[:field], e.g. payment:PAY101:attempts" }
-  - { k: "No namespaces", v: "one flat keyspace; a service prefix avoids clashes" }
-  - { k: "Length", v: "readable beats tiny; 1 KB keys waste memory and time", kind: minus }
-  - { k: "Max key size", v: "512 MB in Redis Open Source 8.x; real keys stay tiny", kind: default }
-  - { k: "KEYS", v: "O(N) over every key and blocks the server", kind: minus }
+  - { k: "Pattern", v: "object-type:id:field, separated by colons, such as payment:9001:attempts" }
+  - { k: "One keyspace", v: "Redis does not separate apps or teams; a type or service prefix keeps keys from clashing" }
+  - { k: "Length", v: "readable beats tiny, but very long keys, such as 1 KB, waste memory and slow lookups", kind: minus }
+  - { k: "KEYS", v: "checks every key in one command and blocks all other clients until it ends", kind: minus }
+  - { k: "SCAN", v: "returns a few keys per call with a cursor; the scan is done only when the cursor is 0", kind: plus }
+  - { k: "SCAN COUNT", v: "10 by default (Redis Open Source 8.x): a hint for work per call, not a limit on results", kind: default }
 trap:
-  wrong: "Use KEYS payment:* in app code to find pending payments."
-  right: "KEYS blocks Redis while it walks every key. Use SCAN with MATCH, or keep the ids in a set."
-sayIt: "I name keys object-type:id:field with a service prefix and iterate with SCAN and a cursor, because KEYS walks every key and blocks the server."
+  wrong: "Use KEYS payment:* in app code to find the pending payments."
+  right: "KEYS blocks Redis while it walks every key. Use SCAN with MATCH, or keep the payment ids in a set."
+  why: "KEYS gives the full answer in one line and is instant on a laptop with a few keys, so the problem shows up only on a production database with millions."
+sayIt: "I name keys object-type:id:field with a prefix, like payment:9001:attempts. To find keys I use SCAN with a cursor, because KEYS walks every key in one command and blocks the server. If the app needs a group of keys often, I keep their ids in a set."
+cheat:
+  idea: "Redis has one flat keyspace, so names carry the structure: type:id:field, such as payment:9001:attempts. SCAN walks the keys a few per call with a cursor."
+  flow: "SCAN 0 → next cursor + some keys → repeat → cursor 0 = done"
+  remember: "Never use KEYS in app code: it walks every key in one command and blocks every client."
+buildsOn: [what-is-redis]
+scenarios:
+  - q: "SCAN 24 MATCH payment:* returns cursor 20 and an empty list. Is the scan finished?"
+    a: "No. MATCH filters after Redis picks each batch, so a batch can contain no matches. The scan ends only when the returned cursor is 0."
+  - q: "The order service and the payment service both write a key named 9001 into the same Redis. What goes wrong, and how do you fix it?"
+    a: "They overwrite each other, because Redis has one keyspace with no separation. Prefix every key with its type, and with the service when needed: payment:9001 and order:9001."
 confusedWith: []
 tags: [keys, scan, naming]
-visual: table
+visual: flow
 sources:
-  - title: "Keys and values (redis.io)"
+  - title: "Keys and values: content of keys, KEYS and SCAN (redis.io)"
     url: "https://redis.io/docs/latest/develop/using-commands/keyspace/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "SCAN (redis.io command reference)"
     url: "https://redis.io/docs/latest/commands/scan/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "KEYS (redis.io command reference)"
     url: "https://redis.io/docs/latest/commands/keys/"
     verifiedOn: "2026-10-20"
+  - title: "SELECT: numbered databases and Redis Cluster (redis.io command reference)"
+    url: "https://redis.io/docs/latest/commands/select/"
+    verifiedOn: "2026-10-21"
+  - title: "Redis CLI: get a list of keys with --scan (redis.io)"
+    url: "https://redis.io/docs/latest/develop/tools/cli/"
+    verifiedOn: "2026-10-21"
   - title: "Redis interview questions: Redis keys (Devinterview.io, GitHub)"
     url: "https://github.com/Devinterview-io/redis-interview-questions"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Key design is how you name your keys and how you find them again. Redis has no tables: all keys of a database sit in one flat keyspace, the set of all its keys, so the name is your only structure. The usual convention is object type, id and an optional field, separated by colons, such as `payment:9001:attempts`. To find keys that match a pattern, you walk the keyspace with `SCAN`, a command that returns a few keys per call.
+
 ## Why it exists
 
-Redis has no tables or namespaces, so key names are your only structure. One careless KEYS call can freeze production.
+If the order service and the payment service both write a key named `9001`, one overwrites the other, because [Redis](card:what-is-redis) does not separate them. Clear names prevent such clashes and tell a reader what each key holds. Finding keys has its own danger: `KEYS payment:*` checks every key inside one command, and since commands run one at a time, millions of keys freeze every other client until it ends.
 
 ## How it works
 
-| Key | Holds |
-|---|---|
-| `payment:PAY101` | payment status |
-| `payment:PAY101:attempts` | retry counter |
-| `merchant:42:config` | merchant settings |
-| `lock:payment:PAY101` | lock token |
-| `rate:user:7:upi` | request count |
+<Mermaid
+  alt="SCAN loop. The client calls SCAN 0. Redis checks a small batch of keys and returns the next cursor plus the matching keys. The client calls SCAN again with that cursor. When the returned cursor is 0, the scan is complete."
+  chart={`flowchart LR
+  S([SCAN 0]) --> B[Redis checks a small batch]
+  B --> R[Returns next cursor + matches]
+  R --> C{Cursor is 0?}
+  C -- no --> N[SCAN with that cursor] --> B
+  C -- yes --> D([Done])`}
+/>
 
-- SCAN returns a cursor and a few keys; call again with that cursor until it returns 0.
-- Hash tags for Cluster: [Redis Cluster](card:redis-cluster). Deleting big keys: [UNLINK](card:memory-optimization).
+1. You call `SCAN 0` to start. The 0 is the cursor, a bookmark that tells Redis where to continue.
+2. Redis checks a small batch of keys, keeps those that fit `MATCH`, and returns them with the next cursor.
+3. You call `SCAN` again with that cursor. Between your calls, other clients' commands run normally.
+4. You stop when the returned cursor is 0. Every key that existed for the whole scan was returned at least once.
+
+So the key is: many small steps instead of one giant command.
 
 ## Example
 
-```text
-SCAN 0 MATCH payment:* COUNT 100
--- 1) "1792"   next cursor   2) 1) "payment:PAY101"  2) "payment:PAY102"
-SCAN 1792 MATCH payment:* COUNT 100
--- 1) "0"      cursor 0: done
-EXISTS payment:PAY101                -- (integer) 1
-TYPE merchant:42:config              -- string
-MGET payment:PAY101 payment:PAY102   -- both values in one round trip
-DEL payment:PAY102                   -- (integer) 1
+The database holds 200 session keys and three payment keys. The payment service looks for the payment keys.
+
+```bash
+redis-cli SCAN 0 MATCH 'payment:*'
+redis-cli SCAN 24 MATCH 'payment:*'
+redis-cli --scan --pattern 'payment:*'
 ```
 
-## Defaults
+```text output
+1) "24"
+2) 1) "payment:9003"
+1) "20"
+2) (empty array)
+"payment:9003"
+"payment:9001"
+"payment:9002"
+```
 
-| What | Default | Where |
-|---|---|---|
-| SCAN COUNT | 10 (a hint, not a limit) | Redis Open Source 8.x |
+What to notice:
+
+- The first call returns cursor 24 and one match. The number is only a bookmark, not a count of keys, and it changes from server to server.
+- The second call returns no keys, because `MATCH` filters after Redis picks the batch. An empty batch does not mean the scan is over; only cursor 0 does.
+- `redis-cli --scan --pattern` runs the whole loop for you and prints every match. It is the safe way to list keys from a terminal.
+
+## Rules and defaults
+
+- **Naming:** use `type:id:field` with colons. The payment service uses these keys:
+
+| Key | Holds |
+|---|---|
+| `payment:9001` | the cached payment record |
+| `payment:9001:attempts` | its retry counter |
+| `merchant:42:config` | the merchant's settings |
+| `lock:payment:9001` | the lock token |
+| `rate:user:7:upi` | a request counter |
+
+- **Length:** `user:1000:followers` is better than `u1000flw`, but a 1 KB key wastes memory and makes lookups compare more bytes. The maximum key size is 512 MB.
+- **Numbered databases:** a standalone server has 16 databases by default, chosen with `SELECT`. Redis Cluster supports only database 0, so a key prefix is the portable way to separate data.
+- **SCAN options:** `COUNT` is 10 by default and only a hint; `TYPE hash` returns keys of one type only (Redis 6.0+).
+- **KEYS:** for debugging only, never in application code.
+
+## Not to be confused with
+
+`KEYS` returns every matching key in one call and blocks the server while it runs. `SCAN` returns a few keys per call with a cursor, so other commands run in between. Rule: `KEYS` only in a debug session on a tiny database, `SCAN` everywhere else.
+
+## Common mistakes
+
+- **"SCAN returns each key exactly once."** A key can come back twice, so the code must cope with duplicates, for example by collecting the keys in a set.
+- **"Scan the keyspace on every request."** If the app often needs "all pending payments", keep their ids in a Redis [set](card:sets) and read that set instead.
 
 ## Interview Qs
 
 ### KEYS vs SCAN?
 
-KEYS returns every match in one call, O(N), and blocks all clients. SCAN walks the keyspace in small steps with a cursor, so it is safe in production, but a key may come back twice and MATCH filters after fetching.
+KEYS returns all matches in one command, O(N) over every key, and blocks all clients meanwhile. SCAN walks the keyspace in small steps with a cursor, so it is safe in production. The cost: a key may be returned twice, and MATCH filters after each batch, so some calls return nothing.
 
 ### How do you name Redis keys?
 
-Use object-type:id:field with colons, like payment:PAY101:attempts, plus a service prefix. Keep names readable; very long keys cost memory and lookup time.
+Use object-type:id:field with colons, such as payment:9001:attempts, plus a service prefix when several services share one Redis. Keep names readable; very long keys cost memory and lookup time.
+
+### How do you delete all keys that match a pattern without hurting production?
+
+Walk the keys with SCAN and MATCH, and delete each batch with UNLINK, which frees memory in the background; you will see it in [big keys and memory use](card:memory-optimization). Never run KEYS first to collect them.

@@ -5,52 +5,97 @@ title: Redis vs Memcached
 topic: basics
 level: intermediate
 heat: 2
-hook: "Memcached is a plain, multi-threaded cache of opaque values; Redis adds data types, persistence, replication and scripting."
+hook: "Memcached is a plain, multi-threaded cache of byte values. Redis does the same job and adds data types, saving to disk, copies on other servers and scripts."
 points:
-  - { k: "Memcached values", v: "opaque bytes; the app serialises everything" }
-  - { k: "Memcached threads", v: "4 worker threads by default (memcached -t)", kind: default }
-  - { k: "Memcached item size", v: "1 MB max by default (memcached -I)", kind: default }
-  - { k: "Memcached nodes", v: "unaware of each other; the client picks the node", kind: minus }
-  - { k: "Redis extras", v: "types, persistence, replicas, Lua, Pub/Sub, Cluster", kind: plus }
+  - { k: "Memcached values", v: "plain bytes; the app serialises each object and rewrites the whole value to change one field" }
+  - { k: "Memcached threads", v: "4 worker threads by default (memcached -t), so one server uses several CPU cores", kind: default }
+  - { k: "Memcached item size", v: "1 MB per item by default (memcached -I); a Redis string can hold up to 512 MB", kind: default }
+  - { k: "Memcached servers", v: "never talk to each other; the client hashes each key to one server, and nothing is copied", kind: minus }
+  - { k: "Redis extras", v: "typed values, saving to disk, replicas, failover, scripts, Pub/Sub and Cluster", kind: plus }
 trap:
   wrong: "Redis is always faster than Memcached."
-  right: "Both answer from RAM quickly, and Memcached uses many threads. Choose on features, not raw speed."
-sayIt: "Memcached is a simple, multi-threaded cache of opaque values with no replication. Redis has rich types, persistence, replication and scripting. I pick Memcached only for a plain cache of throwaway values."
+  right: "Both answer from RAM, and Memcached uses many threads. Choose on features and operations, not raw speed."
+  why: "Memcached is called the simple one and Redis the single-threaded one, so people turn that into a speed ranking. For a simple read, the network trip costs more than either server's work."
+sayIt: "Memcached is a simple, multi-threaded cache of opaque values with no persistence or replication. Redis adds data types, persistence, replication and scripting. I pick Memcached only for a plain cache of throwaway values; otherwise Redis."
+cheat:
+  idea: "Memcached is a multi-threaded in-memory cache of plain byte values, with no persistence and no replication. Redis does the same job and adds types, persistence, replicas and scripts."
+  remember: "Choose on features, not speed: Memcached for a throwaway cache of blobs, Redis when you need structures or data that survives."
+buildsOn: [what-is-redis]
+scenarios:
+  - q: "You need a leaderboard of merchants by today's payment total. Memcached or Redis?"
+    a: "Redis. A sorted set keeps members ordered by score and updates one merchant with a single command. In Memcached you would store the whole ranking as one blob and rewrite it on every payment."
+  - q: "A Memcached server that holds 2 GB of cached merchant settings crashes. What happens to that data?"
+    a: "It is gone. Memcached keeps no copy on disk or on other servers. Requests for those keys miss, and the app reloads the settings from the database, which takes a burst of extra load."
 confusedWith: []
 tags: [memcached, comparison, caching]
 visual: table
 sources:
   - title: "Memcached documentation: overview and design philosophy"
     url: "https://docs.memcached.org/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "memcached(1) man page (memcached on GitHub)"
     url: "https://github.com/memcached/memcached/blob/master/doc/memcached.1"
     verifiedOn: "2026-10-20"
   - title: "Warm restart (Memcached documentation)"
     url: "https://docs.memcached.org/features/restart/"
     verifiedOn: "2026-10-20"
+  - title: "Comparing Valkey, Memcached and Redis OSS (Amazon ElastiCache docs)"
+    url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SelectEngine.html"
+    verifiedOn: "2026-10-20"
   - title: "Redis Interview Questions: Redis vs Memcached (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/system-design/top-25-redis-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Memcached is an older in-memory cache that, like [Redis](card:what-is-redis), stores values under keys in RAM. Its values are opaque: plain bytes that Memcached never looks inside, so the app turns each object into bytes itself. Memcached runs several worker threads, and its servers never talk to each other. Redis does the same caching job and adds typed values, saving to disk, copies on other servers and scripts.
+
 ## Why it exists
 
-Both are in-memory caches, so interviewers ask which one to pick. The difference is features and operations, not the basic idea.
+Both tools answer reads from memory, so interviewers ask why you would pick one over the other. The answer is about features and operations, not raw speed. To cache rendered pages or serialised objects that you can always rebuild, Memcached is enough. Once you need lists, sets or rankings, data that survives a restart, or a standby copy for failover, you need Redis.
 
 ## How it works
 
 <Compare id="redis-vs-memcached" />
 
-- Memcached spreads keys by hashing in the client; Redis has [Redis Cluster](card:redis-cluster) built in.
-- Memcached keeps data only across a clean restart with warm restart (1.5.18+); a crash loses it.
+1. With Memcached, the app serialises an object to bytes, hashes the key to pick one server, and stores the bytes there.
+2. To change one field, the app reads the whole value, changes it in its own memory and writes the whole value back.
+3. If that Memcached server dies, its keys are gone, and the app reloads them from the database.
+4. With Redis, the app can store a hash and change one field with one command. Replicas keep a copy, and [Sentinel](card:sentinel) or [Redis Cluster](card:redis-cluster) can promote a replica when a server dies.
+
+So the key is: Memcached only stores and returns blobs; Redis understands the shape of the data.
+
+## Example
+
+The payment service checks four needs against both tools.
+
+| Need | Memcached | Redis |
+|---|---|---|
+| Cache merchant settings as JSON for 10 minutes | Yes | Yes |
+| Count a user's requests | Yes (`incr`) | Yes (`INCR`) |
+| Rank merchants by today's payment total | No ordered type | Sorted set |
+| Keep sessions after a crash | No | Yes, with persistence on |
+
+The first two rows are plain caching and counting, where both tools work. The last two need a data type or persistence, which only Redis has.
+
+## Rules and defaults
+
+- **Worker threads:** 4 by default (`memcached -t`).
+- **Item size:** at most 1 MB per item by default (`memcached -I`). A Redis string can be up to 512 MB.
+- **When memory is full:** Memcached drops the least recently used items by default.
+- **Restarts:** Memcached 1.5.18 and later can keep data across a clean restart (warm restart), but a crash loses everything.
 
 ## Interview Qs
 
 ### When would you still choose Memcached?
 
-For a simple cache of serialised objects on large multi-core nodes, where losing the data is fine and you need no types, replication or persistence.
+For a simple cache of serialised objects on large multi-core servers, where losing the data is fine and you need no data types, replication or persistence. Otherwise pick Redis, so that one tool covers caching, counters and locks.
 
 ### Does Memcached replicate data?
 
-No. Memcached servers do not talk to each other: no replication or synchronisation. If a node dies, its keys are gone and the app reloads them from the database.
+No. Memcached servers do not know about each other: no replication and no synchronisation. The client decides which server holds each key. If a node dies, its keys are lost and the app reloads them from the database.
+
+### Is Redis faster than Memcached?
+
+Not in general. Both serve simple reads from RAM, and Memcached uses many threads, so it can use more CPU cores on one server. The real difference is features: types, persistence, replication and scripting in Redis.

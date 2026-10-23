@@ -5,51 +5,109 @@ title: Read-Through, Write-Through and Write-Behind
 topic: caching
 level: intermediate
 heat: 2
-hook: "Cache-aside puts the app in charge. Read-through, write-through and write-behind hand loading or writing to a cache layer."
+hook: "Read-through: a cache layer loads misses. Write-through: each write updates cache and database. Write-behind: the database is written later, in the background."
 points:
-  - { k: "Read-through", v: "the cache layer, not the app, loads a miss from the DB" }
-  - { k: "Write-through", v: "a write returns only after cache and DB are both updated" }
-  - { k: "Write-behind", v: "a crash before the DB flush loses those writes", kind: minus }
-  - { k: "Refresh-ahead", v: "reload hot entries before expiry; wrong guesses waste DB calls" }
+  - { k: "Read-through", v: "the app asks only the cache; on a miss the cache layer loads the row from the database" }
+  - { k: "Write-through", v: "a write returns only after both the cache and the database hold the new value" }
+  - { k: "Write-behind", v: "a write returns after the cache is updated; a background worker writes the database later" }
+  - { k: "Write-behind risk", v: "if the cache dies before the worker flushes its queue, those writes are lost", kind: minus }
+  - { k: "Plain Redis", v: "does none of these by itself; a library, a product add-on or your own code must do the work", kind: minus }
 trap:
   wrong: "Redis does read-through by itself: on a miss it loads the row from the database."
-  right: "Redis Open Source does not load from your database by itself. Read-through needs a library or integration layer; otherwise the app does cache-aside."
-sayIt: "Cache-aside is app-driven. Read-through and write-through move loading and writing into a cache layer; write-behind writes the database later for speed but can lose data. Plain Redis needs the app or a library."
+  right: "Redis Open Source never calls your database. Read-through needs a library or an integration layer; otherwise the app does cache-aside."
+  why: "Articles describe 'Redis read-through caching', and some managed services and libraries add it, so it sounds like a Redis feature."
+sayIt: "Cache-aside is app-driven. Read-through moves loading into a cache layer, write-through keeps the cache fresh by writing both on every write, and write-behind writes the database later for speed but can lose data. Plain Redis needs the app or a library for all of them."
+cheat:
+  idea: "Read-through: a cache layer loads misses. Write-through: each write updates cache and database before returning. Write-behind: the cache takes the write, the database gets it later."
+  remember: "Plain Redis does none of these itself. Write-behind can lose writes, so keep payment records out of it."
+buildsOn: [cache-aside]
+scenarios:
+  - q: "After each price update, a product page gets a burst of reads within a second, and you want those reads to hit Redis. Cache-aside or write-through?"
+    a: "Write-through. The write itself stores the new price in Redis, so the burst hits. With cache-aside the write deletes the key, so the first reads of the burst all miss and go to the database together."
+  - q: "A page-view counter gets 50,000 updates a second, and losing the last second of counts after a crash is acceptable. Which write strategy fits?"
+    a: "Write-behind. Count in Redis, and let a worker write the totals to the database every few seconds, so thousands of updates become one database write. The small loss window is acceptable here; it would not be for payments."
 confusedWith: []
 tags: [caching, write-through, write-behind, read-through]
 visual: table
 sources:
   - title: "Cache-Aside pattern: read-through and write-through in commercial caches (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/cache-aside"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Caching strategies: lazy loading, write-through, TTL (Amazon ElastiCache docs)"
     url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Caching Data Sources: read-through, write-through, write-behind, refresh-ahead (Oracle Coherence 14.1.1)"
     url: "https://docs.oracle.com/en/middleware/standalone/coherence/14.1.1.2206/develop-applications/caching-data-sources.html"
     verifiedOn: "2026-10-20"
+  - title: "Write-behind (preview) architecture: Redis Enterprise as the source of changes (Redis docs)"
+    url: "https://redis.io/docs/latest/integrate/write-behind/architecture/"
+    verifiedOn: "2026-10-21"
+  - title: "Write-through and write-behind caching: greater risk of data loss with write-behind (Redisson glossary)"
+    url: "https://redisson.org/glossary/write-through-and-write-behind-caching.html"
+    verifiedOn: "2026-10-21"
   - title: "Caching patterns: cache-aside, write-behind, write-through (redis.io)"
     url: "https://redis.io/solutions/use-cases/caching"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+These are three other caching patterns, named by who does the loading and writing. In read-through, a cache layer (a library or product that sits between the app and the database) loads a missing entry itself, so the app only ever asks the cache. In write-through, every write updates the cache and the database before it returns. In write-behind, also called write-back, a write updates the cache at once and the database later, in the background.
+
 ## Why it exists
 
-In [cache-aside](card:cache-aside) every service repeats the load-and-store code, and writes leave the cache briefly stale. A cache layer that loads and writes for you trades that for control or durability.
+[Cache-aside](card:cache-aside) has two costs. Every service repeats the load-and-store code, and after a write the key is deleted, so the next reads miss or see a briefly stale copy. Read-through puts the loading code in one place. Write-through makes reads right after a write hit the cache with the new value. Write-behind makes writes fast and lets the cache merge many writes into a few database writes, at the price of possible data loss.
 
 ## How it works
 
 <Compare id="cache-aside-vs-read-through-vs-write-through-vs-write-behind" />
 
-- Write-behind merges repeated writes to one entry and batches them, so the database sees fewer writes.
-- Until its queue is flushed, the cache holds the only copy: keep payment records out of write-behind.
+Follow one read and one write of merchant 42's configuration under each pattern:
+
+1. **Read-through:** the app asks the cache layer for merchant 42. On a miss, the layer runs a loader the app registered, stores the row and returns it.
+2. **Write-through:** the app writes the new fee to PostgreSQL and stores the same value in Redis, and reports success only after both.
+3. A read right after the write-through finds the new value in Redis: a hit.
+4. **Write-behind:** the cache layer stores the new fee and returns success at once, and puts the database write on a queue.
+5. A background worker later merges queued writes to the same key and sends them to PostgreSQL in batches. If the cache dies before this step, the queued writes are lost.
+
+So the key is: each pattern moves work from the app into a cache layer, and write-behind also trades safety for speed.
+
+## Example
+
+With plain Redis, write-through is code the app writes itself: write the database, then store the same value instead of deleting it.
+
+```java
+void updateConfig(long id, String json) {
+    configRepo.save(id, json);                                   // 1. write PostgreSQL
+    redis.opsForValue().set("merchant:" + id + ":config", json,
+            Duration.ofMinutes(30));                             // 2. write the same value to Redis
+}                                                                // 3. only now does the caller get success
+```
+
+What to notice:
+
+- The only change from cache-aside is `set` in place of `delete`, so the next read is a hit with the new value instead of a miss.
+- The TTL stays. If the `set` fails after the database write, the old copy lives only until it expires.
+- Two writers can reach Redis in the opposite order from the database, leaving the older value cached. You will see in [cache invalidation](card:cache-invalidation) why many teams prefer deleting.
+
+## Rules and defaults
+
+- **Redis Open Source loads nothing:** no command makes Redis read your database. Read-through needs a client library or an integration layer. For write-behind, Redis Software has a write-behind integration (in preview), or you write your own worker.
+- **Pair write-through with lazy loading:** a new or restarted node has no data until each key is written again, so add cache-aside reads to fill the gaps (AWS ElastiCache guidance).
+- **Write-through still needs a TTL:** most written data is never read, so a TTL removes copies nobody uses.
+- **Write-behind and payments:** until the worker flushes, the cache holds the only copy of the change. Never use it for payment records or anything you cannot lose.
+- **Refresh-ahead:** when an entry is read shortly before it expires, the cache layer reloads it in the background. It helps only if it predicts well which entries will be read again; wrong guesses cost database calls.
 
 ## Interview Qs
 
 ### Why pair write-through with lazy loading?
 
-Write-through fills the cache only on writes, so a new or restarted node lacks data until it is written again. Lazy loading fills those gaps on reads, and a TTL clears data nobody reads.
+Write-through fills the cache only when data is written, so a new or restarted cache node lacks everything until each item is written again. Lazy loading fills those gaps on reads. A TTL then clears copies that nobody reads, which write-through alone would keep.
 
 ### When would you choose write-behind?
 
-When writes are heavy and the database is the bottleneck, and losing or reordering the last few writes is acceptable. Database writes must not fail later, because the caller already got a success.
+When writes are heavy, the database is the bottleneck, and losing or reordering the last few writes is acceptable, such as counters or analytics. The database write must also not fail later, because the caller was already told the write succeeded.
+
+### Which strategy would you use for payment records?
+
+Cache-aside, with the database written first and the cached copy deleted after the commit. The payment must be durable before the caller hears success, which rules out write-behind. Write-through is possible but adds a second write that can fail or arrive out of order.

@@ -5,75 +5,130 @@ title: Redis Sentinel and Failover
 topic: operations
 level: intermediate
 heat: 2
-hook: "Sentinels watch the primary; when it dies they agree, promote a replica and tell clients the new address."
+hook: "Sentinels are small processes that watch the primary. When it dies, they agree, promote a replica and give clients the new primary's address."
 points:
-  - { k: "Quorum", v: "how many Sentinels must agree the primary is down" }
-  - { k: "Majority", v: "of all Sentinels must elect a leader to run the failover" }
-  - { k: "At least 3", v: "on machines or zones that fail independently" }
-  - { k: "Clients", v: "ask a Sentinel for the primary instead of a fixed host", kind: plus }
-  - { k: "Lost writes", v: "replication is async, so a failover can drop acknowledged writes", kind: minus }
+  - { k: "Quorum", v: "how many Sentinels must agree the primary is unreachable before it counts as down" }
+  - { k: "Majority", v: "more than half of all Sentinels must vote a leader before any failover can start" }
+  - { k: "At least 3", v: "run three or more Sentinels on machines or zones that fail independently" }
+  - { k: "Clients ask Sentinel", v: "the app asks a Sentinel for the current primary's address instead of a fixed host", kind: plus }
+  - { k: "Lost writes", v: "replication is asynchronous, so writes the old primary acknowledged can be lost", kind: minus }
+  - { k: "Timing (Redis 8.10)", v: "down-after-milliseconds is 30000 (30 s) by default: no valid reply for that long means down", kind: default }
 trap:
-  wrong: "Once the quorum agrees, the failover starts."
-  right: "Quorum only marks the primary down. A majority of all Sentinels must still elect a leader before any failover."
-sayIt: "Sentinel gives automatic failover without sharding. Three or more Sentinels watch the primary; when a quorum sees it down, a majority elects a leader that promotes a replica, and clients ask Sentinel for it."
+  wrong: "Once the quorum agrees the primary is down, the failover starts."
+  right: "The quorum only marks the primary down. A majority of all Sentinels must still elect a leader, and only that leader runs the failover."
+  why: "The quorum is the only number in sentinel monitor, so it looks like the number that decides everything."
+sayIt: "Sentinel gives one Redis primary automatic failover. Three or more Sentinels watch it; when a quorum sees it down, a majority elects a leader that promotes the best replica, and clients ask Sentinel for the new address. It does not shard data and cannot prevent lost writes."
+cheat:
+  idea: "Sentinel is a group of processes that watch a Redis primary. When it fails, they promote a replica and tell clients the new address."
+  flow: "SDOWN → quorum: ODOWN → majority elects leader → promote replica"
+  remember: "Quorum detects the failure; a majority must approve the failover. Run at least 3 Sentinels on independent machines."
+buildsOn: [replication]
+scenarios:
+  - q: "A network split cuts the old primary off with one app server. That app keeps writing payment:9002 = PAID and gets OK. Sentinels on the other side promote a replica. What happens to that write when the network heals?"
+    a: "It is lost. The old primary rejoins as a replica of the new one and drops its own data. Setting min-replicas-to-write 1 with min-replicas-max-lag 10 limits this: a primary cut off from its replicas stops taking writes after about 10 seconds."
+  - q: "You run 5 Sentinels with quorum 2. Two of them see the primary as down, but only those two can still reach each other. Does a failover happen?"
+    a: "No. The quorum of 2 marks the primary as down, but the failover needs a leader elected by a majority of all 5 Sentinels, which is 3. Two cannot reach it, so nothing changes."
+  - q: "Two replicas have the default replica-priority, and replica 2 has received more data from the primary. Which one does Sentinel promote?"
+    a: "Replica 2. Sentinel first prefers the lower replica-priority; on a tie it takes the replica with the larger replication offset, because it has lost the fewest writes. A replica-priority of 0 means never promote."
 confusedWith: [sentinel-vs-cluster]
 tags: [sentinel, failover, high-availability]
 visual: flow
 sources:
   - title: "High availability with Redis Sentinel (Redis docs)"
     url: "https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "sentinel.conf (Redis 8.10.2 tag)"
     url: "https://github.com/redis/redis/blob/8.10.2/sentinel.conf"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Common application properties: spring.data.redis.sentinel.* (Spring Boot 4.1)"
-    url: "https://docs.spring.io/spring-boot/4.1/appendix/application-properties/index.html"
-    verifiedOn: "2026-10-20"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Redis Sentinel is a set of separate processes that watch a Redis primary and its [replicas](card:replication). It runs from the same `redis-server` program in Sentinel mode, usually on port 26379. When the primary stops answering, the Sentinels agree that it is down, promote one replica to primary and repoint the other replicas to it. Applications do not hard-code the primary's address; they ask a Sentinel for it.
 
 ## Why it exists
 
-[Replication](card:replication) keeps copies, but nobody promotes a replica when the primary dies. Sentinel does it automatically and points clients to the new primary.
+Replication gives you a copy, but when the primary dies at 3 a.m. someone must pick a replica, run `REPLICAOF NO ONE` on it, repoint the other replicas and change every application's configuration. Until then, every write from the payment service fails. Sentinel does these steps automatically, without a person. Because clients ask Sentinel for the address, they find the new primary without a redeploy.
 
 ## How it works
 
-<Steps label="A Sentinel failover">
-  <Step title="Detect">A Sentinel gets no valid reply for down-after-milliseconds and marks the primary subjectively down (SDOWN).</Step>
-  <Step title="Agree">When quorum Sentinels agree, the primary is objectively down (ODOWN).</Step>
-  <Step title="Elect">A majority of Sentinels votes one of them leader for this failover.</Step>
-  <Step title="Promote">The leader promotes the best replica and repoints the other replicas to it.</Step>
-  <Step title="Discover">Clients ask any Sentinel for the current primary and reconnect.</Step>
-</Steps>
+<Mermaid
+  alt="Three Sentinels each watch the primary and two replicas. The app asks a Sentinel for the primary's address, then sends its commands to that primary."
+  chart={`flowchart LR
+  S1[Sentinel 1] & S2[Sentinel 2] & S3[Sentinel 3] -. watch .-> P[(Primary)]
+  P --> R1[(Replica 1)]
+  P --> R2[(Replica 2)]
+  App -- "1. where is payments?" --> S1
+  App -- "2. commands" --> P`}
+/>
 
-- An old primary cut off with some clients keeps taking writes; they vanish when it rejoins as a replica.
-- [min-replicas-to-write](card:replication) makes it stop taking writes once its replicas stop answering.
-- Spring Boot: set `spring.data.redis.sentinel.master` and `spring.data.redis.sentinel.nodes`.
+1. Each Sentinel checks the primary all the time. If it gets no valid reply for `down-after-milliseconds`, it marks the primary subjectively down (SDOWN): down in its own view only.
+2. When at least the quorum of Sentinels report it down, the primary is objectively down (ODOWN).
+3. To act, one Sentinel must be elected leader for this failover by a majority of all Sentinels. Without a majority, no failover happens.
+4. The leader picks a replica: lowest `replica-priority` first (a number set on each replica, 100 by default), then the one with the most data from the primary, and skips replicas cut off too long. It promotes that replica and repoints the others to it.
+5. All Sentinels now report the new address. When the old primary comes back, Sentinel turns it into a replica of the new primary.
 
 ## Example
 
-```text
--- sentinel.conf on each of 3 machines (Sentinel port 26379)
-sentinel monitor mymaster 10.0.0.1 6379 2
-sentinel down-after-milliseconds mymaster 5000
+Three Sentinels watch the payment service's primary under the name `payments`. Each one uses this configuration:
 
--- ask any Sentinel where the primary is
-SENTINEL GET-MASTER-ADDR-BY-NAME mymaster   -> 1) "10.0.0.1" 2) "6379"
+```text
+port 26379
+sentinel monitor payments 172.20.0.2 6379 2
+sentinel down-after-milliseconds payments 5000
 ```
 
-## Defaults
+Then the test asks a Sentinel for the primary, freezes the primary and asks again:
 
-| What | Default | Where |
-|---|---|---|
-| Sentinel port | 26379 | Redis Open Source 8.10 sentinel.conf |
-| down-after-milliseconds | 30000 (30 s) | Redis Open Source 8.10 sentinel.conf |
-| failover-timeout | 180000 (3 min) | Redis Open Source 8.10 sentinel.conf |
+```bash
+redis-cli -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME payments
+docker pause redis-primary > /dev/null   # the primary stops answering
+sleep 20                                 # 5 s to SDOWN, then vote and promote
+redis-cli -p 26379 SENTINEL GET-MASTER-ADDR-BY-NAME payments
+```
+
+```text output
+1) "172.20.0.2"
+2) "6379"
+1) "172.20.0.4"
+2) "6379"
+```
+
+What to notice:
+
+- The last number in `sentinel monitor` is the quorum, 2: two Sentinels must agree before the primary counts as down.
+- `down-after-milliseconds 5000` makes the test fast. The default is 30 seconds, and a lower value can cause failovers on short network hiccups.
+- The second answer is a replica's address: it was promoted. An app that asks Sentinel reconnects to it without any configuration change.
+
+## Rules and defaults
+
+- **Defaults (Redis Open Source 8.10 sentinel.conf):** port 26379, `down-after-milliseconds 30000`, `failover-timeout 180000` (3 minutes), `parallel-syncs 1` (replicas repointed one at a time).
+- **Placement:** run at least three Sentinels, on machines or zones that fail independently.
+- **Never promote a replica:** set its `replica-priority` to 0. It still follows the new primary.
+- **Spring Boot 4.1:** set `spring.data.redis.sentinel.master` to the name, `payments`, and `spring.data.redis.sentinel.nodes` to the Sentinels' `host:port` list. The client asks them for the primary.
+- **No write guarantee:** the Redis docs say Sentinel does not keep every acknowledged write during a failure, because replication is asynchronous. A [lock](card:distributed-locks) taken on the old primary can also vanish this way.
+
+## Not to be confused with
+
+Sentinel adds automatic failover to one primary that holds all the data. [Redis Cluster](card:redis-cluster), the next concept, splits the data across several primaries and runs failover itself, with no Sentinel processes. Rule: Sentinel = failover only; Cluster = sharding plus failover.
+
+## Common mistakes
+
+- **"Two Sentinels are enough: one next to the primary, one next to the replica."** If the primary's machine dies, it takes one Sentinel with it. The survivor is one of two, not a majority, so it cannot start a failover.
 
 ## Interview Qs
 
-### Why at least three Sentinels?
+### Why do you need at least three Sentinels?
 
-A failover needs a majority. With two, if the primary's machine dies it takes one Sentinel with it, and the survivor alone is no majority. Three on independent machines survive one failure.
+A failover needs a leader voted by a majority of all Sentinels. With three on independent machines, losing one machine leaves two out of three, which is still a majority. With two, losing one leaves one out of two, so no failover can start.
 
 ### Can a Sentinel failover lose data?
 
-Yes. Writes the primary acknowledged but had not yet copied are lost when a replica is promoted. Sentinel limits downtime, not data loss.
+Yes. Writes the old primary acknowledged but had not yet sent to the promoted replica are lost. A network split is worse: clients still connected to the old primary keep writing, and those writes vanish when it rejoins. `min-replicas-to-write` limits how long that can go on.
+
+### How does the application find the new primary?
+
+It uses a Sentinel-aware client. The client is given the Sentinels' addresses and the primary's name, asks a Sentinel for the current address, and asks again when the connection fails. In Spring Boot that is the `spring.data.redis.sentinel.*` properties.

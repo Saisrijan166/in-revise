@@ -5,40 +5,58 @@ title: maxmemory and Eviction Policies
 topic: memory
 level: intermediate
 heat: 3
-hook: "At maxmemory, the eviction policy decides which keys Redis drops; the default, noeviction, refuses writes instead."
+hook: "When Redis reaches its memory limit, the eviction policy decides which keys it deletes. The default, noeviction, deletes nothing and refuses new writes."
 points:
-  - { k: "Trigger", v: "a command adds data while memory is over maxmemory" }
-  - { k: "allkeys- / volatile-", v: "pick from any key, or only from keys with a TTL" }
-  - { k: "No TTLs + volatile-*", v: "nothing to pick, so writes fail as with noeviction", kind: minus }
-  - { k: "Pure cache", v: "allkeys-lru; allkeys-lfu keeps often-read keys longer", kind: plus }
-  - { k: "Mixed data", v: "cache plus must-keep keys: two instances are cleaner than volatile-lru" }
+  - { k: "Trigger", v: "a command that adds data arrives while used memory is above maxmemory" }
+  - { k: "noeviction", v: "the default: nothing is evicted; writes that need memory get an OOM error, reads still work", kind: default }
+  - { k: "allkeys-* / volatile-*", v: "allkeys-* may evict any key; volatile-* only keys that have a TTL" }
+  - { k: "Pure cache", v: "use allkeys-lru, or allkeys-lfu to keep often-read keys longer", kind: plus }
+  - { k: "volatile-* without TTLs", v: "no key qualifies, so writes fail exactly as with noeviction", kind: minus }
+  - { k: "Approximate", v: "Redis checks a sample of keys, 5 by default, and evicts the best of them, not the exact LRU key" }
 trap:
   wrong: "Keys without a TTL are safe from eviction."
   right: "Only under volatile-* policies. Under allkeys-* any key can be evicted, with or without a TTL."
-sayIt: "I set maxmemory and, for a pure cache, allkeys-lru or allkeys-lfu. The default noeviction returns OOM errors on writes. volatile-* policies only drop keys that have a TTL."
+  why: "Under the volatile-* policies keys without a TTL really are safe, and many tutorials show only those, so people take it as a general rule."
+sayIt: "I set maxmemory and, for a pure cache, allkeys-lru or allkeys-lfu. The default noeviction returns OOM errors on writes. volatile-* policies only drop keys with a TTL, so for cache plus must-keep data I prefer two instances."
+cheat:
+  idea: "When used memory passes maxmemory, the eviction policy decides what happens: delete keys by LRU, LFU, LRM, random or shortest TTL, or refuse writes (noeviction)."
+  remember: "The default is noeviction, so writes fail with OOM. For a cache, set maxmemory and allkeys-lru."
+buildsOn: [what-is-redis, ttl-and-expiration]
+scenarios:
+  - q: "A cache uses volatile-lru, but the team stores every key without a TTL. Memory reaches maxmemory. What happens to new writes?"
+    a: "They fail with an OOM error. volatile-lru only evicts keys that have a TTL, and with none it behaves like noeviction. Use allkeys-lru for a pure cache, or give the keys TTLs."
+  - q: "Merchant settings are read thousands of times a minute but written once a day. Payment statuses are written often and read once. Which policy keeps the settings under memory pressure?"
+    a: "allkeys-lfu, because it evicts the keys used least often, and the settings are used most. allkeys-lru also keeps them while reads are recent. allkeys-lrm would evict them first, because it counts only writes."
 confusedWith: [ttl-vs-eviction]
 tags: [eviction, maxmemory, lru, lfu]
 visual: flow
 sources:
-  - title: "Key eviction (Redis docs)"
+  - title: "Key eviction: policies, approximated LRU, LFU and LRM (Redis docs)"
     url: "https://redis.io/docs/latest/develop/reference/eviction/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "redis.conf, MEMORY MANAGEMENT section (Redis 8.10.2 tag)"
     url: "https://github.com/redis/redis/blob/8.10.2/redis.conf"
     verifiedOn: "2026-10-20"
   - title: "server.c, OOM error reply (Redis 8.10.2 tag)"
     url: "https://github.com/redis/redis/blob/8.10.2/src/server.c"
     verifiedOn: "2026-10-20"
+  - title: "Diagnosing latency issues: swapping (redis.io)"
+    url: "https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/latency/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Eviction is Redis deleting keys on its own to stay under a memory limit. You set the limit with `maxmemory`, for example 2 GB. The eviction policy, set with `maxmemory-policy`, decides which keys go when the limit is reached, or tells Redis to refuse new writes instead. LRU means least recently used: the key that nobody has read or written for the longest time.
 
 ## Why it exists
 
-Redis keeps data in RAM, and RAM runs out. maxmemory caps it; the policy decides whether Redis drops old keys or refuses new writes.
+[Redis](card:what-is-redis) keeps all its data in RAM, and RAM runs out. Without a limit, a growing cache takes all the machine's memory: the operating system starts moving Redis memory to disk, which makes it slow, or kills the process. With `maxmemory` and a policy, a cache drops its least useful keys and keeps working. A store whose keys must not vanish can instead reject writes with a clear error.
 
 ## How it works
 
 <Mermaid
-  alt="A write that needs memory arrives. Under maxmemory it runs. Over it, noeviction returns an OOM error; any other policy samples keys, evicts one and checks again."
+  alt="A write that needs memory arrives. If memory is under maxmemory, the write runs. If it is over and the policy is noeviction, Redis returns an OOM error. With any other policy, Redis samples keys, evicts one according to the policy and checks the memory again."
   chart={`flowchart TD
   W([Write needs memory]) --> M{Over maxmemory?}
   M -- no --> OK([Run the write])
@@ -48,39 +66,76 @@ Redis keeps data in RAM, and RAM runs out. maxmemory caps it; the policy decides
   S --> M`}
 />
 
-- Ten policies as of Redis 8.6: [noeviction](card:evict-noeviction), four [allkeys-*](card:evict-allkeys), five [volatile-*](card:evict-volatile).
+1. A client sends a command that adds data, such as `SET`.
+2. Before running it, Redis compares the memory in use with `maxmemory`.
+3. Under the limit, the command runs normally.
+4. Over the limit with `noeviction`, the default, Redis answers with an OOM (out of memory) error. Commands that only read still work.
+5. With any other policy, Redis samples a few keys, evicts the best candidate for that policy, and repeats until it is under the limit. Then it runs the command.
+
+So the key is: eviction happens only when a write needs memory, and the policy alone decides which key goes.
 
 ## Example
 
-```text
--- redis.conf of a cache-only instance
-maxmemory 2gb
-maxmemory-policy allkeys-lru
+A test instance runs with `maxmemory 2mb` and the default `noeviction`. It is already full of 1 KB `merchant:*:config` keys.
 
--- with noeviction (the default) and memory full:
-SET payment:PAY101 PENDING EX 300
--> (error) OOM command not allowed when used memory > 'maxmemory'.
-GET merchant:42:config               -- reads still work
+```bash
+redis-cli SET payment:9001 '{"status":"PENDING"}' EX 300
+redis-cli EXISTS merchant:1:config
+redis-cli CONFIG SET maxmemory-policy allkeys-lru
+redis-cli SET payment:9001 '{"status":"PENDING"}' EX 300
+redis-cli INFO stats | grep evicted_keys
 ```
 
-## Defaults
+```text output
+(error) OOM command not allowed when used memory > 'maxmemory'.
+(integer) 1
+OK
+OK
+evicted_keys:37
+```
 
-| What | Default | Where |
-|---|---|---|
-| maxmemory | 0: no limit (64-bit) | Redis Open Source 8.10 |
-| maxmemory-policy | noeviction | Redis Open Source 8.10 redis.conf |
-| maxmemory-samples | 5 keys per eviction | Redis Open Source 8.10 redis.conf |
+What to notice:
+
+- Under `noeviction` the write is refused, but `EXISTS`, a read, still works.
+- After the switch to `allkeys-lru`, the same `SET` succeeds, because Redis evicted old merchant keys to make room.
+- `evicted_keys` counts every eviction. If it keeps rising in production, the cache is too small or the policy evicts useful keys.
+
+## Rules and defaults
+
+| Policy | Evicts |
+|---|---|
+| `noeviction` (default) | Nothing; writes that need memory fail |
+| `allkeys-lru` | The least recently used key, among all keys |
+| `allkeys-lfu` | The least frequently used key (Redis 4.0+) |
+| `allkeys-lrm` | The least recently modified key; reads do not count (Redis 8.6+) |
+| `allkeys-random` | A random key |
+| `volatile-lru`, `-lfu`, `-lrm`, `-random` | The same rules, only among keys with a TTL |
+| `volatile-ttl` | The key with the shortest TTL left |
+
+- **maxmemory:** 0 by default, which means no limit on 64-bit systems (Redis Open Source 8.10).
+- **maxmemory-samples:** 5 keys per eviction by default; 10 comes very close to true LRU at some extra CPU.
+- **Buffers:** memory for the buffers that feed replicas and the AOF log is not counted against `maxmemory`, so leave some RAM free for them.
+- **Big writes:** one command that adds a lot of data can push memory well over the limit for a moment.
+
+## Not to be confused with
+
+LRU evicts the key that has gone unused for the longest time. LFU evicts the key used least often, using a counter that slowly decays so old popularity fades. Rule: LRU when recent means hot; LFU when popular means hot. And a [TTL](card:ttl-and-expiration) removes a key because its own time ran out, while eviction removes keys because the instance is out of memory.
+
+## Common mistakes
+
+- **Cache keys and must-keep keys in one instance with volatile-lru.** A cache key stored without a TTL is never evicted, and memory fills up. The Redis docs suggest two separate instances instead.
+- **Leaving maxmemory at 0 on a cache.** Nothing is ever evicted, and Redis grows until the machine runs out of memory.
 
 ## Interview Qs
 
 ### What happens when Redis runs out of memory?
 
-It depends on maxmemory-policy. With noeviction, writes that need memory get an OOM error and reads still work. With any other policy, Redis evicts keys until it is back under maxmemory.
+It depends on maxmemory-policy. With noeviction, the default, writes that need memory get an OOM error while reads still work. With any other policy, Redis evicts keys until it is back under maxmemory, then runs the write.
 
-### Which policy for a cache?
+### Which policy would you choose for a cache?
 
-allkeys-lru when a subset of keys is read far more than the rest, the common case. allkeys-random when all keys are read about equally. volatile-ttl when you mark eviction candidates with short TTLs.
+allkeys-lru when a small set of keys gets most of the reads, the common case. allkeys-lfu when popularity matters more than recency. allkeys-random when all keys are read about equally. volatile-ttl when you mark eviction candidates with short TTLs.
 
 ### Is Redis LRU exact?
 
-No. It samples a few random keys plus a pool of candidates and evicts the oldest. Raising maxmemory-samples to 10 gets close to true LRU at more CPU.
+No. Exact LRU would need extra memory per key. Redis samples a few random keys, plus a pool of good candidates since Redis 3.0, and evicts the oldest. Raising maxmemory-samples to 10 gets very close to true LRU at more CPU cost.

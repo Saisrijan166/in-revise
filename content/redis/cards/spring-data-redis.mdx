@@ -5,35 +5,57 @@ title: "Spring Data Redis: Templates and Clients"
 topic: java
 level: intermediate
 heat: 3
-hook: "Add spring-boot-starter-data-redis, inject a template, call opsForValue(); Boot connects through Lettuce to localhost:6379."
+hook: "Java code talks to Redis through a template object. Add the Redis starter and Spring Boot builds the connection and two ready templates for you."
 points:
-  - { k: "Auto-configured", v: "RedisConnectionFactory, StringRedisTemplate and RedisTemplate beans" }
-  - { k: "Client", v: "Lettuce by default; Jedis if you swap it in (Spring Boot 4.1)", kind: default }
-  - { k: "RedisTemplate values", v: "JDK serialisation by default: binary, Java-only", kind: minus }
-  - { k: "One bean, all threads", v: "templates are thread-safe; Lettuce shares one connection", kind: plus }
-  - { k: "opsForX()", v: "opsForValue, opsForHash, opsForList, opsForSet, opsForZSet" }
+  - { k: "Starter", v: "spring-boot-starter-data-redis brings Spring Data Redis and Lettuce, and connects to localhost:6379 (Boot 4.1)", kind: default }
+  - { k: "Two ready templates", v: "Boot creates a StringRedisTemplate and a RedisTemplate<Object, Object> bean that you can inject" }
+  - { k: "Serialiser", v: "turns each Java key and value into bytes, so it decides what is really stored and what redis-cli shows" }
+  - { k: "RedisTemplate default", v: "JDK serialisation, even for keys: Java-only binary bytes, and unsafe with untrusted data", kind: minus }
+  - { k: "One bean, all threads", v: "a configured template is thread-safe, and Lettuce shares one connection for normal commands", kind: plus }
+  - { k: "opsForX()", v: "commands are grouped by type: opsForValue, opsForHash, opsForList, opsForSet, opsForZSet" }
 trap:
   wrong: "RedisTemplate stores my Java objects as JSON out of the box."
-  right: "It uses JDK serialisation. Use StringRedisTemplate for text, or set a JSON value serialiser such as JacksonJsonRedisSerializer."
-sayIt: "Spring Boot auto-configures a Lettuce connection factory and two templates. I use StringRedisTemplate for text, or a RedisTemplate with String keys and a JSON value serialiser."
+  right: "It uses JDK serialisation. Use StringRedisTemplate for text, or give a RedisTemplate a JSON value serialiser such as JacksonJsonRedisSerializer."
+  why: "Spring web controllers turn objects into JSON automatically, so people expect the Redis template to do the same."
+sayIt: "Spring Boot auto-configures a Lettuce connection factory, a StringRedisTemplate and a RedisTemplate. I use StringRedisTemplate for text and counters, and for objects a RedisTemplate<String, T> with a string key serialiser and a JSON value serialiser."
+cheat:
+  idea: "Spring Data Redis gives Java a template object with one method per Redis command. With the Redis starter, Spring Boot connects through Lettuce and builds a StringRedisTemplate and a RedisTemplate."
+  flow: "Service → template → serialisers → Lettuce → Redis"
+  remember: "RedisTemplate uses JDK serialisation by default; use StringRedisTemplate or a JSON value serialiser."
+buildsOn: [strings, ttl-and-expiration]
+scenarios:
+  - q: "You inject Boot's RedisTemplate<Object, Object> and set merchant:42:config. Then redis-cli GET merchant:42:config returns (nil). Why?"
+    a: "The default JDK serialiser turns the key into Java bytes too, so the real key is \"\\xac\\xed\\x00\\x05t\\x00\\x12merchant:42:config\". Use StringRedisTemplate, or set RedisSerializer.string() as the key serialiser."
+  - q: "You add @Bean RedisTemplate<String, Payment> redisTemplate(...). How many RedisTemplate beans does the app have?"
+    a: "One, yours. Boot creates its own RedisTemplate only when no bean named redisTemplate exists. A bean with another name, such as paymentTemplate, would sit beside Boot's instead of replacing it."
 confusedWith: [redistemplate-vs-stringredistemplate, lettuce-vs-jedis]
 tags: [spring-boot, redistemplate, lettuce, serialisation]
 visual: flow
 sources:
-  - title: "Working with NoSQL: Redis (Spring Boot 4.1 reference)"
+  - title: "Working with NoSQL: Redis (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/data/nosql.html"
-    verifiedOn: "2026-10-20"
-  - title: "Working with Objects through RedisTemplate (Spring Data Redis 4.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Working with Objects through RedisTemplate (Spring Data Redis 4.1.1 reference)"
     url: "https://docs.spring.io/spring-data/redis/reference/redis/template.html"
-    verifiedOn: "2026-10-20"
-  - title: "Drivers: Lettuce and Jedis (Spring Data Redis 4.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Drivers: Lettuce and Jedis (Spring Data Redis 4.1.1 reference)"
     url: "https://docs.spring.io/spring-data/redis/reference/redis/drivers.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "DataRedisAutoConfiguration and DataRedisProperties (Spring Boot 4.1.1 source)"
+    url: "https://github.com/spring-projects/spring-boot/tree/v4.1.1/module/spring-boot-data-redis/src/main/java/org/springframework/boot/data/redis/autoconfigure"
+    verifiedOn: "2026-10-21"
+  - title: "Configuration metadata format: deprecation level error (Spring Boot 4.1 specification)"
+    url: "https://docs.spring.io/spring-boot/specification/configuration-metadata/format.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Spring Data Redis is a Spring library for using Redis from Java. Its main class, the template, has a method for each Redis command: `opsForValue().set(...)` sends SET. A template uses serialisers, converters that turn Java keys and values into the bytes Redis stores. Below the template, a client library holds the network connection and sends the commands; Spring Boot uses Lettuce by default.
 
 ## Why it exists
 
-Raw client code means hand-made connections and byte conversion everywhere. Spring Data Redis gives templates that convert Java values and share connections; Spring Boot wires them up.
+Without it, every service would use a client library directly: open connections, convert each key and value to bytes by hand, and translate errors in every method. Spring Data Redis puts that work in one shared template. Spring Boot adds the setup: when the Redis starter is on the classpath, it creates the connection factory and the templates as beans, the objects Spring creates and injects. A service only asks for a template in its constructor and calls it.
 
 ## How it works
 
@@ -47,11 +69,17 @@ Raw client code means hand-made connections and byte conversion everywhere. Spri
   C --> R[(Redis)]`}
 />
 
-- Connect with `spring.data.redis.host` and `port`, or one `spring.data.redis.url` that overrides them.
-- With `commons-pool2` on the classpath, Boot builds a pooled connection factory.
-- Whiteboard skeletons for set and get, counters and locks: [Redis code templates](card:redis-code-templates).
+1. At startup, Spring Boot reads the `spring.data.redis.*` properties and builds a `RedisConnectionFactory` for Lettuce.
+2. Boot creates two template beans on that factory: `StringRedisTemplate` and `RedisTemplate<Object, Object>`.
+3. Your service calls a template method, such as `opsForValue().set(key, value, Duration)`.
+4. The template's serialisers turn the key and the value into bytes.
+5. Lettuce sends the command over its shared connection, and the template turns the reply back into a Java value.
+
+So the key is the serialiser: it decides what Redis really stores, so choose it on purpose.
 
 ## Example
+
+The payment service caches the payment record `payment:9001` as JSON, so another service, or a person with redis-cli, can read it.
 
 ```java
 @Bean
@@ -63,24 +91,55 @@ RedisTemplate<String, Payment> paymentTemplate(RedisConnectionFactory factory) {
     return template;
 }
 
-// payment:PAY101 -> {"amount":500,"method":"UPI"}, gone after 5 minutes
-paymentTemplate.opsForValue().set("payment:PAY101", payment, Duration.ofMinutes(5));
+// In PaymentService: Payment is record Payment(String id, long amount, String status)
+paymentTemplate.opsForValue().set("payment:9001", payment, Duration.ofMinutes(5));
 ```
 
-## Defaults
+```bash
+redis-cli GET payment:9001
+redis-cli TTL payment:9001
+```
 
-| What | Default | Where |
-|---|---|---|
-| Server | `localhost:6379` | Spring Boot 4.1 |
-| Client library | Lettuce | `spring-boot-starter-data-redis`, Spring Boot 4.1 |
-| `RedisTemplate` and `RedisCache` values | JDK serialisation | Spring Data Redis 4.1 |
+```text output
+"{\"id\":\"9001\",\"amount\":500,\"status\":\"PAID\"}"
+(integer) 297
+```
+
+What to notice:
+
+- `RedisSerializer.string()` stores the key as plain text, so redis-cli finds `payment:9001`. Remove that line and the key is written as JDK bytes, which is a different key.
+- `JacksonJsonRedisSerializer` (Jackson 3, Spring Data Redis 4.0 and later) writes the record as readable JSON and reads it back as a `Payment`.
+- Passing a `Duration` sends one `SET payment:9001 ... EX 300`, so the value and its TTL arrive together; the TTL had dropped to 297 when redis-cli ran.
+- The bean is named `paymentTemplate`, so Boot's own `redisTemplate` bean still exists beside it.
+
+## Rules and defaults
+
+- **Server:** `localhost:6379` unless you set `spring.data.redis.host` and `port`. If you set `spring.data.redis.url`, Boot ignores host, port, username and password (Spring Boot 4.1).
+- **Client:** the starter brings Lettuce. To use Jedis, exclude `lettuce-core` and add the `jedis` dependency.
+- **Replacing Boot's beans:** any bean of type `StringRedisTemplate` replaces Boot's. A `RedisTemplate` replaces Boot's only if the bean is named `redisTemplate`.
+- **Serialisation:** `RedisTemplate` and Spring's `RedisCache` use JDK serialisation unless you set serialisers. `StringRedisTemplate` uses `StringRedisSerializer`, so keys and values are readable text (Spring Data Redis 4.1).
+- **Connections:** Lettuce shares one thread-safe connection for normal commands. Blocking commands such as BLPOP and MULTI/EXEC transactions need a dedicated connection. With `commons-pool2` on the classpath, Boot builds a pooled connection factory.
+
+## Not to be confused with
+
+`StringRedisTemplate` is a ready `RedisTemplate<String, String>` whose serialisers write plain text, so what you store is what redis-cli shows. `RedisTemplate` takes any key and value types, and you choose its serialisers. Rule: text and counters go through `StringRedisTemplate`; objects go through a `RedisTemplate<String, T>` with a JSON value serialiser.
+
+Lettuce and Jedis are the client libraries under the template; the template is the API you call. Rule: keep Lettuce unless your team already runs Jedis.
+
+## Common mistakes
+
+- **"`spring.redis.host` still configures Redis."** Spring Boot 3.0 renamed these properties to `spring.data.redis.*`. Boot 4.1 marks the old names as an error and does not bind them, so the app quietly connects to `localhost:6379`.
 
 ## Interview Qs
 
 ### Do you need a connection pool with Lettuce?
 
-Usually not: one thread-safe connection is shared for normal commands. Blocking commands such as BLPOP and MULTI/EXEC transactions need a dedicated connection, so add `commons-pool2` when you use them a lot.
+Usually not. One thread-safe Lettuce connection is shared by all threads for normal commands. Blocking commands such as BLPOP and MULTI/EXEC transactions each need a dedicated connection, so add `commons-pool2` when you use them often; Spring Boot then builds a pooled connection factory.
 
-### How do you store Java objects as JSON?
+### How do you store Java objects as JSON in Redis?
 
-Define a `RedisTemplate<String, T>` with `RedisSerializer.string()` for keys and `JacksonJsonRedisSerializer` (Jackson 3, Spring Data Redis 4.0+) for values. Avoid JDK serialisation: it is Java-only and unsafe with untrusted data.
+Define a `RedisTemplate<String, T>` bean with `RedisSerializer.string()` for keys and `JacksonJsonRedisSerializer` for values. Redis then holds readable JSON that other languages and redis-cli can read, and the template turns it back into your object.
+
+### Why is JDK serialisation a poor choice for Redis values?
+
+The bytes are Java-only, so other services and redis-cli cannot read them. The Spring Data Redis docs also warn that Java deserialisation of untrusted data can let an attacker run code, and recommend a format such as JSON instead.

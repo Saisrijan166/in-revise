@@ -5,65 +5,125 @@ title: Hashes
 topic: data-types
 level: beginner
 heat: 2
-hook: "A hash is a small map inside one key: read or change one field without touching the others."
+hook: "A hash is a small map of fields inside one key, like one row of a table, so you can read or change one field without touching the rest."
 points:
-  - { k: "Shape", v: "field-value pairs under one key; values are strings, no nesting" }
-  - { k: "Partial update", v: "HSET one field; no read-modify-write of a whole JSON string", kind: plus }
-  - { k: "Field counters", v: "HINCRBY changes one numeric field atomically", kind: plus }
-  - { k: "Whole-hash reads", v: "HGETALL, HKEYS, HVALS are O(n) on big hashes", kind: minus }
+  - { k: "Shape", v: "one key holds many field-value pairs; every value is a string, so a hash cannot nest another hash" }
+  - { k: "Change one field", v: "HSET or HINCRBY changes one field, with no read-edit-write of the whole object", kind: plus }
+  - { k: "HSET reply", v: "HSET returns how many fields were new; updating an existing field returns 0" }
+  - { k: "Field expiry (Redis 7.4+)", v: "HEXPIRE gives one field its own expiry; before 7.4 only the whole key could expire", kind: default }
+  - { k: "Whole-hash reads", v: "HGETALL, HKEYS and HVALS read every field, so they get slow on a hash with many fields", kind: minus }
 trap:
-  wrong: "Only whole keys can expire, never a single hash field."
-  right: "Since Redis 7.4, HEXPIRE sets a TTL on single fields; Redis 8.0 added HSETEX and HGETEX."
-sayIt: "A hash stores an object as fields under one key, so I can read or update one field, or HINCRBY a counter, without rewriting the object. Since Redis 7.4 single fields can even have their own TTL."
+  wrong: "A hash field can hold a number, a list or another map, like a Java Map<String, Object>."
+  right: "Every field value is a string. HINCRBY works because Redis reads the string as an integer. For nested data use a JSON document."
+  why: "Hashes look like objects or maps in code, and HINCRBY makes a field behave like a number, so it is easy to assume the values are typed."
+sayIt: "A hash stores an object as string fields under one key, so I read or update one field, or HINCRBY a counter, without rewriting the object. Since Redis 7.4 a single field can have its own expiry. For nested data I use JSON instead."
+cheat:
+  idea: "A hash is one key holding many fields, like a table row: payment:9001 has amount, currency, method and status. You read or change one field without rewriting the others."
+  code: |
+    HSET payment:9001 status PAID    # changes only this field
+  remember: "Every field value is a plain string, with no nesting; use a JSON document for nested data."
+buildsOn: [strings]
+scenarios:
+  - q: "payment:9001 is a hash with four fields. The code runs HSET payment:9001 status PAID. What does it return, and are the other fields affected?"
+    a: "It returns 0, because status already existed and HSET counts only new fields. Only status changes; amount, currency and method stay as they were."
+  - q: "You keep each merchant's daily counts of UPI, card and wallet payments. One hash per merchant or one string per count?"
+    a: "One hash, such as merchant:42:stats with fields upi, card and wallet. HINCRBY adds to one field atomically, and HGETALL reads all counts in one call. Separate strings work too, but a hash keeps them together under one key."
 confusedWith: [string-vs-hash-vs-json]
 tags: [hashes, hset, objects]
 visual: flow
 sources:
-  - title: "Redis hashes (Redis docs)"
+  - title: "Redis hashes: field expiration (7.4), HGETEX and HSETEX (8.0) (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/hashes/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Compare data types (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/compare-data-types/"
     verifiedOn: "2026-10-20"
+  - title: "HSET command: reply is the number of fields added (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/hset/"
+    verifiedOn: "2026-10-21"
   - title: "Redis interview questions (Devinterview-io on GitHub)"
     url: "https://github.com/Devinterview-io/redis-interview-questions"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A hash is a key whose value is a small map of fields, each field holding a string value. It looks like one row of a table: the key `payment:9001` has the fields `amount`, `currency`, `method` and `status`. You can read or change one field on its own. A field value is always a string, so a hash cannot hold another hash or a list inside it.
+
 ## Why it exists
 
-A payment has several fields that change on their own. Stored as one JSON string, every change means read, edit, write back. A hash lets you change just one field.
+If the payment record is cached as one JSON [string](card:strings), changing its status means three steps: read the whole text, edit it in the app, and write it back. Two app servers doing this at the same time can each overwrite the other's change. A hash avoids both problems: `HSET payment:9001 status PAID` changes one field in one command, and `HINCRBY` adds to a numeric field in one atomic step, so no other client can slip in between the read and the write.
 
 ## How it works
 
 <Mermaid
-  alt="One key, payment:PAY101:details, holds four fields: amount is 500, currency is INR, method is UPI and retries is 1. Each field can be read or changed on its own."
+  alt="One key, payment:9001, holds five fields: amount is 500, currency is INR, method is UPI, status is PAID and retries is 1. Each field can be read or changed on its own."
   chart={`flowchart LR
-  K["payment:PAY101:details"] --> A["amount = 500"]
+  K["payment:9001"] --> A["amount = 500"]
   K --> C["currency = INR"]
   K --> M["method = UPI"]
+  K --> S["status = PAID"]
   K --> R["retries = 1"]`}
 />
 
-- Small hashes use a compact encoding: see [memory optimisation](card:memory-optimization).
-- Need nested objects or arrays? Use [JSON](card:json-and-query-engine).
+1. `HSET key field value [field value ...]` creates the hash if needed and writes the fields. It returns how many fields were new.
+2. `HGET key field` reads one field; `HMGET` reads several; `HGETALL` reads them all.
+3. `HINCRBY key field n` reads the field as an integer, adds n and stores it again, in one step. A missing field starts at 0.
+4. `HDEL key field` removes a field. When the last field goes, Redis deletes the key itself.
+
+So the key is: one key per object, one field per property.
 
 ## Example
 
-```text
-HSET payment:PAY101:details amount 500 currency INR method UPI  -- 3
-HGET payment:PAY101:details amount           -- "500"
-HINCRBY payment:PAY101:details retries 1     -- 1
-HEXPIRE payment:PAY101:details 600 FIELDS 1 method   -- 1) 1
-HGETALL payment:PAY101:details               -- all fields and values
+The payment service stores payment 9001 as a hash, marks it paid and counts a retry.
+
+```bash
+redis-cli HSET payment:9001 amount 500 currency INR method UPI status PENDING
+redis-cli HSET payment:9001 status PAID
+redis-cli HINCRBY payment:9001 retries 1
+redis-cli HGET payment:9001 status
+redis-cli HMGET payment:9001 amount currency
+redis-cli HEXPIRE payment:9001 600 FIELDS 1 retries
 ```
+
+```text output
+(integer) 4
+(integer) 0
+(integer) 1
+"PAID"
+1) "500"
+2) "INR"
+1) (integer) 1
+```
+
+What to notice:
+
+- The second HSET returned 0: `status` already existed, so it was updated, not added. Only that one field changed.
+- `HINCRBY` created the missing field `retries` from 0 and returned the new value, 1.
+- `amount` came back as `"500"`, a string. Your code converts it to a number.
+- `HEXPIRE` returned 1, meaning the expiry was set on `retries` alone; the rest of the hash does not expire. You will learn expiry in [TTL and key expiry](card:ttl-and-expiration).
+
+## Rules and defaults
+
+- **Values are strings:** numbers are stored as text; `HINCRBY` and `HINCRBYFLOAT` read them as numbers.
+- **Field expiry:** since Redis 7.4, `HEXPIRE` and `HPEXPIRE` set an expiry on single fields. Redis 8.0 added `HSETEX` and `HGETEX` to set or read fields and their expiry in one command.
+- **Size:** the number of fields has no practical limit other than memory. Small hashes use a compact encoding, covered in [Big keys and memory use](card:memory-optimization).
+- **Whole-hash commands:** `HGETALL`, `HKEYS` and `HVALS` read every field. On a big hash, walk the fields in pages with `HSCAN`.
+
+## Not to be confused with
+
+A [string](card:strings) holds one whole value, so you rewrite it to change anything. A hash holds flat fields, so you change one at a time. A [JSON document](card:json-and-query-engine) holds nested objects and arrays and can change any part by path. Rule: whole value = string; flat fields = hash; nested = JSON.
 
 ## Interview Qs
 
 ### When is a hash better than a JSON string?
 
-When fields are read or changed one at a time. HSET or HINCRBY touches one field; a string must be read, edited and written back whole.
+When fields are read or changed one at a time. HSET or HINCRBY touches one field in one command. A string must be read, edited and written back whole, which costs more and lets two writers overwrite each other's change.
 
-### How would you keep several counters for one merchant?
+### What happens if you run HINCRBY on a field that holds text?
 
-One hash per merchant, one field per counter: `HINCRBY merchant:42:stats upi 1`. Each increment is atomic, and HGETALL reads every counter in one call.
+Redis returns the error "hash value is not an integer" and changes nothing. Field values are plain strings, and HINCRBY works only when the string reads as an integer. So keep counters in their own fields and never mix them with text.
+
+### Can one field of a hash expire on its own?
+
+Yes, since Redis 7.4. HEXPIRE sets an expiry on named fields, and when it runs out Redis removes only those fields. Before 7.4 you could only expire the whole key, so short-lived fields had to go into separate keys.

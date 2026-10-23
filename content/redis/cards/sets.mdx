@@ -5,59 +5,121 @@ title: Sets
 topic: data-types
 level: beginner
 heat: 2
-hook: "A set holds unique strings with no order; adding the same member twice still leaves one."
+hook: "A set holds unique strings with no order: adding the same member twice still leaves one, and 'is X in it?' is one fast command."
 points:
-  - { k: "Unique", v: "SADD ignores a member that is already there" }
-  - { k: "Fast checks", v: "add, remove and SISMEMBER are O(1)", kind: plus }
-  - { k: "Set algebra", v: "SINTER, SUNION, SDIFF compare sets on the server", kind: plus }
-  - { k: "Big sets", v: "SMEMBERS returns all at once, O(n); page with SSCAN", kind: minus }
+  - { k: "Unique members", v: "SADD ignores a member that is already there and returns 0 for it" }
+  - { k: "Fast checks", v: "SADD, SREM and SISMEMBER take the same time however big the set is", kind: plus }
+  - { k: "No order", v: "SMEMBERS may return members in any order; use a list or a sorted set when order matters", kind: minus }
+  - { k: "Set algebra", v: "SINTER, SUNION and SDIFF combine sets inside Redis, with no data sent to the app first", kind: plus }
+  - { k: "Big sets", v: "SMEMBERS returns every member in one reply; walk a big set in pages with SSCAN", kind: minus }
 trap:
   wrong: "SMEMBERS returns members in the order they were added."
-  right: "Sets have no order; Redis may return members in any order. For order use a list or a sorted set."
-sayIt: "A Redis set stores unique strings with O(1) add, remove and membership checks, plus intersections and unions on the server. I use it for tags, dedupe and exact unique counts that stay small."
+  right: "A set has no order, and Redis may return its members in any order. Use a list for insertion order or a sorted set for ranked order."
+  why: "With a few small members the reply often looks like insertion order, so a quick test seems to confirm it."
+sayIt: "A Redis set stores unique strings with no order. Add, remove and membership checks are O(1), and SINTER, SUNION and SDIFF run on the server. I use it to skip duplicate events, for tags, and for exact unique counts that stay small."
+cheat:
+  idea: "A set holds unique strings with no order. Adding a member twice keeps one copy, and SISMEMBER answers 'is it there?' in one fast command."
+  code: |
+    SADD seen:payment-events evt-501   # 1 = new, 0 = already seen
+  remember: "Sets have no order; SMEMBERS can return members in any order."
+buildsOn: [strings]
+scenarios:
+  - q: "Two app servers receive webhook evt-501 at the same moment, and both run SADD seen:payment-events evt-501 before processing. Can both process it?"
+    a: "No. Redis runs the two SADD commands one after the other. The first gets 1 and processes the event; the second gets 0 and skips it. The check and the add happen in one command, so no gap exists between them."
+  - q: "user:7:methods is {UPI, card} and user:9:methods is {UPI, wallet}. What does SDIFF user:9:methods user:7:methods return?"
+    a: "wallet. SDIFF returns the members of the first set that are in none of the others, so the order of the keys matters. With user:7 first it would return card."
 confusedWith: []
 tags: [sets, sadd, dedupe]
 visual: table
 sources:
-  - title: "Redis sets (Redis docs)"
+  - title: "Redis sets: unordered, limits, performance, alternatives (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/sets/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Redis data types (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/"
     verifiedOn: "2026-10-20"
+  - title: "HyperLogLog: up to 12 KB per counter (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/probabilistic/hyperloglogs/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A set is a key whose value is a collection of unique strings, called members, with no order. If you add a member that is already there, nothing changes. Unlike a [list](card:lists), a set does not remember the order you added members in. Redis can also compare sets: which members two sets share, which they have together, and which only one has.
 
 ## Why it exists
 
-Many checks are "have I seen this already?" or "who is in both groups?". A set answers them in one call, and Redis keeps the members unique for you.
+Many checks are "have I seen this already?" or "who is in both groups?". The payment provider may send the same webhook event twice, and the service must not process it twice. With a list you would scan every item to find a duplicate, which gets slower as it grows. A set answers "is this id here?" in one fast command and keeps the members unique for you.
 
 ## How it works
 
-User 7 paid with `{UPI, card}`; user 9 paid with `{UPI, wallet}`.
+User 7 has paid with `{UPI, card}`; user 9 with `{UPI, wallet}`.
 
 | Command | Result | Meaning |
 |---|---|---|
-| SINTER u7 u9 | UPI | used by both |
-| SUNION u7 u9 | UPI, card, wallet | used by either |
-| SDIFF u7 u9 | card | only user 7 (order of keys matters) |
+| SINTER user:7:methods user:9:methods | UPI | in both sets |
+| SUNION user:7:methods user:9:methods | UPI, card, wallet | in either set |
+| SDIFF user:7:methods user:9:methods | card | only in the first set |
 
-- Huge sets cost memory. For an approximate unique count, use [HyperLogLog](card:bitmaps-hyperloglog).
+1. `SADD key member` adds the member and returns 1, or returns 0 if it was already there.
+2. `SISMEMBER key member` returns 1 if the member is in the set, 0 if not.
+3. `SCARD key` returns how many members the set has. "Cardinality" is the word for this count.
+4. `SINTER`, `SUNION` and `SDIFF` combine sets inside Redis and return the result, so the app does not download every member first.
 
 ## Example
 
-```text
-SADD payment:PAY101:events CREATED       -- 1 (added)
-SADD payment:PAY101:events CREATED       -- 0 (already there)
-SCARD payment:PAY101:events              -- 1
-SISMEMBER payment:PAY101:events CREATED  -- 1 (yes)
+The payment service skips a webhook event it has already handled, then compares two users' payment methods.
+
+```bash
+redis-cli SADD seen:payment-events evt-501
+redis-cli SADD seen:payment-events evt-501
+redis-cli SCARD seen:payment-events
+redis-cli SADD user:7:methods UPI card
+redis-cli SADD user:9:methods UPI wallet
+redis-cli SINTER user:7:methods user:9:methods
+redis-cli SDIFF user:7:methods user:9:methods
+redis-cli SISMEMBER user:9:methods card
 ```
+
+```text output
+(integer) 1
+(integer) 0
+(integer) 1
+(integer) 2
+(integer) 2
+1) "UPI"
+1) "card"
+(integer) 0
+```
+
+What to notice:
+
+- The first `SADD` returned 1 (new event, so process it). The second returned 0 (already seen, so skip it). `SCARD` confirms one member.
+- Check and add happen in one command, so two app servers that get the same event at the same moment cannot both see 1.
+- `SDIFF` returned `card` because it keeps members of the first set only. Swap the keys and it returns `wallet`.
+- `seen:payment-events` has no expiry here, so it grows with every event. In real use you would give it an expiry, as [TTL and key expiry](card:ttl-and-expiration) shows.
+
+## Rules and defaults
+
+- **Size limit:** a set can hold up to 2^32 - 1 (about 4.29 billion) members.
+- **Speed:** adding, removing and checking a member are O(1): the cost does not grow with the set.
+- **Whole-set commands:** `SMEMBERS` returns every member in one reply and is O(n). On a big set, walk it in pages with `SSCAN`.
+- **Memory:** a huge set uses memory for every member. If an estimate is enough, use a probabilistic type instead: the Redis docs suggest a Bloom filter for "seen before?", and a [HyperLogLog](card:bitmaps-hyperloglog) estimates counts.
+
+## Common mistakes
+
+- **"SMEMBERS on a big set is fine because SADD is fast."** SADD touches one member; SMEMBERS builds a reply with all of them while other clients wait. Use SSCAN or SCARD when you only need a page or the count.
 
 ## Interview Qs
 
 ### How do you avoid processing the same payment event twice?
 
-SADD the event ID to a set of seen IDs. A reply of 1 means new, so process it; 0 means it was already seen. Add a TTL to the key if the set must not grow forever.
+SADD the event id to a set of seen ids. A reply of 1 means new, so process it; 0 means already seen, so skip it. Give the key an expiry so the set does not grow forever. For a hard guarantee, the database should also reject duplicates.
 
-### Set or HyperLogLog for unique visitors?
+### Set or HyperLogLog for counting unique visitors?
 
-A set gives the exact count and the members, but memory grows with every visitor. A [HyperLogLog](card:bitmaps-hyperloglog) uses a small fixed amount of memory and gives a close estimate, without the members.
+A set gives the exact count and lets you list the members, but its memory grows with every visitor. A HyperLogLog uses at most about 12 KB per counter and gives a close estimate, but cannot list who the visitors were.
+
+### How would you find users who paid with both UPI and card?
+
+Keep one set per method, such as method:UPI:users and method:card:users, and run SINTER on the two keys. Redis computes the overlap on the server and returns only the common user ids.

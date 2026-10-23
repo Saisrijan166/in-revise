@@ -5,38 +5,66 @@ title: JSON, Search and Other Redis 8 Types
 topic: data-types
 level: intermediate
 heat: 1
-hook: "Redis 8 ships JSON documents, a search engine with secondary indexes, time series, probabilistic types and vector sets."
+hook: "Redis 8 has nested JSON documents, a search engine that finds keys by field value, and small approximate types such as the Bloom filter, all built in."
 points:
-  - { k: "Built in", v: "in Redis Open Source 8.0+ packages and images; no separate install", kind: plus }
-  - { k: "JSON", v: "nested documents; read or change one path with JSONPath" }
-  - { k: "Redis Search", v: "query hashes or JSON by field value, text or vector" }
-  - { k: "Bloom filter", v: "'definitely not seen' or 'maybe seen', in little memory" }
-  - { k: "Memory", v: "JSON uses the most, then hashes, then strings", kind: minus }
+  - { k: "Built in (Redis 8.0+)", v: "JSON, Redis Search, time series and the probabilistic types ship in Redis Open Source; no modules to install", kind: plus }
+  - { k: "JSON document", v: "a key holds a nested JSON value; JSONPath such as $.customer.id reads or changes one part" }
+  - { k: "Redis Search", v: "FT.CREATE indexes hashes or JSON under a key prefix; FT.SEARCH then finds keys by field values" }
+  - { k: "Bloom filter", v: "answers 'definitely never added' or 'probably added' using little memory; it never lists items" }
+  - { k: "Vector sets (8.0+)", v: "like a sorted set, but each member carries a vector instead of a score, for similarity search" }
+  - { k: "Still no joins", v: "Redis Search filters one kind of document; it has no joins or foreign keys like SQL", kind: minus }
 trap:
   wrong: "JSON and search in Redis need Redis Stack or extra modules."
-  right: "Since Redis 8.0, JSON, Redis Search, time series and the probabilistic types are part of Redis Open Source."
-sayIt: "Redis 8 includes a native JSON type with JSONPath, Redis Search for secondary indexes and full-text or vector queries, time series, Bloom-style probabilistic types and vector sets, all in Redis Open Source."
+  right: "Since Redis 8.0, JSON, Redis Search, time series and the probabilistic types are part of Redis Open Source itself."
+  why: "Before Redis 8 these features came as separate modules or in the Redis Stack bundle, and many tutorials still say so."
+sayIt: "Redis 8 includes a native JSON type with JSONPath, Redis Search for secondary indexes with field, full-text and vector queries, time series, probabilistic types like Bloom filters, and vector sets, all in Redis Open Source."
+cheat:
+  idea: "Since Redis 8.0, Redis Open Source includes JSON documents, Redis Search to find keys by field value, time series and probabilistic types like the Bloom filter."
+  flow: "JSON.SET → FT.CREATE → FT.SEARCH by field"
+  remember: "Redis 8 needs no Redis Stack or modules. A Bloom filter's 'no' is certain; its 'yes' may be wrong."
+buildsOn: [hashes, sets]
+scenarios:
+  - q: "Payments are stored as JSON documents under payment:*. Support asks for all UPI payments between 400 and 600 rupees. How do you answer it in Redis?"
+    a: "Create a Redis Search index once with FT.CREATE ... ON JSON PREFIX 1 payment: and a NUMERIC field for amount and a TAG field for method. Then FT.SEARCH with @method:{UPI} @amount:[400 600]. Without an index, Redis can only find keys by name."
+  - q: "BF.EXISTS seen:payment-ids 9002 returns 1. Was payment id 9002 definitely added?"
+    a: "No, only probably. A Bloom filter can give false positives, so 1 means 'maybe'. A 0 is certain: the id was never added. Check the database when a 'yes' must be exact."
 confusedWith: [string-vs-hash-vs-json]
 tags: [json, search, redis-8]
-visual: flow
+visual: code
 sources:
+  - title: "What's new in Redis 8.0: one Redis Open Source distribution, vector set beta (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/whats-new/8-0/"
+    verifiedOn: "2026-10-21"
   - title: "Redis 8.0.0 release notes (redis/redis on GitHub)"
     url: "https://github.com/redis/redis/releases/tag/8.0.0"
     verifiedOn: "2026-10-20"
+  - title: "Redis vector sets: VADD since 8.0.0 (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/vector-sets/"
+    verifiedOn: "2026-10-21"
+  - title: "Redis arrays: preview data type, commands since 8.8.0 (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/data-types/arrays/"
+    verifiedOn: "2026-10-21"
   - title: "JSON (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/json/"
     verifiedOn: "2026-10-20"
   - title: "Redis Search (Redis docs)"
     url: "https://redis.io/docs/latest/develop/ai/search-and-query/"
     verifiedOn: "2026-10-20"
-  - title: "Bloom filter (Redis docs)"
+  - title: "Bloom filter: false positives, Cuckoo filters allow deletions (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/probabilistic/bloom-filter/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "FT.CREATE: PREFIX, SKIPINITIALSCAN (existing keys are scanned by default) (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/ft.create/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Redis 8 adds several types beyond the core ones. A JSON document is a key that holds a nested JSON value, and a path such as `$.customer.id` reads or changes one part of it. Redis Search builds a secondary index, a lookup by field value rather than by key name, over hashes or JSON documents. Redis 8 also includes time series and probabilistic types such as the Bloom filter, which uses little memory but may answer "probably yes" wrongly.
 
 ## Why it exists
 
-Core Redis finds data only by key. Real apps also ask "all UPI payments between ₹400 and ₹600", and want nested objects. Redis 8 answers these without a second database.
+Core Redis finds data only by key: you must already know `payment:9001`. Support staff ask instead "all UPI payments between ₹400 and ₹600", and a [hash](card:hashes) cannot hold the payment's nested customer object. Without these types you would copy the data into a second database just to query it. Since Redis 8.0 they come with Redis Open Source, so the same server stores the documents and answers the query.
 
 ## How it works
 
@@ -49,25 +77,64 @@ Core Redis finds data only by key. Real apps also ask "all UPI payments between 
   I -- matching keys --> A`}
 />
 
-- The engine was named Redis Query Engine in the 8.0 release notes; the docs now call it Redis Search.
-- Bloom filter as the fix for cache penetration: [cache problems](card:cache-problems).
+1. The app writes each payment with `JSON.SET payment:<id> $ '{...}'`.
+2. Once, `FT.CREATE` defines an index: which key prefix to watch, and which paths to index as numbers, tags or text.
+3. Redis Search indexes the existing keys with that prefix, then updates the index on every later write.
+4. `FT.SEARCH` runs a query on the index and returns the matching keys, without scanning the whole keyspace.
 
 ## Example
 
-```text
-JSON.SET payment:PAY101 $ '{"amount":500,"method":"UPI","customer":{"id":7}}'  -- OK
-JSON.GET payment:PAY101 $.customer.id       -- "[7]"
-JSON.NUMINCRBY payment:PAY101 $.amount 50   -- "[550]"
-FT.CREATE idx:pay ON JSON PREFIX 1 payment: SCHEMA $.amount AS amount NUMERIC $.method AS method TAG
-FT.SEARCH idx:pay "@method:{UPI} @amount:[400 600]"   -- finds payment:PAY101
+The payment service stores payment 9001 as JSON, queries it by field, and checks a Bloom filter of seen payment ids.
+
+```bash
+redis-cli JSON.SET payment:9001 '$' '{"amount":500,"method":"UPI","customer":{"id":7}}'
+redis-cli JSON.GET payment:9001 '$.customer.id'
+redis-cli JSON.NUMINCRBY payment:9001 '$.amount' 50
+redis-cli FT.CREATE idx:payments ON JSON PREFIX 1 payment: SCHEMA '$.amount' AS amount NUMERIC '$.method' AS method TAG
+redis-cli FT.SEARCH idx:payments '@method:{UPI} @amount:[400 600]' NOCONTENT
+redis-cli BF.ADD seen:payment-ids 9001
+redis-cli BF.EXISTS seen:payment-ids 9002
 ```
+
+```text output
+OK
+"[7]"
+"[550]"
+OK
+1) (integer) 1
+2) "payment:9001"
+(integer) 1
+(integer) 0
+```
+
+What to notice:
+
+- `JSON.GET` with `$.customer.id` read one nested value, and `JSON.NUMINCRBY` changed the amount in place. Results come back as arrays, because a `$` path can match several places.
+- `FT.SEARCH` found `payment:9001` (amount 550, method UPI): 1 match. `NOCONTENT` returns only key names, not documents.
+- `BF.EXISTS` returned 0 for 9002, which is certain: 9002 was never added. A 1 would only mean "probably".
+
+## Rules and defaults
+
+- **Since Redis 8.0:** Redis Stack and Redis Community Edition were merged into one distribution, Redis Open Source, with JSON, Redis Search, time series and the probabilistic types built in.
+- **Probabilistic types:** Bloom filter and Cuckoo filter (membership), Count-min sketch (frequency), Top-K (most frequent items) and t-digest (percentiles).
+- **Naming:** the 8.0 release notes call the engine the Redis Query Engine; the docs now call it Redis Search.
+- **Vector sets:** added in Redis 8.0, where the release notes marked them as a beta.
+- **Arrays (Redis 8.8+, preview):** a sparse sequence of strings addressed by integer index, for ring buffers and event logs. The docs say the type may still change.
+
+## Not to be confused with
+
+A Bloom filter and a [HyperLogLog](card:bitmaps-hyperloglog) are both small and approximate, but they answer different questions; that concept gives the rule. A JSON document is not a [hash](card:hashes): a hash holds flat string fields, while JSON holds nested objects, arrays and numbers. Rule: flat object = hash; nested object = JSON.
 
 ## Interview Qs
 
 ### Can Redis query by a field value, not only by key?
 
-Yes, with Redis Search, built into Redis 8: FT.CREATE indexes hashes or JSON documents under a key prefix, and FT.SEARCH filters by numbers, tags, text, location or vectors. Plain Redis has key access only.
+Yes, with Redis Search, built into Redis 8. FT.CREATE indexes hashes or JSON documents under a key prefix, and FT.SEARCH filters by numbers, tags, text, location or vectors. Without an index, Redis only finds data by key name.
 
 ### What does a Bloom filter guarantee?
 
-A "no" is certain: the item was never added. A "yes" may be a false positive. It uses little, fixed memory because it stores hashed bits, not the items.
+A "no" is certain: the item was never added. A "yes" may be a false positive. It uses little memory because it keeps hashed bits, not the items, so you cannot list or delete what you added. It is a common guard against lookups for ids that do not exist.
+
+### When would you store an object as JSON instead of a hash?
+
+When it is nested, like a payment with a customer object and a list of attempts, or when you need to change one part by path. A hash is flat and uses less memory, so it fits flat objects.

@@ -5,26 +5,47 @@ title: Sorted Sets and Leaderboards
 topic: data-types
 level: intermediate
 heat: 3
-hook: "A sorted set keeps unique members always ordered by a score, so top-N and rank are instant."
+hook: "A sorted set is a set where every member has a number called a score, and Redis keeps members ordered by it, so 'top 10' and 'my rank' are instant."
 points:
-  - { k: "Score", v: "a floating-point number per member, such as volume or points" }
-  - { k: "Updates", v: "ZADD and ZINCRBY are O(log n); no re-sort on read", kind: plus }
-  - { k: "Range reads", v: "ZRANGE is O(log n + m) for m results; big ranges cost", kind: minus }
-  - { k: "Numeric index", v: "any number works as a score, such as a Unix timestamp" }
+  - { k: "Score", v: "each member carries a floating-point score, such as payment volume, points or a timestamp" }
+  - { k: "Always ordered", v: "Redis keeps members sorted as scores change, so a read never has to sort", kind: plus }
+  - { k: "Cost of an update", v: "ZADD and ZINCRBY are O(log n), so a million members cost only a few more steps", kind: plus }
+  - { k: "Low to high", v: "ZRANGE returns the lowest scores first; add REV to get the highest first" }
+  - { k: "Equal scores", v: "members with the same score are ordered by name, byte by byte" }
+  - { k: "Big ranges", v: "ZRANGE costs O(log n + m) for m results, so huge ranges are slow", kind: minus }
 trap:
   wrong: "ZRANGE key 0 9 returns the top 10 scores."
-  right: "ZRANGE is low to high. For the top 10 use ZRANGE key 0 9 REV; ZREVRANGE is deprecated since Redis 6.2."
-sayIt: "A sorted set stores unique members ordered by score, using a skip list plus a hash table. Updates are O(log n), and top-N and rank reads need no sorting, which makes it the standard leaderboard."
+  right: "ZRANGE is low to high, so 0 9 gives the ten lowest. For the top ten use ZRANGE key 0 9 REV. ZREVRANGE does the same but is deprecated since Redis 6.2."
+  why: "Leaderboards are shown highest first, so people expect that default, and old tutorials use ZREVRANGE without mentioning REV."
+sayIt: "A sorted set stores unique members ordered by score, using a skip list plus a hash table. Updates are O(log n) and reads need no sorting, so it is the standard leaderboard: ZRANGE ... REV for the top, ZREVRANK for a rank."
+cheat:
+  idea: "A sorted set is a set where each member has a score, and Redis keeps members in score order as scores change. Top-N and rank reads need no sorting, which makes it the standard leaderboard."
+  code: |
+    ZINCRBY rank:merchants:2026-10-21 500 merchant:42
+    ZRANGE rank:merchants:2026-10-21 0 9 REV WITHSCORES   # top 10
+  remember: "ZRANGE is lowest first; add REV for the top. Equal scores sort by member name."
+buildsOn: [sets]
+scenarios:
+  - q: "merchant:8 and merchant:17 both have score 75500. Which comes first in ZRANGE key 0 -1, and why?"
+    a: "merchant:17. With equal scores Redis orders members by their bytes, and the character 1 comes before 8, so merchant:17 sorts lower. With REV the order flips and merchant:8 comes first."
+  - q: "You need the 10 payments created in the last hour, and you also want to delete older ones cheaply. Which structure fits?"
+    a: "A sorted set with the creation time (Unix milliseconds) as the score. ZRANGE key <now-1h> +inf BYSCORE reads the last hour, and ZREMRANGEBYSCORE key -inf <now-1h> deletes everything older in one command."
 confusedWith: []
 tags: [sorted-sets, zset, leaderboard]
 visual: table
 sources:
-  - title: "Redis sorted sets (Redis docs)"
+  - title: "Redis sorted sets: skip list and hash table, equal scores, performance (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/sorted-sets/"
-    verifiedOn: "2026-10-20"
-  - title: "ZRANGE command (Redis docs)"
+    verifiedOn: "2026-10-21"
+  - title: "ZRANGE command: BYSCORE, BYLEX, REV, LIMIT since 6.2.0; REV reverses ties (Redis docs)"
     url: "https://redis.io/docs/latest/commands/zrange/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "ZADD command: score is a double, integers exact up to 2^53, existing member gets a new score (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/zadd/"
+    verifiedOn: "2026-10-21"
+  - title: "ZREVRANGE: deprecated as of Redis 6.2.0 (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/zrevrange/"
+    verifiedOn: "2026-10-21"
   - title: "Secondary indexing (Redis docs)"
     url: "https://redis.io/docs/latest/develop/clients/patterns/indexes/"
     verifiedOn: "2026-10-20"
@@ -33,13 +54,17 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A sorted set is a [set](card:sets) where every member also has a score, a floating-point number. Members are still unique, but Redis keeps them ordered by score, from lowest to highest. When two members have the same score, Redis orders them by name. Sorted sets are often called ZSETs, which is why their commands start with Z.
+
 ## Why it exists
 
-A leaderboard in SQL means ORDER BY on every read. A sorted set keeps members in score order as they change, so "top 3" and "my rank" are cheap.
+A leaderboard of merchants by today's payment volume, built in SQL, runs `ORDER BY volume DESC LIMIT 10` on every page view, and the database sorts again each time. A sorted set keeps the order up to date as each payment comes in, so "top 10" and "where is merchant 42?" are read straight from an already ordered structure.
 
 ## How it works
 
-Merchants ranked by payment volume today (key `rank:merchants:2026-10-20`):
+Merchants ranked by payment volume today (key `rank:merchants:2026-10-21`):
 
 | Member | Score | ZREVRANK (0 = top) |
 |---|---|---|
@@ -47,24 +72,64 @@ Merchants ranked by payment volume today (key `rank:merchants:2026-10-20`):
 | merchant:8 | 75500 | 1 |
 | merchant:17 | 75500 | 2 |
 
-- Equal scores sort by member name as bytes ("merchant:17" before "merchant:8"); REV flips that too.
-- Sliding-window limits use a sorted set too: [rate limiting](card:rate-limiting-with-redis); delayed jobs: [queues](card:queues-with-redis).
+1. Each payment runs `ZINCRBY key amount member`. Redis adds to the member's score, or creates the member with that score.
+2. Redis moves the member to its new place in the order in O(log n) steps, so the set is never out of order.
+3. `ZRANGE key 0 9 REV WITHSCORES` walks the ordered structure from the top and returns the first ten with their scores.
+4. `ZREVRANK key member` returns the member's position counted from the highest score, starting at 0.
+
+So the key is: you pay a little on every write, and reads need no sorting.
 
 ## Example
 
-```text
-ZINCRBY rank:merchants:2026-10-20 500 merchant:42   -- "98500"
-ZRANGE rank:merchants:2026-10-20 0 2 REV WITHSCORES -- top 3 with scores
-ZREVRANK rank:merchants:2026-10-20 merchant:17      -- 2
-ZRANGE rank:merchants:2026-10-20 50000 +inf BYSCORE -- score 50000 and up
+Payment 9001 adds ₹500 to merchant 42's volume, then the dashboard reads the top two and merchant 17's rank.
+
+```bash
+redis-cli ZADD rank:merchants:2026-10-21 97500 merchant:42 75500 merchant:8 75500 merchant:17
+redis-cli ZINCRBY rank:merchants:2026-10-21 500 merchant:42
+redis-cli ZRANGE rank:merchants:2026-10-21 0 1 REV WITHSCORES
+redis-cli ZREVRANK rank:merchants:2026-10-21 merchant:17
+redis-cli ZRANGE rank:merchants:2026-10-21 0 0
 ```
+
+```text output
+(integer) 3
+"98000"
+1) "merchant:42"
+2) "98000"
+3) "merchant:8"
+4) "75500"
+(integer) 2
+1) "merchant:17"
+```
+
+What to notice:
+
+- `ZINCRBY` returned the new score, 98000, so the app does not need a second read.
+- With `REV`, merchant:8 comes before merchant:17 although both have 75500. Equal scores sort by name, and REV flips that order too.
+- Without `REV`, `ZRANGE 0 0` returned the lowest member, merchant:17, not the leader.
+- One key per day (`...:2026-10-21`) gives a fresh board each day; old boards can expire.
+
+## Rules and defaults
+
+- **Score type:** a double-precision floating-point number. Integers up to 2^53 are stored exactly, so a Unix time in milliseconds works as a score.
+- **One range command (Redis 6.2+):** `ZRANGE` takes `BYSCORE`, `BYLEX`, `REV` and `LIMIT`. The older `ZREVRANGE`, `ZRANGEBYSCORE` and `ZREVRANGEBYSCORE` are deprecated.
+- **Inside:** a skip list (a sorted linked list with extra "express" links that skip ahead) keeps the order, and a hash table maps each member to its score.
+- **Ranks:** `ZRANK` counts from the lowest score, `ZREVRANK` from the highest; both start at 0.
+
+## Common mistakes
+
+- **"A sorted set can hold the same member twice with two scores."** Members are unique. ZADD on an existing member replaces its score; use a different member name, such as the payment id, for each entry.
 
 ## Interview Qs
 
 ### How would you build a real-time leaderboard?
 
-One sorted set per board. ZINCRBY the member's score on each event; read the top N with ZRANGE ... REV WITHSCORES and a user's place with ZREVRANK. Each update is O(log n).
+One sorted set per board, for example per day. ZINCRBY the member's score on each event. Read the top N with ZRANGE ... REV WITHSCORES and a member's place with ZREVRANK. Each update is O(log n), so it stays fast with millions of members.
 
-### Why is a sorted set fast for both updates and ranges?
+### Why is a sorted set fast for both updates and range reads?
 
-It keeps a hash table for member-to-score lookups and a skip list kept in score order. An update repositions one member in O(log n); a range read walks the already ordered list.
+It keeps two structures. A hash table finds a member's score in one step. A skip list keeps members in score order, so an update moves one member in O(log n) and a range read walks the already ordered list.
+
+### What else can a sorted set do besides leaderboards?
+
+Any score works as an index. With a timestamp as the score it becomes a time-ordered index: you will use this for sliding-window [rate limiting](card:rate-limiting-with-redis) and for delayed jobs in [queues](card:queues-with-redis).

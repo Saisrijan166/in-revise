@@ -5,27 +5,41 @@ title: Strings
 topic: data-types
 level: beginner
 heat: 3
-hook: "A string is one key mapped to one blob of bytes: text, a number, serialised JSON or even an image."
+hook: "A Redis string is one key holding one value of plain bytes: a status word, a number, a JSON text or even an image."
 points:
-  - { k: "Binary-safe", v: "raw bytes, no encoding rules; any data fits" }
-  - { k: "Max value size", v: "512 MB by default (Redis Open Source 8.10)", kind: default }
-  - { k: "Speed", v: "most commands are O(1)", kind: plus }
-  - { k: "Range commands", v: "GETRANGE and SETRANGE are O(n) on big values", kind: minus }
-  - { k: "Structured data", v: "one field changes often? a hash or JSON avoids rewriting it all" }
+  - { k: "Binary-safe", v: "Redis stores the bytes exactly as sent, so text, numbers, JSON or an image all fit" }
+  - { k: "Max size (Redis 8.10)", v: "one string value can be up to 512 MB by default, set by proto-max-bulk-len", kind: default }
+  - { k: "SET replaces", v: "SET overwrites whatever the key held, of any type, and also removes the key's old expiry" }
+  - { k: "SET NX / XX", v: "NX writes only if the key is missing; XX writes only if it already exists" }
+  - { k: "MGET", v: "reads many keys in one network round trip; a missing key comes back as nil", kind: plus }
+  - { k: "Whole value only", v: "to change one field of a JSON string, you rewrite the whole value", kind: minus }
 trap:
-  wrong: "MSET writes the keys one by one, so a reader can see half of the update."
-  right: "MSET is atomic: no client sees some keys updated and others not. MSETNX writes only if none of the keys exist."
-sayIt: "A Redis string is a binary-safe value up to 512 MB. I use it for cached values, flags and counters, with SET options like EX and NX, and MGET to read many keys in one round trip."
+  wrong: "MSET writes the keys one by one, so another client can see some new values and some old ones."
+  right: "MSET is one atomic command: other clients see either none of the new values or all of them."
+  why: "MSET takes many keys and looks like a loop of SET calls, and separate SETs really can be seen half done."
+sayIt: "A Redis string is a binary-safe value of up to 512 MB, used for cached values, flags and counters. SET takes EX for expiry and NX or XX for conditional writes, and MGET reads many keys in one round trip."
+cheat:
+  idea: "A string is the simplest Redis value: one key holds one blob of bytes, such as a status, a number or JSON text. SET writes it; GET reads it."
+  code: |
+    SET payment:9001:status PENDING EX 300   # write, expire in 300 s
+    GET payment:9001:status                  # "PENDING"
+  remember: "One key, one whole value: changing one field of a JSON string means rewriting all of it; a hash changes one field."
+buildsOn: [what-is-redis, key-design]
+scenarios:
+  - q: "payment:9001:status expired a minute ago. The code now runs SET payment:9001:status PAID XX. What is the reply, and does the key exist afterwards?"
+    a: "The reply is nil and the key still does not exist. XX writes only if the key exists, and an expired key counts as missing. Use a plain SET, or SET ... NX, when the code must create the key."
+  - q: "A dashboard needs the status of 50 payments. Should it call GET 50 times or MGET once?"
+    a: "MGET once. Each GET is a separate network round trip, and the round trip usually costs more than the command itself. MGET returns all 50 values in one reply, with nil for any key that is missing."
 confusedWith: [string-vs-hash-vs-json]
 tags: [strings, set, get]
-visual: table
+visual: code
 sources:
   - title: "Redis strings (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/strings/"
     verifiedOn: "2026-10-20"
-  - title: "SET command (Redis docs)"
+  - title: "SET command: options, old TTL discarded, IFEQ since 8.4.0 (Redis docs)"
     url: "https://redis.io/docs/latest/commands/set/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "MSET command (Redis docs)"
     url: "https://redis.io/docs/latest/commands/mset/"
     verifiedOn: "2026-10-20"
@@ -34,42 +48,81 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A string is the simplest kind of value in Redis: one key holds one sequence of bytes. Redis strings are binary-safe, which means Redis stores the bytes exactly as you send them and never checks whether they are text. So a string can hold a status word like `PENDING`, a number, a JSON text or even an image, up to 512 MB. You write it with `SET` and read it with `GET`.
+
 ## Why it exists
 
-Most caching is "give me the value for this key". The string is the simplest value Redis has, and every other trick (counters, bits, locks) starts from it.
+Most caching is "give me the value for this key". The payment service reads the status of payment 9001 and the config of merchant 42 on every request. Without Redis, each read goes to PostgreSQL. With a string per key, the service stores the value once and reads it back in one fast command. Counters, flags and simple locks are also strings, so this is the type you will use most.
 
 ## How it works
 
-| You store | Commands | Where it goes deeper |
+| You store | Commands | Taught in |
 |---|---|---|
-| Text, JSON, HTML | SET, GET, MGET, MSET | [Cache-aside](card:cache-aside) |
-| A number | INCR, INCRBY | [One command is atomic](card:single-command-atomicity) |
-| Bits or small integers | SETBIT, BITFIELD | [Bitmaps](card:bitmaps-hyperloglog) |
+| Text, JSON, a status | SET, GET, MGET, MSET | this concept |
+| A number you add to | INCR, INCRBY | [Atomic commands](card:single-command-atomicity) |
+| One bit per user id | SETBIT, BITCOUNT | [Bitmaps](card:bitmaps-hyperloglog) |
 
-- SET overwrites any old value, whatever its type.
-- SET NX as a lock: see [distributed locks](card:distributed-locks); expiry rules: [TTL](card:ttl-and-expiration).
+1. `SET key value` creates the key, or replaces its old value whatever type it was. It also removes any expiry the key had.
+2. Options change the write: `EX 300` makes the key expire after 300 seconds, `NX` writes only if the key does not exist yet, and `XX` writes only if it does.
+3. `GET key` returns the value, or nil if the key does not exist.
+4. `MGET` reads several keys in one command, and `MSET` writes several, so you pay for one network round trip instead of many.
+
+So the key is: one key, one whole value, written and read in one step.
 
 ## Example
 
-```text
-SET payment:PAY101 PENDING EX 300     -- OK, expires in 300 s
-SET payment:PAY101 SUCCESS NX         -- (nil): key exists, NX refuses
-SET payment:PAY101 SUCCESS XX GET     -- "PENDING" (old value), now SUCCESS
-MGET payment:PAY101 payment:PAY102    -- 1) "SUCCESS" 2) (nil)
+The payment service stores the status of payment 9001 and caches merchant 42's config as a JSON text.
+
+```bash
+redis-cli SET payment:9001:status PENDING EX 300
+redis-cli SET payment:9001:status PAID NX
+redis-cli SET payment:9001:status PAID XX GET
+redis-cli TTL payment:9001:status
+redis-cli SET merchant:42:config '{"name":"Asha Stores","upiEnabled":true}' EX 600
+redis-cli MGET payment:9001:status merchant:42:config payment:9002:status
 ```
 
-## Defaults
+```text output
+OK
+(nil)
+"PENDING"
+(integer) -1
+OK
+1) "PAID"
+2) "{\"name\":\"Asha Stores\",\"upiEnabled\":true}"
+3) (nil)
+```
 
-| What | Default | Where |
-|---|---|---|
-| Largest string value | 512 MB (`proto-max-bulk-len`) | Redis Open Source 8.10 |
+What to notice:
+
+- `NX` refused the second write and returned nil, because the key already existed. This "only if missing" write is the base of the [Redis lock](card:distributed-locks) you will see later.
+- `XX GET` wrote `PAID` and returned the old value, `PENDING`, in the same command.
+- `TTL` returned -1, which means "no expiry". The third SET removed the 300-second expiry from the first. [TTL and key expiry](card:ttl-and-expiration) covers this in full.
+- `MGET` returned nil for `payment:9002:status`, which does not exist. It does not fail.
+
+## Rules and defaults
+
+- **Size limit:** a string value can be up to 512 MB by default (`proto-max-bulk-len`, Redis Open Source 8.10).
+- **SET overwrites any type:** if the key held a hash or a list, SET replaces it with a string.
+- **Conditional writes:** `NX` and `XX` exist since Redis 2.6.12. Since Redis 8.4, `IFEQ value` writes only if the current value equals the one you give.
+- **MSET is atomic:** no client sees some keys written and others not. `MSETNX` writes all keys only if none of them exists.
+
+## Not to be confused with
+
+A string holds one whole value, so a JSON text in a string must be rewritten whole to change one field. A [hash](card:hashes) holds separate fields under one key, so you change one field alone. A [JSON document](card:json-and-query-engine) can also change one part of a nested object. Rule: string = the whole value at once; hash or JSON = one field at a time.
 
 ## Interview Qs
 
 ### What can a Redis string hold?
 
-Any bytes up to 512 MB by default: text, numbers, serialised JSON, even an image. It is binary-safe, so Redis never interprets the bytes unless you call a number or bit command.
+Any bytes up to 512 MB by default: text, a number, serialised JSON or an image. It is binary-safe, so Redis does not interpret the bytes. Only number or bit commands, such as INCR or SETBIT, read them as a number or as bits.
 
-### Why use MGET instead of many GETs?
+### Why use MGET instead of many GET calls?
 
-MGET reads many keys in one round trip, and atomically. Missing keys, or keys that are not strings, come back as nil.
+MGET reads many keys in one command, so you pay for one network round trip instead of one per key, and the round trip usually costs more than the command itself. Missing keys, or keys that are not strings, come back as nil instead of an error.
+
+### What does SET with NX do, and where is it used?
+
+SET key value NX writes only if the key does not exist and returns nil otherwise, as one atomic step. Two clients racing on the same key cannot both succeed, so it is used for "first one wins" flags and, with an expiry, for simple locks.

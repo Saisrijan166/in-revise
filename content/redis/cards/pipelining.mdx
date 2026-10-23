@@ -5,67 +5,137 @@ title: Pipelining and Round Trips
 topic: atomicity
 level: intermediate
 heat: 2
-hook: "Pipelining sends many commands at once and reads all replies after: fewer round trips, but not atomic."
+hook: "Pipelining sends many commands without waiting for each reply, then reads all the replies: far fewer round trips, but not atomic."
 points:
-  - { k: "Round trip", v: "each request waits for the network both ways; many small calls add up" }
-  - { k: "Pipeline", v: "send a batch without waiting, then read the replies in order", kind: plus }
-  - { k: "Not atomic", v: "other clients' commands can run between yours", kind: minus }
-  - { k: "Order of choice", v: "MGET/MSET first, then a pipeline, then Lua if a reply feeds the next" }
-  - { k: "Batch size", v: "the server holds replies in memory; send about 10k, read, repeat" }
+  - { k: "Round trip", v: "normally each command waits for its reply to come back over the network before the next one is sent" }
+  - { k: "Pipeline", v: "the client sends a batch of commands without waiting, then reads all the replies in the same order", kind: plus }
+  - { k: "Not atomic", v: "other clients' commands can run between the commands of your pipeline", kind: minus }
+  - { k: "No chaining", v: "a later command in a pipeline cannot use an earlier reply; that needs a Lua script", kind: minus }
+  - { k: "Batch size", v: "Redis keeps the replies in memory until it sends them, so send batches of about 10k commands" }
 trap:
-  wrong: "A pipeline is atomic: all its commands succeed or none do."
-  right: "A pipeline only saves round trips. Others can run in between; for atomicity use MULTI/EXEC or Lua."
-sayIt: "Pipelining cuts round trips by sending a batch before reading the replies. It is not atomic and cannot use one reply in the next command; for that I use MULTI/EXEC or a Lua script."
-confusedWith: []
+  wrong: "A pipeline is atomic: all its commands succeed together or none do."
+  right: "A pipeline only saves round trips. Other clients can run in between, and each command succeeds or fails alone; for atomicity use MULTI/EXEC or Lua."
+  why: "Pipelines and transactions both send a batch of commands and get a list of replies back, and some client libraries offer both through similar calls, so they look alike."
+sayIt: "Pipelining cuts round trips by sending a batch of commands before reading the replies. It is not atomic and cannot feed one reply into the next command; for that I use MULTI/EXEC or a Lua script. If MGET or MSET fits, I use that first."
+cheat:
+  idea: "Pipelining sends many commands without waiting for each reply, then reads all the replies in order. It saves round trips and system calls, but other clients' commands can still run in between."
+  remember: "Not atomic, and one reply cannot feed the next command: use MULTI/EXEC or Lua for that."
+buildsOn: [what-is-redis, transactions-multi-exec, lua-and-functions]
+scenarios:
+  - q: "The payment service is 2 ms away from Redis and must read the status of 1,000 payments, one GET each. Roughly how long does it take with and without a pipeline?"
+    a: "Without a pipeline, about 2 seconds: 1,000 round trips of 2 ms, almost all of it waiting on the network. In one pipeline it is close to a single round trip plus the time Redis needs to run the commands, because the client does not wait between commands."
+  - q: "You pipeline GET payment:9001 and then a SET whose value depends on that GET. Does it work?"
+    a: "No. In a pipeline the client sends every command before it reads any reply, so the SET is already sent before the GET's value is known. Use a Lua script, or read first and send the SET in a later call."
+  - q: "Which do you choose to read 500 payment statuses stored as strings: a pipeline of 500 GETs, or one MGET?"
+    a: "One MGET. It is a single command for many keys, so it needs one round trip and Redis parses one command instead of 500. Use a pipeline when the commands differ, such as a GET and a TTL per payment."
+confusedWith: [pipelining-vs-multi-exec-vs-lua]
 tags: [pipelining, performance, latency]
-visual: table
+visual: flow
 sources:
-  - title: "Redis pipelining (Redis docs)"
+  - title: "Redis pipelining: RTT, batch size, system calls, pipelining vs scripting (Redis docs)"
     url: "https://redis.io/docs/latest/develop/using-commands/pipelining/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Diagnosing latency issues (Redis docs)"
     url: "https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/latency/"
     verifiedOn: "2026-10-20"
-  - title: "Pipelining (Spring Data Redis 4.1 reference)"
+  - title: "Pipelining: executePipelined, callback must return null (Spring Data Redis 4.1 reference)"
     url: "https://docs.spring.io/spring-data/redis/reference/redis/pipelining.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Pipelines and transactions: a redis-py pipeline runs as a MULTI/EXEC transaction by default (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/clients/redis-py/transpipe/"
+    verifiedOn: "2026-10-21"
   - title: "Scripting with Lua: EVALSHA in the context of pipelining (Redis docs)"
     url: "https://redis.io/docs/latest/develop/programmability/eval-intro/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A round trip is the time a command takes to travel from your app to Redis plus the time its reply takes to come back. Normally a client sends one command and waits for the reply before it sends the next. Pipelining means the client sends many commands without waiting, and then reads all the replies, in the same order, at the end. It is a way to save network time; it does not make the commands one atomic step.
 
 ## Why it exists
 
-Redis runs most commands in under a microsecond, but each reply waits for the network. With a 250 ms round trip, one-at-a-time calls manage only 4 requests a second.
+Redis runs a GET very quickly, but every reply still has to cross the network. Reading 1,000 payment statuses one by one, 1 ms away from Redis, takes about a second, and nearly all of it is waiting. The Redis docs give an extreme case: with a 250 ms round trip, a client can make only 4 requests a second, however fast the server is. With pipelining the client pays roughly one round trip per batch instead of one per command.
 
 ## How it works
 
-<Compare id="pipelining-vs-multi-exec-vs-lua" />
+<Mermaid
+  alt="Without pipelining, the app sends GET payment:9001, waits for the reply, then sends GET payment:9002 and waits again: one round trip per command. With pipelining, the app sends GET payment:9001, GET payment:9002 and GET payment:9003 one after another, and Redis sends the three replies back together: one round trip for the batch."
+  chart={`sequenceDiagram
+  participant A as App
+  participant R as Redis
+  Note over A,R: Without pipelining, one round trip per command
+  A->>R: GET payment:9001
+  R-->>A: PAID
+  A->>R: GET payment:9002
+  R-->>A: PENDING
+  Note over A,R: With pipelining, one round trip per batch
+  A->>R: GET 9001, GET 9002, GET 9003
+  R-->>A: PAID, PENDING, FAILED`}
+/>
 
-- Fewer `read()` and `write()` system calls too, so throughput can rise to about 10 times.
-- In Spring, `executePipelined` runs a callback in one pipeline ([Spring Data Redis](card:spring-data-redis)).
+1. The client writes several commands into the connection, one after another, without reading anything.
+2. Redis reads them, often many in a single `read()` system call (a request to the operating system), and runs them one by one in the order sent. Commands from other clients may run between them.
+3. Redis keeps the replies in memory and sends them back, often many in a single `write()` call.
+4. The client reads the replies in the same order as its commands.
+
+So a pipeline saves round trips and system calls, but the commands stay separate.
 
 ## Example
 
+The payment service reads the status and the remaining TTL of three payments in one round trip:
+
 ```java
-// Status and TTL of many payments: 2 commands each, 1 round trip
+List<String> ids = List.of("9001", "9002", "9003");
 List<Object> replies = stringRedisTemplate.executePipelined(
-    (RedisCallback<Object>) conn -> {
-        StringRedisConnection c = new DefaultStringRedisConnection(conn);
-        for (String id : List.of("PAY101", "PAY102", "PAY103")) {
-            c.get("payment:" + id);
+    (RedisCallback<Object>) connection -> {
+        StringRedisConnection c = new DefaultStringRedisConnection(connection);
+        for (String id : ids) {
+            c.get("payment:" + id);   // queued on the connection, no waiting
             c.ttl("payment:" + id);
         }
-        return null; // must be null: the replies come back as the list
+        return null;                  // must be null: the replies come back as the list
     });
+System.out.println(replies);
 ```
+
+```text output
+[PAID, -1, PENDING, 600, FAILED, -1]
+```
+
+What to notice:
+
+- Inside the callback, `c.get` and `c.ttl` return nothing useful: their replies arrive only in the `replies` list, after the whole batch.
+- The list holds one reply per command, in the order sent: a status, then the seconds left before expiry (it counts down), where -1 means the key has no expiry.
+- The callback must return `null`; Spring discards it and returns the pipeline's replies instead.
+- Six commands cost about one round trip. Without `executePipelined`, the same loop would wait six times.
+
+## Rules and defaults
+
+- **One command first:** if a single command for many keys fits, such as MGET or MSET, use it instead of a pipeline. It is one command and one round trip.
+- **Batch size:** Redis holds every reply in memory until it sends it, so send large jobs in batches, such as 10,000 commands, then read and send the next batch.
+- **Not atomic:** commands from other clients can run between yours. Put MULTI and EXEC inside the pipeline if you need both speed and isolation.
+- **Each command alone:** an error in one pipelined command does not stop the others.
+- **Scripts in a pipeline:** a NOSCRIPT error cannot be handled in the middle of a pipeline, so run SCRIPT LOAD first or send EVAL ([Lua scripts](card:lua-and-functions)).
+
+## Not to be confused with
+
+A pipeline is a way for the client to send commands: it saves network time and gives no isolation. A [MULTI/EXEC transaction](card:transactions-multi-exec) is a server guarantee: the queued commands run with no other client in between. The two combine well. Rule: a pipeline saves time; MULTI/EXEC keeps commands together.
+
+## Common mistakes
+
+- **"Pipelining makes a slow command faster."** It removes network waiting only. A command that is slow on the server, such as KEYS on a big database, still blocks every client.
 
 ## Interview Qs
 
 ### What is pipelining and when would you use it?
 
-Sending many commands without waiting for each reply, then reading all replies together. Use it for bulk loads or many independent reads and writes, when one variadic command such as MGET cannot do the job.
+The client sends many commands without waiting for each reply, then reads all the replies together. Use it for bulk loads and for many independent reads or writes, when one multi-key command such as MGET cannot do the job.
 
 ### Is a pipeline the same as MULTI/EXEC?
 
-No. A pipeline only batches network traffic; other clients' commands can run between yours. MULTI/EXEC runs the queued commands with no other client in between.
+No. A pipeline only batches network traffic; other clients' commands can run between yours, and you get no isolation. MULTI/EXEC runs the queued commands with no other client in between. You can send a MULTI/EXEC block inside a pipeline to get both.
+
+### Why does pipelining help even when Redis runs on the same machine?
+
+Each command sent alone costs a `read()` and a `write()` system call, and switching into the operating system is slow compared with running the command. A pipeline lets Redis read many commands in one call and write many replies in one call. The Redis docs show throughput rising up to about ten times.

@@ -5,24 +5,41 @@ title: Queues and Messaging with Redis
 topic: coordination
 level: intermediate
 heat: 2
-hook: "A list is a simple job queue, a sorted set delays jobs, a stream adds acks and replay; Pub/Sub keeps nothing."
+hook: "A list is a simple job queue, a sorted set holds jobs until their time comes, and a stream adds acknowledgements and replay. Pub/Sub keeps nothing."
 points:
-  - { k: "Simple queue", v: "LPUSH to add a job, BRPOP to wait for and take one" }
-  - { k: "Reliable queue", v: "BLMOVE into a processing list; LREM when done", kind: plus }
-  - { k: "Delayed jobs", v: "sorted set scored by run time; take the due ones" }
-  - { k: "Streams", v: "consumer groups, acks, retries and replay" }
-  - { k: "Failover", v: "async replication: a new primary may miss recent jobs", kind: minus }
+  - { k: "Job queue", v: "the API adds a job and replies at once; a worker process does the slow part later" }
+  - { k: "Simple queue", v: "LPUSH adds a job to a list; a worker's BRPOP waits until a job arrives and takes it" }
+  - { k: "Reliable queue", v: "BLMOVE moves the job into the worker's processing list; LREM removes it only when done", kind: plus }
+  - { k: "Delayed jobs", v: "a sorted set scored by run time; a worker claims a due job with ZREM, and only a reply of 1 wins" }
+  - { k: "Streams", v: "consumer groups, acknowledgements, retries and replay, when a list is not enough" }
+  - { k: "Failover", v: "replication is asynchronous, so a new primary can miss the most recent jobs", kind: minus }
 trap:
   wrong: "Use Pub/Sub as a job queue."
-  right: "Pub/Sub keeps nothing: a worker that is offline or crashes misses the job. Use a list or a stream."
-sayIt: "For a simple job queue I use a list: LPUSH and BRPOP, or BLMOVE into a processing list so a crash loses nothing. For acks, retries and replay I use a stream with consumer groups."
-confusedWith: []
+  right: "Pub/Sub keeps nothing: a worker that is offline or crashes misses the job for good. Use a list or a stream."
+  why: "Pub/Sub has PUBLISH and SUBSCRIBE, which sound like a queue, and in a demo with the worker running every message arrives."
+sayIt: "For a simple job queue I use a list: LPUSH to add, and BLMOVE into a processing list so a crash loses nothing. For delayed jobs a sorted set scored by run time; for acks, retries and replay a stream with consumer groups."
+cheat:
+  idea: "A Redis list can be a job queue: the API pushes a job and replies at once; a worker takes it later, keeping a copy until done."
+  flow: "LPUSH → BLMOVE to processing list → do the job → LREM"
+  remember: "Pub/Sub is no queue: it keeps nothing, so an offline worker misses the job."
+buildsOn: [lists, sorted-sets, streams]
+scenarios:
+  - q: "A worker takes job 9001 with BRPOP, then crashes before sending the receipt. Where is the job now?"
+    a: "Nowhere. BRPOP removed it from the list, and the worker died holding the only copy. With BLMOVE the job would still sit in the worker's processing list, and a watcher could put it back on the queue."
+  - q: "Two workers both see check:9001 as due in the delayed set and both call ZREM jobs:delayed check:9001. Which one runs it?"
+    a: "Only the one whose ZREM returns 1. Redis runs the two commands one after the other, so the second ZREM finds nothing to remove and returns 0, and that worker skips the job."
+  - q: "Five services must each read every payment event, and new services must replay the last 30 days. Redis Streams or Kafka?"
+    a: "Kafka. It keeps events on disk for as long as you configure and suits long replay by many services. Redis streams live in memory, are usually capped with MAXLEN, and replicate asynchronously."
+confusedWith: [pub-sub-vs-lists-vs-streams]
 tags: [queue, list, stream, pubsub]
-visual: table
+visual: flow
 sources:
   - title: "LMOVE, pattern: reliable queue (Redis commands)"
     url: "https://redis.io/docs/latest/commands/lmove/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "BLMOVE (Redis commands, since 6.2.0; replaces BRPOPLPUSH)"
+    url: "https://redis.io/docs/latest/commands/blmove/"
+    verifiedOn: "2026-10-21"
   - title: "Redis Pub/Sub, delivery semantics (Redis docs)"
     url: "https://redis.io/docs/latest/develop/pubsub/"
     verifiedOn: "2026-10-20"
@@ -37,42 +54,85 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A job queue is a waiting line of work. One part of the system, the producer, adds jobs; separate worker processes take them off and do them. Redis has no queue type, but a [list](card:lists) works as one, a [sorted set](card:sorted-sets) can hold jobs until a set time, and a [stream](card:streams) adds acknowledgements. This concept shows when to use each.
+
 ## Why it exists
 
-Slow work, such as emailing a payment receipt, should not hold up the API reply. A queue lets the API answer now and a worker do the job later.
+When payment 9001 succeeds, the service must email a receipt, which can take seconds. If the API sends the email before replying, the user waits, and a slow mail server makes the payment API slow too. With a queue, the API adds "send receipt for 9001" and replies at once. A worker sends the email later, and a crashed worker can be retried without the user noticing.
 
 ## How it works
 
-<Compare id="pub-sub-vs-lists-vs-streams" />
+<Mermaid
+  alt="The payment API pushes job 9001 onto the jobs:receipts list. Worker w1 moves it atomically into its own list jobs:processing:w1, sends the receipt, and then removes the job from its processing list."
+  chart={`flowchart LR
+  API[Payment API] -- "1. LPUSH 9001" --> Q[(jobs:receipts)]
+  Q -- "2. BLMOVE" --> P[(jobs:processing:w1)]
+  P --> W[Worker w1: 3. send receipt]
+  W -- "4. LREM 9001" --> P`}
+/>
 
-- BRPOP removes the job at once; if the worker then crashes, the job is gone. BLMOVE keeps a copy.
-- A watcher re-queues jobs left in a processing list too long.
+1. The API adds the job to the left end of the list with `LPUSH jobs:receipts 9001`.
+2. A worker waits with `BLMOVE jobs:receipts jobs:processing:w1 RIGHT LEFT 0`. When a job arrives, Redis takes it from the right end and puts it in the worker's processing list in one atomic step.
+3. The worker does the job. If it crashes now, the job is still in `jobs:processing:w1`.
+4. When done, the worker removes the job with `LREM jobs:processing:w1 1 9001`.
+5. A separate watcher puts back on the queue any job that has stayed in a processing list too long.
+
+The simpler `BRPOP` removes the job outright, so a crash between steps 2 and 4 loses it. That is why step 2 uses `BLMOVE`.
 
 ## Example
 
-```text
--- payment PAY101 succeeded: queue its receipt
-LPUSH jobs:receipts PAY101                            -> (integer) 1
--- worker w1 waits for a job and keeps it in its processing list
-BLMOVE jobs:receipts jobs:processing:w1 RIGHT LEFT 0  -> "PAY101"
--- ... receipt sent ...
-LREM jobs:processing:w1 1 PAY101                      -> (integer) 1
--- delayed: check UPI status at 10:05 IST on 20-10-2026
-ZADD jobs:delayed 1792470900 check:PAY101             -> (integer) 1
-ZRANGE jobs:delayed -inf 1792470900 BYSCORE LIMIT 0 10
-ZREM jobs:delayed check:PAY101                        -> (integer) 1, so w1 runs it
+A receipt job goes through the reliable queue, then a status check is scheduled for later in a sorted set.
+
+```bash
+redis-cli LPUSH jobs:receipts 9001
+redis-cli BLMOVE jobs:receipts jobs:processing:w1 RIGHT LEFT 0
+redis-cli LREM jobs:processing:w1 1 9001
+# check payment 9001 at 10:05 IST on 20-10-2026 (Unix time 1792470900)
+redis-cli ZADD jobs:delayed 1792470900 check:9001
+redis-cli ZRANGE jobs:delayed -inf 1792470900 BYSCORE LIMIT 0 10
+redis-cli ZREM jobs:delayed check:9001   # worker w1
+redis-cli ZREM jobs:delayed check:9001   # worker w2, a moment later
 ```
+
+```text output
+(integer) 1
+"9001"
+(integer) 1
+(integer) 1
+1) "check:9001"
+(integer) 1
+(integer) 0
+```
+
+What to notice:
+
+- `BLMOVE` returns the job, `"9001"`, and the job now waits in `jobs:processing:w1` until `LREM` returns 1.
+- The delayed job's score is its run time. `ZRANGE ... BYSCORE` up to now lists only jobs that are due.
+- Both workers saw the due job, but only w1's `ZREM` returned 1, so only w1 runs it. Skip the `ZREM` check and both would run it.
+
+## Rules and defaults
+
+- **BLMOVE:** Redis 6.2+. It replaces the deprecated `BRPOPLPUSH`; `BLMOVE ... RIGHT LEFT` does the same thing.
+- **Timeout 0:** the worker blocks until a job arrives, with no time limit.
+- **At least once:** a job that is retried after a crash may run twice, so make each job safe to repeat, for example by checking whether receipt 9001 was already sent.
+- **Kafka instead:** when events must stay on disk for a long time and many services replay them. Redis keeps streams in memory.
+
+## Not to be confused with
+
+A list hands each job to one worker and keeps it until taken. A stream keeps every entry, gives each one to one worker per consumer group, and tracks which entries were acknowledged. [Pub/Sub](card:pub-sub) sends each message to whoever is subscribed at that moment and keeps nothing. Rule: list for simple jobs, stream for acks and replay, Pub/Sub only for live notices.
 
 ## Interview Qs
 
 ### How do you build a job queue with Redis?
 
-Producers LPUSH jobs onto a list; workers block on BRPOP. To survive crashes, a worker uses BLMOVE to move each job into its processing list and LREMs it when done.
+Producers `LPUSH` jobs onto a list, and workers block on `BRPOP`. To survive crashes, each worker uses `BLMOVE` to move a job into its own processing list and `LREM`s it when done, while a watcher re-queues jobs stuck there too long.
 
 ### How do you run a job later?
 
-Add it to a sorted set with the run time as score. Workers read jobs due up to now with ZRANGE ... BYSCORE and claim each with ZREM: only the worker that gets 1 runs it.
+Add it to a sorted set with its run time as the score. Workers read due jobs with `ZRANGE ... BYSCORE` up to now and claim each with `ZREM`; only the worker that gets 1 runs it.
 
 ### When would you choose Kafka over Redis Streams?
 
-When events must stay on disk for a long time or be replayed by many services. Redis streams live in memory, are usually capped with MAXLEN, and replicate asynchronously.
+When events must stay on disk for a long time or be replayed by many services. Redis streams live in memory, are usually capped with `MAXLEN`, and replicate asynchronously, so they suit short-lived work queues better than a long event history.

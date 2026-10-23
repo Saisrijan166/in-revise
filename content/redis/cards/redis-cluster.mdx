@@ -5,85 +5,138 @@ title: Redis Cluster and Hash Slots
 topic: operations
 level: intermediate
 heat: 3
-hook: "Cluster splits keys into 16384 hash slots spread over primaries; each has replicas, and clients follow redirects."
+hook: "Redis Cluster splits keys over several primaries: each key falls into one of 16384 hash slots, and each primary owns a range of slots."
 points:
-  - { k: "Slot", v: "CRC16(key) mod 16384; each primary owns a range of slots" }
-  - { k: "Hash tag", v: "only the text in {} is hashed: {merchant:42}:* keys share a slot", kind: plus }
-  - { k: "Multi-key", v: "MSET, MULTI/EXEC or Lua across slots fails with CROSSSLOT", kind: minus }
-  - { k: "MOVED / ASK", v: "slot moved for good / only this command, during resharding" }
-  - { k: "Consistency", v: "async replication, so acknowledged writes can be lost", kind: minus }
+  - { k: "Hash slot", v: "slot = CRC16(key) mod 16384, and each primary owns a range of the 16384 slots" }
+  - { k: "Hash tag", v: "only the part inside {} is hashed, so {merchant:42}:config and {merchant:42}:limits share a slot", kind: plus }
+  - { k: "One slot per command", v: "a command, MULTI/EXEC or Lua script whose keys are in different slots fails with CROSSSLOT", kind: minus }
+  - { k: "MOVED / ASK", v: "MOVED: the slot lives elsewhere now, update the map; ASK: only this command goes there, mid-move" }
+  - { k: "Built-in failover", v: "each primary has replicas, and the cluster promotes one when its primary fails; no Sentinel", kind: plus }
+  - { k: "Lost writes", v: "replication is still asynchronous, so a failover can lose acknowledged writes", kind: minus }
 trap:
   wrong: "Redis Cluster uses consistent hashing on a ring."
-  right: "It uses fixed hash slots: CRC16(key) mod 16384. Adding a node moves whole slots to it."
-sayIt: "Cluster shards keys over 16384 hash slots. Each primary owns a slot range and has replicas for failover. Keys used together need a hash tag, or multi-key commands fail with CROSSSLOT."
+  right: "It uses fixed hash slots: CRC16(key) mod 16384. Adding a node means moving some whole slots to it."
+  why: "Many distributed caches and databases do use a consistent-hashing ring, so people assume Redis Cluster works the same way."
+sayIt: "Redis Cluster shards keys over 16384 hash slots, CRC16 of the key mod 16384. Each primary owns a slot range and has replicas for failover. Keys used in one command need the same hash tag, or the command fails with CROSSSLOT."
+cheat:
+  idea: "Redis Cluster splits data over several primaries. Each key maps to one of 16384 hash slots, and each primary owns a range of slots and has its own replicas."
+  code: |
+    CLUSTER KEYSLOT payment:9001        -> 6906
+    MSET {merchant:42}:config A {merchant:42}:limits B   -> OK, same slot
+  remember: "Keys used in one command must share a slot: give them the same hash tag, or you get CROSSSLOT."
+buildsOn: [replication, key-design, transactions-multi-exec]
+scenarios:
+  - q: "In Cluster, MSET merchant:42:config A merchant:42:limits B fails with CROSSSLOT. Why, and what do you change?"
+    a: "The two keys hash to different slots (5042 and 2883), and one command may only touch one slot. Rename them {merchant:42}:config and {merchant:42}:limits: only merchant:42 is hashed, so both land in slot 7650."
+  - q: "Your app keeps sessions in database 2 with SELECT 2. You move to Redis Cluster. What breaks?"
+    a: "SELECT fails with 'SELECT is not allowed in cluster mode', because Cluster supports only database 0. Separate the data with key prefixes, such as session:..., instead of database numbers."
+  - q: "Primary B acknowledges SET payment:9001 PAID and crashes before its replica receives it. The replica takes over. Is the write there?"
+    a: "No. Replication in Cluster is asynchronous, so B replied before copying the write. The promoted replica never had it, and the write is lost."
 confusedWith: [sentinel-vs-cluster]
 tags: [cluster, sharding, hash-slot]
 visual: flow
 sources:
   - title: "Scale with Redis Cluster (Redis docs)"
     url: "https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Redis Cluster specification (Redis docs)"
     url: "https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Multi-key operations (Redis docs)"
     url: "https://redis.io/docs/latest/develop/using-commands/multi-key-operations/"
     verifiedOn: "2026-10-20"
   - title: "config.c (Redis 8.10.2 tag)"
     url: "https://github.com/redis/redis/blob/8.10.2/src/config.c"
     verifiedOn: "2026-10-20"
+  - title: "Common application properties: spring.data.redis.cluster.* (Spring Boot 4.1)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Redis Cluster is Redis's built-in sharding: the keys are split across several primaries, so each primary holds only part of the data. Every key belongs to one of 16384 hash slots, and each primary owns a range of slots. Each primary can have [replicas](card:replication), and the cluster itself promotes a replica when a primary fails, so no Sentinel is needed.
 
 ## Why it exists
 
-One server's RAM and CPU cap how much data and how many writes Redis takes. Cluster spreads keys over several primaries.
+With [Sentinel](card:sentinel), every key and every write still live on one primary, so its RAM and its one main thread set the limit. If the merchant data outgrows one server's memory, more replicas do not help, because each replica holds the same full copy. Cluster spreads the slots over several primaries, so adding a primary adds both memory and write capacity.
 
 ## How it works
 
 <Mermaid
-  alt="The client hashes each key to a slot and sends it to the owner: primary A has slots 0-5500, B 5501-11000, C 11001-16383. Each has one replica."
+  alt="The client computes slot = CRC16(key) mod 16384 and sends the command to the owner: primary A has slots 0-5460, B 5461-10922, C 10923-16383. Each primary has one replica."
   chart={`flowchart LR
   C[Client] -- "slot = CRC16(key) mod 16384" --> B
   C --> A
   C --> PC
-  A[(Primary A: 0-5500)] --> A1[(Replica A1)]
-  B[(Primary B: 5501-11000)] --> B1[(Replica B1)]
-  PC[(Primary C: 11001-16383)] --> C1[(Replica C1)]`}
+  A[(Primary A: 0-5460)] --> A1[(Replica A1)]
+  B[(Primary B: 5461-10922)] --> B1[(Replica B1)]
+  PC[(Primary C: 10923-16383)] --> C1[(Replica C1)]`}
 />
 
-- A node that does not own the slot replies MOVED; cluster clients cache the slot map.
-- At least 3 primaries; 3 primaries plus 3 replicas is the recommended start.
-- Spring Boot: `spring.data.redis.cluster.nodes` lists seed nodes for [the client](card:spring-data-redis).
+1. The client computes the key's slot: the CRC16 checksum of the key, mod 16384. `payment:9001` is slot 6906, which primary B owns.
+2. It sends the command straight to B, using a map of slot owners that it fetched from the cluster.
+3. If the map is old and the command reaches the wrong node, that node does not forward it. It replies `MOVED 6906 <host:port>`, and the client updates its map and retries there.
+4. While a slot is being moved to another node, called resharding, the old owner may reply `ASK`. The client sends just that command to the new node, after an `ASKING` command, and keeps its map.
+5. If the majority of primaries cannot reach B for `cluster-node-timeout`, B's replica is elected and takes over its slots.
+
+So the key rule is that one command, transaction or script may only use keys from one slot.
 
 ## Example
 
-```text
-CLUSTER KEYSLOT payment:PAY101                   -> (integer) 4122
-MSET merchant:42:config A merchant:43:config B
--> (error) CROSSSLOT Keys in request don't hash to the same slot
-MSET {merchant:42}:config A {merchant:42}:limits B   -> OK  (both slot 7650)
+This runs on a real three-primary cluster. `-c` tells redis-cli to follow redirects as a cluster client does.
 
--- redis-cli without -c, connected to the wrong node
-GET payment:PAY101   -> (error) MOVED 4122 10.0.0.1:6379
+```bash
+redis-cli -c CLUSTER KEYSLOT payment:9001
+redis-cli -c SET payment:9001 PAID
+redis-cli GET payment:9001                 # no -c: redis-cli does not follow redirects
+redis-cli -c MSET merchant:42:config A merchant:42:limits B
+redis-cli -c MSET {merchant:42}:config A {merchant:42}:limits B
+redis-cli -c SELECT 1
 ```
 
-## Defaults
+```text output
+(integer) 6906
+OK
+(error) MOVED 6906 172.20.0.3:6379
+(error) CROSSSLOT Keys in request don't hash to the same slot
+OK
+(error) ERR SELECT is not allowed in cluster mode
+```
 
-| What | Default | Where |
-|---|---|---|
-| cluster-node-timeout | 15000 ms | Redis Open Source 8.10 |
-| Cluster bus port | data port + 10000 (16379) | Redis Open Source 8.10 |
+What to notice:
+
+- `SET` with `-c` printed OK because redis-cli followed the redirect to slot 6906's owner. Without `-c`, the same node only answered `MOVED` with the owner's address.
+- The first `MSET` fails because its two keys are in different slots. With the hash tag `{merchant:42}`, only `merchant:42` is hashed, so both keys are in slot 7650.
+- `SELECT` fails: Cluster has only database 0.
+
+## Rules and defaults
+
+- **Size:** at least 3 primaries. The docs recommend 6 nodes: 3 primaries and 3 replicas.
+- **Ports:** each node needs its data port and a cluster bus port for node-to-node messages, by default the data port + 10000 (16379).
+- **Failure timeout (Redis 8.10):** `cluster-node-timeout` is 15000 ms by default.
+- **Adding a node:** add it empty, then move some slots to it with `redis-cli --cluster reshard`. The keys move with their slots, and clients keep working.
+- **Hash tags:** only the text between the first `{` and the next `}` is hashed, and only if that text is not empty. Tag only keys that must be used together, because every key with one tag lands in one slot, on one node.
+- **Spring Boot 4.1:** `spring.data.redis.cluster.nodes` lists a few seed nodes, and the client discovers the rest. `spring.data.redis.cluster.max-redirects` limits how many redirects it follows.
+
+## Not to be confused with
+
+Consistent hashing places keys and nodes on a ring, and a new node takes over part of the ring. Redis Cluster instead has a fixed set of 16384 slots, and a new node is given whole slots. [Sentinel](card:sentinel) only adds failover to one primary that holds all the data. Rule: Sentinel = failover; Cluster = sharding plus failover.
+
+## Common mistakes
+
+- **"MULTI/EXEC or a Lua script can update any keys in Cluster."** They work only if all keys are in one slot; otherwise the cluster rejects them with CROSSSLOT. Give the keys one hash tag, such as `{payment:9001}:status` and `{payment:9001}:events`.
 
 ## Interview Qs
 
-### How do you update two keys atomically in Cluster?
+### How do you update two keys atomically in Redis Cluster?
 
-Give them one hash tag, like `{order:PAY101}:status` and `{order:PAY101}:events`. They share a slot, so MULTI/EXEC or Lua works.
+Put them in the same slot with a hash tag, for example `{payment:9001}:status` and `{payment:9001}:events`. Both keys hash only `payment:9001`, so they land on one node, and `MULTI`/`EXEC` or a Lua script can use them together. Keys in different slots fail with CROSSSLOT.
 
 ### What is the difference between MOVED and ASK?
 
-MOVED: the slot lives on another node now; update the map. ASK: the slot is migrating; send only this command there, after ASKING.
+MOVED means the slot now lives on another node for good: the client updates its slot map and sends future commands there. ASK appears only while a slot is being moved: the client sends just that one command to the named node, after `ASKING`, and keeps its map.
 
-### Sentinel or Cluster?
+### When do you need Cluster instead of Sentinel?
 
-Sentinel while one primary holds all the data; Cluster when it must be split. See [Sentinel vs Cluster](compare:sentinel-vs-cluster).
+When one primary can no longer hold all the data in RAM or handle all the writes. Sentinel only adds failover; Cluster also spreads data and writes across primaries. The price is the one-slot rule for multi-key commands and database 0 only.

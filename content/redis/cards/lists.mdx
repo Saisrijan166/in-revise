@@ -5,62 +5,125 @@ title: Lists
 topic: data-types
 level: beginner
 heat: 2
-hook: "A list keeps strings in insertion order; pushing or popping at either end is O(1), even with millions of items."
+hook: "A list keeps strings in the order you add them; adding or removing at either end stays fast however long the list grows."
 points:
-  - { k: "Order", v: "insertion order, not sorted; duplicates allowed" }
-  - { k: "Ends", v: "LPUSH, RPUSH, LPOP, RPOP are O(1)", kind: plus }
-  - { k: "Middle", v: "LINDEX, LSET, LINSERT are O(n) on long lists", kind: minus }
-  - { k: "Capped list", v: "LPUSH then LTRIM 0 99 keeps only the latest 100" }
+  - { k: "Order", v: "items stay in insertion order, not sorted, and duplicates are allowed" }
+  - { k: "Both ends are fast", v: "LPUSH, RPUSH, LPOP and RPOP take the same time on a 10-item or a 10-million-item list", kind: plus }
+  - { k: "Middle is slow", v: "LINDEX, LSET and LINSERT walk the list to the position, so they slow down on long lists", kind: minus }
+  - { k: "Capped list", v: "LPUSH then LTRIM 0 99 keeps only the newest 100 items" }
+  - { k: "Blocking pop", v: "BRPOP waits until an item arrives or the timeout ends; timeout 0 waits forever" }
+  - { k: "Pop removes", v: "a popped item is gone from Redis; if the worker crashes before finishing, the job is lost", kind: minus }
 trap:
-  wrong: "A worker should call RPOP in a loop to wait for new items."
-  right: "Use BRPOP or BLPOP: the call blocks until an item arrives or the timeout ends, with no wasted calls."
-sayIt: "A Redis list is a sequence of strings in insertion order with O(1) push and pop at both ends. I use it for latest-N feeds with LPUSH and LTRIM, and for simple work queues with blocking pops."
+  wrong: "A worker should call RPOP in a loop to wait for new jobs."
+  right: "Use BRPOP or BLPOP. The call waits inside Redis until an item arrives or the timeout ends, so the worker sends no empty requests."
+  why: "A polling loop is the first idea most people have, and it works in a test, so the wasted calls and the delay between polls go unnoticed."
+sayIt: "A Redis list keeps strings in insertion order, with fast push and pop at both ends. I use it for latest-N feeds with LPUSH and LTRIM, and for simple job queues with BRPOP. A popped job is gone, so a crash loses it."
+cheat:
+  idea: "A list keeps strings in the order you add them. You push and pop at the head (left) or the tail (right), and both ends stay fast at any length."
+  flow: "LPUSH at head → wait in order → BRPOP at tail"
+  remember: "A popped job is gone: if the worker crashes mid-job, it is lost."
+buildsOn: [strings]
+scenarios:
+  - q: "You run LPUSH recent:merchant:42 payment:9001 payment:9002 payment:9003 on an empty key. What does LRANGE recent:merchant:42 0 0 return?"
+    a: "payment:9003. LPUSH adds each value at the head, one after another, so the last argument ends up first. The list reads 9003, 9002, 9001."
+  - q: "A refund worker runs BRPOP jobs:refund 5 and no job arrives for 5 seconds. What happens?"
+    a: "BRPOP returns nil after the 5-second timeout and the worker can loop and call it again. If a job had arrived during the wait, BRPOP would have returned at once with the list name and the job."
 confusedWith: [pub-sub-vs-lists-vs-streams]
 tags: [lists, lpush, brpop]
 visual: flow
 sources:
-  - title: "Redis lists (Redis docs)"
+  - title: "Redis lists: linked lists, limits, automatic key removal (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/lists/"
-    verifiedOn: "2026-10-20"
-  - title: "BLPOP command (Redis docs)"
+    verifiedOn: "2026-10-21"
+  - title: "BLPOP command: timeout as a double, 0 blocks forever, reliable queues (Redis docs)"
     url: "https://redis.io/docs/latest/commands/blpop/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Redis interview questions (Devinterview-io on GitHub)"
     url: "https://github.com/Devinterview-io/redis-interview-questions"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A list is a key whose value is a sequence of strings kept in the order you add them. It is not sorted, and the same value may appear more than once. You work on its two ends: the left end is called the head (commands starting with L) and the right end is the tail (commands starting with R). Redis builds lists as linked lists, so adding or removing at an end costs the same however long the list is.
+
 ## Why it exists
 
-Many features need "the latest N things" or "the next job to do". A list adds and removes at the ends in constant time, however long it gets.
+Two needs come up again and again: "show the latest N payments" and "give the next job to a free worker". Keeping them in one [string](card:strings) means rewriting the whole value on every change, and keeping them in a database table means a worker asks "anything new?" again and again. A list adds an item at one end and removes it at the other in one fast command, and a worker can wait inside Redis until a job arrives.
 
 ## How it works
 
 <Mermaid
-  alt="A producer pushes new payment IDs on the left with LPUSH. The list runs from the newest item at the head to the oldest at the tail. A worker takes the oldest item from the right with BRPOP, so items are processed first in, first out."
+  alt="A producer pushes new payment ids on the left with LPUSH. The list runs from the newest item at the head to the oldest at the tail. A worker takes the oldest item from the right with BRPOP, so items are handled first in, first out."
   chart={`flowchart LR
-  P[Producer] -- LPUSH --> H["head: PAY103, PAY102, PAY101 :tail"]
+  P[Producer] -- LPUSH --> H["head: 9003, 9002, 9001 :tail"]
   H -- BRPOP --> W[Worker]`}
 />
 
-- LPUSH with RPOP is first in, first out; LPUSH with LPOP is last in, first out.
-- Reliable queues (LMOVE, BLMOVE) and when to pick a stream: [queues](card:queues-with-redis).
+1. A producer calls `LPUSH key item`. If the key does not exist, Redis creates the list first.
+2. Each new item goes in at the head, so the oldest item drifts towards the tail.
+3. A worker calls `BRPOP key timeout`. If the list has an item, Redis removes the one at the tail and returns it at once.
+4. If the list is empty, the worker's connection waits until a producer pushes an item or the timeout runs out.
+5. When the last item is popped, Redis deletes the key automatically.
+
+So the key is: push at one end and pop at the other for first in, first out; push and pop at the same end for last in, first out.
 
 ## Example
 
-```text
-LPUSH recent:merchant:42 PAY101 PAY102 PAY103  -- 3
-LTRIM recent:merchant:42 0 99                  -- keep the 100 newest
-LRANGE recent:merchant:42 0 9                  -- newest 10, newest first
-BRPOP jobs:refund 5                            -- waits up to 5 s; nil on timeout
+The payment service keeps merchant 42's latest payments and hands one refund job to a worker.
+
+```bash
+redis-cli LPUSH recent:merchant:42 payment:9001 payment:9002 payment:9003
+redis-cli LTRIM recent:merchant:42 0 99
+redis-cli LRANGE recent:merchant:42 0 1
+redis-cli RPUSH jobs:refund payment:9001
+redis-cli BRPOP jobs:refund 5
+redis-cli BRPOP jobs:refund 1
 ```
+
+```text output
+(integer) 3
+OK
+1) "payment:9003"
+2) "payment:9002"
+(integer) 1
+1) "jobs:refund"
+2) "payment:9001"
+(nil)
+```
+
+What to notice:
+
+- One `LPUSH` with three ids put the last one, 9003, at the head. `LRANGE 0 1` read the two newest.
+- `LTRIM 0 99` keeps indexes 0 to 99 and deletes the rest, so the feed never grows past 100 items. Run it after every push.
+- `BRPOP` returned two values, the list name and the item, because one call can watch several lists.
+- The second `BRPOP` waited 1 second on the now empty list and returned nil. The empty list had already been deleted.
+
+## Rules and defaults
+
+- **Length limit:** a list can hold up to 2^32 - 1 (about 4.29 billion) items.
+- **Speed:** commands at the head or tail are O(1), meaning their cost does not grow with the list. Commands that reach into the middle, such as `LINDEX`, are O(n).
+- **Blocking timeout:** in seconds, read as a decimal number; 0 waits forever. With several keys, `BRPOP` pops from the first non-empty one in the order you listed them.
+- **Missing or empty key:** read commands return an empty reply or nil, not an error; the key is created on the first push and deleted with the last item.
+
+## Not to be confused with
+
+A list is a queue inside Redis: each item is popped by one worker and is then gone. A [stream](card:streams), which you will meet soon, keeps every entry after it is read and tracks which worker has finished it. Rule: list = simple job queue; stream = jobs that must not be lost.
+
+## Common mistakes
+
+- **"BRPOP makes the queue reliable."** BRPOP removes the item as it returns it. If the worker crashes before finishing, the job is lost. `BLMOVE` moves the item to a "processing" list instead; [Queues with Redis](card:queues-with-redis) shows this pattern.
 
 ## Interview Qs
 
 ### Why are pushes O(1) but LINDEX slow?
 
-Redis lists are linked lists, built for fast access at the head and tail. Reaching an item in the middle means walking the list, so it costs O(n). For fast access to the middle of a big collection, use a sorted set.
+Redis lists are linked lists, built for fast work at the head and tail. Reaching an item in the middle means walking the list to it, so the cost grows with its position. For fast access to the middle of a big collection, the Redis docs suggest a sorted set.
+
+### How would you keep only the latest 100 payments for a dashboard?
+
+LPUSH each new payment id, then LTRIM the list to 0 99 right after. The list never holds more than 100 items, and LRANGE 0 9 reads the newest ten.
 
 ### What does BRPOP with timeout 0 do?
 
-It blocks until an item arrives, with no time limit. BRPOP can watch several lists at once and returns two values: the list name and the item. With a non-zero timeout it returns nil when time runs out.
+It waits until an item arrives, with no time limit. With a non-zero timeout it returns nil when the time runs out. If several workers wait on the same list, the one that has waited longest gets the next item.

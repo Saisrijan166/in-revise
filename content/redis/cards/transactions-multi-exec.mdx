@@ -5,77 +5,148 @@ title: "Transactions: MULTI, EXEC and WATCH"
 topic: atomicity
 level: intermediate
 heat: 2
-hook: "MULTI queues commands and EXEC runs them with no one in between; WATCH cancels EXEC if a key changed. No rollback."
+hook: "MULTI queues commands and EXEC runs them all with no other client in between; WATCH cancels EXEC if a key changed first. Nothing is ever rolled back."
 points:
-  - { k: "MULTI … EXEC", v: "commands reply QUEUED, then run in order as one isolated step" }
-  - { k: "No rollback", v: "a command that fails at run time does not undo the others", kind: minus }
-  - { k: "Queue error", v: "a bad command (wrong syntax) makes EXEC refuse the whole block" }
-  - { k: "WATCH", v: "EXEC returns nil if a watched key changed; read again and retry", kind: plus }
-  - { k: "Replies at EXEC", v: "you cannot use a value read inside MULTI to decide the next write", kind: minus }
+  - { k: "MULTI … EXEC", v: "after MULTI each command replies QUEUED; EXEC runs them all in order with no other client in between" }
+  - { k: "Replies at EXEC", v: "queued commands return their replies only at EXEC, so you cannot use a value read inside MULTI", kind: minus }
+  - { k: "No rollback", v: "if one command fails while EXEC runs it, the others still apply and nothing is undone", kind: minus }
+  - { k: "Queue-time error", v: "a command with bad syntax makes EXEC refuse the whole transaction with EXECABORT" }
+  - { k: "WATCH", v: "if a watched key changes before EXEC, EXEC replies nil and runs nothing, so you read again and retry", kind: plus }
 trap:
   wrong: "MULTI/EXEC rolls back like a SQL transaction when one command fails."
-  right: "Redis has no rollback. A run-time error fails only that command; the rest still apply."
-sayIt: "MULTI/EXEC runs the queued commands in order with no other client in between, but it never rolls back. For check-then-write I WATCH the key and retry when EXEC returns nil, or use a Lua script."
+  right: "Redis has no rollback. A command that fails at run time fails alone; the other commands in the transaction still apply."
+  why: "The word transaction brings the SQL habit of BEGIN, COMMIT and ROLLBACK with it. Redis left rollback out on purpose, to stay simple and fast."
+sayIt: "MULTI/EXEC runs the queued commands in order with no other client in between, but it never rolls back. For check-then-write I WATCH the key, read, queue the writes, and retry when EXEC returns nil; or I use a Lua script."
+cheat:
+  idea: "MULTI starts queueing commands, and EXEC runs them all in order with no other client in between. WATCH, sent before MULTI, cancels EXEC if a watched key changed."
+  flow: "WATCH → GET and decide → MULTI → queue writes → EXEC (nil = retry)"
+  remember: "No rollback: a command that fails inside EXEC does not undo the others."
+buildsOn: [single-command-atomicity]
+scenarios:
+  - q: "payment:9001 holds a string. You run MULTI, SET payment:9001 PAID, LPUSH payment:9001 retry, EXEC. What is payment:9001 afterwards?"
+    a: "PAID. LPUSH fails with WRONGTYPE when EXEC runs it, because the key holds a string, not a list. That error affects only LPUSH: the SET already ran and Redis does not undo it."
+  - q: "Inside MULTI you type INCRBY merchant:42:paise:2026-10-21 with the amount missing, then EXEC. What runs?"
+    a: "Nothing. The bad command is rejected while queueing (wrong number of arguments), so EXEC replies EXECABORT and discards the whole transaction. Errors found while queueing cancel everything; errors found while running do not."
+  - q: "Server A has run WATCH payment:9001 and read PENDING. Before A sends EXEC, server B sets the payment to FAILED. What happens to A's transaction?"
+    a: "EXEC replies nil and none of A's queued commands run, so A does not overwrite FAILED with PAID. A reads the key again, sees FAILED and decides not to mark it paid."
 confusedWith: [pipelining-vs-multi-exec-vs-lua]
 tags: [atomicity, transactions, optimistic-locking]
 visual: flow
 sources:
-  - title: "Transactions (Redis docs)"
+  - title: "Transactions: guarantees, errors, rollbacks, WATCH (Redis docs)"
     url: "https://redis.io/docs/latest/develop/using-commands/transactions/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "src/multi.c at tag 8.10.2 (redis/redis on GitHub)"
     url: "https://github.com/redis/redis/blob/8.10.2/src/multi.c"
     verifiedOn: "2026-10-20"
+  - title: "DISCARD command: unwatches all keys (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/discard/"
+    verifiedOn: "2026-10-21"
   - title: "Multi-key operations (Redis docs)"
     url: "https://redis.io/docs/latest/develop/using-commands/multi-key-operations/"
     verifiedOn: "2026-10-20"
-  - title: "Transactions (Spring Data Redis 4.1 reference)"
+  - title: "Transactions: SessionCallback and transaction support (Spring Data Redis 4.1 reference)"
     url: "https://docs.spring.io/spring-data/redis/reference/redis/transactions.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Redis interview questions (Devinterview.io)"
     url: "https://github.com/Devinterview-io/redis-interview-questions"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A Redis transaction is a group of commands that Redis runs one after another with no other client's command in between. You start it with MULTI. Redis then stores, or queues, each command you send instead of running it, and replies QUEUED. EXEC runs the whole queue and returns all the replies as one list. WATCH, sent before MULTI, makes EXEC conditional: if a watched key has changed since, EXEC runs nothing.
+
 ## Why it exists
 
-Some updates touch several keys, or must check a value first. MULTI/EXEC makes the writes one isolated step; WATCH adds optimistic locking for the check.
+Marking payment 9001 as PAID and adding its 50000 paise to merchant 42's daily total are two commands. Sent separately, another client can read between them and see a paid payment missing from the total, and an app crash after the first leaves the second undone. With MULTI/EXEC Redis runs both together, and if the app disconnects before EXEC, neither runs. "Only if still PENDING" needs a check too: WATCH spots a change by another client, so you retry instead of overwriting it. This is optimistic locking: you take no lock and detect a conflict at write time.
 
 ## How it works
 
-<Steps label="Optimistic update with WATCH">
-  <Step title="WATCH">Mark payment:PAY101; Redis notes any change to it.</Step>
-  <Step title="Read and decide">GET the status and check it in the app.</Step>
-  <Step title="MULTI">Start the queue; each command replies QUEUED.</Step>
-  <Step title="EXEC">Runs all, or returns nil if the key changed (a write, expiry or eviction).</Step>
-  <Step title="Retry on nil">Start again from WATCH.</Step>
-</Steps>
+<Mermaid
+  alt="The app sends WATCH payment:9001, then GET, which returns PENDING. It sends MULTI, then SET and INCRBY, which each reply QUEUED. Then it sends EXEC. If the key did not change, Redis runs both writes and returns their replies. If another client changed the key after WATCH, EXEC replies nil and nothing runs."
+  chart={`sequenceDiagram
+  participant A as App
+  participant R as Redis
+  A->>R: WATCH payment:9001
+  A->>R: GET payment:9001
+  R-->>A: PENDING
+  A->>R: MULTI
+  A->>R: SET ... PAID / INCRBY ... 50000
+  R-->>A: QUEUED, QUEUED
+  A->>R: EXEC
+  alt key unchanged
+    R-->>A: OK, 50000
+  else changed after WATCH
+    R-->>A: nil (nothing ran)
+  end`}
+/>
 
-- DISCARD drops the queue; nothing runs.
-- In [Redis Cluster](card:redis-cluster) all keys of one transaction must share a hash slot.
-- For one string key, `SET … IFEQ` (Redis 8.4+) does this check in [one command](card:single-command-atomicity).
+1. The app sends WATCH payment:9001. From now on Redis notes any change to that key: a write by any client, an expiry or an eviction.
+2. The app reads the status with GET and decides in Java. It is PENDING, so the app goes on.
+3. The app sends MULTI and then the two writes. Each one replies QUEUED; nothing has run yet.
+4. The app sends EXEC. If the key is unchanged, Redis runs the queued commands in order, with no other client in between, and returns one reply per command.
+5. If the key changed, EXEC replies nil and runs nothing. The app starts again from step 1. Either way, EXEC ends the WATCH.
+
+So MULTI/EXEC keeps the writes together, and WATCH adds the check.
 
 ## Example
 
-```text
-WATCH payment:PAY101
-GET payment:PAY101                          -- "PENDING": the app may go on
+The payment service marks payment 9001 as paid and adds its amount to the merchant total, in redis-cli:
+
+```bash
+WATCH payment:9001
+GET payment:9001
 MULTI
-SET payment:PAY101 PAID
-INCRBY merchant:42:paise:2026-10-20 50000
-EXEC                                        -- nil if PAY101 changed since WATCH
+SET payment:9001 PAID
+INCRBY merchant:42:paise:2026-10-21 50000
+EXEC
 ```
+
+```text output
+OK
+"PENDING"
+OK
+QUEUED
+QUEUED
+1) OK
+2) (integer) 50000
+```
+
+What to notice:
+
+- The GET comes before MULTI. Inside MULTI it would only reply QUEUED, and its value would arrive at EXEC, too late to decide anything.
+- EXEC returns one reply per queued command, in the order you sent them.
+- If another client had changed payment:9001 between WATCH and EXEC, EXEC would reply `(nil)` and neither write would run.
+- Without WATCH both writes still run together, but nothing stops you from marking PAID a payment that another server has just marked FAILED.
+
+## Rules and defaults
+
+- **Run-time error:** a command that fails when EXEC runs it, such as WRONGTYPE, fails alone. The other commands still run, and nothing is rolled back.
+- **Queue-time error:** if a command is rejected while queueing, for bad syntax or because Redis is out of memory, EXEC refuses the whole transaction with EXECABORT (Redis 2.6.5+).
+- **DISCARD:** drops the queue and ends the transaction; none of the commands runs.
+- **WATCH:** expiry and eviction count as changes too (Redis 6.0.9+). EXEC, DISCARD and closing the connection unwatch every key; UNWATCH does it by hand.
+- **Redis Cluster:** all keys in one transaction must be in the same hash slot, as you will see in [Redis Cluster](card:redis-cluster).
+- **One string key:** `SET … IFEQ PENDING` (Redis 8.4+) does this check in [one command](card:single-command-atomicity), with no WATCH and no retry loop.
+
+## Not to be confused with
+
+A SQL transaction runs your statements one by one, lets you read and decide in the middle, and undoes everything on ROLLBACK or on an error. A Redis transaction queues commands and runs them together at EXEC; you cannot act on a read inside it, and it never undoes a command. Rule: SQL transaction = all or nothing; Redis transaction = all together, no rollback.
+
+## Common mistakes
+
+- **"In Spring I can call multi(), then a few RedisTemplate methods, then exec()."** Each RedisTemplate call may use a different connection, so the commands can miss the transaction. Run them inside a `SessionCallback`, which keeps one connection.
 
 ## Interview Qs
 
 ### How is a Redis transaction different from a SQL transaction?
 
-Both run as an isolated unit, but Redis never rolls back: if one command fails at run time, the others still apply. You cannot act on reads inside it, and WATCH detects changes instead of locking rows.
+Both run as one isolated unit, but Redis never rolls back: if one command fails at run time, the others still apply. You also cannot use a read inside the transaction to decide the next command, because replies arrive only at EXEC. Instead of locking rows, WATCH detects a change and cancels EXEC.
 
 ### When does EXEC return nil?
 
-When a key you watched was changed by another client, or expired or was evicted, between WATCH and EXEC. Nothing ran; read again and retry.
+When a key you watched changed between WATCH and EXEC: another client wrote it, or it expired or was evicted. None of the queued commands ran. The app reads the key again and retries, or gives up if the new value means it should not write.
 
 ### How do you run MULTI/EXEC from Spring Data Redis?
 
-Inside a `SessionCallback`, so every command uses the same connection; plain `RedisTemplate` calls may use different ones.
+Inside a `SessionCallback`, passed to `redisTemplate.execute(...)`. Inside it you call `multi()`, the commands and `exec()` on the same operations object, so they all use one connection. Plain RedisTemplate calls may each take a different connection and break the transaction.

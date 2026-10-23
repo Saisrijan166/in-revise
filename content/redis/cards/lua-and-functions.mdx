@@ -5,75 +5,131 @@ title: Lua Scripts and Redis Functions
 topic: atomicity
 level: intermediate
 heat: 2
-hook: "A Lua script runs inside Redis as one atomic step, so it can read, decide and write with no one in between."
+hook: "A Lua script runs inside Redis as one atomic step, so it can read a key, decide with an if, and write, with no other client in between."
 points:
-  - { k: "Atomic", v: "no other command runs while the script runs", kind: plus }
-  - { k: "Read, decide, write", v: "a reply can choose the next command, unlike MULTI/EXEC", kind: plus }
-  - { k: "KEYS and ARGV", v: "pass every key name in KEYS; other values in ARGV" }
-  - { k: "Blocks everyone", v: "a slow script stalls all clients; keep it short", kind: minus }
-  - { k: "Functions", v: "Redis 7.0+: named, stored in the database, replicated" }
+  - { k: "Atomic script", v: "while a script runs no other command runs, so all its reads and writes act as one step", kind: plus }
+  - { k: "Read, decide, write", v: "each redis.call returns its reply to the script, so an if can choose the next write, unlike MULTI/EXEC", kind: plus }
+  - { k: "KEYS and ARGV", v: "pass every key name the script touches in KEYS and every other value in ARGV" }
+  - { k: "busy-reply-threshold", v: "Redis 8.10 default 5000 ms: after it other clients get BUSY errors, but the script keeps running", kind: default }
+  - { k: "Functions (Redis 7.0+)", v: "named Lua code loaded once with FUNCTION LOAD, called with FCALL, and kept with the data" }
 trap:
-  wrong: "When a script passes the time limit, Redis stops it."
-  right: "Redis never stops it on its own; others get BUSY. SCRIPT KILL works only if it has not written yet."
-sayIt: "When a write depends on a value I read, I put the logic in a Lua script: it runs atomically on the server. I pass keys in KEYS, keep it short because it blocks Redis, and use Functions on Redis 7+."
+  wrong: "When a script runs past the time limit, Redis stops it."
+  right: "Redis never stops a script on its own; other clients get BUSY. SCRIPT KILL works only if the script has not written anything yet."
+  why: "Databases usually cancel slow queries, and the old setting name, lua-time-limit, sounds like a hard limit. Stopping a script that already wrote would break its atomicity, so Redis only starts answering BUSY."
+sayIt: "When a write depends on a value I read, I use a Lua script: it runs atomically on the server. I pass keys in KEYS, keep it short because it blocks Redis, and use Functions on Redis 7+ when the code should live in the database."
+cheat:
+  idea: "A Lua script runs inside Redis as one atomic step, so it can read a key, decide with an if and write, which MULTI/EXEC cannot. Redis Functions (7.0+) keep such code in Redis by name."
+  remember: "A script blocks every client while it runs, and Redis never stops it: keep it short."
+buildsOn: [single-command-atomicity, transactions-multi-exec]
+scenarios:
+  - q: "A script returns 0 unless payment:9001 is PENDING; otherwise it sets PAID and adds 50000 to the merchant total. The payment is PENDING and you run the script twice. What are the two replies?"
+    a: "50000, then 0. The first run sees PENDING, writes PAID and adds 50000 to the merchant total. The second run sees PAID, so the if returns 0 before any write, and a duplicate request changes nothing."
+  - q: "After a failover to a replica, every EVALSHA call from your service fails with NOSCRIPT. What happened, and what do you do?"
+    a: "The script cache is not part of the data and is not persisted, and a failover can leave the new primary with an empty cache, so the SHA1 is unknown there. Send the script again with EVAL or SCRIPT LOAD and retry. Spring's RedisTemplate does this fallback for you."
+  - q: "Which do you choose: add 1 to a counter, or mark a payment PAID only if it is PENDING and also add its amount to a total?"
+    a: "For the counter, plain INCR: one command is already atomic, and a script adds nothing. For the second, a Lua script, because the write depends on a read and it touches two keys. SET IFEQ alone covers only the one key."
 confusedWith: [pipelining-vs-multi-exec-vs-lua]
 tags: [lua, scripting, functions, atomicity]
 visual: table
 sources:
-  - title: "Scripting with Lua (Redis docs)"
+  - title: "Scripting with Lua: atomicity, KEYS and ARGV, script cache, SCRIPT KILL (Redis docs)"
     url: "https://redis.io/docs/latest/develop/programmability/eval-intro/"
-    verifiedOn: "2026-10-20"
-  - title: "Redis functions (Redis docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Redis programmability: maximum execution time, BUSY, SHUTDOWN NOSAVE (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/programmability/"
+    verifiedOn: "2026-10-21"
+  - title: "Redis functions: persistence, replication, cluster loading (Redis docs)"
     url: "https://redis.io/docs/latest/develop/programmability/functions-intro/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "redis.conf at tag 8.10.2 (redis/redis on GitHub)"
     url: "https://github.com/redis/redis/blob/8.10.2/redis.conf"
     verifiedOn: "2026-10-20"
-  - title: "Lua scripting (Spring Data Redis 4.1 reference)"
+  - title: "Lua scripting: EVALSHA with EVAL fallback (Spring Data Redis 4.1 reference)"
     url: "https://docs.spring.io/spring-data/redis/reference/redis/scripting.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A Lua script is a small program in the Lua language that your app sends to Redis to run on the server. Inside it, `redis.call` runs one Redis command and hands its reply back to the script. While the script runs, no other command runs, so the whole script is one atomic step. Unlike [MULTI/EXEC](card:transactions-multi-exec), it can decide its writes from a value it reads. Redis Functions (Redis 7.0+) work the same way, but the code is loaded into Redis once and called by name.
 
 ## Why it exists
 
-MULTI/EXEC cannot use a value it reads, and WATCH needs retry loops. A script moves the whole read-decide-write logic to the server and runs it at once.
+"Mark payment 9001 PAID only if it is still PENDING, then add its amount to the merchant total" needs a read whose result decides the writes. MULTI/EXEC cannot use a read, and WATCH needs a retry loop, with more retries when many servers touch the same key. A script moves the read, the if and the writes into Redis, so they run in one call and one round trip, with no retries.
 
 ## How it works
 
 | | EVAL | EVALSHA | FCALL |
 |---|---|---|---|
 | You send | the script text | its SHA1 digest | the function name |
-| Code lives in | the request | script cache, volatile | the database, persisted |
-| Load with | nothing | SCRIPT LOAD | FUNCTION LOAD |
+| Code lives in | the request | script cache, lost on restart | the database, kept |
+| Load it with | nothing | SCRIPT LOAD, or one EVAL | FUNCTION LOAD |
 | Since | Redis 2.6 | Redis 2.6 | Redis 7.0 |
 
-- Key names built inside a script are unsafe in Cluster; declared keys must share one slot ([Redis Cluster](card:redis-cluster)).
-- The lock release script is in [distributed locks](card:distributed-locks); the token bucket in [rate limiting](card:rate-limiting-with-redis).
+1. The app sends EVAL with the script, the number of keys, the key names and then the other arguments. Redis puts the key names in the `KEYS` table and the rest in `ARGV`.
+2. Redis compiles the script and stores it in the script cache under its SHA1 digest, a fixed-length fingerprint of the script text.
+3. Redis runs the script line by line. Each `redis.call` runs one command, and the next line can use its reply.
+4. The script's return value goes back to the app as the reply. No other client's command ran in between.
+5. Later calls send EVALSHA with only the digest. If the cache was emptied, Redis replies NOSCRIPT and the app sends EVAL again.
 
 ## Example
 
+The payment service marks a payment as paid only while it is PENDING, and adds the amount to merchant 42's total in the same step:
+
 ```lua
--- mark_paid.lua: KEYS[1] payment, KEYS[2] merchant total, ARGV[1] paise
+-- mark_paid.lua: KEYS[1] = payment, KEYS[2] = merchant daily total, ARGV[1] = amount in paise
 if redis.call('GET', KEYS[1]) ~= 'PENDING' then
-  return 0
+  return 0                                   -- already PAID or FAILED: change nothing
 end
 redis.call('SET', KEYS[1], 'PAID')
 return redis.call('INCRBY', KEYS[2], ARGV[1])
--- redis-cli --eval mark_paid.lua payment:PAY101 merchant:42:paise:2026-10-20 , 50000
 ```
 
-## Defaults
+From Java, with [Spring Data Redis](card:spring-data-redis):
 
-| What | Default | Where |
-|---|---|---|
-| Busy-script threshold | 5000 ms (`busy-reply-threshold`, old name `lua-time-limit`) | redis.conf, Redis Open Source 8.10 |
+```java
+RedisScript<Long> markPaid = RedisScript.of(new ClassPathResource("mark_paid.lua"), Long.class);
+Long total = stringRedisTemplate.execute(markPaid,
+        List.of("payment:9001", "merchant:42:paise:2026-10-21"), "50000");
+System.out.println(total);
+```
+
+```text output
+50000
+```
+
+What to notice:
+
+- The if uses the reply of the GET to choose the writes. A second call returns 0, because the payment is no longer PENDING.
+- Both key names go in the key list, and the amount in `ARGV`. Never build a key name inside the script.
+- `execute` sends EVALSHA first and falls back to EVAL when Redis replies NOSCRIPT. Create the `RedisScript` once, as a bean, so its SHA1 is not computed on every call.
+
+## Rules and defaults
+
+- **Keys must be declared:** the script should touch only keys passed in `KEYS`. In [Redis Cluster](card:redis-cluster) they must all be in one hash slot.
+- **Busy script:** Redis never stops a running script. After `busy-reply-threshold` (5000 ms by default in Redis 8.10; old name `lua-time-limit`), other clients get BUSY errors. `SCRIPT KILL` stops the script only if it has not written yet; otherwise only `SHUTDOWN NOSAVE` ends it, losing unsaved data.
+- **Script cache:** it is not persisted. A restart, a failover to a replica or `SCRIPT FLUSH` empties it, and EVALSHA then replies NOSCRIPT.
+- **Errors:** an error from `redis.call` stops the script and goes to the client; `redis.pcall` returns the error to the script to handle.
+- **Functions:** they are saved in the AOF file and copied to replicas with the data. In Redis Cluster you must load them on every primary yourself.
+
+## Not to be confused with
+
+An EVAL script belongs to the app: the app keeps the code and sends it, or its digest, and the script cache can lose it at any time. A Redis Function belongs to the database: you load a library once with FUNCTION LOAD, call each function by name with FCALL, and Redis keeps it across restarts and on replicas. Rule: script = code the app sends; function = code Redis keeps.
+
+## Common mistakes
+
+- **"If the script fails halfway, Redis undoes its earlier writes."** It does not. If the script writes a key and the next `redis.call` fails, the first write stays. Check inputs before the first write.
 
 ## Interview Qs
 
 ### When do you choose a Lua script over MULTI/EXEC?
 
-When a later command depends on an earlier reply, such as "mark PAID only if still PENDING". MULTI/EXEC only queues commands; WATCH needs a retry loop. A script reads and writes in one atomic step.
+When a later command depends on an earlier reply, such as "mark PAID only if still PENDING". MULTI/EXEC cannot branch, and WATCH needs a retry loop. A script reads, decides and writes in one atomic step and one round trip.
 
 ### EVALSHA returns NOSCRIPT. Why, and what do you do?
 
-The script cache is not persisted: a restart, a failover or SCRIPT FLUSH empties it. Run SCRIPT LOAD and retry, or fall back to EVAL; Spring's RedisTemplate falls back for you.
+The script cache lives in memory only. A restart, a failover or SCRIPT FLUSH empties it, so the digest is unknown. Load the script again with SCRIPT LOAD, or send it with EVAL, and retry. Spring's RedisTemplate falls back to EVAL for you.
+
+### Why must every key name be passed in KEYS?
+
+Redis reads the key arguments to know which keys a script touches. In a cluster, the client uses them to send the call to the node that owns those keys, and Redis rejects declared keys from different slots. A key name built inside the script may belong to another node, and the call then fails.

@@ -1,5 +1,5 @@
 # Coverage: Redis
-Reference: reference/redis.md  ·  Last updated: 20-10-2026
+Reference: reference/redis.md  ·  Last updated: 21-10-2026
 
 Every reference item (key list: the numbered sections, plus each question, pattern and "X vs Y" row inside them) appears in exactly
 one of Mapped, Corrected or Dropped. A section whose parts went to different places has one row here (Corrected wins over
@@ -240,3 +240,171 @@ Independently verified on 20-10-2026.
 | Reference item | Reason |
 |---|---|
 | (none) | |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass then checked about 1,280 claims and fixed 27, removing none.
+
+### Unit atomicity
+
+**Added from the reference**
+
+- Ref 6 "atomic command / race condition / INCR vs GET+SET" -> single-command-atomicity (What, Why, How table and steps, scenario 1).
+- Ref 6 "MULTI/EXEC / DISCARD / WATCH / optimistic locking" -> transactions-multi-exec (What, Why, sequence diagram, Rules, scenarios).
+- Ref 6 "no rollback like a relational transaction" -> transactions-multi-exec (trap, Not to be confused with, Interview Q 1).
+- Ref 6 "Lua scripting executes atomically" -> lua-and-functions.
+- Ref 7 "safe release via script" stays in distributed-locks (linked from single-command-atomicity Common mistakes).
+- Beyond the reference (new, verified): INCREX (Redis 8.8+) as the one-command counter with expiry; DELEX (8.4+) compare-and-delete; a script error halfway does not undo earlier writes (run); EXECABORT vs run-time error (run); DISCARD unwatches; functions must be loaded on every cluster primary; errors in one pipelined command do not stop the others (run); "why pipelining helps on localhost" (system calls) Interview Q.
+
+**Corrections**
+
+- INCRBYFLOAT: the draft said it "works on double-precision floats, which round". The docs say the computation's internal precision varies and output is fixed at 17 decimal digits; a run of 0.1 + 0.2 printed "0.3". Reworded to "binary floating-point maths, where decimal amounts are not stored exactly", which holds. Source: https://redis.io/docs/latest/commands/incrbyfloat/
+- SET IFEQ: added that it never creates a missing key and replies nil when the condition fails. Source: https://redis.io/docs/latest/commands/set/
+- pipelining: How it works now uses a sequence diagram instead of embedding the comparison, and the comparison moved to confusedWith (it still shows under "Not to be confused with"). visual changed from table to flow.
+- lua-and-functions: "## Defaults" table replaced by "Rules and defaults" (v3).
+
+### Unit basics
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| D1 in-memory, key-value, "not just a cache" | what-is-redis (What it is, Interview Q "Is Redis only a cache?") |
+| D1.R1 database stays the source of truth | MOVED: from what-is-redis trap to redis-and-databases (point "Source of truth", Rules, Interview Q "Redis and the database disagree") |
+| D3 SET/GET/DEL/EXISTS/TTL/EXPIRE/SET EX | what-is-redis Example (SET EX, GET, TYPE, INCR, miss = nil); ttl-and-expiration Example |
+| D3 "expiry is not a timed callback" | ttl-and-expiration trap + scenario 2 |
+| D5 TTL, maxmemory, policies, LRU/LFU, short TTL for status / longer for config | ttl-and-expiration (sayIt), eviction-policies (table of all 10 policies, LRU vs LFU section) |
+| D5 trap: key without TTL can still be evicted | eviction-policies trap; ttl-vs-eviction example |
+| D9 Redis vs database table and payment rule | redis-and-databases (Compare, scenarios) |
+| D3 SET NX EX | redis-and-databases Example (lock line, details left to distributed-locks) |
+Added beyond the reference (verified): "Is Redis really single-threaded?" Q (I/O threads off by default, background threads); numbered databases (16 by default) and Redis Cluster only db 0 (key-design); SCAN may return duplicates and empty batches; deleting keys by pattern safely (SCAN + UNLINK); TTL: set TTL in the same command, EXPIRE 0 deletes, replicas wait for the primary's DEL; eviction: buffers not counted against maxmemory, big writes overshoot, maxmemory 0 on a cache is a mistake, allkeys-lrm scenario; memory: Redis may not return freed memory to the OS, use hashes for small objects, big key vs hot key, lazyfree-lazy-user-del default no; licensing: check the version with INFO server.
+
+**Corrections**
+
+- None to the reference in these units. Draft wording tightened: what-is-redis no longer claims "under a microsecond" for commands in general; it says Redis's own processing is sub-microsecond (latency doc) and the network trip dominates.
+- Licence table keeps "Redis 7.4 to 7.8": the redis.io licensing page says "Redis Community Edition 7.4.x to 7.8.x" in prose, though its table lists only 7.4.
+
+### Unit caching
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| D1 Redis basics: cache, cache hit, cache miss, "PostgreSQL stays the source of truth" | cache-aside What it is, Rules ("Source of truth") |
+| D1 example flow (check Redis, hit / miss, PostgreSQL, store) | cache-aside Mermaid and steps 1-4 |
+| D4 cache-aside code note "production code must handle serialisation, errors, concurrent misses" | cache-aside What to notice (concurrent misses), Interview Q 2 (errors); spring-cache-abstraction (Java serialisation default) |
+| D4 read-through, write-through, write-behind, "data-loss risk" | caching-strategies What it is, steps 1-5, Rules |
+| D4 cache invalidation, stale data, "invalidate or update after successful DB changes" | cache-invalidation What it is, Why, steps, Rules ("After the commit", "Delete rather than update") |
+| D4 stampede / penetration / avalanche / negative caching and the common solutions | cache-problems What it is, steps (rebuild lock), Example (NX lock, NOT_FOUND EX 60, TTL jitter), Rules, scenarios |
+| D8 Spring cache abstraction @Cacheable, @CachePut, @CacheEvict | spring-cache-abstraction (whole concept), Not to be confused with, cacheable-vs-cacheput explain / example |
+Also added (beyond the reference, verified): cache-aside analogy (notepad, with its limit); "cache-aside not a good fit when most reads miss, or for sensitive data in a shared cache" (Azure); write-through needs a TTL and pairing with lazy loading (AWS); write-through by hand with SET and its reorder risk (caching-strategies Example); after-commit delete with `TransactionSynchronization.afterCommit` (cache-invalidation Example, run); TTL vs eviction vs invalidation rule; stale-set race after update-then-delete and Facebook leases (Common mistakes); "what if the delete fails" Interview Q; hot key vs big key rule; client-side caching invalidation messages (Redis docs); `HOTKEYS` (8.6+) and `--hotkeys` LFU requirement; Spring Boot advice against @EnableCaching on the main class; Boot's default Java serialisation for cache values; `unless = "#result == null"` and the error thrown when null caching is off; Spring Data Redis default writer takes no lock even with sync = true (from the 4.1.1 source), locking writer locks the whole cache; self-invocation Interview Q.
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft spring-cache point "@EnableCaching on a @Configuration class, not the main class" stated as a rule | Now "Spring Boot advises against the main class" with the reason (caching becomes mandatory, including in tests) | Spring Boot 4.1 reference, Caching |
+| Draft spring-cache Example cached `repo.load(id)` with cache-null-values=false and no `unless`; a null result would throw | Example now uses `unless = "#result == null"`; Rules explain the error | Spring Data Redis 4.1.1 source, RedisCache.processAndCheckValue (message names the fix) |
+| Draft did not say values are Java-serialised by default, so cached classes must be Serializable | Added to What to notice and the Rules table | Spring Boot 4.1.1 source, RedisCacheConfiguration (JdkSerializationRedisSerializer); Spring Data Redis 4.1 reference, defaults table |
+| Reference D4 "Write-through: writes go through the cache layer and underlying store together according to its implementation" (vague) | Kept the earlier correction: a write returns only after both hold the value; with plain Redis the app writes both | AWS ElastiCache Strategies; Azure Cache-Aside |
+| Four-way comparison rows "Read side not set: pair it", "Not a write policy" were hard to read | "Not covered: pair it with a read pattern", "Not covered: it is a read pattern" | (wording only) |
+
+### Unit coordination
+
+**Added from the reference**
+
+- 7 "Lock expiry helps prevent a dead process from holding a lock forever" → distributed-locks (Why it exists, step 4).
+- 7 "Lock timeout risk" → distributed-locks (point "Lease can run out", scenario 1, Interview Q).
+- 7 "Do not blindly DEL" → distributed-locks (trap with why; Example shows DELEX with the wrong token returning 0).
+- 7 Payment rule (lock alone is not exactly-once) → distributed-locks (sayIt, cheat remember, scenario 3, Interview Q, "Not to be confused with": lock vs idempotency key).
+- 6 "Distributed lock" definition → distributed-locks (What it is, contrasted with a JVM-local lock).
+- 1 "Redis is not just a cache: counters, rate limiting, ephemeral state" → rate-limiting-with-redis and session-storage (Why it exists).
+- New common mistakes: SET then EXPIRE (non-atomic lock), fixed lock value instead of a random token.
+
+**Corrections**
+
+- Lock release before Redis 8.4: the draft mixed redis-cli lines and Lua in one `lua` block. Now a real redis-cli run (bash + output) and a separate Lua script, both run on Redis 8.10.2. Source: https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/
+- Redisson watchdog: the draft/tree implied it always renews; it renews only when the lock is taken without a lease time. Source: https://redisson.pro/docs/configuration/ (lockWatchdogTimeout).
+- Session properties: confirmed Boot 4.1 names `spring.session.data.redis.namespace` and `.repository-type` (the Spring Session reference uses `spring.session.redis.*`; Boot's appendix uses `spring.session.data.redis.*`, which is what the site shows). Cookie default `SESSION` added (Spring Session 4.1 API docs).
+- Session timeout: `spring.session.timeout` has no default of its own; it falls back to `server.servlet.session.timeout` (30m). Source: Spring Boot 4.1 Spring Session page + properties appendix.
+- INCREX at the cap: replies `[current, 0]` and leaves the key and TTL alone (not an error). Source: https://redis.io/docs/latest/commands/increx/
+
+### Unit data-types
+
+**Added from the reference**
+
+- D2 String / Hash / Set / Sorted Set / Stream / Bitmap / HyperLogLog / Geo / Pub/Sub one-liners → the "What it is" of each concept (already mapped; now taught step by step).
+- D2 example (SET/GET, HSET/HGET, SADD twice, SCARD = 1) → strings, hashes and sets Examples (re-run with payment:9001).
+- D3 SET NX EX, MGET, HSET/HGET, LPUSH/RPUSH, SADD/SISMEMBER, ZADD/ZRANGE → the matching concepts' How it works and Examples.
+- D3 "SET ... EX" plus the TTL idea → strings trap: a plain SET drops the old TTL (shown by a real run: TTL returns -1). The full TTL rules stay in ttl-and-expiration (another unit); linked.
+- D2 "Pub/Sub has no durable history" → pub-sub What it is, points, trap and the comparison's explain.
+
+**Corrections**
+
+- Draft strings trap (MSET atomic) moved to Common mistakes; new trap "SET keeps the old expiry" (wrong). Source: SET command page, "Any previous time to live associated with the key is discarded on successful SET operation".
+- Draft hashes trap (field expiry) replaced by "field values are typed" (wrong: all values are strings); field expiry moved to points, Rules and an Interview Q. Source: hashes docs; HINCRBY on a text field gives "ERR hash value is not an integer" (run).
+- Geo trap made precise: swapped latitude/longitude values inside the valid ranges are accepted silently (real run: GEOADD kiosks 12.97 77.59 returned 1; GEOPOS shows the swapped point). Only out-of-range values give an error (run: "ERR invalid longitude,latitude pair").
+- Bitmap draft example had an exact count of SETBIT replies only in comments; the reply of SETBIT is the old bit (0), shown in the output panel.
+- No reference statement in this unit was found to be wrong beyond the corrections already in redis.coverage.md (List "ordered" means insertion order; Pub/Sub is not a data type; Redis 8 bundles JSON and Search).
+
+**Facts added or changed (verified 21-10-2026), about 36**
+
+strings: SET discards old TTL; KEEPTTL (6.0); NX/XX (2.6.12); IFEQ (8.4.0); SET GET returns the old value; SET overwrites any type.
+hashes: HSET returns number of new fields; values are strings; HDEL of the last field deletes the key (run); field count limited only by memory; HSCAN for big hashes; HGETEX/HSETEX (8.0).
+lists: max 2^32 - 1 items; LPUSH puts the last argument at the head; key created on push and deleted with the last item; BRPOP timeout is a double in seconds; longest-waiting client is served first; keys checked in the order given; popped item lost on client crash.
+sets: max 2^32 - 1 members; SDIFF keeps members of the first set only (order of keys matters, run); docs suggest Bloom filter or HyperLogLog for memory.
+sorted-sets: score is a double, integers exact up to 2^53; ZADD on an existing member replaces its score; REV also reverses the tie order; ZREVRANGE, ZRANGEBYSCORE, ZREVRANGEBYSCORE deprecated as of 6.2.0; ZRANK/ZREVRANK 0-based.
+streams: XGROUP CREATE $ vs 0, MKSTREAM (missing stream errors without it); XREADGROUP > vs any other id; NOACK skips the PEL; ids stay increasing if the clock moves back; XADD is O(1); one consumer group per service to give each all entries.
+bitmaps-hyperloglog: up to 2^32 bits (512 MB string); setting a high bit allocates all bits below; BITOP; HLL stored as a string (GET/SET copy it); far below 12 KB while it has seen few items.
+geospatial: valid ranges -180..180 and -85.05112878..85.05112878 (error outside); GEORADIUSBYMEMBER deprecated as of 6.2.0; geo index TYPE is zset (run).
+json-and-query-engine: Redis 8 merged Redis Stack and Community Edition into Redis Open Source; vector sets beta in 8.0; FT.CREATE scans existing keys unless SKIPINITIALSCAN; Bloom filters cannot delete (Cuckoo filters can); the probabilistic type list.
+pub-sub: channels ignore database numbers; RESP2 subscribed clients may only run subscribe-type commands, PING, RESET, QUIT, while RESP3 allows any; Cluster forwards PUBLISH to all nodes; the PUBLISH reply counts only clients on the same node.
+New sources with verifiedOn 2026-10-21: 21 entries (about 14 new pages: SET, HSET, BLPOP, ZADD, ZREVRANGE, XREADGROUP, XGROUP CREATE, GEORADIUSBYMEMBER, What's new in 8.0, FT.CREATE, PUBLISH, plus re-checked lists, sets, sorted sets, hashes, streams, bitmaps, HyperLogLog, GEOADD, GEOSEARCH, Pub/Sub, Bloom filter pages).
+Glossary additions: `S/add/redis/data-types.glossary.yaml` adds skip-list-term, at-most-once-term, fan-out-term and probabilistic-data-structure-term. at-least-once-term is already added by the coordination unit.
+
+### Unit java
+
+**Added from the reference**
+
+| Item | Concept |
+|---|---|
+| D8 example "PaymentService with StringRedisTemplate, set with Duration.ofMinutes(5), get" | spring-data-redis Example (typed template, JSON) and redis-code-templates (PaymentStatusStore) |
+| D8 "ensure connectivity, configuration and error handling" | spring-data-redis Common mistakes (old spring.redis.* names are not bound); redis-failure-handling |
+| D9 "cache failure strategy: fail, fall back to DB or controlled behaviour" | redis-failure-handling Why, How it works steps, scenario 2 |
+| Integration template "How do you integrate Redis?" + own RedisTemplate<String,String> bean | redis-code-templates Q1; spring-data-redis scenario 1 (JDK bytes key) and scenario 2 (bean named redisTemplate replaces Boot's) |
+| New: login rate-limit interview question | redis-code-templates Interview Q 3 |
+| New: "What would you not keep in Redis?" | redis-playbook Interview Q 3 |
+| New: Lettuce buffering does not stop callers waiting | redis-failure-handling Common mistakes |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Reference's own `RedisTemplate<String, String>` bean with no serialisers | Its default JDK serialiser applies to keys too; real key seen as "\xac\xed\x00\x05t\x00\x12merchant:42:config" (run on Redis 8.10.2). Use StringRedisTemplate or RedisSerializer.string() | Spring Data Redis 4.1.1 template reference; real run |
+| Draft "Example" had no property-name warning | Old `spring.redis.*` names have deprecation level error since 3.0.0, so Boot 4.1 does not bind them | spring-boot-data-redis 4.1.1 configuration metadata; Boot configuration-metadata format spec |
+| Draft "templates are thread-safe; Lettuce shares one connection" | kept, plus: blocking commands and MULTI/EXEC need a dedicated connection | Spring Data Redis 4.1.1 drivers page |
+
+### Unit memory
+
+### Unit operations
+
+**Added from the reference**
+
+The reference (Part 2, section 9) has only one-line items here; all were already mapped. Teaching angles kept or added:
+| Reference item | Concept |
+|---|---|
+| 9. Persistence trade-off: a successful write is not always on disk | persistence-rdb-aof (trap, trap.why, Example crash test, cheat remember) |
+| 9. RDB point-in-time snapshots / AOF replayed on recovery | persistence-rdb-aof (What it is, How it works steps 2-6); rdb-vs-aof explain |
+| 1. Persistence: survive process or machine failures | persistence-rdb-aof (Why it exists); "Not to be confused with" (persistence vs replica vs backup) |
+| 9. Primary-replica, replicas may serve reads; replication lag | replication (What it is, scenario 1, Interview Q "Why read from replicas") |
+| 9. Sentinel monitors and coordinates failover (coverage file already records the correction: Sentinel runs the failover itself) | sentinel (What it is, How it works) |
+| 9. Cluster distributes keys across shards; sharding | redis-cluster (What it is, Why it exists) |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft cluster diagram slot ranges 0-5500 / 5501-11000 / 11001-16383 | 0-5460 / 5461-10922 / 10923-16383, the ranges `redis-cli --cluster create` assigns to 3 primaries (real run) | Redis 8.10.2 run; scaling docs |
+| Draft cluster example slot for `payment:PAY101` (4122) | Key renamed to the running example `payment:9001`, slot 6906 (real run) | CLUSTER KEYSLOT, Redis 8.10.2 |
+New or changed facts checked on 21-10-2026: switching to AOF must be done live with CONFIG SET (restart with appendonly yes on an RDB-only server loads an empty AOF; confirmed by a real run); auto-aof-rewrite-percentage 100 / min-size 64mb semantics (redis.conf 8.10.2); appendfsync no = OS flush, usually 30 s on Linux (persistence docs); RDB safe to copy while running, hourly/daily backups (persistence docs); repl-diskless-sync yes and repl-diskless-sync-delay 5 (CONFIG GET on 8.10.2; replication docs); replicas do not expire keys, primary sends DEL, replica hides logically expired keys on reads (replication docs); replica offset/replication ID meaning (replication docs); persistence-off primary with auto-restart wipes replicas (replication docs); Sentinel replica selection order and replica-priority 0, default 100 (Sentinel docs; CONFIG GET); parallel-syncs 1, down-after 30000, failover-timeout 180000 (sentinel.conf 8.10.2 and SENTINEL MASTER on a real Sentinel); quorum vs majority, 5 Sentinels with quorum 2 example (Sentinel docs); min-replicas-to-write 1 + max-lag 10 makes an isolated old primary stop writes after 10 s (Sentinel docs); Cluster: nodes do not proxy, only database 0 and SELECT error (spec; real run), hash-tag first-{ rule (spec), 3 primaries minimum and 6 nodes recommended, resharding live (scaling docs), majority of primaries + NODE_TIMEOUT for failover (spec); Spring Boot 4.1.1 properties spring.data.redis.sentinel.master/nodes and spring.data.redis.cluster.nodes/max-redirects (application properties appendix).
+New sources: none new beyond re-verified existing ones; the Spring Boot properties appendix URL was updated to the current unversioned page (it now serves 4.1.1) and added to redis-cluster.

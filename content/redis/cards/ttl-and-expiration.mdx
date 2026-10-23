@@ -5,24 +5,38 @@ title: TTL and Key Expiry
 topic: memory
 level: beginner
 heat: 3
-hook: "A TTL is a timer on a key: when it runs out, the key is gone for readers, but Redis may delete it later."
+hook: "A TTL is a timer on a key: when it runs out, readers stop seeing the key, but Redis may delete it later."
 points:
-  - { k: "One step", v: "SET key value EX 300 stores the value and its TTL together" }
-  - { k: "TTL key", v: "seconds left; -1 = no TTL, -2 = no such key" }
-  - { k: "Accuracy", v: "an expired key stops being returned within 0-1 ms" }
-  - { k: "Clock based", v: "stored as a Unix time; a clock jump can expire keys early", kind: minus }
+  - { k: "TTL", v: "a timer on one key; when it runs out, Redis treats the key as gone" }
+  - { k: "Set it in one step", v: "SET key value EX 300 stores the value with a 300-second TTL" }
+  - { k: "TTL key", v: "returns the seconds left; -1 means no TTL, -2 means the key does not exist" }
+  - { k: "Plain SET", v: "replaces the value and removes the old TTL; pass EX again or use KEEPTTL (Redis 6.0+)", kind: minus }
+  - { k: "No TTL by default", v: "a new key lives until deleted or evicted (Redis Open Source 8.x)", kind: default }
+  - { k: "When keys go", v: "deleted when touched after expiry, or later by a background sampling cycle" }
 trap:
   wrong: "Redis deletes the key at the exact second its TTL ends, so I can start timed work from that."
-  right: "The delete and its expired event can come much later for untouched keys. Use a scheduler or a delayed queue for timed work."
-sayIt: "I set a TTL with SET EX or EXPIRE: minutes for payment status, longer for rarely changing config. Redis removes expired keys on access and in a background cycle, so I never rely on the exact delete time."
+  right: "Readers stop seeing the key on time, but the actual delete and its expired event can come later. Use a scheduler for timed work."
+  why: "A TTL looks like a countdown, and Redis can publish an expired event, so it seems a natural timer."
+sayIt: "I set a TTL with SET EX: minutes for payment status, hours for rarely changing config. Redis deletes expired keys on access or in a background cycle, so I never rely on the exact delete time. A plain SET drops the TTL."
+cheat:
+  idea: "A TTL is a timer on a key. When it runs out, readers stop seeing the key, and Redis deletes it when touched or in a background cycle."
+  code: |
+    SET payment:9001 '{"status":"PENDING"}' EX 300   # value + 5-minute TTL
+  remember: "A plain SET drops the TTL, and TTL then returns -1. Pass EX again or use KEEPTTL."
+buildsOn: [what-is-redis, strings]
+scenarios:
+  - q: "TTL payment:9001 returns 120. The service then runs SET payment:9001 '{\"status\":\"PAID\"}'. What does TTL return now?"
+    a: "-1. A plain SET replaces the key and removes its TTL, so the key now lives forever. Use SET with EX 300 again, or KEEPTTL to keep the remaining 120 seconds."
+  - q: "You plan to cancel unpaid orders 15 minutes after creation by listening for the expired event of a key set with EX 900. Good idea?"
+    a: "No. The expired event is sent when Redis actually deletes the key, which for an untouched key can be later than 15 minutes. Events are also lost if no subscriber is connected at that moment. Use a scheduler or a delayed queue."
 confusedWith: [ttl-vs-eviction]
 tags: [ttl, expiry, caching]
-visual: table
+visual: code
 sources:
-  - title: "EXPIRE (Redis command reference)"
+  - title: "EXPIRE: how Redis expires keys, accuracy, replicas (Redis command reference)"
     url: "https://redis.io/docs/latest/commands/expire/"
-    verifiedOn: "2026-10-20"
-  - title: "SET (Redis command reference)"
+    verifiedOn: "2026-10-21"
+  - title: "SET: EX, PX and KEEPTTL options (Redis command reference)"
     url: "https://redis.io/docs/latest/commands/set/"
     verifiedOn: "2026-10-20"
   - title: "TTL (Redis command reference)"
@@ -31,44 +45,101 @@ sources:
   - title: "Keyspace notifications: timing of expired events (Redis docs)"
     url: "https://redis.io/docs/latest/develop/pubsub/keyspace-notifications/"
     verifiedOn: "2026-10-20"
+  - title: "redis.conf: hz 10, background tasks that purge expired keys (Redis 8.10.2, GitHub)"
+    url: "https://github.com/redis/redis/blob/8.10.2/redis.conf"
+    verifiedOn: "2026-10-21"
+  - title: "Keys and values: key expiration (redis.io)"
+    url: "https://redis.io/docs/latest/develop/using-commands/keyspace/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A TTL, short for time to live, is a timer you attach to a key. When the timer runs out, the key expires: Redis treats it as gone and deletes it. A key without a TTL lives until something deletes it. You set the timer with the `EX` option of `SET`, or with `EXPIRE` on a key that already exists.
 
 ## Why it exists
 
-Cached copies go stale and short-lived state piles up. A TTL lets Redis remove them by itself, with no cleanup job.
+Cached copies go stale, and short-lived state, such as a payment status or a login attempt counter, piles up. Without a TTL you would need a cleanup job that finds and deletes old keys, and it would miss some. With a TTL, each key carries its own end time, so old copies disappear by themselves and their memory is freed.
 
 ## How it works
 
-| Command | Effect on the TTL |
-|---|---|
-| `SET k v EX 300` / `PX 300000` | Value plus TTL in seconds / ms |
-| `EXPIRE k 300` / `PEXPIRE` / `EXPIREAT` | Adds or changes the TTL |
-| `PERSIST k` | Removes the TTL |
-| `SET k v` (no option) | Drops the old TTL |
-| `SET k v KEEPTTL` | Keeps the old TTL (Redis 6.0+) |
-| `INCR`, `HSET`, `LPUSH` | Change the value, keep the TTL |
+<Mermaid
+  alt="A key is stored with an expiry time. Before that time, reads return the value. After it, two paths delete the key: a command that touches it deletes it and gets nothing back, and a background cycle that samples keys with a TTL deletes the expired ones it finds."
+  chart={`flowchart LR
+  S["SET ... EX 300"] --> K[Key + expiry time]
+  K -- "read before expiry" --> V([Value returned])
+  K -- "read after expiry" --> L[Deleted on access, reply nil]
+  K -- "never read again" --> A[Background cycle finds and deletes it]`}
+/>
 
-- Keys leave by [lazy expiry](card:ttl-lazy-expiry) or [active expiry](card:ttl-active-expiry); replicas wait for the primary's DEL.
-- Pick the TTL per data: minutes for payment status, hours for merchant config.
-- Fields inside a hash can have their own TTL: see [hashes](card:hashes).
+1. `SET payment:9001 ... EX 300` stores the value and an expiry time: now plus 300 seconds, saved as an absolute Unix time.
+2. Until then, reads return the value, and `TTL payment:9001` reports the seconds left.
+3. After that time, the first command that touches the key sees that it expired, deletes it and answers as if it never existed. This is lazy expiry.
+4. Keys that nobody touches are found by active expiry: several times a second, Redis samples some keys that have a TTL and deletes the expired ones.
+5. Replicas, the copies of a primary server that you will meet in [replication](card:replication), do not delete expired keys on their own. The primary sends them a `DEL` for each expired key.
+
+So the key is: clients never read an expired key, but the moment it is actually deleted is not fixed.
 
 ## Example
 
-```text
-SET payment:PAY101 PENDING EX 300    -- status lives 5 minutes
-TTL payment:PAY101                   -> 300
-SET payment:PAY101 PAID KEEPTTL      -- update, keep the timer
-TTL payment:PAY101                   -> 291
-SET payment:PAY101 PAID              -- plain SET: timer dropped
-TTL payment:PAY101                   -> -1
+The payment service caches the status of payment 9001 for 5 minutes, then updates it twice.
+
+```bash
+redis-cli SET payment:9001 '{"status":"PENDING"}' EX 300
+redis-cli TTL payment:9001
+redis-cli SET payment:9001 '{"status":"PAID"}' KEEPTTL
+redis-cli TTL payment:9001
+redis-cli SET payment:9001 '{"status":"PAID"}'
+redis-cli TTL payment:9001
+redis-cli TTL payment:9999
 ```
+
+```text output
+OK
+(integer) 300
+OK
+(integer) 299
+OK
+(integer) -1
+(integer) -2
+```
+
+What to notice:
+
+- `TTL` counts down: 300 seconds, then 299 a moment later.
+- `KEEPTTL` replaces the value but keeps the running timer.
+- The plain `SET` replaced the key and its timer, so `TTL` now returns `-1`: the key will never expire. This is the most common TTL bug.
+- `-2` means there is no key `payment:9999` at all.
+
+## Rules and defaults
+
+- **Removes the TTL:** `SET` without `EX`, `PX` or `KEEPTTL`, `GETSET`, `DEL`, the `*STORE` commands, and `PERSIST`.
+- **Keeps the TTL:** commands that change the value in place, such as `INCR`, `LPUSH` and `HSET`. `RENAME` moves the TTL to the new name.
+- **Conditional EXPIRE (Redis 7.0+):** `NX` sets a TTL only if there is none, `XX` only if there is one, `GT` only if longer, `LT` only if shorter.
+- **Zero or negative:** `EXPIRE key 0` deletes the key at once.
+- **Accuracy:** an expired key stops being returned within 0 to 1 ms (since Redis 2.6).
+- **Clock:** the expiry is an absolute time, so it keeps running while Redis is stopped, and moving the server clock forward expires keys early.
+- **Hash fields:** fields inside a hash can have their own TTL; see [hashes](card:hashes).
+
+## Not to be confused with
+
+A TTL is your own timer on one key: the key goes when its time runs out. Eviction is Redis deleting keys because memory reached its limit, whatever their timers say; you will see it in [eviction policies](card:eviction-policies). Rule: TTL is freshness you choose; eviction is a safety net for memory.
+
+## Common mistakes
+
+- **Setting the TTL in a second command.** `SET` followed by `EXPIRE` leaves a key with no TTL if the app crashes in between. Use `SET ... EX` in one command.
+- **The same TTL for many keys loaded together.** They all expire at the same moment and send a burst of reads to the database; [cache problems](card:cache-problems) shows the fix.
 
 ## Interview Qs
 
 ### How does Redis remove expired keys?
 
-Lazily: a command that touches an expired key deletes it and gets nothing. Actively: a background cycle samples keys with a TTL and deletes expired ones, so unread keys are freed too.
+In two ways. Lazily: a command that touches an expired key deletes it and gets nothing back. Actively: a background cycle samples keys that have a TTL and deletes the expired ones, so keys that nobody reads are freed too.
 
 ### I updated a cached value and now it never expires. Why?
 
-A plain SET replaces the key and discards its TTL. Pass EX again or use KEEPTTL. Commands that only change the value, like INCR or HSET, keep the TTL.
+A plain SET replaces the key and discards its TTL, so TTL returns -1. Pass EX again or use KEEPTTL. Commands that only change the value in place, such as INCR or HSET, keep the TTL.
+
+### Do replicas expire keys themselves?
+
+No. To stay consistent, the primary turns each expiry into a DEL and sends it to its replicas and to the append-only file (AOF), its log on disk. Replicas still keep the expiry times, so a replica promoted to primary starts expiring keys on its own.

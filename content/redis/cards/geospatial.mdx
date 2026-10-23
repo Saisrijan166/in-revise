@@ -5,33 +5,58 @@ title: Geospatial Indexes
 topic: data-types
 level: intermediate
 heat: 1
-hook: "A geo index is a sorted set whose scores encode longitude and latitude, so 'what is within 5 km' is one command."
+hook: "A geo index is a sorted set whose scores encode longitude and latitude, so 'which kiosks are within 5 km of me?' is one command."
 points:
-  - { k: "Storage", v: "a sorted set; the score is a 52-bit geohash" }
-  - { k: "Search", v: "GEOSEARCH by radius or box, nearest first with ASC", kind: plus }
-  - { k: "Remove", v: "no GEODEL: use ZREM, since it is a sorted set" }
+  - { k: "Storage", v: "a geo index is a sorted set; each member's score is a 52-bit geohash of its position" }
+  - { k: "Longitude first", v: "GEOADD and GEOSEARCH take longitude, then latitude, the x then y order" }
+  - { k: "Search", v: "GEOSEARCH finds members within a radius or a box, nearest first with ASC", kind: plus }
+  - { k: "Remove a point", v: "there is no GEODEL; use ZREM, because the index is a sorted set" }
+  - { k: "Accuracy", v: "distances assume the Earth is a perfect sphere, so they can be off by up to 0.5%", kind: minus }
 trap:
   wrong: "GEOADD takes latitude, then longitude."
-  right: "GEOADD takes longitude first, then latitude (x, y order)."
-sayIt: "Redis geo commands store points in a sorted set using a geohash as the score. I add merchants with GEOADD and find the nearest ones with GEOSEARCH BYRADIUS, which replaced the deprecated GEORADIUS."
+  right: "GEOADD takes longitude first, then latitude. Swapped values inside the valid ranges are accepted silently and put the point in the wrong place."
+  why: "Maps and phones usually show coordinates as 'latitude, longitude', so people type them in that order."
+sayIt: "Redis geo commands store points in a sorted set, with a 52-bit geohash as each member's score. I add places with GEOADD, longitude first, and find the nearest with GEOSEARCH BYRADIUS ... ASC, which replaced the deprecated GEORADIUS."
+cheat:
+  idea: "A geo index is a sorted set where each member's score encodes its longitude and latitude. GEOSEARCH then finds the members within a radius or box, nearest first."
+  code: |
+    GEOADD kiosks 77.5946 12.9716 kiosk:mg-road        # longitude, latitude, name
+    GEOSEARCH kiosks FROMLONLAT 77.60 12.97 BYRADIUS 5 km ASC
+  remember: "Longitude comes first; swapped values may be accepted silently and put the point in the wrong place."
+buildsOn: [sorted-sets]
+scenarios:
+  - q: "A developer runs GEOADD kiosks 12.97 77.59 kiosk:x, typing latitude first. What happens?"
+    a: "Redis accepts it, because 12.97 is a valid longitude and 77.59 is a valid latitude. The kiosk is stored far up in the Arctic instead of in Bengaluru, and nearby searches never find it. Only values outside the valid ranges give an error."
+  - q: "The app must show the 3 nearest kiosks within 5 km of a user, with distances. Which command?"
+    a: "GEOSEARCH kiosks FROMLONLAT <lon> <lat> BYRADIUS 5 km ASC COUNT 3 WITHDIST. ASC sorts nearest first, COUNT 3 stops after three, and WITHDIST returns each distance in kilometres."
 confusedWith: []
 tags: [geospatial, geosearch, location]
 visual: flow
 sources:
-  - title: "GEOADD command (Redis docs)"
+  - title: "GEOADD: longitude first, valid ranges, 52-bit geohash, up to 0.5% error (Redis docs)"
     url: "https://redis.io/docs/latest/commands/geoadd/"
-    verifiedOn: "2026-10-20"
-  - title: "GEOSEARCH command (Redis docs)"
+    verifiedOn: "2026-10-21"
+  - title: "GEORADIUSBYMEMBER: deprecated as of Redis 6.2.0 (Redis docs)"
+    url: "https://redis.io/docs/latest/commands/georadiusbymember/"
+    verifiedOn: "2026-10-21"
+  - title: "GEOSEARCH command, since 6.2.0 (Redis docs)"
     url: "https://redis.io/docs/latest/commands/geosearch/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Redis geospatial (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/geospatial/"
     verifiedOn: "2026-10-20"
+  - title: "Geospatial in Redis Search: GEO and GEOSHAPE fields, polygons (Redis docs)"
+    url: "https://redis.io/docs/latest/develop/ai/search-and-query/advanced-concepts/geo/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A geospatial index stores places as points and finds the ones near a location. In Redis it is a [sorted set](card:sorted-sets) underneath: each member is a place name, and its score is a geohash, one number made by interleaving the bits of the longitude and the latitude. Points that are close on the map get scores that are close together, so Redis can search a small range of scores instead of every point.
 
 ## Why it exists
 
-"Show payment kiosks near me" needs a distance search. Redis answers it in memory, without a separate geo database.
+"Show payment kiosks near me" needs a distance search. Without a geo index, the app would load every kiosk and compute every distance itself, or run a separate geo database. Redis stores the points in memory and answers "within 5 km, nearest first" in one command.
 
 ## How it works
 
@@ -43,20 +68,51 @@ sources:
   Z --> S["GEOSEARCH BYRADIUS 5 km"]`}
 />
 
+1. `GEOADD key longitude latitude member` checks the coordinates are in range and turns them into a 52-bit geohash.
+2. Redis stores the member in the sorted set with that geohash as its score.
+3. `GEOSEARCH` takes a centre (a longitude and latitude, or an existing member) and a shape: a radius or a box.
+4. Redis reads the score ranges that cover the shape, then keeps only the members really inside it and computes their distances.
+
 ## Example
 
-```text
-GEOADD kiosks 77.5946 12.9716 kiosk:mg-road 77.6408 12.9784 kiosk:indiranagar  -- 2
-GEOSEARCH kiosks FROMLONLAT 77.60 12.97 BYRADIUS 5 km ASC WITHDIST
-GEODIST kiosks kiosk:mg-road kiosk:indiranagar km  -- about 5.06 km
+The payment service indexes two kiosks in Bengaluru and finds those within 5 km of a user.
+
+```bash
+redis-cli GEOADD kiosks 77.5946 12.9716 kiosk:mg-road 77.6408 12.9784 kiosk:indiranagar
+redis-cli GEOSEARCH kiosks FROMLONLAT 77.60 12.97 BYRADIUS 5 km ASC WITHDIST
+redis-cli GEODIST kiosks kiosk:mg-road kiosk:indiranagar km
+redis-cli TYPE kiosks
 ```
+
+```text output
+(integer) 2
+1) 1) "kiosk:mg-road"
+   2) "0.6119"
+2) 1) "kiosk:indiranagar"
+   2) "4.5200"
+"5.0647"
+zset
+```
+
+What to notice:
+
+- Each `GEOADD` triple is longitude, latitude, name. 77.59 is Bengaluru's longitude, and it comes first.
+- `ASC` sorted the results nearest first, and `WITHDIST` added each distance in kilometres.
+- `TYPE` says `zset`: the geo index is a plain sorted set, so `ZREM kiosks kiosk:mg-road` removes a kiosk and `ZCARD` counts them.
+
+## Rules and defaults
+
+- **Valid ranges:** longitude -180 to 180; latitude -85.05112878 to 85.05112878. Points nearer the poles cannot be indexed, and GEOADD returns an error for them.
+- **Accuracy:** Redis treats the Earth as a sphere, so a distance can be off by up to 0.5% in the worst case.
+- **Commands:** `GEOSEARCH` (Redis 6.2+) replaces the deprecated `GEORADIUS` and `GEORADIUSBYMEMBER`. `GEODIST` gives a distance; `GEOPOS` returns a member's coordinates.
+- **Units:** `m`, `km`, `mi` or `ft`.
 
 ## Interview Qs
 
 ### How would you find the nearest merchants to a user?
 
-GEOADD every merchant once. On a request, GEOSEARCH from the user's longitude and latitude BYRADIUS, sorted ASC with a COUNT limit, and add WITHDIST to show the distance.
+GEOADD every merchant once with longitude and latitude. On each request, GEOSEARCH from the user's position BYRADIUS, sorted ASC, with COUNT to limit the results and WITHDIST to show distances. When a merchant moves, GEOADD it again; when it closes, ZREM it.
 
 ### What are the limits of Redis geo?
 
-Points near the poles (beyond about 85.05 degrees latitude) cannot be indexed. Distances assume a perfect sphere, so they can be off by up to 0.5%. Queries are radius or box only.
+Points beyond about 85.05 degrees latitude cannot be indexed. Distances assume a perfect sphere, so they can be off by up to 0.5%. GEOSEARCH works by radius or box only. For polygons, such as a town boundary, use GEOSHAPE fields in the Redis Query Engine; for routes, use a dedicated geo system.

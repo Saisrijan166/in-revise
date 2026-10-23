@@ -5,68 +5,115 @@ title: Bitmaps, Bitfields and HyperLogLog
 topic: data-types
 level: intermediate
 heat: 2
-hook: "Bitmaps store one yes/no per ID, bitfields pack small counters, and HyperLogLog estimates unique counts in 12 KB."
+hook: "Bitmaps keep one yes/no bit per numeric id, bitfields pack many small counters into one string, and HyperLogLog estimates a unique count in at most 12 KB."
 points:
-  - { k: "Bitmap", v: "bit operations on a string; one bit per integer ID" }
-  - { k: "Bitmap size", v: "grows to the highest bit set (up to 2^32); IDs must be integers", kind: minus }
-  - { k: "Bitfield", v: "many signed or unsigned integers of chosen width in one string" }
-  - { k: "HyperLogLog", v: "up to 12 KB, standard error 0.81%, no members kept", kind: plus }
+  - { k: "Bitmap", v: "bit commands on a string: bit n stands for id n, so one bit records 'user n was active'" }
+  - { k: "Bitmap size", v: "the string grows to the highest bit you set, so ids must be small, dense integers", kind: minus }
+  - { k: "Bitfield", v: "BITFIELD reads, writes or adds to many small integers of a chosen width inside one string" }
+  - { k: "HyperLogLog", v: "PFADD and PFCOUNT estimate how many distinct items were added, in at most 12 KB", kind: plus }
+  - { k: "Estimate only", v: "PFCOUNT has a standard error of 0.81% and cannot list the items it saw", kind: minus }
 trap:
-  wrong: "PFCOUNT gives the exact number of unique visitors."
-  right: "It is an estimate with about 0.81% standard error. For an exact count or the members, use a set."
-sayIt: "For daily active users by numeric ID I use a bitmap: SETBIT per user, BITCOUNT for the total. When IDs are not small integers or the count is huge, HyperLogLog estimates unique counts in at most 12 KB."
+  wrong: "PFCOUNT gives the exact number of unique payers."
+  right: "It is an estimate with a standard error of about 0.81%. For an exact count, or to list the payers, use a set and accept its memory cost."
+  why: "On small tests PFCOUNT usually returns the exact number, so the estimate looks exact until the counts get large."
+sayIt: "For daily active users with numeric ids I use a bitmap: SETBIT per user and BITCOUNT for the total, about 125 KB for a million ids. When ids are not small integers, or an estimate is enough, a HyperLogLog counts distinct items in at most 12 KB with 0.81% error."
+cheat:
+  idea: "A bitmap uses one bit per numeric id to record yes or no, such as 'active today'. A HyperLogLog estimates how many distinct items it has seen in at most 12 KB, without storing them."
+  remember: "PFCOUNT is an estimate (about 0.81% error) and cannot list items; a set gives exact members."
+buildsOn: [strings, sets]
+scenarios:
+  - q: "You want daily active users, and user ids are numbers from 1 to 1,000,000. Set, bitmap or HyperLogLog?"
+    a: "A bitmap. SETBIT active:<date> <id> 1 for each active user, then BITCOUNT. It is exact, needs about 125 KB per day (one bit per possible id), and lets you check one user with GETBIT. A set would store every id as a member and use far more memory."
+  - q: "You want the number of distinct card numbers seen today, and the numbers are long strings. Which tool?"
+    a: "A HyperLogLog: PFADD each card's hash, then PFCOUNT. A bitmap needs small integer ids, and a set would store every card. The HyperLogLog stays at most 12 KB, and its count is an estimate within about 0.81%."
 confusedWith: []
 tags: [bitmaps, hyperloglog, analytics]
 visual: table
 sources:
-  - title: "Redis bitmaps (Redis docs)"
+  - title: "Redis bitmaps: string as a bit vector, up to 2^32 bits (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/strings/bitmaps/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "BITFIELD command (Redis docs)"
     url: "https://redis.io/docs/latest/commands/bitfield/"
     verifiedOn: "2026-10-20"
-  - title: "HyperLogLog (Redis docs)"
+  - title: "HyperLogLog: up to 12 KB, 0.81% standard error, stored as a string (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/probabilistic/hyperloglogs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+These are three space-saving tools built on [strings](card:strings). A bitmap is not a separate type: it is a string that bit commands treat as a long row of bits, where bit number 7 can mean "user 7 was active today". A bitfield packs many small integers, such as 8-bit retry counters, into one string. A HyperLogLog is a probabilistic structure: it estimates how many distinct items you added, using at most 12 KB, without storing the items.
 
 ## Why it exists
 
-Counting unique users with a set costs memory for every member. When you only need yes/no per ID, or an approximate count, these tools use a tiny fraction of that.
+Counting unique payers with a [set](card:sets) stores every member, so memory grows with every user. Often you need less: one yes/no per user id, or only "about how many?". A bitmap needs one bit per id, so a million ids fit in about 125 KB. A HyperLogLog stays at most 12 KB whether it has seen a thousand items or a billion.
 
 ## How it works
 
 | Tool | Answers | Exact? | Memory |
 |---|---|---|---|
-| Bitmap | "Was user 7 active today?" "How many were?" | yes | 1 bit per ID up to the highest ID |
-| Bitfield | "Retries for slot 3?" (many small counters) | yes | the bits you choose per counter |
-| HyperLogLog | "About how many unique payers?" | no | at most 12 KB per counter |
+| Bitmap | "Was user 7 active today?" "How many were?" | yes | 1 bit per id, up to the highest id set |
+| Bitfield | "How many retries for slot 3?" | yes | the bits you choose per counter |
+| HyperLogLog | "About how many unique payers today?" | no, about 0.81% error | at most 12 KB per counter |
 
-- A Bloom filter answers "seen before?" approximately: [Bloom filter](card:json-and-query-engine).
+1. A bitmap starts empty. `SETBIT key 7 1` grows the string to cover bit 7 and turns it on.
+2. `GETBIT key n` returns that bit; a bit you never set reads as 0. `BITCOUNT key` counts the bits that are 1.
+3. A HyperLogLog takes items with `PFADD`. It hashes each item and keeps only a small summary of the hashes, never the item.
+4. `PFCOUNT` turns that summary into an estimate of how many distinct items were added. Adding the same item again does not change it.
 
 ## Example
 
-```text
-SETBIT active:2026-10-20 7 1         -- user 7 was active
-GETBIT active:2026-10-20 7           -- 1
-BITCOUNT active:2026-10-20           -- users active today
-BITFIELD retries:42 INCRBY u8 0 1    -- 8-bit counter at bit 0, now 1
-PFADD payers:2026-10-20 user:7 user:9 user:7   -- 1
-PFCOUNT payers:2026-10-20            -- 2 (an estimate)
+The payment service marks users 7 and 9 as active today, counts distinct payers, and counts a retry for merchant 42.
+
+```bash
+redis-cli SETBIT active:2026-10-21 7 1
+redis-cli SETBIT active:2026-10-21 9 1
+redis-cli GETBIT active:2026-10-21 8
+redis-cli BITCOUNT active:2026-10-21
+redis-cli PFADD payers:2026-10-21 user:7 user:9 user:7
+redis-cli PFCOUNT payers:2026-10-21
+redis-cli BITFIELD retries:merchant:42 INCRBY u8 0 1
 ```
 
-## Defaults
+```text output
+(integer) 0
+(integer) 0
+(integer) 0
+(integer) 2
+(integer) 1
+(integer) 2
+1) (integer) 1
+```
 
-| What | Default | Where |
-|---|---|---|
-| BITFIELD overflow | WRAP (also SAT, FAIL) | Redis Open Source 8.10 |
+What to notice:
+
+- `SETBIT` returns the bit's old value, 0 here. User 8 was never set, so `GETBIT` returns 0.
+- `BITCOUNT` returned 2, exact. The whole bitmap is only 2 bytes because the highest bit set is 9.
+- `PFADD` returned 1 because the estimate changed; `user:7` twice still counts once, so `PFCOUNT` says 2.
+- `BITFIELD ... INCRBY u8 0 1` treats bits 0 to 7 as an unsigned 8-bit counter and adds 1.
+
+## Rules and defaults
+
+- **Bitmap limit:** a string is at most 512 MB, so a bitmap holds up to 2^32 bits. Setting a very high bit allocates memory for every bit below it.
+- **Combine days:** `BITOP AND|OR|XOR|NOT` combines bitmaps into a new key, for example users active on every one of 7 days.
+- **HyperLogLog:** at most 12 KB, far less while it has seen few items; standard error 0.81%. `PFMERGE` joins several into one. It is stored as a string, so `GET` and `SET` can copy it.
+- **BITFIELD overflow:** `WRAP` by default (Redis Open Source 8.10); `SAT` stops at the limit, `FAIL` refuses the change.
+
+## Not to be confused with
+
+A HyperLogLog answers "how many distinct items?". A Bloom filter, part of [JSON, Search and other Redis 8 types](card:json-and-query-engine), answers "have I seen this item?". Both are small and approximate, but neither lists the items. Rule: count = HyperLogLog; membership = Bloom filter; exact members = set.
 
 ## Interview Qs
 
 ### How do you find users active on each of the last 7 days?
 
-Keep one bitmap per day. BITOP AND the seven keys into a new key, then BITCOUNT it: bit n is 1 only if user n was active on all seven days.
+Keep one bitmap per day, with bit n for user n. BITOP AND the seven keys into a new key, then BITCOUNT it. Bit n is 1 only if user n was active on all seven days.
 
 ### Why is HyperLogLog so small?
 
-It keeps only a small fixed-size state about what it has seen, never the items. That caps it at 12 KB but makes the count approximate, and you cannot list the members.
+It never stores the items. It hashes each one and keeps a fixed-size summary of patterns in the hashes, which caps it at 12 KB. The price is an approximate count, about 0.81% standard error, and you cannot list the members.
+
+### When is a bitmap a bad idea?
+
+When ids are sparse or huge. A bitmap grows to the highest bit set, so one user with id 4,000,000,000 makes the string about 500 MB even if only two bits are on. Use a set or a HyperLogLog then.

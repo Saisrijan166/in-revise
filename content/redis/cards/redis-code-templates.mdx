@@ -5,38 +5,57 @@ title: Redis Code Templates
 topic: java
 level: interview
 heat: 3
-hook: "Four skeletons cover most whiteboard asks: connection properties, set with a TTL and get, an INCR-plus-EXPIRE script, and a SET NX lock released by token."
+hook: "Four short skeletons cover most Redis coding asks: connect, save with a TTL and read back, count with one script, and lock with a token."
 points:
-  - { k: "No config class", v: "Spring Boot already builds StringRedisTemplate; inject it", kind: plus }
-  - { k: "set(k, v, Duration)", v: "one SET carries the value and its TTL, so no key lives forever" }
-  - { k: "get on a miss", v: "returns null, not an exception", kind: minus }
-  - { k: "RedisScript", v: "keep it in a static field; execute(script, keys, args)" }
-  - { k: "setIfAbsent(k, token, ttl)", v: "SET NX EX; true means you hold the lock" }
+  - { k: "No config class", v: "Spring Boot already builds a StringRedisTemplate bean, so you inject it and write no Redis setup code", kind: plus }
+  - { k: "set(k, v, Duration)", v: "sends one SET with EX, so the value and its TTL are written together and no key lives forever" }
+  - { k: "get on a miss", v: "returns null, not an exception, when the key is missing or has expired", kind: minus }
+  - { k: "RedisScript", v: "wrap the Lua text once in a static RedisScript; execute(script, keys, args) runs it as one step" }
+  - { k: "setIfAbsent(k, token, ttl)", v: "sends SET key token EX 30 NX; true means you now hold the lock" }
 trap:
   wrong: "Lock: if get(key) returns null, call set(key, token, ttl)."
   right: "Two workers can both read null and both take the lock. setIfAbsent(key, token, ttl) checks and sets in one SET NX."
-sayIt: "I add the Redis starter, set spring.data.redis.host and port, and inject the auto-configured StringRedisTemplate. Writes pass a Duration so the TTL goes in the same SET; counters and lock releases run as Lua scripts, so each step is atomic."
+  why: "In single-threaded code, checking first and then writing is the normal way, so the gap between the two calls is easy to miss."
+sayIt: "I add the Redis starter, set spring.data.redis.host and port, and inject the auto-configured StringRedisTemplate. Every write passes a Duration so the TTL goes in the same SET, and counters and lock releases run as Lua scripts, so each read-then-write is atomic."
+cheat:
+  idea: "Four skeletons cover most Redis coding asks: connection properties, set with a TTL and get, an INCR-plus-EXPIRE script for limits, and a setIfAbsent lock released by token."
+  code: |
+    redis.opsForValue().set("payment:9001:status", "PAID", Duration.ofMinutes(10));
+  remember: "Pass a Duration on every write, and run every read-then-write, such as count-then-expire or check-then-delete, as one Lua script."
+buildsOn: [spring-data-redis, lua-and-functions, distributed-locks]
+scenarios:
+  - q: "A login limiter calls increment(key) and then expire(key, 60 s) as two separate calls. The app crashes between them. What happens?"
+    a: "The counter key is left without a TTL, so it never resets, and once it passes the limit that user is blocked for good. In one Lua script, INCR and EXPIRE run together, so this gap cannot happen."
+  - q: "Worker A's lock on lock:payment:9001 expires while A is still working, and worker B takes it. A then finishes and calls delete(key). What goes wrong, and what does the template do instead?"
+    a: "A plain delete removes B's lock, so a third worker can enter as well. The UNLOCK script deletes the key only if it still holds A's token, so A's late release does nothing and B keeps its lock."
 confusedWith: []
 tags: [spring-boot, coding-round, redistemplate, lua]
 visual: code
 sources:
-  - title: "Working with NoSQL: Redis (Spring Boot 4.1 reference)"
+  - title: "Working with NoSQL: Redis (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/data/nosql.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "ValueOperations (Spring Data Redis 4.1 API)"
     url: "https://docs.spring.io/spring-data/redis/docs/current/api/org/springframework/data/redis/core/ValueOperations.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Scripting (Spring Data Redis 4.1 reference)"
     url: "https://docs.spring.io/spring-data/redis/reference/redis/scripting.html"
     verifiedOn: "2026-10-20"
   - title: "INCR: pattern rate limiter (Redis docs)"
     url: "https://redis.io/docs/latest/commands/incr/"
     verifiedOn: "2026-10-20"
+  - title: "DefaultScriptExecutor: EVALSHA, then EVAL on NOSCRIPT (Spring Data Redis 4.1.1 source)"
+    url: "https://github.com/spring-projects/spring-data-redis/blob/4.1.1/src/main/java/org/springframework/data/redis/core/script/DefaultScriptExecutor.java"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Redis code templates are four short skeletons for the coding part of a Redis interview: the connection properties, a save with a TTL and a read, a counter for rate limiting, and a lock. Each one uses the `StringRedisTemplate` that Spring Boot already builds, as shown in [Spring Data Redis](card:spring-data-redis). The ideas behind them come from earlier concepts; this page is the code you write on the whiteboard.
 
 ## Why it exists
 
-"How would you use Redis in Spring Boot?" usually ends with "write it". A few short skeletons answer almost every version of that ask.
+"How would you use Redis in Spring Boot?" is often followed by "write it". Code written from scratch under pressure tends to have the classic bugs: a key with no TTL, a GET and then a SET that two servers run at the same time, or a lock deleted by the wrong worker. Four fixed shapes, learned once, avoid all three.
 
 ## How it works
 
@@ -50,10 +69,15 @@ sources:
 | Count or rate-limit | INCR and EXPIRE in one script, below |
 | Lock a job | `setIfAbsent`, then a token check on release, below |
 
-- Why one script beats two calls: [Lua scripts](card:lua-and-functions) run whole.
-- The theory behind the last two: [rate limiting](card:rate-limiting-with-redis), [locks](card:distributed-locks).
+1. Add `spring-boot-starter-data-redis` and set the connection properties. Spring Boot builds the connection and the `StringRedisTemplate`.
+2. Inject `StringRedisTemplate` into your service through its constructor.
+3. On every write, pass a `Duration`, so the value and its TTL go in one SET.
+4. When a write depends on a read, such as "count, then set the expiry" or "check the owner, then delete", put both steps in one [Lua script](card:lua-and-functions), so no other client runs in between.
+5. For a lock, call `setIfAbsent` with a random token and a TTL, and release it with the token-check script.
 
 ## Example
+
+The payment service connects with these properties; the password comes from an environment variable, not from the file.
 
 ```properties
 spring.data.redis.host=localhost
@@ -62,13 +86,15 @@ spring.data.redis.password=${REDIS_PASSWORD}
 spring.data.redis.timeout=2s
 ```
 
+It saves a payment status for 10 minutes and reads it back.
+
 ```java
 @Service
 class PaymentStatusStore {
     private final StringRedisTemplate redis;           // auto-configured by Spring Boot
     PaymentStatusStore(StringRedisTemplate redis) { this.redis = redis; }
 
-    void save(String id, String status) {              // SET payment:PAY101:status PAID EX 600
+    void save(String id, String status) {              // SET payment:9001:status PAID EX 600
         redis.opsForValue().set("payment:" + id + ":status", status, Duration.ofMinutes(10));
     }
     String find(String id) {                           // null when missing or expired
@@ -77,11 +103,13 @@ class PaymentStatusStore {
 }
 ```
 
+The same steps in redis-cli, with the replies Redis gives:
+
 ```bash
-redis-cli SET payment:PAY101:status PAID EX 600
-redis-cli GET payment:PAY101:status
-redis-cli TTL payment:PAY101:status
-redis-cli GET payment:PAY999:status
+redis-cli SET payment:9001:status PAID EX 600
+redis-cli GET payment:9001:status
+redis-cli TTL payment:9001:status
+redis-cli GET payment:9999:status
 ```
 
 ```text output
@@ -91,17 +119,21 @@ OK
 (nil)
 ```
 
+The login limiter allows 5 attempts per user per 60 seconds.
+
 ```java
 private static final RedisScript<Long> HIT = RedisScript.of("""
         local n = redis.call('INCR', KEYS[1])
         if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
         return n""", Long.class);
 
-boolean allow(String userId) {                         // 5 requests per 60-second window
-    Long n = redis.execute(HIT, List.of("rate:user:" + userId), "60");
-    return n <= 5;                                     // false: answer 429
+boolean allowLogin(String userId) {                    // 5 attempts per 60-second window
+    Long n = redis.execute(HIT, List.of("rate:user:" + userId + ":login"), "60");
+    return n <= 5;                                     // false: answer HTTP 429
 }
 ```
+
+One worker at a time may capture payment 9001.
 
 ```java
 private static final RedisScript<Long> UNLOCK = RedisScript.of(
@@ -117,16 +149,31 @@ boolean runOnce(String paymentId, Runnable job) {
 }
 ```
 
+What to notice:
+
+- `set(key, value, Duration)` sends one `SET ... EX 600`, and `get` returns null for the missing `payment:9999:status`, so the caller must check for null.
+- The limiter's script sets the expiry only on the first hit (`n == 1`), so the window starts at the first attempt; the sixth call in that window returns false.
+- `setIfAbsent` sends `SET lock:payment:9001 <token> EX 30 NX`: true means this worker holds the lock. The `finally` block runs the release even when the job throws.
+- The release deletes the key only if it still holds this worker's token. Replace it with a plain `delete` and a worker whose lock expired can remove another worker's lock.
+
+## Rules and defaults
+
+- **Script results:** a Lua integer comes back as a Java `Long`, so declare `RedisScript<Long>`.
+- **Script sending:** Spring sends EVALSHA with the script's SHA1 first, and falls back to EVAL with the full text when Redis replies NOSCRIPT (Spring Data Redis 4.1).
+- **Keys and arguments:** pass key names in the `keys` list, which the script reads as `KEYS[1]`, and other values as arguments, read as `ARGV[1]`.
+- **Boolean results:** `setIfAbsent` returns a `Boolean` that is null inside a pipeline or transaction, so compare with `Boolean.TRUE.equals(...)`.
+- **Timeouts:** what `spring.data.redis.timeout` changes, and why to set it, is in [When Redis is slow or down](card:redis-failure-handling).
+
 ## Interview Qs
 
 ### How do you integrate Redis into a Spring Boot service?
 
-Add `spring-boot-starter-data-redis`, set `spring.data.redis.host` and `port`, and inject the auto-configured `StringRedisTemplate`. Write with `opsForValue().set(key, value, Duration)` so every key gets a TTL, and read with `get`.
-
-### Why does your own `RedisTemplate<String, String>` bean make `redis-cli GET user:1` return nil?
-
-Its default [JDK serialisation](card:spring-data-redis) applies to keys too, so the real key is `\xac\xed\x00\x05t\x00\x06user:1`. Inject `StringRedisTemplate` instead, or set `RedisSerializer.string()` on the template.
+Add `spring-boot-starter-data-redis`, set `spring.data.redis.host` and `port`, and inject the auto-configured `StringRedisTemplate`. Write with `opsForValue().set(key, value, Duration)` so every key gets a TTL, and read with `get`, which returns null on a miss.
 
 ### How do you run a Lua script from Spring?
 
-Wrap it once in `RedisScript.of(text, Long.class)` and call `redis.execute(script, keys, args)`. Spring sends EVALSHA and falls back to EVAL when Redis has not cached the script yet.
+Wrap the script once in `RedisScript.of(text, Long.class)`, kept in a static field, and call `redis.execute(script, keys, args)`. Spring sends EVALSHA, so the script text crosses the network only when Redis has not cached it yet.
+
+### How would you rate-limit login attempts with Redis in Spring Boot?
+
+Keep one counter per user, such as `rate:user:7:login`. A Lua script runs INCR and, on the first hit, EXPIRE 60, then returns the count; above 5 the endpoint answers HTTP 429. One script keeps the count and the expiry together.

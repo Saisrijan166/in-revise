@@ -5,17 +5,28 @@ title: Redis Interview Playbook
 topic: java
 level: interview
 heat: 2
-hook: "Say how the data is read, changed and how long it lives; that picks the type, the key, the TTL and the safety net."
+hook: "Start any Redis design answer from how the data is read and changed; that choice picks the type, then you add the key, the TTL, the race fix and the plan for failure."
 points:
-  - { k: "1. Shape", v: "how it is read and changed picks the data type" }
-  - { k: "2. Key and life", v: "type:id key names, a TTL, an eviction policy" }
-  - { k: "3. Races", v: "read-modify-write in one command or one script" }
-  - { k: "4. Loss and growth", v: "records in the database; replicas or Cluster to grow" }
-  - { k: "5. Redis down", v: "planned per use: miss, allow, deny or retry" }
+  - { k: "1. Shape", v: "how the data is read and changed picks the type: whole value, one field, rank, uniqueness or order" }
+  - { k: "2. Key and life", v: "name keys type:id, give each one a TTL, and set maxmemory with an eviction policy as the safety net" }
+  - { k: "3. Races", v: "a read-then-write on a shared key runs as one command, such as INCR, or as one Lua script" }
+  - { k: "4. Loss and growth", v: "records of value stay in the database; replicas add read capacity, Cluster adds memory and write capacity" }
+  - { k: "5. Redis down", v: "each use has a planned fallback: a cache miss, allow, deny, or retry later" }
 trap:
   wrong: "Answer \"which Redis type?\" by naming the one you know best, usually a JSON string."
-  right: "Start from the access pattern: ranking means a sorted set, per-field updates a hash, a big unique count HyperLogLog."
-sayIt: "I start from the access pattern, pick the data type and a key with a TTL, make read-modify-write atomic, keep records in the database, and plan what happens when Redis is down."
+  right: "Start from the access pattern: ranking means a sorted set, per-field updates a hash, a big unique count a HyperLogLog."
+  why: "Strings are the first type everyone learns, and a JSON string can hold any object, so it seems to fit every problem."
+sayIt: "I start from the access pattern, pick the data type and a key with a TTL, make every read-then-write atomic, keep records in the database, and plan what each use does when Redis is down."
+cheat:
+  idea: "A repeatable frame for any Redis design question, starting from how the data is read and changed."
+  flow: "Shape → key and TTL → races → loss and growth → Redis down"
+  remember: "Ranking means a sorted set, per-field updates a hash, a huge unique count a HyperLogLog; records stay in the database."
+buildsOn: [redis-and-databases, single-command-atomicity, redis-failure-handling]
+scenarios:
+  - q: "You must show the top 10 merchants by today's payment volume, updated on every payment. Which Redis type, and why?"
+    a: "A sorted set such as rank:merchants:2026-10-21. ZINCRBY adds each payment to the merchant's score, and ZRANGE 0 9 REV WITHSCORES returns the top 10 already in order. With a hash or a JSON string, the app would have to read and sort every merchant."
+  - q: "You need the number of unique payers per day, across millions of users, and about 1% error is fine. A set or a HyperLogLog?"
+    a: "A HyperLogLog. It uses at most 12 KB per key, however many payers it sees, with a standard error of 0.81%. A set stores every payer id, so its memory grows with every new user; use it only when you need exact counts or the list of members."
 confusedWith: [string-vs-hash-vs-json, pub-sub-vs-lists-vs-streams]
 tags: [playbook, data-types, use-cases, payments]
 visual: table
@@ -26,50 +37,74 @@ sources:
   - title: "Redis data types (redis.io)"
     url: "https://redis.io/docs/latest/develop/data-types/"
     verifiedOn: "2026-10-20"
+  - title: "HyperLogLog: up to 12 KB, 0.81% standard error (redis.io)"
+    url: "https://redis.io/docs/latest/develop/data-types/probabilistic/hyperloglogs/"
+    verifiedOn: "2026-10-21"
   - title: "Redis Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/system-design/top-25-redis-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The Redis playbook is a fixed order of questions for answering any Redis design question. It ties the earlier concepts together: you first say how the data is read and changed, and that picks the data type. Then you add the key name and its TTL, make updates safe when two servers change the same key, say what happens if data is lost, and plan for Redis being down.
+
 ## Why it exists
 
-Most Redis questions are "which tool for this problem?". One table answers them all, so each concept page only explains its own tool.
+Most Redis interview questions are "which tool would you use for this?" in disguise. Without a frame, candidates name the type they know best, often a JSON string, and forget the TTL, the race or the outage. A fixed order of questions makes the answer complete, and the picker table below turns each common need into one Redis tool.
 
 ## How it works
 
-|You need (payments)|Reach for|Concept|
+| You need (payments) | Reach for | Concept |
 |---|---|---|
-|Fast reads of merchant config|String with TTL; hash for field updates|[Cache-aside](card:cache-aside)|
-|Payments per merchant today|INCR, HINCRBY|[Atomic commands](card:single-command-atomicity)|
-|Top merchants by volume|Sorted set|[Sorted sets](card:sorted-sets)|
-|Last 10 payments of a user|List, LPUSH + LTRIM|[Lists](card:lists)|
-|Payment ids already seen|Set|[Sets](card:sets)|
-|Unique payers, millions|HyperLogLog (approximate)|[HyperLogLog](card:bitmaps-hyperloglog)|
-|One worker per payment|SET NX PX with a token|[Locks](card:distributed-locks)|
-|UPI attempts per user|Counter with TTL, or Lua bucket|[Rate limits](card:rate-limiting-with-redis)|
-|Login shared by all instances|Hash with TTL|[Sessions](card:session-storage)|
-|Receipt jobs, payment events|List, or stream with groups|[Queues](card:queues-with-redis)|
-|Live alerts to online screens|Pub/Sub, no history|[Pub/Sub](card:pub-sub)|
-|Merchants within 5 km|Geo index|[Geospatial](card:geospatial)|
-|Search merchants by field|JSON + Query Engine|[JSON](card:json-and-query-engine)|
+| Fast reads of merchant config | String with a TTL; hash for field updates | [Cache-aside](card:cache-aside) |
+| Payments per merchant today | INCR, HINCRBY | [Atomic commands](card:single-command-atomicity) |
+| Top merchants by volume | Sorted set | [Sorted sets](card:sorted-sets) |
+| Last 10 payments of a user | List, LPUSH + LTRIM | [Lists](card:lists) |
+| Payment ids already seen | Set | [Sets](card:sets) |
+| Unique payers, millions | HyperLogLog (approximate) | [HyperLogLog](card:bitmaps-hyperloglog) |
+| One worker per payment | SET NX with a token and a TTL | [Locks](card:distributed-locks) |
+| Login attempts per user | Counter with a TTL, or a Lua bucket | [Rate limits](card:rate-limiting-with-redis) |
+| Login shared by all instances | Hash with a TTL | [Sessions](card:session-storage) |
+| Receipt jobs, payment events | List, or a stream with consumer groups | [Queues](card:queues-with-redis) |
+| Live alerts to open screens | Pub/Sub, no history | [Pub/Sub](card:pub-sub) |
+| Merchants within 5 km | Geo index | [Geospatial](card:geospatial) |
+| Search merchants by field | JSON with the Query Engine | [JSON](card:json-and-query-engine) |
+
+1. **Shape:** ask how the data is read and changed: as a whole value, one field at a time, by rank, as unique members, or in arrival order. The table turns the answer into a type.
+2. **Key and life:** name the key `type:id` (see [key design](card:key-design)), give it a [TTL](card:ttl-and-expiration), and rely on [maxmemory and an eviction policy](card:eviction-policies) when memory fills.
+3. **Races:** if two app servers can change the same key, make each read-then-write one command, such as INCR, or one script.
+4. **Loss and growth:** say what is lost if Redis restarts, and keep valuable records in the database. Add replicas for reads and failover, and [Cluster](card:redis-cluster) when one node's memory or writes are not enough.
+5. **Redis down:** give each use its fallback, as in [When Redis is slow or down](card:redis-failure-handling).
 
 ## Example
 
-<Steps label="Customer pays ₹500 for PAY101 by UPI">
-  <Step title="Shape">Status is polled often; merchant config is read on every payment.</Step>
-  <Step title="Type and key">`payment:PAY101` and `merchant:42:config` as strings: [key design](card:key-design).</Step>
-  <Step title="Life">Status for 5 minutes; [TTL](card:ttl-and-expiration) plus [eviction](card:eviction-policies).</Step>
-  <Step title="Races">INCR on `rate:user:7:upi`; one worker holds `lock:payment:PAY101`.</Step>
-  <Step title="Loss and growth">The ₹500 record lives in [the database](card:redis-and-databases); [Cluster](card:redis-cluster) later.</Step>
-  <Step title="Redis down">Follow the [failure plan](card:redis-failure-handling).</Step>
+The frame applied to one payment: a customer pays ₹500 by UPI, and the payment id is 9001.
+
+<Steps label="Customer pays ₹500 for payment 9001 by UPI">
+  <Step title="Shape">The app polls the status of payment 9001 every few seconds as a whole value, so it is a string. Every payment reads merchant 42's config: a JSON string, or a hash if its fields change one at a time.</Step>
+  <Step title="Key and life">`payment:9001:status` lives 10 minutes. `merchant:42:config` has a TTL, and its key is deleted after each committed update.</Step>
+  <Step title="Races">INCR counts login attempts on `rate:user:7:login`. Only the worker holding `lock:payment:9001` captures the payment.</Step>
+  <Step title="Loss and growth">The ₹500 payment row lives in PostgreSQL, so losing Redis data costs cache misses and reset counters, not payments. Cluster comes later, if one node is not enough.</Step>
+  <Step title="Redis down">Config falls back to the database with capped load, the login limiter fails closed, and workers retry the lock later.</Step>
 </Steps>
+
+## Not to be confused with
+
+For one object, a string stores the whole value as one blob, a hash stores flat named fields, and JSON stores a nested document that can be changed by path. Rule: string if you always read and write the whole object, hash if fields change on their own, JSON if it is nested.
+
+For messages, Pub/Sub delivers only to clients listening right now, a list is a queue where each item goes to one worker, and a stream keeps a log that groups read, acknowledge and replay. Rule: Pub/Sub for live alerts, a list for simple jobs, a stream when nothing may be lost.
 
 ## Interview Qs
 
 ### Which Redis data types have you used, and for what?
 
-Name three with a reason: strings for cached values and counters, sorted sets for a leaderboard, hashes for objects updated field by field. Add one non-obvious pick, such as HyperLogLog for unique visitors.
+Name three with a reason: strings for cached values and counters, sorted sets for a leaderboard, and hashes for objects updated field by field. Add one less obvious choice, such as a HyperLogLog for counting unique visitors in at most 12 KB.
 
 ### Where does Redis fit in a payment service?
 
-Around the database, not instead of it: cached merchant config, attempt limits, a processing lock per payment and short-lived status. The payment record stays in the database.
+Beside the database, not instead of it: cached merchant config, login attempt limits, a processing lock per payment and short-lived status. The payment record itself stays in the database, which is the source of truth.
+
+### What would you not keep in Redis?
+
+The only copy of data you cannot lose, such as payment records, because persistence settings decide how much a crash loses. Also data you must query in many ways with joins, and very large values, which block other clients while Redis reads or deletes them.

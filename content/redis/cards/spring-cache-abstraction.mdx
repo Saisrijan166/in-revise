@@ -5,63 +5,93 @@ title: Spring Cache with Redis
 topic: caching
 level: intermediate
 heat: 2
-hook: "With the cache starter, Redis and @EnableCaching, Spring keeps @Cacheable results in Redis; @CachePut and @CacheEvict update them."
+hook: "Put @Cacheable on a method and Spring does cache-aside for you: it checks Redis before the method runs and stores the result after. @CacheEvict deletes the entry."
 points:
-  - { k: "Turn on", v: "@EnableCaching on a @Configuration class, not the main class" }
-  - { k: "Default key", v: "one argument is the key; several become a SimpleKey" }
-  - { k: "Starter", v: "spring-boot-starter-cache plus spring-boot-starter-data-redis" }
-  - { k: "sync = true", v: "asks for one loader per key; Redis's default writer does not lock", kind: minus }
+  - { k: "Turn it on", v: "@EnableCaching on a separate @Configuration class; Spring Boot advises against the main class" }
+  - { k: "Dependencies", v: "spring-boot-starter-cache plus spring-boot-starter-data-redis; then Boot builds a RedisCacheManager" }
+  - { k: "Redis key", v: "the cache name, two colons and the key: payments::9001" }
+  - { k: "TTL (Boot 4.1)", v: "entries never expire until you set spring.cache.redis.time-to-live", kind: default }
+  - { k: "Self-call", v: "a call from another method of the same class skips the proxy, so nothing is cached", kind: minus }
+  - { k: "sync = true", v: "the default Redis cache writer takes no lock, so concurrent misses still run the method", kind: minus }
 trap:
   wrong: "@Cacheable still works when another method in the same class calls it."
-  right: "That call skips Spring's proxy, so nothing is cached. Call the method through another bean."
-sayIt: "I enable caching and let Spring Boot configure a RedisCacheManager, then set a TTL, because entries never expire by default. @Cacheable on reads, @CachePut or @CacheEvict on writes, and no calls from inside the class."
+  right: "That call never passes through Spring's proxy, so nothing is cached. Call the method from another bean."
+  why: "The annotation is right there on the method, so it looks as if it applies to every call. The proxy that does the caching is invisible in the code."
+sayIt: "I enable caching and let Spring Boot configure a RedisCacheManager, then set a TTL, because entries never expire by default. @Cacheable on reads, @CacheEvict or @CachePut on writes, and no calls from inside the same class, because those skip the proxy."
+cheat:
+  idea: "Spring Cache adds cache-aside to a method with an annotation: a proxy checks Redis before the method runs and stores its result after."
+  code: |
+    @Cacheable(cacheNames = "payments", key = "#id")   // Redis key payments::9001
+    public PaymentView find(String id) { ... }
+  remember: "Set spring.cache.redis.time-to-live: by default entries never expire."
+buildsOn: [cache-aside, cache-invalidation, ttl-and-expiration]
+scenarios:
+  - q: "find(id) returns null for an unknown payment, and cache-null-values is left at its default. What happens on the next call with the same id?"
+    a: "Spring stored a null marker under payments::<id>, so the next call is a hit that returns null without running the method. That is negative caching for free, but with no TTL the marker stays even after the payment is created. Set a TTL, or add unless = \"#result == null\"."
+  - q: "Two app instances miss payments::9001 at the same moment, and find has @Cacheable(sync = true). How many times does find run?"
+    a: "Twice. sync = true asks the cache to let one caller load, but Spring Data Redis's default cache writer takes no lock, so each caller runs the method. The opt-in locking writer would stop this, but it locks the whole cache, not one key."
 confusedWith: [cacheable-vs-cacheput]
 tags: [spring, cacheable, cacheevict, redis-cache-manager]
-visual: flow
+visual: code
 sources:
-  - title: "Declarative annotation-based caching (Spring Framework 7.0 reference)"
+  - title: "Declarative annotation-based caching: key generation, sync, @CacheEvict timing, proxy mode (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/integration/cache/annotations.html"
-    verifiedOn: "2026-10-20"
-  - title: "Caching: Redis (Spring Boot 4.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Caching: @EnableCaching placement, starter, Redis, RedisCacheManagerBuilderCustomizer (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/io/caching.html"
-    verifiedOn: "2026-10-20"
-  - title: "Application properties: spring.cache.redis (Spring Boot 4.1)"
+    verifiedOn: "2026-10-21"
+  - title: "Application properties: spring.cache.redis.* defaults (Spring Boot 4.1)"
     url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
-    verifiedOn: "2026-10-20"
-  - title: "Redis Cache (Spring Data Redis 4.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Redis Cache: defaults, lock-free writer, cache-level locking, key prefix (Spring Data Redis 4.1 reference)"
     url: "https://docs.spring.io/spring-data/redis/reference/redis/redis-cache.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Spring's cache abstraction adds [cache-aside](card:cache-aside) to a Java method through annotations instead of hand-written Redis code. You put `@Cacheable` on a method, and Spring wraps the bean in a proxy: an object that sits in front of the bean and receives calls from other beans. The proxy checks the cache before the method runs and stores the result after. When Redis is available and configured, Spring Boot keeps these entries in Redis through a `RedisCacheManager`.
 
 ## Why it exists
 
-Hand-written [cache-aside](card:cache-aside) code repeats in every service. Spring's cache abstraction moves it into annotations; Spring Boot backs them with Redis.
+Hand-written cache-aside repeats the same steps in every service method: build the key, `GET`, check for null, load, `SET` with a TTL, and delete on writes. Each copy is a chance to forget the TTL or build a wrong key. With annotations, the caching rule is one line on the method, and the same code runs against Redis, an in-memory cache, or no cache at all in tests (`spring.cache.type=none`).
 
 ## How it works
 
 <Mermaid
-  alt="Another bean calls find for PAY101. Spring's cache proxy checks Redis for the key payments::PAY101. On a hit it returns the cached value without running the method. On a miss it runs find, stores the result in Redis and returns it. A call to find from inside the same class goes straight to the method and skips the proxy."
+  alt="Another bean calls find for 9001. Spring's cache proxy checks Redis for the key payments::9001. On a hit it returns the cached value without running the method. On a miss it runs find, stores the result in Redis and returns it. A call to find from inside the same class goes straight to the method and skips the proxy."
   chart={`flowchart TD
-  C(["Other bean: find PAY101"]) --> P{"Proxy: payments::PAY101 in Redis?"}
+  C(["Other bean: find 9001"]) --> P{"Proxy: payments::9001 in Redis?"}
   P -- hit --> RET([Return cached value])
   P -- miss --> M["Run find"]
   M --> S[Store result in Redis] --> RET
   SELF(["this.find inside the class"]) -.-> M`}
 />
 
-- The value serialiser is chosen in [Spring Data Redis](card:spring-data-redis).
-- When Redis fails, [failure handling](card:redis-failure-handling) can turn cache errors into misses.
+1. At startup, `@EnableCaching` turns the cache proxies on, and Spring Boot creates a `RedisCacheManager` because Redis is configured.
+2. Another bean calls `find("9001")`. The proxy builds the key from the cache name `payments` and the argument, giving the Redis key `payments::9001`.
+3. On a hit, the proxy returns the cached value, and the method body does not run.
+4. On a miss, the method runs, and the proxy stores its result in Redis with the configured TTL before returning it.
+5. When another bean calls `refund("9001")`, marked `@CacheEvict`, the method runs first. Only after it returns normally does the proxy delete `payments::9001`.
+
+So the key is: the proxy does the caching, so only calls that pass through it are cached.
 
 ## Example
 
+`PaymentQueryService` caches payment lookups and evicts the entry when a payment is refunded.
+
 ```java
+@Configuration
+@EnableCaching
+class CacheConfig { }
+
 @Service
 class PaymentQueryService {
     private final PaymentRepository repo;
     PaymentQueryService(PaymentRepository repo) { this.repo = repo; }
 
-    @Cacheable(cacheNames = "payments", key = "#id")    // Redis key payments::PAY101
-    public PaymentView find(String id) { return repo.load(id); }
+    @Cacheable(cacheNames = "payments", key = "#id", unless = "#result == null")
+    public PaymentView find(String id) { return repo.load(id); }   // Redis key payments::9001
 
     @CacheEvict(cacheNames = "payments", key = "#id")
     public void refund(String id) { repo.refund(id); }
@@ -70,23 +100,45 @@ class PaymentQueryService {
 
 ```properties
 spring.cache.redis.time-to-live=10m
-spring.cache.redis.cache-null-values=false
 ```
 
-## Defaults
+What to notice:
+
+- `key = "#id"` uses the method argument. With exactly one argument, that is also the default key.
+- Calling `find("9001")` twice from another bean runs `repo.load` once; the second call is a hit. Removing `@EnableCaching` makes the annotations do nothing, with no error.
+- `unless = "#result == null"` skips storing a missing payment. Without it, Boot caches a null marker that never expires unless you set a TTL.
+- Boot stores values with Java serialisation by default, so `PaymentView` must implement `Serializable`; otherwise storing it fails.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
 | Entry TTL | never expires | `spring.cache.redis.time-to-live`, Spring Boot 4.1 |
 | Cache `null` results | yes | `spring.cache.redis.cache-null-values`, Spring Boot 4.1 |
 | Key prefix | the cache name plus `::` | `spring.cache.redis.use-key-prefix`, Spring Boot 4.1 |
+| Value format | Java serialisation | Boot's auto-configured cache, Spring Boot 4.1 |
+| After-commit evicts | off | `RedisCacheManager` builder, Spring Data Redis 4.1 |
+
+- **Where @EnableCaching goes:** on one of your `@Configuration` classes. The Spring Boot docs advise against the main application class, because that makes caching mandatory, including in every test.
+- **Per-cache TTL:** register a `RedisCacheManagerBuilderCustomizer` bean and call `withCacheConfiguration("payments", RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration.ofMinutes(5)))`.
+- **JSON values:** define your own `RedisCacheConfiguration` bean with a JSON serialiser; Boot then uses it instead of its default.
+- **sync = true:** the default Redis cache writer takes no lock. The opt-in locking writer (`RedisCacheWriter.lockingRedisCacheWriter`) locks the whole cache, not one entry.
+- **Null not allowed:** with `cache-null-values=false`, a method that returns null makes the cache throw an error; add `unless = "#result == null"`.
+
+## Not to be confused with
+
+`@Cacheable` skips the method on a hit and caches the result on a miss. `@CachePut` always runs the method and then overwrites the entry with its result. `@CacheEvict` runs the method and then deletes the entry, or all entries with `allEntries = true`. Rule: `@Cacheable` for reads, `@CachePut` for writes that return the new object, `@CacheEvict` for writes that do not.
 
 ## Interview Qs
 
 ### How do you give each cache its own TTL?
 
-Register a `RedisCacheManagerBuilderCustomizer` bean and call `withCacheConfiguration("payments", RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration.ofMinutes(5)))` for each cache name.
+Register a `RedisCacheManagerBuilderCustomizer` bean and call `withCacheConfiguration` for each cache name, passing a `RedisCacheConfiguration` with its own `entryTtl`. `spring.cache.redis.time-to-live` sets one default TTL for all caches.
 
 ### Does @CacheEvict run before or after the method?
 
-After it completes successfully, so a failed refund keeps the entry. `beforeInvocation = true` evicts first, even if the method throws; `allEntries = true` clears the whole cache.
+After the method completes successfully, so a failed refund keeps the entry. With `beforeInvocation = true` the entry is evicted before the method runs, even if the method then throws. `allEntries = true` clears the whole cache.
+
+### Why does @Cacheable not work when the method is called from the same class?
+
+Caching happens in a proxy that wraps the bean. A call like `this.find(id)` goes straight to the method and skips the proxy, so nothing is checked or stored. Move the cached method to another bean, or call it through the bean from outside.
