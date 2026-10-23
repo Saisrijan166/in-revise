@@ -5,88 +5,138 @@ title: Exception Handling with @RestControllerAdvice
 topic: spring
 level: intermediate
 heat: 3
-hook: "Throw exceptions from the service; one @RestControllerAdvice maps each type to a status and a ProblemDetail body."
+hook: "The service throws an exception; one @RestControllerAdvice class turns each exception type into the right status and a ProblemDetail body, for every controller."
 points:
-  - { k: "@ExceptionHandler", v: "turns an exception type into a response; local to its controller" }
-  - { k: "@RestControllerAdvice", v: "@ControllerAdvice + @ResponseBody: handlers for every controller" }
-  - { k: "ProblemDetail", v: "Spring's RFC 9457 error body (Spring Framework 6.0+)" }
-  - { k: "ResponseEntityExceptionHandler", v: "base advice that formats Spring MVC's own errors too" }
-  - { k: "ResponseStatusException", v: "throw a status and reason with no custom exception class" }
+  - { k: "@ExceptionHandler", v: "marks a method that turns one exception type into a response; in a controller it covers only that one" }
+  - { k: "@RestControllerAdvice", v: "a class whose @ExceptionHandler methods apply to every controller and write the response body" }
+  - { k: "ProblemDetail", v: "Spring's class for an RFC 9457 error body; its status field becomes the HTTP status" }
+  - { k: "Built-in errors (Boot 4.1)", v: "Spring MVC's own errors become ProblemDetail if spring.mvc.problemdetails.enabled=true (off by default)", kind: default }
+  - { k: "No handler matches", v: "Spring Boot's /error sends generic JSON, usually 500, and hides the message by default", kind: minus }
 trap:
-  wrong: "Catch Exception in the controller and return 200 with an error message."
-  right: "Let it reach the advice, which sends the real status (400, 404, 500) with a ProblemDetail body."
-sayIt: "I keep @ExceptionHandler methods in one @RestControllerAdvice that returns ProblemDetail with the right status. Every error has one shape, and stack traces never reach the client."
+  wrong: "Catch the exception in the controller and return 200 with an error message in the body."
+  right: "Let it reach the advice, which sends the real status, such as 400, 404 or 500, with a ProblemDetail body."
+  why: "Client code can read the message from the body either way, so the status looks unimportant. But caches, retries, monitoring and client libraries all decide by the status code."
+sayIt: "My services throw domain exceptions, and one @RestControllerAdvice maps each type to a ProblemDetail with the right status. Extending ResponseEntityExceptionHandler formats Spring's own errors the same way. Every error has one shape, and stack traces never reach the client."
+cheat:
+  idea: "@ExceptionHandler methods turn an exception type into an error response. Put them in one @RestControllerAdvice class and they apply to every controller, returning a ProblemDetail."
+  flow: "Service throws → controller's handler? → advice's handler? → ProblemDetail, else /error"
+  remember: "ProblemDetail's status becomes the HTTP status; never send 200 with an error in the body."
+buildsOn: [response-entity, error-responses]
+scenarios:
+  - q: "PaymentService throws PaymentNotFoundException for PAY999, and no @ExceptionHandler handles it. What does the client get?"
+    a: "500 Internal Server Error with Spring Boot's generic JSON: timestamp, status, error and path. The exception message is hidden by default. An advice handler mapping it to 404 would tell the client the real problem."
+  - q: "Your advice extends ResponseEntityExceptionHandler. A client posts an amount of -500, which fails @Positive. What body does it get?"
+    a: "A ProblemDetail with status 400, title Bad Request and detail Invalid request content., sent as application/problem+json. The base class handles MethodArgumentNotValidException along with Spring MVC's other built-in errors."
 confusedWith: []
 tags: [spring, errors, problem-details]
 visual: flow
 sources:
-  - title: "Controller Advice (Spring Framework 7.0 reference)"
+  - title: "Controller Advice: global handlers run after local ones (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-advice.html"
-    verifiedOn: "2026-10-20"
-  - title: "Error Responses (Spring Framework 7.0 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Error Responses: ProblemDetail status, ResponseEntityExceptionHandler (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-rest-exceptions.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "ResponseStatusException (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/server/ResponseStatusException.html"
     verifiedOn: "2026-10-20"
-  - title: "Servlet Web Applications (Spring Boot 4.1 reference)"
+  - title: "Servlet Web Applications: /error mapping, spring.mvc.problemdetails.enabled (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/web/servlet.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Application Properties (Spring Boot 4.1)"
     url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An exception is Java's way of reporting a failure: it stops the current method and travels up to the callers until some code handles it. Exception handling in Spring MVC turns an exception into an HTTP error response. An `@ExceptionHandler` method says "for this exception type, send this response". Put such methods in a class marked `@RestControllerAdvice` and they apply to every controller. They usually return Spring's `ProblemDetail`, the RFC 9457 body from [error responses](card:error-responses).
+
 ## Why it exists
 
-Without one central place, every controller repeats try/catch and errors come in different shapes. One advice gives each error its status and one body shape.
+The service knows that payment PAY999 does not exist, but it should not know about HTTP. Without a central handler, every controller wraps its calls in try/catch and builds its own error body, so errors come out in different shapes, and any exception nobody catches becomes a 500. With one advice class, the service just throws `PaymentNotFoundException`, and every controller answers 404 with the same body shape.
 
 ## How it works
 
 <Mermaid
-  alt="An exception goes to the controller's @ExceptionHandler first, then to the @RestControllerAdvice; either returns a ProblemDetail. Unhandled, Spring Boot's /error sends generic JSON."
+  alt="An exception thrown in the service goes first to an @ExceptionHandler in the same controller. If there is none, Spring looks in the @RestControllerAdvice classes. Either handler returns a ProblemDetail with a status and body. If no handler matches, Spring Boot's /error mapping sends generic JSON."
   chart={`flowchart TD
   E([Exception thrown in service]) --> L{"@ExceptionHandler in that controller?"}
   L -- yes --> P["ProblemDetail: status + body"]
-  L -- no --> G{"@ExceptionHandler in @RestControllerAdvice?"}
+  L -- no --> G{"@ExceptionHandler in an advice class?"}
   G -- yes --> P
   G -- no --> X["Spring Boot /error: generic JSON"]`}
 />
 
-- The `status` of the returned ProblemDetail becomes the HTTP status.
-- What the fields mean (type, title, status, detail, instance): [error responses](card:error-responses).
+1. The service throws `PaymentNotFoundException`. The controller does not catch it, so it leaves the controller method.
+2. Spring MVC first looks for an `@ExceptionHandler` for that type in the same controller.
+3. If there is none, it looks in the advice classes, which apply to all controllers.
+4. The matching handler returns a `ProblemDetail`. Its `status` becomes the HTTP status, and the body goes out as `application/problem+json`.
+5. If no handler matches, the exception reaches Spring Boot's `/error` fallback, which usually answers 500.
 
 ## Example
+
+One advice class serves the whole payment API.
 
 ```java
 @RestControllerAdvice
 class ApiErrors extends ResponseEntityExceptionHandler {   // also formats Spring MVC's errors
+
     @ExceptionHandler(PaymentNotFoundException.class)
     ProblemDetail notFound(PaymentNotFoundException ex) {
         ProblemDetail pd = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
         pd.setTitle("Payment not found");
-        return pd;                                // 404, application/problem+json
+        return pd;                                          // 404, application/problem+json
     }
 }
 ```
 
-## Defaults
+```bash
+curl -s -w '\n%{http_code} %{content_type}\n' http://localhost:8080/api/payments/PAY999
+```
 
-| What | Default | Where |
-| --- | --- | --- |
-| ProblemDetail for Spring MVC's built-in errors | off: `spring.mvc.problemdetails.enabled=false` | Spring Boot 4.1 |
-| Message and stack trace in `/error` | `never` (`spring.web.error.include-message`, `include-stacktrace`) | Spring Boot 4.1 |
+```text output
+{"detail":"No payment with id PAY999","instance":"/api/payments/PAY999","status":404,"title":"Payment not found"}
+404 application/problem+json
+```
+
+What to notice:
+
+- The service only threw an exception. The status 404 and the body came from the advice.
+- Spring filled `instance` with the request path; the code set only status, detail and title.
+- Extending `ResponseEntityExceptionHandler` makes Spring MVC's own errors, such as a failed `@Valid` or a missing header, come out as `ProblemDetail` too.
+- Delete this class and the same request gets 500 with Spring Boot's generic JSON, because nothing maps the exception to 404.
+
+## Rules and defaults
+
+- **Order:** handlers in the controller itself run first; handlers in advice classes run after them.
+- **Scope:** an advice applies to every controller by default. A package name or `annotations = RestController.class` narrows it.
+- **Built-in errors as ProblemDetail (Spring Boot 4.1):** off by default. Set `spring.mvc.problemdetails.enabled=true`, or extend `ResponseEntityExceptionHandler` yourself as above.
+- **No class for every error:** `throw new ResponseStatusException(HttpStatus.CONFLICT, "Payment already refunded")` sends that status; its reason becomes the `detail`.
+- **Unhandled exceptions:** Spring Boot's `/error` sends JSON with timestamp, status, error and path. The exception message and stack trace are hidden by default (`spring.web.error.include-message` and `include-stacktrace` are `never`).
+
+## Not to be confused with
+
+`@ExceptionHandler` marks one method that handles one exception type. On its own, inside a controller, it covers only that controller. `@ControllerAdvice` marks a class whose handlers apply to all controllers, and `@RestControllerAdvice` is the same plus `@ResponseBody`, so the return value is the body. Rule: `@ExceptionHandler` says how to handle; the advice says where it applies.
+
+## Common mistakes
+
+- **"Send the exception message and stack trace so the client can debug."** They can reveal class names, SQL and internal paths. Log the details on the server, and send a safe `detail` the client can act on.
 
 ## Interview Qs
 
 ### How do you handle exceptions globally in Spring Boot?
 
-A @RestControllerAdvice class with one @ExceptionHandler method per exception type, each returning a ProblemDetail with the right status. It applies to every controller.
+A `@RestControllerAdvice` class with one `@ExceptionHandler` method per exception type, each returning a `ProblemDetail` with the right status. It applies to every controller. Extending `ResponseEntityExceptionHandler` also covers Spring MVC's own exceptions, so every error has the same shape.
 
 ### If @ExceptionHandler handles exceptions, why do we need @ControllerAdvice?
 
-@ExceptionHandler is the mechanism, but inside a controller it covers only that controller. @ControllerAdvice makes the handlers global, so one class serves every controller.
+`@ExceptionHandler` is the mechanism, but inside a controller it covers only that controller. `@ControllerAdvice` makes the handlers global, so one class serves every controller instead of copying handlers into each.
 
 ### What does a client get for an exception nobody handles?
 
-Spring Boot's /error mapping sends a JSON error with the status, usually 500, and by default hides the message and stack trace.
+Spring Boot's `/error` mapping sends a JSON error, usually with status 500, holding timestamp, status, error and path. By default it hides the exception message and stack trace.
+
+### How do you return validation errors as Problem Details?
+
+Either set `spring.mvc.problemdetails.enabled=true`, or extend `ResponseEntityExceptionHandler` in your advice. Both handle `MethodArgumentNotValidException` and answer 400 with a `ProblemDetail`. Override its handler method to add the failing fields as an extra property.

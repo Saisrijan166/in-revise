@@ -5,38 +5,60 @@ title: Retries, Backoff and Timeouts
 topic: reliability
 level: intermediate
 heat: 3
-hook: "Time-box every call; retry only temporary failures, a few times, with growing random waits."
+hook: "Put a time limit on every remote call, and retry only failures likely to pass, a few times, with growing random waits."
 points:
-  - { k: "Timeout", v: "on every remote call, or a thread may wait forever" }
-  - { k: "Retry only", v: "idempotent or keyed requests: the first may have worked" }
-  - { k: "Backoff + jitter", v: "growing, capped, random waits", kind: plus }
-  - { k: "Retry-After", v: "the server's wait hint: seconds or an HTTP date (RFC 9110)" }
-  - { k: "Layers multiply", v: "3 tries at each of 5 layers = 243x load on the database", kind: minus }
+  - { k: "Timeout", v: "every remote call needs one; without it a thread can wait forever" }
+  - { k: "Retry only safe calls", v: "retry idempotent requests or ones with an idempotency key, because the first try may have worked" }
+  - { k: "Retry only transient", v: "resets, timeouts, 408, 429, 500, 502, 503 and 504 may pass; 400, 401, 403, 404 and 422 fail again" }
+  - { k: "Backoff + jitter", v: "each wait doubles up to a cap, and randomness spreads clients out so they do not retry together", kind: plus }
+  - { k: "Retry-After", v: "if the server sends it, wait that long: seconds or an HTTP date (RFC 9110)" }
+  - { k: "Layers multiply", v: "3 tries at each of 5 layers means up to 243 database calls for one request", kind: minus }
 trap:
   wrong: "Retry every error, straight away, at every layer."
-  right: "Retry only transient errors, at one layer, with capped backoff and jitter; stop while the breaker is open."
-sayIt: "Every outbound call has connect and read timeouts. I retry only transient errors like 503 or a reset, at one layer, with capped backoff, jitter and Retry-After, and only idempotent or keyed requests."
+  right: "Retry only transient errors, at one layer, with capped backoff and jitter, and stop while a circuit breaker is open."
+  why: "Each team adds retries to its own client, and an instant retry seems kinder to the user. Together they turn a small outage into a flood of calls."
+sayIt: "Every outbound call has a connect and a request timeout. I retry only transient errors, like a reset or a 503, on idempotent or keyed requests, at one layer, with capped backoff, full jitter and Retry-After. If the dependency keeps failing, a circuit breaker stops the retries."
+cheat:
+  idea: "A timeout limits how long a call waits; a retry repeats it after a failure that may pass. Backoff doubles each wait; jitter makes it random."
+  flow: "fail → transient and safe? → random wait → retry"
+  remember: "Never retry 400, 401, 403, 404 or 422; retry a POST only with the same idempotency key."
+buildsOn: [idempotency-keys, status-codes]
+scenarios:
+  - q: "Your service calls the gateway with no timeout. The gateway hangs for 10 minutes. What happens to your service?"
+    a: "Each call waits for the whole 10 minutes, because the JDK HttpClient blocks forever when no timeout is set. Every new payment holds another thread until the pool is empty, and your service stops answering, even for requests that do not use the gateway."
+  - q: "1,000 clients get a 503 at the same moment and all retry after exactly 1 second. What goes wrong, and how do you fix it?"
+    a: "All 1,000 retries hit the recovering service in the same instant and knock it over again, in waves. Full jitter makes each client wait a random time between 0 and the backoff limit, so the retries arrive as a steady trickle."
 confusedWith: [retry-vs-circuit-breaker]
 tags: [retries, timeouts]
 visual: table
 sources:
-  - title: "RFC 9110: HTTP Semantics (9.2.2, 10.2.3, 15.5.9)"
+  - title: "RFC 9110: HTTP Semantics (9.2.2 idempotent methods, 10.2.3 Retry-After, 15.5.9 408)"
     url: "https://www.rfc-editor.org/rfc/rfc9110.html"
     verifiedOn: "2026-10-20"
+  - title: "RFC 6585: Additional HTTP Status Codes (429 Too Many Requests and Retry-After)"
+    url: "https://www.rfc-editor.org/rfc/rfc6585.html#section-4"
+    verifiedOn: "2026-10-21"
   - title: "Timeouts, retries, and backoff with jitter (Amazon Builders' Library)"
     url: "https://builder.aws.com/content/3EumjoZascWd1oZiEgL8ORlv3qE/timeouts-retries-and-backoff-with-jitter"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Retry behavior (AWS SDKs and Tools reference)"
     url: "https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "HttpRequest.Builder.timeout (Java SE 25 API)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.net.http/java/net/http/HttpRequest.Builder.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "HttpClient.Builder.connectTimeout (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.net.http/java/net/http/HttpClient.Builder.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A timeout is the longest time a caller waits for another service before it gives up. A retry sends the same request again after a failure that is likely to pass, such as a dropped connection or a 503. Backoff means each retry waits longer than the one before, and jitter makes each wait a random amount, so many clients do not retry at the same moment.
 
 ## Why it exists
 
-Services and networks fail briefly. A timeout frees the waiting thread; a careful retry turns a blip into success.
+Without a timeout, a call to a hung payment gateway can wait forever, holding a thread, until the server has no threads left. Without retries, one dropped packet fails a customer's payment. Careless retries hurt too: thousands of clients retrying at once hit a struggling service in waves, and retries at every layer multiply the load. So you put a limit on every call, and retry only the right failures, a few times, with backoff and jitter.
 
 ## How it works
 
@@ -47,37 +69,62 @@ Services and networks fail briefly. A timeout frees the waiting thread; a carefu
 | 500, 502, 504 | Yes, a few times |
 | 400, 401, 403, 404, 422 | No: the same request fails again |
 
-- Set both a connect and a read timeout; Spring setup is in [HTTP clients](card:rest-clients).
-- Base the timeout on the callee's latency, say its p99.9.
-- A dependency that keeps failing needs a breaker, not more retries: [Retry vs Circuit Breaker](compare:retry-vs-circuit-breaker).
+1. Before calling, you set a connect timeout (for opening the connection) and a request timeout (for waiting on the answer). Base them on the other service's real latency, such as its p99.9: the time within which 99.9% of its calls finish.
+2. The call fails. You classify the failure with the table: transient, so worth a retry, or permanent.
+3. You check that repeating is safe: the method is idempotent, or the request carries the same [idempotency key](card:idempotency-keys).
+4. You wait: the `Retry-After` value if the server sent one, otherwise a random time between 0 and a limit that doubles each retry, up to a cap.
+5. You stop after a few attempts, three in total for example, and return the error.
+
+So the key is: retry at one layer only. Three tries at each of five layers is 3⁵ = 243 calls to the bottom service.
 
 ## Example
 
+The payment service calls the gateway with both timeouts and the same key on every attempt, and computes its waits with full jitter.
+
 ```java
-// Full jitter over a capped exponential; retry = 0, 1, 2 ...
-Duration backoff(int retry) {
-    long maxMs = Math.min(20_000, 100L << Math.min(retry, 8)); // base 100 ms, cap 20 s
-    return Duration.ofMillis(ThreadLocalRandom.current().nextLong(maxMs + 1));
+HttpClient client = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(2))           // limit for opening a new connection
+        .build();
+HttpRequest request = HttpRequest.newBuilder(URI.create("https://gateway.example/charges"))
+        .timeout(Duration.ofSeconds(5))                  // limit for waiting on the response
+        .header("Idempotency-Key", "order-789-payment")  // same key on every attempt
+        .POST(HttpRequest.BodyPublishers.ofString(body))
+        .build();
+
+static Duration backoff(int retry) {                     // retry = 0, 1, 2 ...
+    long limitMs = Math.min(20_000, 100L << Math.min(retry, 8));  // 100, 200, 400 ... 20 s
+    return Duration.ofMillis(ThreadLocalRandom.current().nextLong(limitMs + 1));
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Request timeout | none: `send()` blocks forever | JDK `HttpClient`, Java 25 |
-| Attempts | 3 in total, 20 s wait cap | AWS SDKs, standard mode |
+- Remove `.timeout(...)` and `send()` waits forever for a response; that is the JDK default.
+- The connect timeout applies only when a new connection is opened. A reused connection is limited by the request timeout alone.
+- `backoff` returns a random wait between 0 and the limit. In a test run the limits were 100, 200, 400 … 12,800 ms, then 20,000 ms from the ninth retry; the actual waits were random values below them.
+- The key never changes between attempts, so a retry after a lost response cannot charge twice.
+
+## Rules and defaults
+
+- **JDK HttpClient (Java 25):** no request timeout is set by default, so `send()` can block forever. A request timeout throws `HttpTimeoutException`; a connect timeout throws `HttpConnectTimeoutException`.
+- **AWS SDKs, standard mode:** 3 attempts in total (1 call and 2 retries), full jitter, and no single wait longer than 20 seconds. A retry quota, a budget of tokens that each retry spends and each success refills, stops retries when many calls fail.
+- **Retry-After:** RFC 9110 defines it for 503 and redirects; RFC 6585 allows it on a 429 from [rate limiting](card:rate-limiting). When it is present, wait at least that long.
+- **One layer:** the Amazon Builders' Library advises retrying at a single point in the call stack.
+
+## Not to be confused with
+
+A retry sends the call again soon, betting that the fault will pass in milliseconds. A circuit breaker stops sending calls to a dependency that keeps failing, and fails them at once for a while. Rule: retry for blips, circuit breaker for outages, and no retries while the breaker is open.
 
 ## Interview Qs
 
 ### Which failures do you retry?
 
-Connection errors, timeouts, 408, 429, 500, 502, 503 and 504, for idempotent or keyed requests only. Never 400, 401, 403, 404 or 422.
+Connection errors, timeouts, 408, 429, 500, 502, 503 and 504, and only for idempotent requests or ones with an idempotency key. Never 400, 401, 403, 404 or 422: the same request would fail again the same way, so a retry only adds load.
 
 ### Why add jitter to exponential backoff?
 
-Clients that failed together retry together, in waves that knock the recovering service over. A random wait spreads them out; AWS SDKs use full jitter.
+Clients that failed together would retry together, in waves that knock the recovering service over again. A random wait between 0 and the backoff limit spreads them out. AWS SDKs use full jitter.
 
 ### Connect timeout vs read timeout?
 
-Connect timeout limits opening a new connection; read timeout limits waiting for data on an open one. A slow payment gateway trips the read timeout.
+A connect timeout limits opening a new connection; it trips when the server is unreachable. A read timeout limits waiting for data on an open connection; a slow payment gateway trips it. The JDK HttpClient has no separate read timeout; its request timeout limits the wait for the response. Either one is an unknown outcome: the server may have done the work.

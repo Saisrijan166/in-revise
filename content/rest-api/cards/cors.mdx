@@ -5,35 +5,52 @@ title: CORS and Preflight Requests
 topic: security
 level: intermediate
 heat: 2
-hook: "CORS is the API telling the browser which other origins may read its responses; the browser, not the server, enforces it."
+hook: "CORS is how an API tells the browser which other websites may read its responses. The browser enforces it; servers, scripts and curl ignore it."
 points:
-  - { k: "Origin", v: "scheme + host + port; any difference is cross-origin" }
-  - { k: "Preflight", v: "OPTIONS first for PUT, DELETE, JSON or custom headers" }
-  - { k: "Credentials", v: "with cookies, Allow-Origin must name one origin, not *", kind: minus }
-  - { k: "Browser only", v: "curl, Postman and servers ignore CORS completely" }
-  - { k: "@CrossOrigin", v: "all origins, 30-minute max age (Spring Framework 7.0)", kind: default }
+  - { k: "Origin", v: "scheme + host + port; https://shop.example and https://api.shop.example are different origins" }
+  - { k: "Preflight", v: "for a JSON body, PUT, DELETE or an Authorization header, the browser first asks with OPTIONS" }
+  - { k: "Credentials", v: "with cookies, Access-Control-Allow-Origin must name one exact origin, never *", kind: minus }
+  - { k: "Browser only", v: "curl, Postman and server-to-server calls ignore CORS, so it never protects the API itself", kind: minus }
+  - { k: "@CrossOrigin", v: "allows all origins and headers, credentials off, max age 30 minutes (Spring Framework 7.0)", kind: default }
 trap:
   wrong: "We configured CORS, so other sites cannot call our API."
-  right: "CORS only stops browser pages reading responses. Any script or server can still call you; you need authentication and authorisation."
-sayIt: "Browsers block cross-origin reads unless the API returns Access-Control-Allow-Origin for that origin. For non-simple requests the browser first sends an OPTIONS preflight. CORS is not security for the API itself."
+  right: "CORS only stops browser pages from reading responses. Any script or server can still call you; you need authentication and authorisation."
+  why: "The browser shows a red CORS error and the call fails, so it looks as if the API itself blocked the caller."
+sayIt: "Browsers block a page from reading another origin's responses unless the API returns Access-Control-Allow-Origin for that origin. For non-simple requests the browser first sends an OPTIONS preflight. CORS protects users in browsers, not the API itself."
+cheat:
+  idea: "CORS headers tell the browser which other origins may read your API's responses. For non-simple requests the browser first asks with an OPTIONS preflight."
+  remember: "Only browsers enforce CORS. It never replaces authentication, and it does not stop CSRF."
+buildsOn: [http-methods, headers-content-negotiation, authentication-methods]
+scenarios:
+  - q: "The checkout page on https://shop.example POSTs JSON with a bearer token to https://api.shop.example. The console shows a CORS error, but the same call works in Postman. Why?"
+    a: "The JSON body and the Authorization header make the browser send an OPTIONS preflight first, and the API did not answer with a matching Access-Control-Allow-Origin and allowed headers. Postman is not a browser and applies no same-origin policy. Fix the API's CORS settings for that origin."
+  - q: "The API returns Access-Control-Allow-Origin: * and the page calls fetch with credentials: 'include' to send its session cookie. Can the page read the response?"
+    a: "No. For a request with credentials the browser rejects the wildcard. The API must name the exact origin, https://shop.example, and also send Access-Control-Allow-Credentials: true."
 confusedWith: [cors-vs-csrf]
 tags: [cors, preflight, same-origin-policy, options]
 visual: flow
 sources:
-  - title: "Cross-Origin Resource Sharing (CORS) (MDN)"
+  - title: "Cross-Origin Resource Sharing (CORS): simple requests, preflight, credentials, Max-Age (MDN)"
     url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Same-origin policy (MDN)"
     url: "https://developer.mozilla.org/en-US/docs/Web/Security/Same-origin_policy"
     verifiedOn: "2026-10-20"
-  - title: "CORS (Spring Framework 7.0 reference, Web MVC)"
+  - title: "CORS: @CrossOrigin and global configuration defaults (Spring Framework 7.0 reference, Web MVC)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc-cors.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "CORS (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/integrations/cors.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+An origin is the scheme, host and port of a web page, such as `https://shop.example`. By default a browser lets a page read responses only from its own origin; this rule is the same-origin policy. Cross-Origin Resource Sharing (CORS) is a set of response headers with which an API, such as `https://api.shop.example`, tells the browser: "pages from these other origins may read my responses".
 
 ## Why it exists
 
-Browsers stop a page reading another origin's responses, so a bad site cannot read your data. CORS lets an API relax that for origins it trusts, like its own web app.
+The shop's web app runs on `shop.example` but calls the payment API on `api.shop.example`, a different origin. Without CORS headers, the browser blocks the page from reading the answer, and checkout breaks. The same-origin policy itself must stay, because it stops any site you visit from reading your bank's API with your cookies. CORS lets the API open the door only for origins it trusts.
 
 ## How it works
 
@@ -51,11 +68,16 @@ Browsers stop a page reading another origin's responses, so a bad site cannot re
   B-->>P: Response readable`}
 />
 
-- Simple requests (GET, HEAD, form-style POST) skip the preflight; the browser still checks the response headers.
-- `Access-Control-Max-Age` caches the preflight result, so the OPTIONS call is not repeated each time.
-- CORS does not stop CSRF: browsers still send cross-site form posts with cookies ([CORS vs CSRF](compare:cors-vs-csrf)).
+1. The page calls the API with `fetch`, and the browser adds an `Origin: https://shop.example` header.
+2. If the request is not simple, for example a POST with a JSON body, a PUT or DELETE, or one with an `Authorization` header, the browser first sends an `OPTIONS` preflight asking which method and headers are allowed. A preflight never carries cookies.
+3. The API answers with `Access-Control-Allow-Origin` and the allowed methods and headers. If they do not match, the browser stops and never sends the real request.
+4. The browser sends the real request and checks `Access-Control-Allow-Origin` again on the response before it lets the page read it.
+
+So the key is: the API only declares the rules; the browser enforces them.
 
 ## Example
+
+This is the preflight the browser sends before the checkout page's `POST /api/payments`, and the API's answer.
 
 ```text
 OPTIONS /api/payments HTTP/1.1
@@ -70,13 +92,38 @@ Access-Control-Allow-Headers: content-type, authorization
 Access-Control-Max-Age: 3600
 ```
 
+What to notice:
+
+- The `Access-Control-Request-*` lines are the browser asking; the `Access-Control-Allow-*` lines are the API answering. `authorization` is listed because the page sends a bearer token.
+- `Allow-Origin` names exactly `https://shop.example`. A page on `evil.example` gets no matching header, so the browser hides the response from it.
+- `Max-Age: 3600` lets the browser reuse this answer for an hour. Without the header it is cached for only 5 seconds, so almost every call would cost an extra `OPTIONS` round trip.
+
+## Rules and defaults
+
+- **Simple requests skip the preflight:** GET, HEAD or POST with only safelisted headers and a `Content-Type` of `application/x-www-form-urlencoded`, `multipart/form-data` or `text/plain` (MDN). The browser still checks the response headers.
+- **Credentials:** to send cookies, the page sets `credentials: "include"`, the API returns `Access-Control-Allow-Credentials: true`, and `Allow-Origin` must be one exact origin, not `*`.
+- **Spring `@CrossOrigin` (Spring Framework 7.0):** allows all origins, all headers and the methods the handler is mapped to; credentials are off and max age is 30 minutes. Global `addCorsMappings` allows only GET, HEAD and POST by default. Name your real origins in production.
+- **With Spring Security:** CORS must be processed before security, because the preflight carries no credentials and would otherwise be rejected as unauthenticated. Enable it with `http.cors(...)` (Spring Security 7.1).
+
+## Not to be confused with
+
+CORS controls whether a page from another origin may read your API's responses. CSRF (cross-site request forgery) is an attack in which another site makes the user's browser send a request that carries the user's cookies automatically, such as a hidden form that posts a payment. Rule: CORS controls who may read; CSRF protection, such as CSRF tokens and SameSite cookies, guards writes that ride on cookies.
+
+## Common mistakes
+
+- **"A CORS error means the server rejected the request."** A simple request, such as a form-style POST, has no preflight, so it reaches the server and may change data; the browser only hides the answer from the page.
+- **"Allow every origin to make the error go away."** `*` exposes the API's responses to every website. List the origins of your own apps instead.
+
 ## Interview Qs
 
 ### Why does my API work from Postman but fail in the browser?
 
-Postman is not a browser, so it does not apply the same-origin policy. The browser blocks the response because the API did not send a matching `Access-Control-Allow-Origin`, or the preflight failed.
+Postman is not a browser, so it does not apply the same-origin policy. The browser blocks the response because the API did not send a matching `Access-Control-Allow-Origin`, or because the preflight failed: a method or header the page uses was not in the allowed list.
 
 ### Is Access-Control-Allow-Origin: * safe?
 
-Only for public data without credentials. Browsers refuse `*` for requests that send cookies or HTTP auth; name the exact origins instead.
+Only for public data without credentials. Any website can then read the responses, and browsers refuse `*` for requests that send cookies or HTTP authentication. For a private API, name the exact origins.
 
+### How do you enable CORS in Spring Boot?
+
+Put `@CrossOrigin(origins = "https://shop.example")` on a controller or method, or set global rules in a `WebMvcConfigurer` with `addCorsMappings`. With Spring Security, also call `http.cors(...)`, so the preflight is answered before authentication runs.

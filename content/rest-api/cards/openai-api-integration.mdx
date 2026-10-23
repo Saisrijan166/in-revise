@@ -5,18 +5,29 @@ title: "Calling the OpenAI API from Java"
 topic: spring
 level: intermediate
 heat: 2
-hook: "An LLM call is a plain HTTPS POST: send model and input as JSON with a Bearer API key from the environment, then read the text from the JSON reply."
+hook: "Calling an LLM is a plain HTTPS POST: send the model and your input as JSON with a Bearer API key, then read the generated text from the JSON reply."
 points:
-  - { k: "Endpoint", v: "POST /v1/responses; OpenAI recommends it over Chat Completions" }
-  - { k: "Auth", v: "Authorization: Bearer key, read from an env var or a secret store" }
-  - { k: "Body", v: "model + input; max_output_tokens caps the reply and the cost" }
-  - { k: "Reply", v: "message items in output[] hold output_text parts" }
-  - { k: "429", v: "rate limit: retry after Retry-After; quota or spend limit: never retry", kind: minus }
-  - { k: "Model", v: "read the id from config (openai.model); a new model needs no code change" }
+  - { k: "Endpoint", v: "POST /v1/responses; OpenAI recommends the Responses API over Chat Completions for new projects" }
+  - { k: "API key", v: "sent as Authorization: Bearer key; read on the server from an environment variable or a secret store" }
+  - { k: "Request body", v: "model and input; max_output_tokens caps the length of the reply, and so its cost" }
+  - { k: "Reply", v: "the output array holds items; the text is in the output_text parts of the message items" }
+  - { k: "429", v: "a rate-limit 429 is retried after Retry-After; a quota or spend-limit 429 must not be retried", kind: minus }
+  - { k: "Model id", v: "read from configuration, such as openai.model, so a new model needs no code change", kind: plus }
 trap:
-  wrong: "Read output_text, or output[0].content[0].text, from the raw JSON."
-  right: "output_text is SDK-only, and output[0] may be a reasoning item. Keep message items and join their output_text parts."
-sayIt: "I build a RestClient for https://api.openai.com/v1 with a Bearer key from an environment variable, POST model and input to /responses, and map the JSON to records. Production adds timeouts, capped 429 retries and a token limit."
+  wrong: "Read output_text, or output[0].content[0].text, straight from the raw JSON."
+  right: "output_text is a helper in the official SDKs, and output[0] may be a reasoning item. Keep the message items and join their output_text parts."
+  why: "SDK examples print response.output_text, and in simple replies the message is the first item, so the shortcut seems to work in a quick test."
+sayIt: "I build a RestClient for https://api.openai.com/v1 with a Bearer key from an environment variable, POST model and input to /responses, and map the JSON to records. In production I add timeouts, capped retries on rate-limit 429s and a token limit."
+cheat:
+  idea: "An LLM call is an HTTPS POST to /v1/responses with the model and input as JSON and a Bearer API key. The reply's message items hold the text."
+  flow: "RestClient → POST /responses + Bearer key → JSON reply → message items → text"
+  remember: "Keep the key on the server in an environment variable; retry only rate-limit 429s."
+buildsOn: [rest-clients, authentication-methods, rate-limiting]
+scenarios:
+  - q: "A teammate puts the OpenAI key in the React front end so the browser can call the API directly. What is wrong?"
+    a: "Anyone can read a key that is shipped to the browser and spend your quota with it. The key must stay on the server: the browser calls your backend, and your backend calls OpenAI with the key from an environment variable."
+  - q: "OpenAI answers 429 and the error says you exceeded your quota. Should your code retry with backoff?"
+    a: "No. A quota or spend-limit 429 does not clear by waiting a few seconds, so retries only add load and delay. Retry rate-limit 429s after Retry-After; for quota errors, fail fast and alert someone to fix billing or limits."
 confusedWith: []
 tags: [spring, openai, integration]
 visual: code
@@ -24,12 +35,18 @@ sources:
   - title: "Text generation: Responses API, output array (OpenAI API docs)"
     url: "https://developers.openai.com/api/docs/guides/text"
     verifiedOn: "2026-10-20"
+  - title: "Migrate to the Responses API (OpenAI API docs)"
+    url: "https://developers.openai.com/api/docs/guides/migrate-to-responses"
+    verifiedOn: "2026-10-20"
   - title: "API overview: authentication, request IDs (OpenAI API reference)"
     url: "https://developers.openai.com/api/reference/overview"
     verifiedOn: "2026-10-20"
   - title: "Rate limits: 429, Retry-After, backoff (OpenAI API docs)"
     url: "https://developers.openai.com/api/docs/guides/rate-limits"
     verifiedOn: "2026-10-20"
+  - title: "openai-java README: retries 2 times by default on connection errors, 408, 409, 429 and 5xx (GitHub)"
+    url: "https://github.com/openai/openai-java"
+    verifiedOn: "2026-10-22"
   - title: "Create a model response: max_output_tokens, output_text (OpenAI API reference)"
     url: "https://developers.openai.com/api/reference/resources/responses/methods/create"
     verifiedOn: "2026-10-20"
@@ -50,9 +67,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An LLM (large language model) is the kind of model behind ChatGPT, and OpenAI offers its models to programs as a REST API. Calling it from Java is an ordinary HTTPS POST: you send the model id and your input as JSON, prove who you are with a Bearer API key, and read the generated text from the JSON reply. ChatGPT is the chat app; your code calls the OpenAI API.
+
 ## Why it exists
 
-Interviewers ask how a backend adds an AI feature. It is an ordinary call to an external REST API, so the usual client, auth and retry rules apply.
+Interviewers ask "how would you add an AI feature?" to see whether you treat it as an external dependency. It is one, so the rules for the payment gateway apply: keep the key secret, set timeouts, handle 429, cap retries, and parse the JSON properly. The same small shape also answers the wider "write integration code" question for Redis, Kafka and AWS.
 
 ## How it works
 
@@ -67,7 +88,13 @@ Interviewers ask how a backend adds an AI feature. It is an ordinary call to an 
 `}
 />
 
-"Write integration code": name the class, then the one call.
+1. The service builds a [RestClient](card:rest-clients) for `https://api.openai.com/v1` with the header `Authorization: Bearer <key>`, reading the key from an environment variable.
+2. It POSTs to `/responses` a JSON body with `model`, `input` and `max_output_tokens`.
+3. OpenAI replies 200 with an `output` array. Items of type `message` hold content parts of type `output_text`; other items, such as reasoning, may come first.
+4. The code keeps the message items and joins their text parts.
+5. On a rate-limit 429 it waits for `Retry-After`, retries a few times, then gives up.
+
+The same "one client class, one main call" shape answers the other integration questions:
 
 | Tech | Java or Spring class | Main call |
 | --- | --- | --- |
@@ -79,20 +106,18 @@ Interviewers ask how a backend adds an AI feature. It is an ordinary call to an 
 | AWS SQS | `SqsClient` (SDK 2.x) | `sendMessage(SendMessageRequest)` |
 | AWS RDS | `JdbcClient` or JPA, as for any SQL database | `sql(...).param(...).update()` |
 
-- Timeouts and `onStatus`: [HTTP clients](card:rest-clients); what to retry: [retries and timeouts](card:retries-and-timeouts).
-- [openai-java](card:openai-java-sdk) or [Spring AI](card:spring-ai-chatclient) wrap the same call.
-- Log the `x-request-id` header; OpenAI support traces calls by it.
-
 ## Example
+
+The payment API writes a short summary of a customer's payments. The client class sends the request:
 
 ```java
 @Service
 class AiClient {
     private final RestClient http;
     private final String model;
-    AiClient(RestClient.Builder b, @Value("${openai.model}") String model) {
+    AiClient(RestClient.Builder builder, @Value("${openai.model}") String model) {
         this.model = model;
-        this.http = b.baseUrl("https://api.openai.com/v1")
+        this.http = builder.baseUrl("https://api.openai.com/v1")
                 .defaultHeader("Authorization", "Bearer " + System.getenv("OPENAI_API_KEY")).build();
     }
     String ask(String prompt) {
@@ -102,6 +127,8 @@ class AiClient {
     }
 }
 ```
+
+Records read the reply:
 
 ```java
 record Reply(List<Item> output) {
@@ -116,12 +143,31 @@ record Item(String type, List<Part> content) {}
 record Part(String type, String text) {}
 ```
 
+What to notice:
+
+- The key comes from `OPENAI_API_KEY` at runtime, so it is never in the code, in Git or in a browser.
+- The model id comes from `openai.model` in configuration; switching models is a config change.
+- `max_output_tokens` caps how much text the model may write, which caps the cost of one call.
+- `text()` filters by `type` instead of taking `output[0]`, so a reasoning item at the start does not break it. Jackson ignores the reply fields the records do not declare.
+
+## Rules and defaults
+
+- **Responses or Chat Completions:** OpenAI recommends `POST /v1/responses` for new projects. `POST /v1/chat/completions` with `messages` is still supported.
+- **Where the key lives:** on the server only, in an environment variable or a secret store.
+- **429 handling:** for a rate limit, wait for `Retry-After`, or back off with jitter, and cap the attempts. The official SDKs already retry 429 and 5xx errors twice by default, so turn their retries off or do not wrap a second retry loop around them.
+- **Tracing a call:** log the `x-request-id` response header; OpenAI support uses it to find a request.
+- **Libraries:** the official [openai-java SDK](card:openai-java-sdk) and [Spring AI](card:spring-ai-chatclient) wrap the same HTTP call.
+
 ## Interview Qs
 
 ### How would you integrate the ChatGPT API in Spring Boot?
 
-Code calls the OpenAI API, not ChatGPT. One service wraps a RestClient: POST /v1/responses with model and input as JSON and a Bearer key from the environment (never in code, Git or a browser), then map the reply to records.
+Code calls the OpenAI API, not ChatGPT. One service wraps a RestClient: POST `/v1/responses` with model and input as JSON and a Bearer key from the environment, never in code, Git or a browser. I map the reply to records, set timeouts and cap the output tokens.
 
 ### What do you do when OpenAI returns 429?
 
-A rate-limit 429 is retryable: wait for Retry-After, else back off with jitter, and cap attempts. Quota and spend-limit 429s need action, not retries. Official SDKs already retry 429 and 503; do not stack a second loop.
+A rate-limit 429 is retryable: wait for `Retry-After`, else back off with jitter, and cap the attempts. Quota and spend-limit 429s need someone to act, not retries. The official SDKs already retry 429 and 5xx twice by default, so I do not stack a second loop on top.
+
+### Is this small client production-ready?
+
+No, it is the skeleton. Production adds timeouts, capped retries, the key in a secret store, logging of `x-request-id`, limits on input size and output tokens, and handling of failed or empty replies.

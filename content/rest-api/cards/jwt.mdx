@@ -5,17 +5,28 @@ title: "JWT: Structure and Validation"
 topic: security
 level: intermediate
 heat: 3
-hook: "A JWT is header.payload.signature in Base64url: signed so any change is detected, but readable by anyone who holds it."
+hook: "A JWT is a signed token of three Base64url parts, header.payload.signature. Anyone can read it, but nobody can change it without breaking the signature."
 points:
-  - { k: "Signed, not secret", v: "JWS only proves integrity; encryption needs JWE", kind: minus }
-  - { k: "Check", v: "signature with an allowed alg, then exp, nbf, iss and aud" }
-  - { k: "HS256 vs RS256", v: "one shared secret vs private key signs, public key verifies" }
-  - { k: "Stateless", v: "no lookup per request; any service with the key verifies it", kind: plus }
-  - { k: "Revocation", v: "valid until exp, so keep access tokens short-lived", kind: minus }
+  - { k: "Three parts", v: "header.payload.signature, each Base64url-encoded and joined by dots" }
+  - { k: "Readable", v: "anyone can decode the payload without a key, so no secrets or personal data inside", kind: minus }
+  - { k: "Check order", v: "allowed alg, then signature, then exp and nbf, then iss and aud; only then trust sub and scope" }
+  - { k: "No lookup", v: "any service with the issuer's public key can verify a token alone, with no session store", kind: plus }
+  - { k: "No early revoke", v: "a token stays valid until exp, so keep access tokens short-lived", kind: minus }
 trap:
   wrong: "The JWT is encrypted, so the customer's phone number can go in the payload."
-  right: "A signed JWT is only encoded; anyone can decode it. Keep secrets and personal data out, or use JWE."
-sayIt: "A JWT is a signed set of claims. The API verifies the signature with the algorithm it expects, then checks exp, iss and aud before trusting sub or the scopes. It is readable, so no secrets inside."
+  right: "A signed JWT is only encoded; anyone can decode it. Keep personal data out, or use an encrypted JWE."
+  why: "The token looks like random characters and has a signature, so people assume it is encrypted."
+sayIt: "A JWT is a signed set of claims. My API accepts only the algorithm it expects, verifies the signature, checks exp, iss and aud, and only then uses sub and scope. Anyone can read it, so no secrets inside, and it lives until exp, so access tokens stay short."
+cheat:
+  idea: "A JWT is a signed token, header.payload.signature, carrying claims such as sub and exp. An API verifies it with the issuer's key, with no session lookup."
+  flow: "allowed alg → signature → exp, nbf → iss, aud → use sub, scope"
+  remember: "Signed is not encrypted: anyone can read the payload, so keep secrets out."
+buildsOn: [authentication-methods, statelessness]
+scenarios:
+  - q: "An attacker edits the payload of a valid token, changing sub from customer-42 to customer-7, and sends it. What happens?"
+    a: "The signature was computed over the original header and payload, so verification fails and the API returns 401. The attacker cannot sign the new payload without the issuer's private key."
+  - q: "A token issued for orders-api (aud: orders-api) is sent to the payments API. Its signature is valid. Should the payments API accept it?"
+    a: "No. The aud check fails because the token was not meant for this API. Without that check, a token leaked from any service would work at every API that trusts the same issuer."
 confusedWith: [jwt-vs-session-cookie]
 tags: [jwt, jws, claims, signature, token-validation]
 visual: flow
@@ -32,48 +43,95 @@ sources:
   - title: "REST Security Cheat Sheet: JWT (OWASP)"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html"
     verifiedOn: "2026-10-20"
+  - title: "JSON Web Token Cheat Sheet: token revocation (OWASP)"
+    url: "https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_Cheat_Sheet.html"
+    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+A JSON Web Token (JWT) is a compact string that carries facts about the caller, called claims, such as the user ID and the expiry time. It has three parts joined by dots: a header that names the signing algorithm, a payload with the claims, and a signature. The login server signs the token with its key. An API that receives it as a [bearer token](card:authentication-methods) checks the signature before it trusts any claim.
 
 ## Why it exists
 
-Calling a login server on every request is slow. A JWT carries the caller's identity and rights in a signed token, so any API can check it by itself.
+With a session ID, every API must look the session up in a shared store on each request: one more network call, and one more system that can fail. A JWT carries the claims itself, and the signature proves that the login server issued them. So the payment API checks the token on its own with the login server's public key, a key that can check signatures but not create them, and needs no lookup, which fits a [stateless](card:statelessness) API. The cost: a token cannot be cancelled before it expires.
 
 ## How it works
 
-<Steps label="How an API validates a JWT">
-  <Step title="Split">Take the three Base64url parts from `Authorization: Bearer`.</Step>
-  <Step title="Pick the algorithm">Use only the one you expect, such as RS256. Never trust `alg: none` from the header.</Step>
-  <Step title="Verify the signature">Use the issuer's public key; reject on any mismatch.</Step>
-  <Step title="Check the time">Reject if now is after `exp` or before `nbf`.</Step>
-  <Step title="Check who">`iss` is your trusted issuer and `aud` names this API.</Step>
-  <Step title="Authorise">Only now use `sub` and scopes to decide access.</Step>
-</Steps>
+<Mermaid
+  alt="JWT validation chain. The API takes the token from the Authorization header. It checks that alg is an allowed algorithm, then that the signature is valid, then that exp and nbf fit the current time, then that iss and aud are correct. If every check passes it uses sub and scope for authorisation. Any failed check returns 401."
+  chart={`flowchart LR
+  T[Bearer token] --> A{alg allowed?}
+  A -- yes --> S{signature valid?}
+  S -- yes --> E{exp, nbf OK?}
+  E -- yes --> I{iss, aud OK?}
+  I -- yes --> U[Use sub and scope]
+  A -- no --> X[401]
+  S -- no --> X
+  E -- no --> X
+  I -- no --> X`}
+/>
 
-- To log users out early, revoke the [refresh token](card:oauth2-and-oidc) or keep a denylist of `jti` values.
+1. The API takes the token from `Authorization: Bearer` and splits it at the dots into header, payload and signature.
+2. It reads `alg` from the header but accepts only the algorithm it expects, such as RS256. A token that says `alg: none`, or names any other algorithm, is rejected (RFC 8725).
+3. It verifies the signature with the issuer's public key (RS256) or the shared secret (HS256). If any byte of the header or payload was changed, this check fails.
+4. It checks the time: now must be before `exp` (expiry) and not before `nbf` (not before).
+5. It checks who: `iss` (issuer) must be the trusted login server, and `aud` (audience) must name this API.
+6. Only then does it trust `sub` (the caller) and `scope` (what the caller may do) for authorisation. Any failed check gives 401.
+
+So the key is: decoding is free for anyone; trust comes only from the checks.
 
 ## Example
 
-```json
-{
-  "iss": "https://auth.shop.example",
-  "sub": "customer-42",
-  "aud": "payments-api",
-  "scope": "payments:write",
-  "iat": 1792483200,
-  "exp": 1792484100
-}
+The payment API receives this token. The code reads its header and payload the way any holder could, without a key.
+
+```java
+String token = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"           // header
+    + ".eyJpc3MiOiJodHRwczovL2F1dGguc2hvcC5leGFtcGxlIiwic3ViIjoiY3VzdG9tZXItNDIiLCJhdWQiOiJwYXltZW50cy1hcGkiLCJleHAiOjE3OTI0ODQxMDB9"
+    + ".c2lnbmF0dXJl";                                        // signature (fake here)
+String[] parts = token.split("\\.");                          // header . payload . signature
+Base64.Decoder decoder = Base64.getUrlDecoder();              // no key needed
+System.out.println(new String(decoder.decode(parts[0])));
+System.out.println(new String(decoder.decode(parts[1])));
 ```
+
+```text output
+{"alg":"RS256","typ":"JWT"}
+{"iss":"https://auth.shop.example","sub":"customer-42","aud":"payments-api","exp":1792484100}
+```
+
+What to notice:
+
+- `Base64.getUrlDecoder()` with no key reads every claim, so a card number, password or phone number in the payload is visible to anyone who holds the token.
+- The signature here is fake, and decoding still works. Reading a token says nothing about whether it is genuine; only the signature check in step 3 does.
+- `exp` is a Unix time in seconds (20-10-2026, 08:15 UTC). After it, the API must reject the token even though the signature is still correct.
+
+## Rules and defaults
+
+- **Signed is not encrypted:** a normal JWT is a JWS (JSON Web Signature): tamper-evident but readable. Hiding the claims needs a JWE (JSON Web Encryption).
+- **HS256 vs RS256 (RFC 7518):** HS256 signs and verifies with one shared secret, so every API that can verify could also create tokens. RS256 signs with a private key and verifies with a public key, so many APIs can verify while only the login server signs.
+- **Registered claims:** `iss`, `sub`, `aud`, `exp`, `nbf`, `iat` and `jti` (a unique token ID) are defined in RFC 7519 section 4.1. All are optional in the spec, so your API must require the ones it checks.
+- **Expiry:** RFC 7519 says a token MUST NOT be accepted after `exp`. There is no built-in revoke, so keep access tokens short-lived.
+- **Early logout:** revoke the refresh token (next concept), or keep a denylist of `jti` values until they expire. A denylist brings server state back.
+
+## Not to be confused with
+
+A session cookie holds only a random ID, and the server looks the session up in its store on every request. A JWT holds the claims themselves, signed, so the server needs no lookup. Rule: session = state on the server, easy to delete; JWT = state in the token, valid until `exp`.
 
 ## Interview Qs
 
 ### Can you decode a JWT without the key?
 
-Yes. The header and payload are just Base64url JSON. The key is needed only to check, or create, the signature. That is why the payload must hold no secrets.
+Yes. The header and payload are Base64url-encoded JSON, so anyone can read them. The key is needed only to create or verify the signature. That is why the payload must hold no secrets or personal data, unless you use an encrypted JWE.
 
-### How do you log out a user who has a JWT?
+### How do you log out a user who holds a JWT?
 
-You cannot delete a self-contained token. Keep it short-lived, revoke the refresh token, and if you must stop it at once, deny its `jti` until it expires. A denylist brings back server state.
+You cannot delete a self-contained token. Keep access tokens short-lived and revoke the refresh token, so no new access token is issued. To stop one token at once, deny its `jti` until it expires, which means a lookup on every request again.
 
 ### What is the alg none attack?
 
-An attacker changes the header to `alg: none` and drops the signature; a careless library accepts it. Fix: verify only with an allow-list of algorithms you chose.
+An attacker changes the header to `alg: none` and removes the signature. A careless library reads the header, skips verification and accepts the forged claims. The fix is to verify only with an allow-list of algorithms you chose, never the one the token names (RFC 8725).
+
+### HS256 or RS256 for many microservices?
+
+RS256. Only the login server holds the private key; every service verifies with the public key, so a hacked service cannot mint tokens. With HS256 every verifier holds the shared secret and could sign tokens itself.

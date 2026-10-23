@@ -5,16 +5,31 @@ title: "Playbook: Designing the ₹500 Payment API"
 topic: playbook
 level: interview
 heat: 3
-hook: "Answer in one order: resources, methods, status codes, errors, security, idempotency, paging, versioning, then tests and docs."
+hook: "Answer \"design a payment API\" in one fixed order: contract, security, validation, idempotency, saving, the gateway call, status, async work, observability."
 points:
-  - { k: "Request path", v: "authenticate, validate, dedupe, save PENDING, call the gateway" }
-  - { k: "Money rule", v: "one Idempotency-Key per payment, reused on every retry" }
-  - { k: "Timeout", v: "the outcome is unknown: reconcile before charging again" }
-  - { k: "Close with", v: "the six payment test cases and an OpenAPI contract" }
+  - { k: "Contract first", v: "POST /api/payments creates PAY101 and answers 201 with a Location; GET /api/payments/{id} reads it" }
+  - { k: "Request path", v: "authenticate, check ownership, validate, dedupe by key, save PENDING, then call the gateway" }
+  - { k: "Money rule", v: "the client sends one Idempotency-Key per payment and reuses it on every retry, so it is charged once" }
+  - { k: "Timeout", v: "a gateway timeout means the outcome is unknown: check with the gateway before charging again", kind: minus }
+  - { k: "Result to the client", v: "the gateway's webhook updates the payment; the page learns it by SSE or by reading the status resource" }
+  - { k: "Close with", v: "the six payment test cases and an OpenAPI contract that other teams can review" }
 trap:
   wrong: "Start by naming tools: Redis, a queue, a load balancer."
-  right: "Start with the resource, the contract and the failure cases. Add a box only for a problem you have named."
-sayIt: "POST /api/payments with an Idempotency-Key. I authenticate, check the caller owns the account, validate, dedupe, save PENDING, then call the gateway with a timeout. A timeout is unknown, never failed, until reconciled."
+  right: "Start with the resource, the contract and the failure cases. Add a component only for a problem you have named."
+  why: "Boxes and product names look like a design and fill the whiteboard fast, while the questions that lose money, such as duplicate charges, are harder to see."
+sayIt: "POST /api/payments with an Idempotency-Key. I authenticate, check the caller owns the account, validate, dedupe, save PENDING, then call the gateway with a timeout. A timeout is unknown, never failed, until reconciled; the webhook settles the final status."
+cheat:
+  idea: "A fixed answer order for \"design a payment API\" that ties the whole tech together: URL and status codes, security, idempotency, timeouts, webhooks and tests."
+  flow: "Contract → security → validate → dedupe → save → gateway → status"
+  remember: "Never charge again after a timeout: the outcome is unknown, so reconcile and retry only with the same Idempotency-Key."
+buildsOn: [idempotency-keys, unknown-outcomes, observability-for-apis]
+scenarios:
+  - q: "After a network error, the mobile app retries POST /api/payments but generates a new Idempotency-Key for the retry. What happens?"
+    a: "The server sees a new key, treats it as a new payment and may charge ₹500 twice. The key must be created once per payment, before the first attempt, and reused on every retry of it."
+  - q: "Your call to the gateway timed out, so PAY101 is UNKNOWN. A minute later the gateway's webhook says SUCCESS. What do you do?"
+    a: "Verify the webhook's signature, skip it if its event ID was already processed, and move PAY101 from UNKNOWN to SUCCESS. Do not charge again. The reconciliation job later finds nothing left to fix for this payment."
+  - q: "The interviewer asks where Redis fits in your design. What is a good answer?"
+    a: "It is optional. Correctness comes from the database: a unique constraint on the idempotency key and durable payment rows. Redis could hold rate-limit counters or cache status reads, but a lock in Redis alone does not prevent double charges."
 confusedWith: []
 tags: [interview, payments, revision]
 visual: flow
@@ -30,14 +45,18 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+This playbook is a fixed order for answering the interview question "design a REST API for payments". It reuses the ₹500 payment, PAY101, that has run through this whole tech. Each step names one decision and links to the concept that explains it, so the answer covers the contract, security, correctness and failure handling, and leaves time to go deep where money is at risk.
+
 ## Why it exists
 
-"Design a payment API" joins every REST topic. A fixed order keeps the answer complete under pressure.
+The question is open-ended, and under pressure candidates either list products, such as Redis and a queue, or forget a whole area, such as who may read a payment. A payment API adds one danger that most APIs do not have: a retry or a timeout can charge the customer twice. A fixed order makes sure nothing is skipped and brings the answer to the two places interviewers probe hardest, idempotency and timeouts.
 
 ## How it works
 
 <Mermaid
-  alt="Client over HTTPS to a load balancer, then the payment API, which uses the database and the gateway; optional cache, queue with worker, and logs."
+  alt="The client calls the payment API over HTTPS through a load balancer. The payment API stores payments in a database and calls the payment gateway. Optional parts, drawn with dotted lines: a cache, a queue with a worker for receipts, and logs, metrics and traces."
   chart={`flowchart LR
   C([Client]) -- HTTPS --> LB[Load balancer]
   LB --> API[Payment API]
@@ -49,35 +68,66 @@ sources:
 />
 
 <Steps label="The ₹500 request, in order">
-  <Step title="Contract">`POST /api/payments` with an `Idempotency-Key`: [resources](card:resources-and-uris), [methods](card:http-methods).</Step>
-  <Step title="Security">[Who is calling](card:authentication-methods), and [may they use this account](card:owasp-api-security)?</Step>
-  <Step title="Validation">Amount, currency, format: [Bean Validation](card:request-binding-validation), one [error body](card:error-responses).</Step>
-  <Step title="Idempotency">Same key seen? Return the first result: [idempotency keys](card:idempotency-keys).</Step>
-  <Step title="Provider choice">Strategy per method (UPI, card, wallet), Adapter per gateway (Design Patterns tech).</Step>
-  <Step title="Persistence">Store PAY101 and its status in a durable database.</Step>
-  <Step title="Gateway call">[Timeout, bounded retries](card:retries-and-timeouts), same key.</Step>
-  <Step title="Status">SUCCESS, FAILED or [unknown](card:unknown-outcomes); a declined payment is [not a 5xx](card:status-codes).</Step>
-  <Step title="Async work">Receipts through a queue; the final result by [webhook](card:webhooks) or a [status resource](card:long-running-operations).</Step>
-  <Step title="Observability">One [correlation ID](card:observability-for-apis) in logs, metrics and traces.</Step>
+  <Step title="Contract">The client calls `POST /api/payments` with the amount, currency, method and an `Idempotency-Key`; the payment is a [resource](card:resources-and-uris) that `GET /api/payments/{id}` reads.</Step>
+  <Step title="Security">The API checks [who is calling](card:authentication-methods) over [HTTPS](card:https-tls), then checks that this caller [owns the account](card:owasp-api-security) being charged.</Step>
+  <Step title="Validation">It checks amount, currency and format with [Bean Validation](card:request-binding-validation) and rejects bad input with one [error body](card:error-responses).</Step>
+  <Step title="Idempotency">It looks up the key; if the same payment was already handled, it returns the first result instead of charging again ([idempotency keys](card:idempotency-keys)).</Step>
+  <Step title="Saving">It stores PAY101 as PENDING in a durable database before calling anyone, so a crash cannot lose it.</Step>
+  <Step title="Gateway call">It calls the gateway with a [timeout and bounded retries](card:retries-and-timeouts), passing the same key on each retry.</Step>
+  <Step title="Status">It records SUCCESS or FAILED, or UNKNOWN after a timeout, which is [settled by checking with the gateway](card:unknown-outcomes); a declined payment is [a business result, not a 5xx](card:status-codes).</Step>
+  <Step title="Async work">Receipts go to a queue and a worker; the final result arrives by [webhook](card:webhooks), and the page learns it by [SSE](card:websockets-and-sse) or a [status resource](card:long-running-operations).</Step>
+  <Step title="Observability">One [trace ID](card:observability-for-apis) runs through the logs, metrics and traces of the whole request.</Step>
 </Steps>
 
-| Rapid-fire question | Short answer |
-|---|---|
-| Stateless? | [Each request carries everything](card:statelessness) |
-| PUT vs PATCH? | [Replace whole vs change part](compare:put-vs-patch-vs-post) |
-| 401 vs 403? | [Who are you vs not allowed](compare:401-vs-403) |
-| Idempotent? | [Repeating has the effect of once](card:http-methods) |
+So the key is to name each failure before adding the component that handles it.
+
+## Example
+
+The request and response the design promises, with the key the client must reuse on a retry:
+
+```text
+POST /api/payments HTTP/1.1
+Authorization: Bearer <token>
+Idempotency-Key: order-789-payment
+Content-Type: application/json
+
+{"amount": 500, "currency": "INR", "method": "UPI"}
+
+HTTP/1.1 201 Created
+Location: /api/payments/PAY101
+
+{"paymentId": "PAY101", "status": "PENDING", "amount": 500}
+```
+
+What to notice:
+
+- The answer is 201 with a `Location`, and the status is PENDING, not SUCCESS: the gateway has not decided yet.
+- If the client times out and sends the same request with the same `Idempotency-Key`, it gets this same response back and no second charge. A new key would mean a new payment.
+- The body carries only what the client may set. The id, the status and the owner come from the server, which is how a [DTO](card:dto-mapping) keeps a caller from setting `"status": "SUCCESS"` itself.
+
+## Rules and defaults
+
+- **Stateless:** each request carries the token and the ids, and no server keeps a session, so [any instance can answer](card:statelessness).
+- **Methods:** POST creates a payment and is not idempotent without a key; GET reads it; [PUT replaces a whole resource, PATCH changes part of it](compare:put-vs-patch-vs-post).
+- **Status codes:** 201 with `Location` on create; [401 when not logged in, 403 when logged in but not allowed](compare:401-vs-403); [429 with Retry-After](card:rate-limiting) when a client sends too much.
+- **Changes:** a breaking change gets [a new version](card:api-versioning), and the old one stays until clients move.
+- **Provider code:** a strategy per payment method (UPI, card, wallet) and an adapter per gateway keep gateway-specific code in one place; the Design Patterns tech covers both.
+
+## Common mistakes
+
+- **"The gateway call timed out, so the payment failed."** The gateway may have charged. Mark it UNKNOWN and check before doing anything else.
+- **Skipping the ownership check.** Logging in proves who the caller is, not that PAY101 is theirs. Without the check, changing the id in the URL shows another customer's payment.
 
 ## Interview Qs
 
 ### Design a REST API for payments. Where do you start?
 
-With the resource and its states: PAY101 goes PENDING to SUCCESS or FAILED. Walk the ten steps, then go deep on idempotency and timeouts, where money gets charged twice.
+With the resource and its states: PAY101 moves from PENDING to SUCCESS or FAILED, with UNKNOWN for timeouts. Then the contract, security, validation and idempotency, saving, the gateway call and status, async work and observability. Then I go deep on idempotency and timeouts, because that is where money gets charged twice.
 
 ### The gateway charged ₹500 but your call timed out. What now?
 
-Do not charge again. Treat it as [unknown and reconcile](card:unknown-outcomes), retrying only with the same idempotency key.
+Do not charge again. Mark the payment UNKNOWN, ask the gateway for its status using our reference, or wait for its webhook, and retry only with the same idempotency key. A reconciliation job settles anything still open against the gateway's report.
 
 ### Which tests prove the design?
 
-The [six payment cases](card:api-testing-strategy): valid, invalid amount, no login, wrong account, duplicate key, gateway timeout.
+The [six payment cases](card:api-testing-strategy): a valid payment, an invalid amount, no login, another customer's token, a duplicate idempotency key and a gateway timeout. Each one checks a promise from this walkthrough, and the OpenAPI file documents them for other teams.

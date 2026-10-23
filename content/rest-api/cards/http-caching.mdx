@@ -5,67 +5,118 @@ title: "HTTP Caching: Cache-Control and ETag"
 topic: http
 level: intermediate
 heat: 2
-hook: "Cache-Control says who may keep a response and for how long; an ETag lets the cache ask cheaply and get 304 instead of the body."
+hook: "Cache-Control says who may keep a response and for how long; an ETag lets a cache ask \"changed?\" and get a bodiless 304 instead of the full reply."
 points:
-  - { k: "Fresh vs stale", v: "fresh is reused without asking; stale is normally checked first" }
-  - { k: "private", v: "only the user's own cache may store it; CDNs and proxies may not" }
-  - { k: "no-store", v: "no cache may store it: use for card and account details" }
-  - { k: "Cacheable methods", v: "GET and HEAD in practice; PUT and DELETE replies never (RFC 9110)", kind: default }
-  - { k: "No Cache-Control", v: "a cache may still guess a lifetime (heuristic freshness)", kind: minus }
+  - { k: "Fresh vs stale", v: "a fresh copy is reused without asking; a stale one is normally checked with the server first" }
+  - { k: "max-age=600", v: "the stored copy stays fresh for 600 seconds; after that it is stale" }
+  - { k: "ETag", v: "a version label of the response; the client sends it back in If-None-Match to ask whether it changed" }
+  - { k: "304 Not Modified", v: "the server says the stored copy is still good and sends no body" }
+  - { k: "private, no-store", v: "private: only the user's own cache may keep it; no-store: no cache may keep it" }
+  - { k: "No Cache-Control", v: "a cache may still guess a lifetime (heuristic freshness), so always send one", kind: minus }
 trap:
   wrong: "Cache-Control: no-cache means the response is never cached."
-  right: "no-cache means store it, but check with the server before each reuse. Never store is no-store."
-sayIt: "Cache-Control sets who may cache and for how long, like max-age=600 or private. When the copy is stale the client sends If-None-Match with the ETag and gets 304 if nothing changed."
+  right: "no-cache means a cache may store it but must check with the server before each reuse. Never storing it is no-store."
+  why: "The name reads like plain English for \"do not cache\", and its real meaning, \"revalidate first\", is hidden in RFC 9111."
+sayIt: "Cache-Control sets who may cache and for how long, such as max-age=600 or private. When the copy goes stale, the client sends If-None-Match with the ETag and gets a bodiless 304 if nothing changed."
+cheat:
+  idea: "HTTP caching reuses a stored response instead of asking the server again. Cache-Control sets who may store it and for how long; an ETag lets a stale copy be checked cheaply."
+  flow: "200 + ETag → fresh: reuse → stale: If-None-Match → 304, no body"
+  remember: "no-cache means check before reuse; no-store means never store. Card details: no-store."
+buildsOn: [http-methods, headers-content-negotiation]
+scenarios:
+  - q: "A developer adds Cache-Control: public, max-age=300 to GET /api/payments/PAY101, which returns one user's payment, and the API sits behind a CDN. What is the risk?"
+    a: "public lets shared caches such as the CDN store the reply even though the request had an Authorization header. The CDN keys by URL, so it can serve that user's payment to another caller without asking the server, which would have checked access. Per-user data needs private, and card details no-store."
+  - q: "The payment methods list has max-age=600. Five minutes after a client fetched it, the server adds a new wallet. When does that client see the wallet?"
+    a: "Only when its copy goes stale, about five minutes later, because a fresh copy is reused without asking the server. If changes must show at once, send no-cache with an ETag: the cache then checks every time and still gets a cheap 304 when nothing changed."
 confusedWith: []
 tags: [caching, cache-control, etag]
 visual: flow
 sources:
-  - title: "RFC 9111 HTTP Caching (5.2 Cache-Control, 4.2.2 Heuristic Freshness)"
+  - title: "RFC 9111 HTTP Caching (3.5 Authorization, 4.2.2 heuristic freshness, 4.4 invalidation, 5.2 Cache-Control)"
     url: "https://www.rfc-editor.org/rfc/rfc9111.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "RFC 9110 HTTP Semantics, 9.3.4 PUT and 9.3.5 DELETE (not cacheable, invalidate stored responses)"
+    url: "https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.4"
+    verifiedOn: "2026-10-21"
   - title: "Cache-Control header (MDN Web Docs)"
     url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control"
     verifiedOn: "2026-10-20"
-  - title: "HTTP Caching in Spring Web MVC (Spring Framework 7.0 reference)"
+  - title: "HTTP Caching in Spring Web MVC: ResponseEntity eTag and checkNotModified (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-caching.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+HTTP caching means keeping a copy of a response and reusing it for a later identical request, instead of asking the server again. A cache is private when it serves one user, like the browser's own store. It is shared when it serves many users, like a proxy or a CDN, a network of servers placed close to users. The server controls caching with the `Cache-Control` [header](card:headers-content-negotiation), and with an ETag, a version label of the response.
 
 ## Why it exists
 
-Downloading the same unchanged data again wastes bandwidth and server time. Caching reuses a stored reply, and revalidation confirms it cheaply.
+The list of payment methods (UPI, card, wallet) changes perhaps once a week, but every app start downloads it again. That wastes bandwidth, server time and the user's time. Caching lets the copy be reused for a while with no network call at all. After that, revalidation asks the server "is my copy still good?" and gets a tiny 304 reply instead of the full body when nothing changed.
 
 ## How it works
 
-<Steps label="Caching and revalidating GET /api/payment-methods">
-  <Step title="First GET">200 with the list, `Cache-Control: max-age=600` and `ETag: "v7"`.</Step>
-  <Step title="Within 10 minutes">The copy is fresh: the cache answers, with no network call.</Step>
-  <Step title="After 10 minutes">The copy is stale: the client sends `If-None-Match: "v7"`.</Step>
-  <Step title="Unchanged">304 Not Modified, no body; the cache reuses its copy. Changed: 200 with a new ETag.</Step>
-</Steps>
+<Mermaid
+  alt="A request arrives at the cache. If no copy is stored, the cache asks the server and gets 200 with the body. If a copy is stored and fresh, the cache uses it with no network call. If the copy is stale, the cache asks the server with If-None-Match: if unchanged, the server replies 304 and the copy is reused; if changed, the server replies 200 with the new body."
+  chart={`flowchart LR
+  R[GET request] --> H{Copy stored?}
+  H -- no --> S[Server: 200 + body]
+  H -- yes --> F{Fresh?}
+  F -- yes --> U[Use the copy, no network]
+  F -- no --> V[Ask with If-None-Match]
+  V -- unchanged --> N[304: reuse the copy]
+  V -- changed --> S`}
+/>
 
-- `s-maxage` overrides `max-age` for shared caches such as a CDN.
-- A shared cache does not reuse a reply to a request with Authorization, unless `public`, `s-maxage` or `must-revalidate` allows it.
-- Last-Modified with If-Modified-Since works the same way, at one-second resolution.
+1. The first `GET /api/payment-methods` gets 200 with the list, `Cache-Control: max-age=600` and `ETag: "v7"`. The cache stores it.
+2. For the next 10 minutes the copy is fresh, so the cache answers by itself, with no network call.
+3. After 10 minutes the copy is stale. The cache sends the request again with `If-None-Match: "v7"`.
+4. If the list is unchanged, the server answers 304 Not Modified with no body, and the copy is fresh for another 10 minutes. If it changed, the server sends 200 with the new list and a new ETag.
+
+So `max-age` decides how long to trust the copy, and the ETag makes checking it cheap.
 
 ## Example
+
+A Spring controller that serves the payment methods with both headers:
 
 ```java
 @GetMapping("/api/payment-methods")
 ResponseEntity<List<PaymentMethod>> methods() {
     return ResponseEntity.ok()
             .cacheControl(CacheControl.maxAge(Duration.ofMinutes(10)))
-            .eTag(catalogue.version())   // Spring sends 304 if If-None-Match matches
+            .eTag(catalogue.version())   // Spring answers 304 if If-None-Match matches
             .body(catalogue.findAll());
 }
 ```
+
+What to notice:
+
+- `CacheControl.maxAge(...)` writes `Cache-Control: max-age=600`, so caches reuse the reply for 10 minutes.
+- `.eTag(...)` writes the version as the ETag. When a request's `If-None-Match` matches it, Spring sends 304 with an empty body instead of the list.
+- `findAll()` still runs on every request here; the 304 saves the transfer, not the work. Spring's `WebRequest.checkNotModified(eTag)` lets you skip the work too.
+
+## Rules and defaults
+
+- **Directives (RFC 9111):** `max-age=N` fresh for N seconds; `s-maxage=N` overrides it for shared caches only; `private` only the user's own cache; `no-cache` store but revalidate before each reuse; `no-store` never store; `must-revalidate` never reuse a stale copy without checking.
+- **Methods:** which methods have cacheable responses is in [HTTP methods](card:http-methods). A successful `PUT`, `POST` or `DELETE` also makes caches drop their stored copies of that URL (RFC 9111).
+- **Logged-in requests:** a shared cache must not reuse a reply to a request with `Authorization` unless `public`, `s-maxage` or `must-revalidate` allows it.
+- **No Cache-Control:** for codes such as 200 and 404, a cache may guess a lifetime, typically 10% of the time since `Last-Modified`.
+- **Last-Modified:** a date validator, sent back in `If-Modified-Since`; it has one-second resolution, so an ETag is more precise.
+
+## Not to be confused with
+
+`no-cache` lets a cache store the response but makes it ask the server before every reuse, which is cheap with an ETag. `no-store` forbids storing it at all, for data such as card details. Rule: no-cache = always check; no-store = never keep.
 
 ## Interview Qs
 
 ### Should payment responses be cached?
 
-Card or account details: `no-store`. Other per-user data: `private`, so a CDN never serves it to another user. Public data, like the list of payment methods, can use `max-age`.
+Card or account details: `no-store`. Other per-user data, such as a payment's status: `private`, so a CDN never serves it to another user. Public data, such as the list of payment methods, can use `max-age` with an ETag.
 
 ### A response has no Cache-Control. Is it safe from caching?
 
-No. For codes such as 200 and 404, a cache may guess a lifetime, for example 10% of the time since Last-Modified (RFC 9111). Send an explicit directive.
+No. For codes such as 200 and 404, RFC 9111 lets a cache guess a lifetime, for example 10% of the time since `Last-Modified`. Send an explicit directive on every response.
+
+### How does an ETag save bandwidth?
+
+The client keeps the ETag of its copy and sends it in `If-None-Match`. If the server's current version has the same ETag, it answers 304 with no body, so only headers cross the network. Only a changed resource sends the full body again.

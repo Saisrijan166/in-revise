@@ -5,32 +5,50 @@ title: Headers and Content Negotiation
 topic: http
 level: beginner
 heat: 2
-hook: "Content-Type says what this body is; Accept says what the client wants back. The server matches them or refuses."
+hook: "Content-Type says what this body is; Accept says what the client wants back. The server picks a format both sides understand, or refuses."
 points:
-  - { k: "Header names", v: "case-insensitive: content-type equals Content-Type (RFC 9110)" }
-  - { k: "Media type", v: "type/subtype plus parameters: text/html; charset=utf-8" }
-  - { k: "Accept weights", v: "q=0 to 1 ranks choices; no q means 1" }
-  - { k: "Vary: Accept", v: "tells caches the reply depends on the Accept header" }
-  - { k: "New custom names", v: "no X- prefix (RFC 6648, 2012); old ones stay", kind: default }
+  - { k: "Header", v: "a Name: value line that describes the message, such as its format; names are case-insensitive" }
+  - { k: "Content-Type", v: "names the media type of the body in this message, such as application/json" }
+  - { k: "Accept", v: "lists the media types the client can read in the response, ranked by q weights" }
+  - { k: "q weights", v: "from 0 to 1 rank the choices; no q means 1, and q=0 means never send this type" }
+  - { k: "Vary: Accept", v: "tells caches that this reply depends on the Accept header, so they keep one copy per format" }
+  - { k: "415 vs 406", v: "415: the server cannot read the request body; 406: it cannot produce any type the client accepts", kind: minus }
 trap:
   wrong: "Content-Type in my request tells the server which format to send back."
-  right: "Content-Type describes the body you send. Accept asks for the response format."
-sayIt: "Headers carry metadata. The client sends Content-Type for its body and Accept for the reply; the server answers with the chosen Content-Type, 415 for a body it cannot read and 406 if it cannot match Accept."
+  right: "Content-Type describes the body you send. Accept asks for the format of the response."
+  why: "Both headers name media types and both appear in requests, so they look interchangeable."
+sayIt: "Headers carry metadata. The client sends Content-Type for its body and Accept for the reply it wants; the server answers with the chosen Content-Type, 415 for a body it cannot read, and 406 if it cannot match Accept."
+cheat:
+  idea: "Headers are Name: value lines that describe a message. In content negotiation the client lists the formats it can read in Accept, and the server names the format it chose in Content-Type."
+  remember: "415: the server cannot read the request body's format. 406: it can produce no format the client accepts."
+buildsOn: [http-request-response, resources-and-uris]
+scenarios:
+  - q: "A client posts XML to POST /api/payments, but the API reads only JSON. What should it get back?"
+    a: "415 Unsupported Media Type: the server refuses because it cannot read the body's format. The response can carry an Accept header, such as Accept: application/json, to say which format it would take."
+  - q: "A CDN caches the JSON reply of GET /api/payment-methods. A second client sends Accept: application/xml. What can go wrong without Vary: Accept?"
+    a: "The CDN matches only by URL, so it may hand the stored JSON to the client that asked for XML. Vary: Accept tells it the reply depends on Accept, so it keeps and matches one copy per format."
 confusedWith: []
 tags: [headers, content-negotiation, media-type]
 visual: flow
 sources:
-  - title: "RFC 9110 HTTP Semantics, 5.1 Field Names, 8.3 Content-Type and 12 Content Negotiation"
+  - title: "RFC 9110 HTTP Semantics, 5.1 Field Names, 8.3 Content-Type, 12 Content Negotiation (absence, weights, Accept, Vary), 15.5.16 415"
     url: "https://www.rfc-editor.org/rfc/rfc9110.html#section-12"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 9113 HTTP/2, 8.2 HTTP Fields (lower-case field names)"
+    url: "https://www.rfc-editor.org/rfc/rfc9113.html#section-8.2"
+    verifiedOn: "2026-10-21"
   - title: "RFC 6648 Deprecating the \"X-\" Prefix"
     url: "https://www.rfc-editor.org/rfc/rfc6648.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A header is one `Name: value` line in a request or response that describes the message instead of carrying its data. Content negotiation is how the client and the server agree on the format of a [representation](card:resources-and-uris). The client lists the formats it can read in the `Accept` header, and the server picks one and names it in `Content-Type`. A format is written as a media type, such as `application/json`.
+
 ## Why it exists
 
-One payment can be sent as JSON or XML. Headers let client and server agree on the format, and carry other data (credentials, links) outside the body.
+A body is only bytes, and one payment can be sent as JSON or XML. Without a label, the receiver must guess how to read the bytes. Without a way to ask, the client gets whatever the server prefers. Headers carry the label and the request, and other facts such as credentials, outside the body. So the body stays pure data, and both sides know how to read it.
 
 ## How it works
 
@@ -44,10 +62,16 @@ One payment can be sent as JSON or XML. Headers let client and server agree on t
   A -- yes --> OK["201 + Content-Type + Vary: Accept"]`}
 />
 
-- RFC 9110 lets the server ignore Accept and send its default instead of 406.
-- Credentials go in Authorization ([how](card:authentication-methods)); request IDs in [observability](card:observability-for-apis); caching headers in [HTTP caching](card:http-caching).
+1. The client sends `Content-Type` to label its body, and `Accept` to list the formats it can read, best first.
+2. The server checks whether it can read the body's media type. If not, it answers 415 Unsupported Media Type.
+3. It picks the best type from `Accept` that it can produce. If there is none, it answers 406 Not Acceptable, or RFC 9110 lets it send its default type anyway.
+4. It sends the body with `Content-Type` naming the chosen type, plus `Vary: Accept`, which tells caches that the reply depends on the `Accept` header.
+
+So the request labels what it sends and asks for what it wants, and the response labels what it actually sent.
 
 ## Example
+
+A client that prefers JSON but can also read XML:
 
 ```text
 GET /api/payments/PAY101
@@ -58,12 +82,30 @@ Content-Type: application/json
 Vary: Accept
 ```
 
+What to notice:
+
+- `application/json` has no `q`, so its weight is 1. XML has 0.5, so the server sends it only if it cannot send JSON.
+- The response's `Content-Type` is what the client parses by; it is the server's final choice.
+- Without `Vary: Accept`, a shared cache could hand this JSON copy to a later client that accepts only XML.
+
+## Rules and defaults
+
+- **Case:** header names are case-insensitive (RFC 9110); HTTP/2 sends them in lower case (RFC 9113).
+- **Media type:** `type/subtype` plus optional parameters, such as `text/html; charset=utf-8`.
+- **No Accept header:** the client has no preference, so any type is fine.
+- **Other common headers:** `Authorization` carries credentials ([authentication](card:authentication-methods)), `Location` points to a resource, `Cookie` and `Set-Cookie` carry cookies, and `Cache-Control` controls [caching](card:http-caching).
+- **Custom names (RFC 6648, 2012):** new header names should not start with `X-`; old ones such as `X-Request-ID` still work.
+
+## Not to be confused with
+
+`Content-Type` describes the body that travels in the same message, so it appears in requests that have a body and in responses. `Accept` is sent in requests and asks for the format of the response; a 415 reply may also carry it, to list the body formats the server takes. Rule: Content-Type = "this is what I sent"; Accept = "this is what I can read".
+
 ## Interview Qs
 
-### What happens if a client posts XML to a JSON-only API?
+### What is content negotiation?
 
-The server replies 415 Unsupported Media Type. It can add an Accept response header listing the types it does accept.
+The client states which formats it can read in `Accept`, with optional q weights, and the server chooses the best one it can produce and labels the body with `Content-Type`. If nothing matches, it answers 406 or sends its default type. `Vary: Accept` keeps caches from mixing formats.
 
 ### Why should a new header not start with X-?
 
-"X-" names leak into wide use; making one a standard then means a rename or living with both names. RFC 6648 (2012) deprecates the prefix for new names; existing ones like X-Request-ID still work.
+`X-` names often spread into wide use. Making one a standard then means renaming it or living with both names forever. RFC 6648 (2012) therefore deprecates the prefix for new names; existing ones like `X-Request-ID` still work.

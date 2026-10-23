@@ -5,24 +5,35 @@ title: "Timeouts Are Not Failures: Unknown Outcomes"
 topic: reliability
 level: interview
 heat: 3
-hook: "A timeout means 'I don't know', not 'it failed': mark the payment UNKNOWN, ask the gateway, never just charge again."
+hook: "A timeout means 'I do not know', not 'it failed': mark the payment UNKNOWN, ask the gateway what happened, and never just charge again."
 points:
-  - { k: "Three outcomes", v: "success, failure, unknown (timeout, reset, a 500)" }
-  - { k: "States", v: "PENDING, SUCCESS, FAILED, UNKNOWN; the names are your design" }
-  - { k: "Resolve", v: "query the gateway by our reference, or wait for its webhook" }
-  - { k: "Safe retry", v: "same idempotency key and same body; never a new key" }
-  - { k: "Lock alone", v: "a paused worker can outlive its lock lease; not enough", kind: minus }
+  - { k: "Three outcomes", v: "success, failure, or unknown: a timeout, a reset connection or a 500 tells you nothing for sure" }
+  - { k: "States", v: "PENDING, SUCCESS, FAILED and UNKNOWN are your own design; the point is a state for 'not sure yet'" }
+  - { k: "Resolve", v: "ask the gateway for the payment by your own reference, or wait for its signed webhook" }
+  - { k: "Safe retry", v: "resend only with the same idempotency key and body; a new key can create a second charge" }
+  - { k: "Lock alone", v: "a lock with an expiry can run out while a paused worker still acts; uniqueness must live in the database", kind: minus }
 trap:
-  wrong: "The gateway call timed out, so mark it FAILED and charge again."
-  right: "The charge may have gone through. Mark it UNKNOWN, check with the gateway, and retry only with the same key."
-sayIt: "A timeout is an unknown outcome. I mark the payment UNKNOWN, query the gateway or wait for its webhook, retry only with the same idempotency key, and a reconciliation job settles the rest."
+  wrong: "The gateway call timed out, so mark the payment FAILED and charge again."
+  right: "The charge may have gone through. Mark it UNKNOWN, check with the gateway, and retry only with the same idempotency key."
+  why: "In most code a timeout surfaces as an exception, and an exception feels like a failure. But the timeout only says the reply did not arrive in time."
+sayIt: "A timeout is an unknown outcome. I mark the payment UNKNOWN, ask the gateway by our reference or wait for its webhook, retry only with the same idempotency key, and let a reconciliation job settle whatever is left against the provider's report."
+cheat:
+  idea: "An unknown outcome is a call with no clear answer, such as a timeout: the gateway may or may not have charged. Mark it UNKNOWN and find out."
+  flow: "timeout → UNKNOWN → ask gateway / webhook → same-key retry → reconcile"
+  remember: "Never charge again with a new key after a timeout; that is how customers pay twice."
+buildsOn: [idempotency-keys, retries-and-timeouts]
+scenarios:
+  - q: "The gateway charged ₹500, but your request timeout fired before its reply arrived. Your code marks PAY101 FAILED and the customer taps Pay again. What happens?"
+    a: "The customer is charged twice: the first charge is real, and the second request is a new payment. Marking it UNKNOWN and asking the gateway first would have found the first charge."
+  - q: "To stop double charges, a teammate wraps the payment in a Redis lock with a 10-second expiry. Is that enough?"
+    a: "No. If the worker pauses longer than 10 seconds, for example while the JVM stops it for garbage collection, the lock expires while it still works, and a second worker can take the lock and charge too. Use a unique constraint on the order id in the database, inside a transaction."
 confusedWith: []
 tags: [payments, timeouts, reconciliation]
 visual: flow
 sources:
   - title: "Advanced error handling: network errors, 500s, reconcile (Stripe docs)"
     url: "https://docs.stripe.com/error-low-level"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Payout reconciliation report (Stripe docs)"
     url: "https://docs.stripe.com/reports/payout-reconciliation"
     verifiedOn: "2026-10-20"
@@ -35,36 +46,80 @@ sources:
   - title: "Unique constraints (PostgreSQL 18 docs, 5.5.3)"
     url: "https://www.postgresql.org/docs/18/ddl-constraints.html"
     verifiedOn: "2026-10-20"
+  - title: "HttpClient.Builder.connectTimeout (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.net.http/java/net/http/HttpClient.Builder.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+An unknown outcome is a call whose result you cannot know: you sent the request, but a timeout, a reset connection or a 500 means no clear answer came back. The other side may have done the work, failed, or never received it. For a payment, unknown is a third state next to success and failure. It is resolved by asking, never by guessing. It is why [timeouts and retries](card:retries-and-timeouts) need care.
 
 ## Why it exists
 
-The gateway may charge ₹500 and the reply may still be lost. Charging again bills the customer twice; marking it failed loses real money.
+Your service asks the gateway to charge ₹500, and the request timeout fires. If you mark the payment FAILED and the customer pays again, they may be charged twice, because the first charge really went through. If you assume success instead, you may deliver goods for money you never received. Treating the timeout as UNKNOWN, and resolving it with the gateway, keeps both the money and your records correct.
 
 ## How it works
 
-<Steps label="Gateway charged ₹500, reply lost">
-  <Step title="Save first">Insert PAY101 as PENDING, with a unique order id, before calling the gateway.</Step>
-  <Step title="Timeout">Mark PAY101 UNKNOWN. Do not charge again with a new key.</Step>
-  <Step title="Ask">Query the gateway by our reference, or wait for its signed webhook.</Step>
-  <Step title="Retry safely">If still unclear, resend with the same idempotency key and body.</Step>
-  <Step title="Reconcile">A job matches our rows to the settlement report and fixes leftovers.</Step>
-</Steps>
+<Mermaid
+  alt="Payment states. A payment starts as PENDING. A clear gateway answer moves it to SUCCESS or FAILED. A timeout moves it to UNKNOWN. From UNKNOWN, a gateway status query, its webhook, a same-key retry or reconciliation moves it to SUCCESS or FAILED."
+  chart={`stateDiagram-v2
+  [*] --> PENDING: row saved before the call
+  PENDING --> SUCCESS: gateway says charged
+  PENDING --> FAILED: gateway says declined
+  PENDING --> UNKNOWN: timeout, reset or 500
+  UNKNOWN --> SUCCESS: query, webhook or reconcile
+  UNKNOWN --> FAILED: query, webhook or reconcile`}
+/>
 
-- Store the "payment succeeded" event in a [transactional outbox](card:transactional-outbox), so the row and event never disagree.
-- Stripe API v1: retry with the same key within 24 hours; after that, reconcile, never resend.
-- Correctness lives in the database (transaction, unique constraint); a lock with an expiry only saves duplicate work.
+1. Before calling the gateway, you save PAY101 as PENDING, with a unique constraint on the order id, so the order can never get a second payment row.
+2. The call times out. You mark PAY101 UNKNOWN, not FAILED, and do not start a new charge.
+3. You ask the gateway for the payment by your own reference, or wait for its signed [webhook](card:webhooks), which you will see next.
+4. If it is still unclear, you resend the call with the same idempotency key and body; the gateway either does the work once or returns its saved result.
+5. A reconciliation job matches your rows against the provider's settlement report, its list of what it really charged and paid out, and fixes anything still open.
+
+## Example
+
+The payment service turns a timeout into UNKNOWN instead of FAILED.
+
+```java
+void pay(Payment payment) throws IOException {
+    String key = "order-" + payment.orderId() + "-payment";    // same key on every attempt
+    try {
+        GatewayResult r = gateway.charge(payment.id(), payment.amount(), key);
+        repo.updateStatus(payment.id(), r.succeeded() ? "SUCCESS" : "FAILED");
+    } catch (HttpTimeoutException e) {
+        repo.updateStatus(payment.id(), "UNKNOWN");   // not FAILED: the charge may have gone through
+        resolver.checkLater(payment.id());            // ask the gateway, or wait for its webhook
+    }
+}
+```
+
+What to notice:
+
+- FAILED is written only when the gateway clearly says declined. A timeout writes UNKNOWN and hands the payment to a resolver.
+- The key comes from the order (`order-789-payment`), so a later retry by the resolver sends exactly the same key.
+- `HttpTimeoutException` also covers `HttpConnectTimeoutException`. That one means no connection was opened, so the gateway never got the request; treating it as UNKNOWN too is still safe.
+- A reset connection (`IOException`) or a 500 needs the same UNKNOWN path; this short version catches only timeouts.
+
+## Rules and defaults
+
+- **Stripe API v1:** after a network error, retry with the same key and parameters within 24 hours. If the outcome is still unknown after that, retry with neither the old key nor a new one: reconcile instead.
+- **A 500 is unknown too:** Stripe treats a 500 as indeterminate, and caches it for that key, so a same-key retry returns the same 500. Resolve it by fetching the object and using webhook events.
+- **Match by your reference:** Stripe advises storing your own id in the object's metadata, so a webhook or a report row can be matched to your payment.
+- **Correctness lives in the database:** a unique constraint and a transaction stop duplicate payment rows. A distributed lock with an expiry only saves duplicate work.
+- **Events:** to announce "payment succeeded" reliably, save the event in an outbox table in the same transaction as the status. A separate relay process publishes it, maybe twice, so consumers dedupe.
 
 ## Interview Qs
 
 ### The gateway timed out after charging ₹500. What do you do?
 
-Mark the payment UNKNOWN, not FAILED. Query the gateway by our reference or wait for its webhook. Retry only with the same idempotency key. Anything still open goes to reconciliation against the settlement report.
+Mark the payment UNKNOWN, not FAILED. Ask the gateway for it by our reference, or wait for its signed webhook. Retry only with the same idempotency key and body. Anything still open goes to a reconciliation job against the provider's settlement report, so the customer is never charged twice.
 
 ### Is a Redis lock enough to stop double charges?
 
-No. A lock with an expiry can run out during a GC pause while the holder keeps working, so two workers act. Use a database transaction and a unique constraint on the order id.
+No. A lock with an expiry can run out during a long pause, such as a garbage-collection pause in the JVM, while the holder keeps working, so two workers act. Put a unique constraint on the order id in the database and work inside a transaction; the lock can only reduce duplicate work.
 
 ### Why a transactional outbox?
 
-Saving the payment and publishing its event are two writes. The outbox saves the event in the same database transaction; a relay publishes it, maybe twice, so consumers must dedupe.
+Saving the payment status and publishing its event are two separate writes, and one can fail after the other succeeds. The outbox saves the event in the same database transaction as the status. A relay then publishes it, possibly twice, so consumers must dedupe by event id.

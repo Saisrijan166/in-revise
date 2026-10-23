@@ -5,68 +5,137 @@ title: "Real-Time Updates: Polling, SSE and WebSockets"
 topic: playbook
 level: intermediate
 heat: 2
-hook: "Polling keeps asking; SSE lets the server push down one HTTP response; a WebSocket is a two-way channel."
+hook: "Polling keeps asking; Server-Sent Events let the server push updates down one open HTTP response; a WebSocket is a two-way channel."
 points:
-  - { k: "Long polling", v: "the server holds the request until news or a timeout" }
-  - { k: "SSE", v: "text/event-stream, server to client only, reconnects by itself" }
-  - { k: "WebSocket", v: "HTTP Upgrade, 101, then both sides send frames (RFC 6455)" }
-  - { k: "SSE on HTTP/1.1", v: "about 6 open connections per browser and domain", kind: minus }
-  - { k: "Spring MVC", v: "return SseEmitter; WebSocketHandler with @EnableWebSocket" }
+  - { k: "Long polling", v: "the server holds the request open until there is news or a timeout; the client then asks again at once" }
+  - { k: "SSE", v: "one long HTTP response of type text/event-stream; server to client only; the browser reconnects by itself", kind: plus }
+  - { k: "WebSocket", v: "starts as an HTTP Upgrade request; after 101 Switching Protocols both sides send messages any time (RFC 6455)" }
+  - { k: "SSE on HTTP/1.1", v: "a browser allows only 6 open connections per domain, across all its tabs; HTTP/2 allows 100 by default", kind: minus }
+  - { k: "EventSource headers", v: "the browser's SSE API cannot add an Authorization header; it can only send cookies", kind: minus }
+  - { k: "Spring MVC", v: "return SseEmitter from a controller for SSE; implement WebSocketHandler with @EnableWebSocket for WebSocket" }
 trap:
   wrong: "A live payment status screen needs WebSockets."
-  right: "The screen only listens, so SSE or polling is enough. WebSocket pays off for frequent two-way messages."
-sayIt: "For a one-way payment status I use SSE: one HTTP response that streams events and reconnects by itself. I pick WebSocket for frequent two-way messages like chat. Server-to-server pushes are webhooks."
+  right: "The screen only listens, so SSE or polling is enough. WebSocket pays off when both sides send messages often."
+  why: "WebSocket is the best-known real-time technology, so it is picked for any live screen, even one that never sends anything back."
+sayIt: "For a one-way payment status I use SSE: one HTTP response that streams events and reconnects by itself, resuming with Last-Event-ID. I pick WebSocket for frequent two-way messages like chat. Server-to-server pushes are webhooks."
+cheat:
+  idea: "Over plain HTTP the client always asks first. Server-Sent Events keep one response open so the server can push updates; a WebSocket upgrades the connection so both sides send any time."
+  flow: "Gateway webhook → your server → SSE event → checkout page"
+  remember: "Only listening? Use SSE or polling. Both sides talk often? Use WebSocket."
+buildsOn: [http-request-response, long-running-operations, webhooks]
+scenarios:
+  - q: "A support agent and a customer chat about a failed payment, both typing many messages. SSE or WebSocket?"
+    a: "WebSocket. Both sides send often and expect each other's messages at once. With SSE the browser could receive, but every message it sends would still be a separate HTTP request."
+  - q: "On a train the SSE connection drops for 20 seconds, and the server sends the SUCCESS event during that gap. Does the page miss it?"
+    a: "Only if the server does not keep it. The browser reconnects by itself and sends Last-Event-ID with the last id it received. If the server stored recent events, it replays the ones after that id; if not, the page should re-read the payment's status."
+  - q: "A user opens the payment status page in seven tabs. The seventh tab never loads. The site runs on HTTP/1.1. Why?"
+    a: "Over HTTP/1.1 a browser allows about six open connections per domain, and each tab's SSE stream holds one open. Serving the site over HTTP/2 fixes it, because many streams share one connection."
 confusedWith: []
 tags: [real-time, sse, websocket]
-visual: table
+visual: code
 sources:
-  - title: "Server-sent events (WHATWG HTML Living Standard)"
+  - title: "Server-sent events (WHATWG HTML Living Standard): Last-Event-ID, 204 stops reconnects"
     url: "https://html.spec.whatwg.org/multipage/server-sent-events.html"
-    verifiedOn: "2026-10-20"
-  - title: "Using server-sent events (MDN Web Docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Using server-sent events (MDN Web Docs): fields, connection limit"
     url: "https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "EventSource() constructor (MDN Web Docs)"
+    url: "https://developer.mozilla.org/en-US/docs/Web/API/EventSource/EventSource"
+    verifiedOn: "2026-10-21"
   - title: "RFC 6455: The WebSocket Protocol"
     url: "https://www.rfc-editor.org/rfc/rfc6455"
     verifiedOn: "2026-10-20"
   - title: "WebSockets (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/websocket.html"
     verifiedOn: "2026-10-20"
-  - title: "Asynchronous requests: HTTP streaming, SSE (Spring Framework 7.0 reference)"
-    url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-ann-async.html"
-    verifiedOn: "2026-10-20"
+  - title: "SseEmitter (Spring Framework 7.0 API): timeout behaviour"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/servlet/mvc/method/annotation/SseEmitter.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A real-time update is the server telling the client that something changed, such as PAY101 moving from PENDING to SUCCESS, without the user pressing refresh. Plain HTTP cannot do this, because the client always sends the request first. Polling works around it by asking again and again. Server-Sent Events (SSE) keep one response open so the server can write events into it. A WebSocket turns the connection into a two-way channel.
 
 ## Why it exists
 
-In HTTP the client always speaks first. A payment screen still has to learn when PENDING turns into SUCCESS.
+After the customer pays, the checkout page must show the result, which arrives seconds later from the gateway. Asking `GET /api/payments/PAY101` every second wastes requests, since most answers say "still PENDING", and the result can still show up to a second late. Keeping a connection open lets the server send the result the moment it knows. The choice between SSE and WebSocket depends on whether the page also needs to send.
 
 ## How it works
 
 <Compare id="polling-vs-long-polling-vs-sse-vs-websocket" />
 
-- On reconnect, SSE sends `Last-Event-ID`, so the server can resume the stream.
-- Server-to-server pushes are [webhooks](card:webhooks): the gateway calls your URL.
+1. The page runs `new EventSource('/api/payments/PAY101/events')`, which sends a GET with `Accept: text/event-stream`.
+2. The server answers 200 with `Content-Type: text/event-stream` and keeps the response open.
+3. When the gateway's [webhook](card:webhooks) says the payment succeeded, the server writes one event: `id`, `event` and `data` lines, ended by a blank line.
+4. If the connection drops, the browser reconnects by itself and sends a `Last-Event-ID` header with the last id it got, so the server can resume.
+5. When the status is final, the page calls `close()`, or the server ends the stream and answers the next reconnect with 204 No Content, which stops further reconnects.
 
 ## Example
 
-```text
-GET /api/payments/PAY101/events
-Accept: text/event-stream
+A Spring MVC endpoint that streams the final status of a payment:
 
-HTTP/1.1 200 OK
-Content-Type: text/event-stream
-
-event: status
-data: {"paymentId":"PAY101","status":"SUCCESS"}
+```java
+@RestController class PaymentEventsController {
+    private final Map<String, SseEmitter> open = new ConcurrentHashMap<>();
+    @GetMapping(path = "/api/payments/{id}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    SseEmitter events(@PathVariable String id) {
+        SseEmitter emitter = new SseEmitter(300_000L);          // time out after 5 minutes
+        open.put(id, emitter);
+        return emitter;                                         // the response stays open
+    }
+    void onFinalStatus(String id, String status) throws IOException {   // called by the webhook handler
+        SseEmitter emitter = open.remove(id);
+        if (emitter == null) return;                            // nobody is watching
+        emitter.send(SseEmitter.event().id("1").name("status").data(status));
+        emitter.complete();                                     // end the stream
+    }
+}
 ```
+
+What a client received, from a real run with `curl -N` while the webhook handler called `onFinalStatus("PAY101", "SUCCESS")`:
+
+```text
+HTTP/1.1 200
+Content-Type: text/event-stream
+Transfer-Encoding: chunked
+Date: Wed, 21 Oct 2026 16:46:31 GMT
+
+id:1
+event:status
+data:SUCCESS
+```
+
+What to notice:
+
+- Returning an `SseEmitter` tells Spring MVC to keep the response open after the method returns. Any later thread, here the webhook handler, can call `send()`.
+- Each event becomes `id`, `event` and `data` lines plus a blank line. The browser fires a `status` event, and remembers id `1` for `Last-Event-ID`.
+- `300_000L` is the timeout in milliseconds. Without it, the timeout configured for Spring MVC async requests applies, or else the server's own default.
+- `complete()` ends the response once the status is final. The browser would then reconnect, so a full version answers requests for a finished payment with 204 No Content, which stops it.
+
+## Rules and defaults
+
+- **SSE format:** UTF-8 text with the fields `event`, `data`, `id` and `retry`; a blank line ends each event, and `retry` sets the reconnect wait in milliseconds.
+- **Stopping reconnects:** answer a reconnect with 204 No Content, or call `close()` on the client; otherwise the browser keeps reconnecting after each drop.
+- **Auth for SSE:** `EventSource` accepts only a `withCredentials` option, so it cannot send an `Authorization` header. Use a cookie, or read the stream with `fetch()` if you need a bearer token.
+- **WebSocket handshake:** a GET with `Upgrade: websocket` is answered with `101 Switching Protocols`. `ws://` uses port 80 by default; use `wss://`, which runs over TLS on port 443.
+- **Spring WebSocket:** implement a `WebSocketHandler`, put `@EnableWebSocket` on a configuration class and map the handler in `WebSocketConfigurer.registerWebSocketHandlers`.
+
+## Not to be confused with
+
+SSE pushes events to a browser over a connection the browser opened and keeps open. A [webhook](card:webhooks) is one server calling another server's URL with an HTTP POST when something happens, such as the gateway notifying your API. Rule: a browser waiting for news uses SSE; a server being notified uses a webhook. A payment usually uses both, one after the other.
 
 ## Interview Qs
 
 ### SSE or WebSocket?
 
-SSE when only the server sends: plain HTTP, automatic reconnect, simple. WebSocket when both sides send often with low delay, such as chat or trading screens; restrictive proxies may block it.
+SSE when only the server sends: it is plain HTTP, and the browser reconnects by itself and resumes with `Last-Event-ID`. WebSocket when both sides send often with low delay, such as chat or trading screens; it needs its own message handling and some restrictive proxies block it.
 
 ### How does long polling work?
 
-The client sends a request; the server holds it open until there is news or a timeout, then replies. The client sends the next request at once.
+The client sends a request, and the server holds it open until there is news or a timeout, then replies. The client sends the next request at once. It gives near-instant updates over plain HTTP, but each message costs a full request with headers.
+
+### How does the checkout page learn that the payment succeeded?
+
+The gateway sends a signed webhook to our server. Our server updates PAY101 to SUCCESS and pushes an event over the SSE stream that the checkout page opened. If the stream is down, the page falls back to `GET /api/payments/PAY101`, so the database stays the source of truth.

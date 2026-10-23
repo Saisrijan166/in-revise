@@ -5,47 +5,69 @@ title: "Error Responses: Problem Details (RFC 9457)"
 topic: design
 level: intermediate
 heat: 2
-hook: "Every error has one shape: RFC 9457 problem details, a stable code for programs and a clear message for people."
+hook: "Every error has one shape: the right status code plus an RFC 9457 problem details body, with a stable code for programs and a clear message for people."
 points:
-  - { k: "Media type", v: "application/problem+json" }
-  - { k: "Standard members", v: "type, title, status, detail, instance; all optional" }
-  - { k: "Extensions", v: "your own fields, such as errorCode and a list of field errors" }
-  - { k: "Stable code", v: "clients branch on type or errorCode, never on detail text" }
-  - { k: "No internals", v: "no stack traces, SQL or class names in the body", kind: minus }
+  - { k: "Media type", v: "a problem details body is sent with Content-Type: application/problem+json" }
+  - { k: "Standard members", v: "type, title, status, detail and instance; all are optional, and a missing type means about:blank" }
+  - { k: "Extensions", v: "you may add your own members, such as errorCode or a list of field errors; clients ignore unknown ones" }
+  - { k: "Stable code", v: "client code branches on type or errorCode, never on the detail text, which may be reworded" }
+  - { k: "No internals", v: "stack traces, SQL and class names stay in the server log, never in the response body", kind: minus }
 trap:
   wrong: "Put the exception message and stack trace in the error body so clients can debug."
-  right: "Keep internals in the server logs. Return problem details with a stable code and a detail that helps the client fix the request."
-sayIt: "All my errors use RFC 9457 problem details: application/problem+json with type, title, status and detail, plus a stable errorCode and field errors. Stack traces stay in the logs."
+  right: "Keep internals in the server logs. Return problem details with a stable code and a detail that helps the client fix its request."
+  why: "During development the stack trace is the fastest way to find a bug, so it is tempting to send it. In production it shows attackers your classes, libraries and queries."
+sayIt: "All my errors use RFC 9457 problem details: application/problem+json with type, title, status and detail, plus a stable errorCode and per-field errors. Clients branch on type or errorCode, and stack traces stay in the logs."
+cheat:
+  idea: "Problem details (RFC 9457) is one standard JSON shape for API errors: type, title, status, detail and instance, plus your own fields, sent as application/problem+json."
+  code: |
+    { "type": ".../problems/invalid-amount", "title": "Invalid amount",
+      "status": 422, "detail": "amount must be greater than 0", "errorCode": "PAYMENT_INVALID_AMOUNT" }
+  remember: "Clients branch on type or errorCode, never on detail text; no stack traces in the body."
+buildsOn: [status-codes, headers-content-negotiation]
+scenarios:
+  - q: "A client's code shows an error when response.detail equals \"Amount too low\". You reword the message to \"Amount must be at least ₹1\". What happens, and how should the client have been written?"
+    a: "The client's check stops matching, so it treats the error as unknown. detail is text for people and can change any time; RFC 9457 says consumers should not parse it. The client should compare type or a stable errorCode, which are part of the contract."
+  - q: "A request has three invalid fields. Do you return three error responses, or one?"
+    a: "One response. HTTP sends one response per request, so you choose one problem type, such as validation failed, and list the three fields in an extension member like errors, each with a pointer to its field and a detail."
 confusedWith: []
 tags: [errors, problem-details, rfc-9457, validation]
 visual: table
 sources:
   - title: "RFC 9457: Problem Details for HTTP APIs"
     url: "https://www.rfc-editor.org/rfc/rfc9457.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Microsoft Azure REST API Guidelines: handling errors"
     url: "https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+An error response is what the API sends when it cannot do what was asked: a [status code](card:status-codes) plus a body that explains the problem. Problem details, defined in RFC 9457, is the standard JSON shape for that body. It is sent with the media type `application/problem+json` in the [Content-Type header](card:headers-content-negotiation). It has a few standard members, such as `type`, `title`, `status` and `detail`, and lets you add your own, such as a stable `errorCode`.
 
 ## Why it exists
 
-A status code alone cannot say which field was wrong. If every endpoint invents its own error body, every client needs custom parsing code for each one.
+A status code alone says 422 but not which field was wrong, or how to fix it. If every endpoint invents its own error body, `{"msg": ...}` here and `{"error": {"text": ...}}` there, each client needs custom parsing for each endpoint. A client that compared message strings also breaks the day someone rewords a message. One standard shape lets a client handle every error with the same code: show `detail` to a developer, branch on `type` or `errorCode`, and highlight the bad fields.
 
 ## How it works
 
 | Member | Meaning |
 |---|---|
 | `type` | A URI naming the kind of problem; `about:blank` when left out |
-| `title` | Short summary of that type; the same every time |
-| `status` | A copy of the HTTP status; it must match the real one |
+| `title` | A short summary of that type; the same every time |
+| `status` | A copy of the HTTP status code; it must match the real one |
 | `detail` | This occurrence, written to help the client fix it |
 | `instance` | A URI for this one occurrence |
 
-- Status choice: [status codes](card:status-codes). Spring's `ProblemDetail`: [exception handling](card:exception-handling).
-- Error text can leak internals: see [OWASP API risks](card:owasp-api-security).
+1. Your code finds a problem: the request asks for a payment of -500.
+2. It chooses the status code that fits, here 422 Unprocessable Content.
+3. It fills a problem details body: a `type` URI for "invalid amount", a fixed `title`, the same `status`, and a `detail` for this request.
+4. It adds extension members: a stable `errorCode` and an `errors` list with one entry per bad field.
+5. It sends the body with `Content-Type: application/problem+json`. The full exception stays in the server log.
 
 ## Example
+
+The payment API rejects a negative amount.
 
 ```text
 HTTP/1.1 422 Unprocessable Content
@@ -61,16 +83,40 @@ Content-Type: application/problem+json
 }
 ```
 
+What to notice:
+
+- `type` is the same URI every time this kind of problem happens, so a client can branch on it. It may point to a page that documents the problem.
+- `detail` describes this request (-500) and tells the client how to fix it. It is written for people, not for code.
+- `errorCode` and `errors` are extension members. `pointer` is a JSON Pointer (`#/amount`) to the bad field, as in RFC 9457's own example.
+- Nothing reveals the server's internals: no exception class, no stack trace, no SQL.
+
+## Rules and defaults
+
+- **All members are optional** (RFC 9457). A missing `type` means `about:blank`, which says "nothing more than the status code"; its `title` should then be the standard status phrase.
+- **status is only advisory:** it must equal the real HTTP status, and clients trust the real one.
+- **Unknown extensions:** clients must ignore extension members they do not recognise, so adding one is safe.
+- **Several problems:** list problems of the same type in one extension member, such as `errors`. For problems of different types, return the most relevant or urgent one.
+- **Error codes are contract:** Microsoft's guidelines document error codes as part of the API contract, so changing one is a breaking change.
+- **RFC 7807:** RFC 9457 (July 2023) replaced RFC 7807 with the same format. Spring's `ProblemDetail` builds this body; you will see it in [exception handling](card:exception-handling).
+
+## Not to be confused with
+
+The HTTP status code is the class of outcome, which any HTTP software understands: caches, proxies, monitoring and retry logic. The `type` or `errorCode` is your API's specific reason, which only your clients understand. Rule: status for HTTP software, `type` or `errorCode` for client logic, `detail` for humans.
+
+## Common mistakes
+
+- **"Return 200 OK with `{"success": false}` for errors."** Monitoring, retry logic and caches read the status code, so they count the failure as a success. Send the real 4xx or 5xx status with a problem details body.
+
 ## Interview Qs
 
 ### What should an API error response contain?
 
-The right HTTP status plus one consistent body: RFC 9457 problem details with type, title, status and detail, and extensions like a stable errorCode and per-field errors. Never a stack trace.
+The right HTTP status plus one consistent body: RFC 9457 problem details with `type`, `title`, `status` and `detail`, and extensions such as a stable `errorCode` and per-field errors. It must never contain a stack trace or other internals.
 
 ### Why a stable error code when there is already a message?
 
-Messages get reworded and translated; client code needs a fixed value to compare. Microsoft's guidelines make error codes part of the API contract, and RFC 9457 says clients should not parse detail.
+Messages get reworded and translated, but client code needs a fixed value to compare. RFC 9457 says consumers should not parse `detail`, and Microsoft's guidelines treat error codes as part of the API contract.
 
 ### What is the difference between RFC 7807 and RFC 9457?
 
-RFC 9457 (July 2023) replaced RFC 7807 (March 2016). The format is the same; it adds a registry of common problem types and guidance for several problems at once.
+RFC 9457, from July 2023, replaced RFC 7807 from March 2016. The JSON format is the same. RFC 9457 adds a registry of common problem types, and guidance for reporting several problems and for using `type` URIs that do not resolve.

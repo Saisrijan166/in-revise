@@ -5,20 +5,32 @@ title: ResponseEntity and Response Status
 topic: spring
 level: beginner
 heat: 2
-hook: "Return the object for 200, use @ResponseStatus for one fixed code, and ResponseEntity to choose status, headers and body per call."
+hook: "Return a plain object and the client gets 200. Return a ResponseEntity to choose the status and headers yourself, such as 201 with a Location header."
 points:
-  - { k: "Plain return", v: "the object becomes the body; status 200 OK" }
-  - { k: "@ResponseStatus", v: "one fixed status on the method, e.g. HttpStatus.CREATED" }
-  - { k: "ResponseEntity", v: "status, headers and body chosen at runtime" }
-  - { k: "@ResponseStatus(reason)", v: "uses sendError: the container writes an HTML page", kind: minus }
-  - { k: "Location URI", v: "ServletUriComponentsBuilder builds it from the current request" }
+  - { k: "Plain return", v: "the object becomes the JSON body and the status is always 200 OK, even for a POST that created something" }
+  - { k: "@ResponseStatus", v: "puts one fixed status on a method, for example @ResponseStatus(HttpStatus.CREATED)" }
+  - { k: "ResponseEntity", v: "holds status, headers and body together, so the method can choose them while it runs", kind: plus }
+  - { k: "created(location)", v: "sends 201 with a Location header that holds the new resource's URL" }
+  - { k: "@ResponseStatus(reason)", v: "calls sendError: your return value is dropped and an error page is sent instead (HTML, or Boot's /error JSON)", kind: minus }
 trap:
-  wrong: "After creating a payment, ResponseEntity.ok(body) is enough."
-  right: "Use ResponseEntity.created(location).body(body): 201 plus a Location header for /api/payments/PAY101."
-sayIt: "A returned object goes out as 200. For one fixed code I use @ResponseStatus; when status or headers depend on the outcome I return ResponseEntity, such as created(location) for 201."
+  wrong: "After creating a payment, returning the object, or ResponseEntity.ok(body), is enough."
+  right: "Send 201 with a Location header: ResponseEntity.created(location).body(body), where location is /api/payments/PAY101."
+  why: "Most clients read only the body, so a 200 seems to work. The missing 201 and Location only hurt clients and tools that follow the HTTP rules."
+sayIt: "A returned object goes out as 200. For one fixed code I use @ResponseStatus; when the status or headers depend on the outcome I return ResponseEntity, such as created(location) for 201 after a POST, or noContent() for 204."
+cheat:
+  idea: "ResponseEntity is a return type that carries the status, headers and body together. A plain return value always sends 200."
+  code: |
+    return ResponseEntity.created(location).body(p);   // 201 + Location
+  remember: "After a create, send 201 with Location; avoid @ResponseStatus(reason) in an API, because it drops your body for an error page."
+buildsOn: [spring-rest-controllers, status-codes]
+scenarios:
+  - q: "A method has @ResponseStatus(HttpStatus.CREATED) and returns ResponseEntity.ok(body). Which status does the client get?"
+    a: "200. @ResponseStatus does not override a status set by ResponseEntity, so the ResponseEntity's own status wins. Choose one way per method so the code says what it does."
+  - q: "PATCH /api/payments/PAY101 cancels a pending payment, and the client needs nothing back. What do you return?"
+    a: "ResponseEntity.noContent().build(), which sends 204 No Content with no body. It tells the client the change worked and that there is nothing to read."
 confusedWith: []
 tags: [spring, response-entity, status-codes]
-visual: table
+visual: code
 sources:
   - title: "ResponseEntity (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-methods/responseentity.html"
@@ -26,49 +38,94 @@ sources:
   - title: "ResponseEntity: ok, created, accepted, noContent, status (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/http/ResponseEntity.html"
     verifiedOn: "2026-10-20"
-  - title: "@ResponseStatus: reason uses sendError (Spring Framework 7.0 API)"
+  - title: "@ResponseStatus: does not override ResponseEntity; reason uses sendError (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/bind/annotation/ResponseStatus.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Servlet Web Applications: /error mapping answers machine clients with JSON (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/web/servlet.html"
+    verifiedOn: "2026-10-22"
   - title: "ServletUriComponentsBuilder.fromCurrentRequest (Spring Framework 7.0 API)"
     url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/servlet/support/ServletUriComponentsBuilder.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+`ResponseEntity` is a return type that holds the whole HTTP response: status code, headers and body. A controller method that returns a plain object always answers 200 OK. Returning a `ResponseEntity` lets the method choose the status and headers while it runs, for example 201 Created with a `Location` header after it creates a payment.
+
 ## Why it exists
 
-Status and headers are part of the API contract. A controller needs a short way to send 201 with a Location, 204 with no body, or 404.
+The status code and headers are part of the API contract, as [status codes](card:status-codes) showed. After POST `/api/payments` creates PAY101, the client should get 201 and the new payment's URL in `Location`, not 200. A cancel with nothing to return should get 204. A plain return value cannot say any of this; `ResponseEntity` can, without touching the low-level servlet response.
 
 ## How it works
 
-| Builder | Sends | Use |
+| You write | Client gets | Payment API use |
 | --- | --- | --- |
-| `ResponseEntity.ok(body)` | 200 | read or update |
-| `created(uri).body(body)` | 201 + `Location` | new payment PAY101 |
-| `accepted().body(body)` | 202 | work finishes later: [long-running operations](card:long-running-operations) |
-| `noContent().build()` | 204 | nothing to return |
-| `status(HttpStatus.CONFLICT).body(body)` | any code | everything else |
+| `return p;` | 200 | read PAY101 |
+| `ResponseEntity.created(uri).body(p)` | 201 + `Location` | create a payment |
+| `ResponseEntity.accepted().body(p)` | 202 | work finishes later: [long-running operations](card:long-running-operations) |
+| `ResponseEntity.noContent().build()` | 204, no body | cancel, nothing to return |
+| `ResponseEntity.status(HttpStatus.CONFLICT).body(p)` | any code | everything else |
 
-- `.header(name, value)` and `.eTag(tag)` add headers; ETag use: [HTTP caching](card:http-caching).
-- Which code fits which case: [status codes](card:status-codes).
+1. The method does its work and gets a result, here the new payment PAY101.
+2. It starts a response with a static builder method; `created(location)` sets status 201 and the `Location` header.
+3. It adds more headers if needed, with `.header(name, value)` or `.eTag(tag)` for [caching](card:http-caching).
+4. It finishes with `.body(p)`, or `.build()` when there is no body.
+5. Spring writes the status and headers, then converts the body to JSON, exactly as for a plain return value.
 
 ## Example
 
+The create endpoint answers 201 and points to the new payment.
+
 ```java
 @PostMapping
-ResponseEntity<PaymentResponse> create(@Valid @RequestBody PaymentRequest req) {
-    PaymentResponse p = service.create(req);                        // PAY101, PENDING
-    URI location = ServletUriComponentsBuilder.fromCurrentRequest()
-            .path("/{id}").buildAndExpand(p.paymentId()).toUri();   // /api/payments/PAY101
-    return ResponseEntity.created(location).body(p);                // 201 + Location
+ResponseEntity<PaymentResponse> create(@RequestHeader("Idempotency-Key") String key,
+                                       @Valid @RequestBody PaymentRequest req) {
+    PaymentResponse p = service.create(key, req);                    // PAY101, PENDING
+    URI location = ServletUriComponentsBuilder.fromCurrentRequest()  // .../api/payments
+            .path("/{id}").buildAndExpand(p.paymentId()).toUri();    // .../api/payments/PAY101
+    return ResponseEntity.created(location).body(p);                 // 201 + Location
 }
 ```
+
+```bash
+curl -s -w '\n%{http_code} %header{location}\n' -X POST http://localhost:8080/api/payments \
+  -H 'Content-Type: application/json' -H 'Idempotency-Key: order-789-payment' \
+  -d '{"amount": 500, "currency": "INR", "method": "UPI"}'
+```
+
+```text output
+{"paymentId":"PAY101","status":"PENDING","amount":500}
+201 http://localhost:8080/api/payments/PAY101
+```
+
+What to notice:
+
+- `fromCurrentRequest()` starts from the URL the client called, so the `Location` has the right host, port and path without hardcoding them.
+- The body is the same JSON as before; only the status line and the `Location` header changed.
+- If the method returned `p` directly, the client would get 200 and no `Location`, although a payment was created.
+
+## Rules and defaults
+
+- **Plain return:** status 200, and the object is converted to the body.
+- **`@ResponseStatus` on a method:** sets one fixed status. It does not override a status set by `ResponseEntity`.
+- **`@ResponseStatus` with `reason`:** Spring calls `sendError` and ignores the method's return value. A plain servlet container then writes an HTML error page; in Spring Boot, a JSON client gets the generic `/error` JSON (timestamp, status, error, path). Either way your body is lost, so do not use `reason` in a REST API.
+- **Builders:** `ok`, `created`, `accepted`, `noContent`, `notFound`, `badRequest` and `status(…)` start a response; `.header` and `.eTag` add headers.
+
+## Common mistakes
+
+- **"Return ResponseEntity from every method, just in case."** It adds noise to simple reads. Return the object when 200 is right, and use `ResponseEntity` only when the status or headers depend on the outcome.
 
 ## Interview Qs
 
 ### When do you return ResponseEntity instead of the object?
 
-When the status or headers depend on the outcome: 201 with Location after a create, 202 for work still running, or an ETag header. For a plain 200, return the object.
+When the status or headers depend on the outcome: 201 with `Location` after a create, 202 for work still running, 204 for nothing to return, or an `ETag` header. For a plain 200, I return the object, which keeps the method short.
 
 ### @ResponseStatus or ResponseEntity?
 
-@ResponseStatus fixes one code at compile time and does not override a status set by ResponseEntity. Avoid its reason attribute in APIs: it calls sendError, and the container may write an HTML error page.
+`@ResponseStatus` fixes one code at compile time, which suits a method that always answers the same, such as 201 for a create with no `Location`. `ResponseEntity` decides at runtime and also sets headers. The annotation does not override a `ResponseEntity` status, and its `reason` attribute replaces your body with an error page, so avoid `reason` in APIs.
+
+### How do you return 201 with a Location header?
+
+Build the URI of the new resource, usually with `ServletUriComponentsBuilder.fromCurrentRequest().path("/{id}").buildAndExpand(id).toUri()`, and return `ResponseEntity.created(uri).body(dto)`. The client can follow `Location` to read the payment.

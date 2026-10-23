@@ -5,72 +5,131 @@ title: "Webhooks: Signatures, Retries and Idempotent Receivers"
 topic: reliability
 level: intermediate
 heat: 2
-hook: "The gateway calls your HTTPS endpoint when a payment settles: verify the signature, answer 2xx fast, process each event once."
+hook: "The gateway calls your HTTPS endpoint when a payment settles: verify the signature, answer 2xx fast, and process each event only once."
 points:
-  - { k: "Signature", v: "HMAC-SHA256 of timestamp + raw body; Standard Webhooks adds the ID" }
-  - { k: "Replay guard", v: "reject old timestamps; Stripe libraries allow 5 minutes", kind: default }
-  - { k: "Respond", v: "2xx quickly; slow work goes to a queue" }
-  - { k: "Delivery", v: "at-least-once and unordered: dedupe by event ID", kind: minus }
-  - { k: "Sender retries", v: "Stripe live mode: up to 3 days, exponential backoff", kind: default }
+  - { k: "Signature", v: "an HMAC-SHA256 of the timestamp and raw body with a shared secret; Standard Webhooks also signs the id" }
+  - { k: "Replay guard", v: "reject a delivery whose signed timestamp is too old; Stripe's libraries allow 5 minutes by default", kind: default }
+  - { k: "Respond fast", v: "save the event and return 2xx at once; slow work goes to a queue, or the sender times out and retries" }
+  - { k: "At least once", v: "the same event can arrive twice and in any order, so skip event ids you have already processed", kind: minus }
+  - { k: "Sender retries", v: "Stripe live mode retries a failed delivery for up to three days, with exponential backoff", kind: default }
 trap:
   wrong: "Each event arrives once and in order, so apply it directly."
-  right: "Delivery is at-least-once and unordered. Skip event IDs already processed and check current state before acting."
-sayIt: "My webhook endpoint verifies the HMAC signature over the raw body and timestamp, returns 2xx fast, queues the event, skips event IDs it has seen, and checks current state because events can arrive out of order."
+  right: "Delivery is at-least-once and unordered. Skip event ids already processed, and check the current state before acting."
+  why: "In testing, each event usually arrives once and in order, so the code works. Duplicates and late events appear only with real retries and real traffic."
+sayIt: "My webhook endpoint verifies the HMAC signature over the raw body and timestamp, rejects old timestamps, saves the event, returns 2xx fast and processes it from a queue. It skips seen event ids and checks current state, because events repeat and arrive out of order."
+cheat:
+  idea: "A webhook is an HTTP POST that a provider, such as a payment gateway, sends to your URL when something happens, like a payment settling."
+  flow: "verify signature → check timestamp → save event id → 2xx → queue"
+  remember: "Delivery is at-least-once and unordered: dedupe by event id, and verify the raw body, not parsed JSON."
+buildsOn: [unknown-outcomes, idempotency-keys]
+scenarios:
+  - q: "Your endpoint parses the JSON body into an object, then serialises it again and checks the signature on that string. Valid webhooks now fail verification. Why?"
+    a: "The signature covers the exact bytes that were sent. Parsing and re-serialising can change spacing, key order or number formats, so the HMAC differs. Verify the raw request body first, then parse it."
+  - q: "Your handler updates the order, emails the receipt and calls the shipping API, which takes 40 seconds, before returning 200. What goes wrong?"
+    a: "The sender times out waiting, counts the delivery as failed and retries, so the same event runs again and the customer may get two emails. Save the event and return 2xx at once, then do the slow work from a queue, skipping repeated event ids."
 confusedWith: []
 tags: [webhooks, security, idempotency]
 visual: flow
 sources:
   - title: "Receive Stripe events in your webhook endpoint (Stripe docs)"
     url: "https://docs.stripe.com/webhooks"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Standard Webhooks specification"
     url: "https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "RFC 2104: HMAC, Keyed-Hashing for Message Authentication"
     url: "https://www.rfc-editor.org/rfc/rfc2104"
     verifiedOn: "2026-10-20"
+  - title: "MessageDigest.isEqual (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/security/MessageDigest.html#isEqual(byte%5B%5D,byte%5B%5D)"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A webhook is an HTTP request that another system sends to your API when something happens there. You register a URL, such as `https://shop.example/webhooks/payments`, with the payment gateway, and when a payment settles, the gateway POSTs a small JSON event to it. The roles are reversed: the gateway is the client and your API is the server. It is how you resolve many [unknown outcomes](card:unknown-outcomes).
 
 ## Why it exists
 
-The gateway learns the final status later, for example when a bank confirms a UPI payment. A webhook pushes that news to you, so you do not poll.
+A UPI payment may be confirmed by the bank seconds or minutes after your POST returned PENDING. Without webhooks you poll the gateway for every pending payment, which wastes calls and still learns the news late. A webhook tells you as soon as it happens. But the URL is public, so anyone could post a fake "payment succeeded", and the gateway retries on errors, so the same event can arrive twice. The receiver must handle both.
 
 ## How it works
 
-<Steps label="Receive one webhook">
-  <Step title="Verify">HMAC-SHA256 over the signed parts (ID, timestamp, raw body) with the secret; compare in constant time.</Step>
-  <Step title="Check time">Reject a timestamp older than the tolerance, to stop replays.</Step>
-  <Step title="Acknowledge">Save the event and return 2xx; heavy work goes to a queue.</Step>
-  <Step title="Dedupe">Skip an event ID already processed (unique constraint on it).</Step>
-  <Step title="Apply">Check current state; ignore an older event that arrives late.</Step>
-</Steps>
+<Mermaid
+  alt="Receiving a webhook. The gateway POSTs an event to the endpoint. The endpoint verifies the signature and the timestamp; if either fails it returns 400. Otherwise it saves the event id under a unique constraint, returns 2xx, and a worker processes the event from a queue. A repeated event id is skipped."
+  chart={`flowchart LR
+  G[Gateway] -- POST event --> V{Signature and timestamp OK?}
+  V -- no --> R([400, ignore])
+  V -- yes --> S{Event id new?}
+  S -- no --> D([2xx, skip])
+  S -- yes --> Q[Save event, return 2xx]
+  Q --> W[Worker applies it from a queue]`}
+/>
 
-- Verify the raw bytes: parsing and re-serialising JSON changes them, and the check fails.
-- [Standard Webhooks](card:standard-webhooks) fixes the header names and signing format across providers.
-- Clients polling a status URL instead: [long-running operations](card:long-running-operations).
+1. The gateway signs the event: it computes an HMAC-SHA256 over the event id, the timestamp and the raw body with a secret only you and it know, and sends the result in a header.
+2. Your endpoint computes the same HMAC over the raw bytes it received and compares the two in constant time. A mismatch gets 400.
+3. It rejects a timestamp older than its tolerance, so a copied old request cannot be replayed.
+4. It saves the event with its id under a unique constraint and returns 2xx at once. An id already saved is skipped.
+5. A worker processes the event from a queue. It checks the payment's current state first, so a late, older event cannot undo a newer one.
 
 ## Example
+
+A Standard Webhooks delivery to the payment API, and the Java check behind step 2 and 3.
 
 ```text
 POST /webhooks/payments
 webhook-id: msg_7Rq2LbX9
 webhook-timestamp: 1792467000
-webhook-signature: v1,4Ix0W12M+WijjIAw4p9AC6ZvsclvDEBYmIIbF7sRfWs=
-{"type": "payment.succeeded", "paymentId": "PAY101"}
-
--> 204 No Content    (saved and queued; a worker marks PAY101 SUCCESS)
+webhook-signature: v1,Vm7/jdpQ7wr6+WH1QCt5m2dtpcYawn1p0cppNiwODrE=
+{"type":"payment.succeeded","paymentId":"PAY101"}
 ```
+
+```java
+boolean verify(String secret, String id, String timestamp, String rawBody, String header)
+        throws Exception {
+    long age = Math.abs(Instant.now().getEpochSecond() - Long.parseLong(timestamp));
+    if (age > 300) return false;                                 // older than 5 minutes
+    Mac mac = Mac.getInstance("HmacSHA256");
+    byte[] key = Base64.getDecoder().decode(secret.substring("whsec_".length()));
+    mac.init(new SecretKeySpec(key, "HmacSHA256"));
+    byte[] expected = mac.doFinal((id + "." + timestamp + "." + rawBody).getBytes(UTF_8));
+    for (String sig : header.split(" ")) {                       // several during secret rotation
+        if (sig.startsWith("v1,") && MessageDigest.isEqual(expected,
+                Base64.getDecoder().decode(sig.substring(3)))) return true;  // constant time
+    }
+    return false;
+}
+```
+
+What to notice:
+
+- The signed text is `id.timestamp.body`, joined with full stops. The signature in the header was computed this way from a test secret, and the same check in Python gave the same value.
+- In a test run, a fresh delivery returned true, the same delivery with `PAY101` changed to `PAY999` returned false, and a correct signature after a wrong one returned true.
+- `MessageDigest.isEqual` takes the same time however many bytes match, so an attacker cannot guess the signature byte by byte from response times.
+- Change the timestamp and the signature no longer matches, so an attacker cannot make an old request look new.
+
+## Rules and defaults
+
+- **Stripe retries:** in live mode, Stripe retries a failed delivery for up to three days with exponential backoff; in a sandbox, three times over a few hours.
+- **Redirects fail:** Stripe treats a 3xx answer as a failed delivery, so register the final URL.
+- **HTTPS only:** Stripe's live endpoints must be public HTTPS URLs using TLS 1.2 or 1.3. Stripe also publishes its webhook IP addresses for an allow-list.
+- **Order:** Stripe does not guarantee event order, and its event timestamps are in seconds. Track event ids, not timestamps, to find duplicates.
+- **Secret rotation:** during a rotation the sender signs with both secrets, so the header can hold two signatures (Stripe keeps the old secret for up to 24 hours).
+
+## Not to be confused with
+
+HTTPS proves to the gateway that it is talking to your real server, and hides the event from anyone on the network. It does not prove to you who sent the request, because anyone can call a public HTTPS URL. The signature proves that the sender knows the shared secret. Rule: HTTPS protects the connection; the signature proves the sender.
 
 ## Interview Qs
 
 ### How do you secure a webhook endpoint?
 
-HTTPS only. Verify the HMAC signature over the raw body with the shared secret, reject old timestamps against replays, and rotate the secret. Stripe also advises accepting only its listed IP addresses.
+Accept HTTPS only. Verify the HMAC signature over the raw body with the shared secret, compare in constant time, and reject old timestamps to stop replays. Rotate the secret from time to time. Stripe also advises accepting only its published IP addresses.
 
 ### The same webhook arrives twice. What happens?
 
-Expect it: delivery is at-least-once. Store each processed event ID under a unique constraint and skip repeats; make the update idempotent too, like setting status to SUCCESS.
+Expect it: delivery is at-least-once. Store each processed event id under a unique constraint and skip repeats. Make the update itself idempotent too, such as setting the status to SUCCESS rather than adding money to a balance.
 
 ### Why return 2xx before processing?
 
-Slow handlers time out, and the provider then retries, sending duplicates. Save, acknowledge, and process from a queue at your own pace.
+A slow handler times out on the sender's side, and the sender then retries, sending duplicates. Save the event, return 2xx, and process it from a queue at your own pace. A queue also absorbs spikes, such as many renewals at the start of a month.

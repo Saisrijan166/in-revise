@@ -5,16 +5,29 @@ title: Pagination, Filtering and Sorting
 topic: design
 level: intermediate
 heat: 2
-hook: "Never return a whole collection: send one page, a link to the next, and let query parameters filter and sort."
+hook: "Never return a whole list at once: send one page of a capped size with a link to the next, and let query parameters filter and sort it."
 points:
-  - { k: "Why page", v: "each response stays small and fast however big the table gets", kind: plus }
-  - { k: "Cap the size", v: "a documented maximum; bigger asks get the cap or a 400" }
-  - { k: "Next page", v: "the server returns its link; none on the last page" }
-  - { k: "Filter and sort", v: "?status=SUCCESS&sort=createdAt,desc" }
+  - { k: "Why page", v: "each response has a bounded size, however many rows the table holds", kind: plus }
+  - { k: "Cap the size", v: "publish a maximum page size; a bigger request gets the cap or a 400, never everything" }
+  - { k: "Next page", v: "the server returns the next page's link; the last page has none, so the client stops" }
+  - { k: "Filter and sort", v: "query parameters such as ?status=SUCCESS&sort=createdAt,desc; accept only documented field names" }
+  - { k: "Offset vs cursor", v: "offset skips N rows and can jump to page N; a cursor continues after the last row" }
+  - { k: "Spring Data", v: "page is 0-based, size defaults to 20, and a size above 2000 is cut to 2000 (Spring Boot 4.1)", kind: default }
 trap:
   wrong: "Offset paging is always fine; just add ?page=N."
-  right: "Deep offsets still read every skipped row, and new rows shift the pages. For large or live lists use a cursor."
-sayIt: "I paginate every list with a capped page size and return a next link. Offset suits small lists where users jump to a page; large or live feeds get an opaque cursor. Filters and sort are query parameters."
+  right: "The database still reads every skipped row, and new rows shift the pages under the reader. For large or live lists use a cursor."
+  why: "Offset is what tutorials and Spring Data show first, and on a small test table it is fast and never shows a skipped or repeated row."
+sayIt: "I paginate every list with a capped page size and a link to the next page. Offset suits small lists where users jump to a page; large or live lists get an opaque cursor. Filters and sorting are allow-listed query parameters."
+cheat:
+  idea: "Pagination returns a long list in capped pages, each with a link to the next. Query parameters such as ?status=SUCCESS filter and sort it."
+  flow: "first page → items + nextLink → next page → no link: done"
+  remember: "Offset (?page=N) for small lists; a cursor for large or live lists, with no skipped or repeated rows."
+buildsOn: [url-design-rules]
+scenarios:
+  - q: "A merchant pages through payments with ?page=1, then ?page=2, sorted newest first. Between the two calls, 5 new payments arrive. What does page 2 show?"
+    a: "The last 5 rows of page 1 slide down into page 2, so the merchant sees them twice. Offset counts rows from the top, and the top moved. A cursor that says 'after payment PAY640' would continue exactly where page 1 ended."
+  - q: "A client sends GET /payments?size=100000. What should the API do?"
+    a: "Apply the documented maximum: return at most the cap, or reject with 400. Spring Data's default cuts it to 2000. Without a cap, one call can make the database read and the server serialise a huge result."
 confusedWith: []
 tags: [pagination, cursor, filtering, sorting, query-string]
 visual: table
@@ -25,27 +38,43 @@ sources:
   - title: "Evolving API Pagination at Slack (Slack Engineering)"
     url: "https://slack.engineering/evolving-api-pagination-at-slack/"
     verifiedOn: "2026-10-20"
-  - title: "Microsoft Azure REST API Guidelines: collections and nextLink"
+  - title: "Microsoft Azure REST API Guidelines: collections, nextLink and maxpagesize"
     url: "https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Spring Data Commons reference: web support, Pageable and Sort parameters"
     url: "https://docs.spring.io/spring-data/commons/reference/repositories/core-extensions.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Spring Boot 4.1 application properties: spring.data.web.pageable.*"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-21"
+  - title: "PostgreSQL 18 docs: 7.6 LIMIT and OFFSET"
+    url: "https://www.postgresql.org/docs/18/queries-limit.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Pagination means the API returns a long list in pieces called pages, each with a fixed maximum number of items, instead of all items at once. Filtering and sorting are query parameters that let the client ask only for the rows it needs, in the order it wants: `?status=SUCCESS&sort=createdAt,desc`. All three follow the [URL rules](card:url-design-rules): the path names the collection, and the query string shapes it.
 
 ## Why it exists
 
-A list of every payment grows without limit. Pages keep each response small, and filters let a client fetch only the rows it needs.
+`GET /payments` without pages works on day one, with 50 rows. A year later there are millions: one call makes the database read them all, the server builds a huge JSON body and may run out of memory, and the client waits seconds for rows it never shows. With pages, each call returns, say, 20 rows and a link to the next 20, so every response stays small however big the table grows.
 
 ## How it works
 
 <Compare id="offset-vs-cursor-pagination" />
 
-- One query parameter per filter field: `?status=SUCCESS`. Sort with `?sort=createdAt,desc`, the [Spring Data](card:spring-data-pageable) style.
-- `?fields=id,status` trims big responses; still check the caller may see each field.
-- Allow-list the field names clients may filter, sort or select by.
+1. The client asks for the first page: `GET /payments?status=SUCCESS&sort=createdAt,desc&size=20`.
+2. The server checks `size` against its maximum, and checks that `status` and `createdAt` are fields clients may filter and sort by.
+3. It runs the query and returns up to 20 items, plus the link to the next page. With a cursor, that link carries an opaque token that marks where this page ended.
+4. The client follows the link exactly as given; it never builds paging URLs itself.
+5. The last page has no next link, so the client stops.
+
+So the key is: the server decides where each page ends, and the client only follows links.
 
 ## Example
+
+The merchant dashboard asks for successful payments, newest first, 20 at a time.
 
 ```text
 GET /api/v1/payments?status=SUCCESS&sort=createdAt,desc&size=20
@@ -59,16 +88,34 @@ Content-Type: application/json
 }
 ```
 
+What to notice:
+
+- `nextLink` repeats the filter and size, and adds `cursor=8f3a2c`. The client treats the cursor as opaque and does not decode it.
+- The list sits inside an object (`items`), so paging fields like `nextLink` have a place next to it. Microsoft's guidelines use the same shape, with `value` and `nextLink`.
+- On the last page `nextLink` is left out, not sent as null, as Microsoft's guidelines require.
+- A [Link header](card:link-header-next) with `rel="next"` is the standard alternative to a `nextLink` field in the body.
+
+## Rules and defaults
+
+- **Page size:** document a default and a maximum. A request above the maximum gets the maximum, or a 400.
+- **Spring Data (Spring Boot 4.1):** `page` starts at 0, `size` defaults to 20, and `spring.data.web.pageable.max-page-size` is 2000. A larger `size` is cut to 2000 without an error.
+- **Stable order:** offset pages need an `ORDER BY` that gives a unique order, such as `created_at, id`. Without it, PostgreSQL may return rows in a different order on each call, so pages overlap.
+- **Allow-list:** accept only documented field names in filter, sort and `?fields=` parameters; reject others with 400. Spring Data passes sort names through without checking them against your fields, so this check is your code's job. Selecting fields with `?fields=id,status` still needs a check that the caller may see each field.
+
+## Not to be confused with
+
+A cursor is the opaque token the client sends back to get the next page. Keyset pagination is one way the server can build it: the token holds the last row's sort key, and the query asks `WHERE id < last id`, so the index skips seen rows. Rule: cursor = what the client sees; keyset = how the database finds the page.
+
 ## Interview Qs
 
 ### Offset or cursor pagination: which would you choose?
 
-Offset for small, stable lists where users jump to page N, like an admin table. Cursor for large or fast-changing data, like a payment feed: each page costs the same, and new rows cause no skips or duplicates.
+Offset for small, stable lists where users jump to page N, like an admin table. Cursor for large or fast-changing data, like a payment feed: every page costs the same, because the database does not read skipped rows, and new rows cause no skips or duplicates.
 
 ### How does the client find the next page?
 
-The server returns it: a `nextLink` field in the body, or a [Link header](card:link-header-next) with `rel="next"`. On the last page there is no link, so the client never builds paging URLs itself.
+The server returns it: a `nextLink` field in the body, or a Link header with `rel="next"`. On the last page there is no link, so the client stops. The client never builds paging URLs itself, so the server can change its paging method later.
 
 ### A client sends size=100000. What do you do?
 
-Enforce the documented maximum: return at most the cap, or reject with 400. An unbounded page size lets one call overload the database.
+Enforce the documented maximum: return at most the cap, or reject with 400. Without a cap, one call can make the database read a huge result and the server build a huge response, which slows everyone else. Spring Data caps it at 2000 by default.

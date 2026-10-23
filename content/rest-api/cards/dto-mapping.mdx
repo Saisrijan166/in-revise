@@ -5,17 +5,27 @@ title: DTOs vs Entities
 topic: spring
 level: beginner
 heat: 2
-hook: "The entity is the database's shape; the DTO is the API's shape. Accept and return DTOs, and map them in the service."
+hook: "The entity is shaped like the database table; the DTO is shaped like the API. Controllers accept and return DTOs, and the service maps between the two."
 points:
-  - { k: "Request DTO", v: "only fields a client may send: no id, status or role" }
-  - { k: "Response DTO", v: "only fields a client may see: no internal fields" }
-  - { k: "Java record", v: "a short, immutable DTO; final since Java 16" }
-  - { k: "MapStruct", v: "annotation processor that writes mapping code at compile time" }
-  - { k: "@JsonIgnore", v: "hides one field; a forgotten field still leaks", kind: minus }
+  - { k: "Request DTO", v: "holds only what a client may send, such as amount, currency and method; never id, status or role" }
+  - { k: "Response DTO", v: "holds only what a client may see; internal fields like the gateway reference stay in the entity" }
+  - { k: "Java record", v: "a short, immutable class, standard since Java 16; good for DTOs, but a record cannot be a JPA entity" }
+  - { k: "Unknown JSON fields", v: "Jackson 3 (Spring Boot 4.x) ignores fields the DTO does not have, so an extra status is dropped", kind: default }
+  - { k: "@JsonIgnore on entities", v: "hides one field at a time; a sensitive field added later leaks unless someone remembers", kind: minus }
 trap:
   wrong: "Return the JPA entity and hide the secret fields with @JsonIgnore."
-  right: "Return a response DTO with only the fields needed. OWASP advises choosing fields, not hiding them one by one."
-sayIt: "Entities model tables; DTOs model the API contract. DTOs stop internal fields leaking and clients setting fields they should not, and let the schema change without breaking clients."
+  right: "Return a response DTO with only the fields the client needs. OWASP advises choosing the fields to send, not hiding them one by one."
+  why: "@JsonIgnore is one line and the JSON looks right today. The leak only appears later, when someone adds a new sensitive field and forgets the annotation."
+sayIt: "Entities model tables; DTOs model the API contract. I accept a request DTO, map it to an entity in the service, and return a response DTO. That stops internal fields leaking and clients setting fields like status, and lets the schema change without breaking clients."
+cheat:
+  idea: "A DTO is a small class shaped for the API, with only the fields a client sends or sees. The entity maps the database table and stays inside the service."
+  remember: "Never bind a request onto an entity or return one: clients could set status, and internal fields would leak."
+buildsOn: [request-binding-validation, owasp-api-security]
+scenarios:
+  - q: "A client adds \"status\": \"SUCCESS\" to POST /api/payments. PaymentRequest has only amount, currency and method. What happens?"
+    a: "Jackson 3 ignores the unknown field, so the payment is created as PENDING. The DTO has no status field, so the client cannot set it. Had the body been bound to the Payment entity, the client could have set status: mass assignment."
+  - q: "You add a cardFingerprint column to the Payment entity. What changes for clients of GET /api/payments/PAY101?"
+    a: "Nothing. The response DTO lists its fields, so the new column stays inside the service until someone adds it to the DTO on purpose. Returning the entity would have sent it to every client at once."
 confusedWith: []
 tags: [spring, dto, api-design]
 visual: table
@@ -26,53 +36,84 @@ sources:
   - title: "JEP 395: Records (OpenJDK)"
     url: "https://openjdk.org/jeps/395"
     verifiedOn: "2026-10-20"
+  - title: "Jakarta Persistence 3.2 specification, 2.1: a record may not be an entity; the entity class must be non-final"
+    url: "https://jakarta.ee/specifications/persistence/3.2/jakarta-persistence-spec-3.2.html"
+    verifiedOn: "2026-10-22"
+  - title: "JSTEP-2: FAIL_ON_UNKNOWN_PROPERTIES defaults to false in Jackson 3.0 (Jackson project wiki)"
+    url: "https://github.com/FasterXML/jackson-future-ideas/wiki/JSTEP-2"
+    verifiedOn: "2026-10-21"
   - title: "MapStruct: compile-time mapping code generator"
     url: "https://mapstruct.org/"
     verifiedOn: "2026-10-20"
+  - title: "MapStruct reference guide: unmappedTargetPolicy WARN reports unmapped target properties at build time"
+    url: "https://mapstruct.org/documentation/stable/reference/html/"
+    verifiedOn: "2026-10-22"
   - title: "SQL Databases: Open EntityManager in View (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/data/sql.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A DTO (data transfer object) is a small class shaped for the API: it holds only the fields a client sends or receives in one call. An entity is the class mapped to a database table, usually with JPA (Jakarta Persistence), the Java standard that saves objects as rows. The controller accepts a request DTO and returns a response DTO. The service copies values between DTOs and entities, which is called mapping.
+
 ## Why it exists
 
-The database model and the API contract change for different reasons. Sending entities out leaks internal fields, ties clients to your tables, and lets clients set fields they should not.
+The `Payment` entity holds everything the database needs: the gateway reference, audit fields, a link to the merchant. If the controller returns it, Jackson writes all of it to the client. If the request body is bound onto it, a client can send `"status": "SUCCESS"` and set a field it must never control; OWASP calls this mass assignment, as [OWASP API risks](card:owasp-api-security) showed. DTOs stop both, and the tables can change without changing the JSON clients depend on.
 
 ## How it works
 
 <Compare id="dto-vs-entity" />
 
-- Map entity to DTO in the service; the controller sees only DTOs.
-- Binding a body straight onto an entity lets a client send `"status": "SUCCESS"` (mass assignment): [OWASP API risks](card:owasp-api-security).
-- Constraints go on the request DTO: [validation](card:request-binding-validation).
+1. Jackson reads the JSON body into `PaymentRequest`, which has only amount, currency and method. Any other field in the JSON is ignored.
+2. The service checks the business rules and builds a new `Payment` entity, setting `status = PENDING` itself.
+3. The repository saves the entity to the database.
+4. The service maps the saved entity to a `PaymentResponse` with only `paymentId`, `status` and `amount`.
+5. The controller returns that DTO, and Jackson writes only those three fields.
+
+So the entity never crosses the API boundary, in either direction.
 
 ## Example
 
+The response DTO is a record with a small mapping method written by hand.
+
 ```java
 record PaymentResponse(String paymentId, String status, BigDecimal amount) {
-    static PaymentResponse from(Payment p) {                  // entity -> DTO, by hand
+    static PaymentResponse from(Payment p) {               // entity -> DTO, by hand
         return new PaymentResponse(p.getPaymentId(), p.getStatus().name(), p.getAmount());
     }
 }
-// The Payment entity also has gatewayRef and internal audit fields: never sent out.
+// Payment (the entity) also has gatewayRef and audit fields: they never leave the service.
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| `spring.jpa.open-in-view` | `true`: lazy loading still works while the response is written | Spring Boot 4.1 |
+- Only the three fields named in the record reach the client. A new column in `Payment` changes nothing in the JSON until someone adds it here.
+- `status` is turned from an enum into text here, so the API can keep its wording even if the enum is renamed.
+- A record is immutable: its fields are set once in the constructor. That suits a DTO, but a JPA entity must be a non-final class, so the entity stays a normal class.
+
+## Rules and defaults
+
+- **Unknown JSON fields (Jackson 3, Spring Boot 4.x):** ignored by default, because `FAIL_ON_UNKNOWN_PROPERTIES` is false. A DTO without a `status` field therefore cannot receive one.
+- **Separate DTOs:** use one DTO for the request and another for the response. A shared one would let clients send `paymentId` or `status`.
+- **Where constraints go:** `@NotNull`, `@Positive` and the other checks belong on the request DTO, as in [validation](card:request-binding-validation).
+- **Open-in-view (Spring Boot 4.1):** `spring.jpa.open-in-view` is `true` by default, so a returned entity can still load lazy relations while Jackson writes it, running extra queries during the response.
+- **Mapping tools:** a static `from()` method is fine for a few DTOs. MapStruct generates the same plain method calls at compile time and warns about target fields it could not map.
+
+## Common mistakes
+
+- **"One `Payment` class can be the entity, the request and the response."** Then every column is exposed, every column can be set by clients, and a schema change is an API change. Keep three shapes for three jobs.
 
 ## Interview Qs
 
 ### If the entity already holds the data, why do we need a DTO?
 
-The entity is shaped by the database; the DTO is the API contract. A DTO hides internal fields, blocks mass assignment, and lets you change tables without breaking clients.
+The entity is shaped by the database; the DTO is the API contract. A DTO hides internal fields, blocks mass assignment because it has no fields a client should not set, and lets you change tables without breaking clients.
 
 ### Why is returning a JPA entity from a controller risky?
 
-Jackson writes every property it can reach. With open-in-view on, lazy relations load while the JSON is written, running extra queries. Internal fields leak, and a table change breaks clients.
+Jackson writes every property it can reach, so internal fields leak. With open-in-view on, lazy relations load while the JSON is written, running extra queries. A table change also becomes a breaking API change.
 
 ### Mapping by hand or MapStruct?
 
-By hand is plain and fine for a few DTOs. MapStruct generates the same plain method calls at compile time, so it stays fast and reports mapping mistakes at build time.
+By hand is plain and fine for a few DTOs. MapStruct generates the same plain method calls at compile time, so there is no reflection cost, and it reports unmapped fields during the build. I choose it when there are many DTOs.

@@ -5,35 +5,58 @@ title: Statelessness
 topic: basics
 level: beginner
 heat: 3
-hook: "Each request carries all it needs, like the token and ids; the server keeps no session between calls, so any instance can answer."
+hook: "Each request carries everything the server needs, such as the token and the ids. The server remembers nothing about the client between calls, so any server can answer."
 points:
-  - { k: "Session state", v: "kept by the client and sent with every request" }
-  - { k: "Resource state", v: "still stored on the server, such as payments in a database" }
-  - { k: "Any instance", v: "no sticky sessions: easy to scale out and fail over", kind: plus }
-  - { k: "Visibility", v: "one request alone is enough to understand it", kind: plus }
-  - { k: "Cost", v: "the same data, like a token, is resent and checked each time", kind: minus }
+  - { k: "Session state", v: "where a client is in its conversation, such as who is logged in; the client keeps it and resends it" }
+  - { k: "Resource state", v: "the data itself, such as payments in the database; it stays on the server, and that is allowed" }
+  - { k: "Any instance", v: "no request needs a particular server, so you add servers freely and survive one failing", kind: plus }
+  - { k: "One request is enough", v: "a log line, a cache or a retry can understand a request on its own", kind: plus }
+  - { k: "Cost", v: "the same data, such as the token, is sent and checked on every request", kind: minus }
 trap:
   wrong: "Stateless means the server stores no data at all."
-  right: "It means no session state kept between requests. Payments in a database are resource state, and that is fine."
-sayIt: "Stateless means each request carries everything needed, like the bearer token and ids, and the server keeps no session between calls. So any instance can serve any request, which makes scaling and failover simple."
+  right: "It means the server keeps no session state between requests. Payments in a database are resource state, and storing them is fine."
+  why: "The word stateless sounds like no state anywhere, and the two kinds of state, session and resource, are rarely named apart."
+sayIt: "Stateless means each request carries everything needed, like the bearer token and the ids, and the server keeps no session between calls. So any instance can serve any request, which makes scaling and failover simple. Resource data still lives in the database."
+cheat:
+  idea: "Statelessness means the server keeps no memory of a client between requests. Every request brings all it needs, such as the token proving who is calling."
+  remember: "Stateless is about session state, not data: payments in the database are fine."
+buildsOn: [http-request-response, what-is-rest]
+scenarios:
+  - q: "Your API stores each user's login in the memory of the server that handled the login. You add a second server behind the load balancer. What goes wrong?"
+    a: "Requests that reach the second server find no login there, so the user looks logged out. You would need sticky sessions, sending each user to the same server, and a restart would still log users out. A stateless design sends the token with every request, so either server can check it."
+  - q: "A client calls GET /api/payments/next-page to get the next 20 payments. Why is this not stateless, and what is the fix?"
+    a: "The server must remember which page this client saw last, which is session state on the server. The fix is GET /api/payments?page=2&size=20: the request says exactly what it wants, so any server can answer it, and it can be retried or cached."
 confusedWith: [jwt-vs-session-cookie]
 tags: [stateless, scalability, session]
 visual: flow
 sources:
-  - title: "Chapter 5: Representational State Transfer, stateless constraint (Fielding, 2000)"
+  - title: "Chapter 5: Representational State Transfer, 5.1.3 stateless constraint (Fielding, 2000)"
     url: "https://ics.uci.edu/~fielding/pubs/dissertation/rest_arch_style.htm"
     verifiedOn: "2026-10-20"
   - title: "Web API design best practices: stateless request model (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-design"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 9110: HTTP Semantics, 3.3 (HTTP is a stateless protocol)"
+    url: "https://www.rfc-editor.org/rfc/rfc9110.html#section-3.3"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 6265: HTTP State Management Mechanism (cookies keep a stateful session)"
+    url: "https://www.rfc-editor.org/rfc/rfc6265.html"
+    verifiedOn: "2026-10-21"
+  - title: "Spring Session 4.1 reference: clustered sessions"
+    url: "https://docs.spring.io/spring-session/reference/"
+    verifiedOn: "2026-10-21"
   - title: "REST API interview questions (InterviewBit)"
     url: "https://www.interviewbit.com/rest-api-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Statelessness is the REST rule that the server keeps no memory of a client between requests. Each request carries everything needed to handle it: who is calling, which resource, and any options. Who is calling is usually proven by a token, a string the client got at login and sends in the `Authorization` header. This memory of where a client is in its conversation is called session state; in REST the client keeps it and resends it.
+
 ## Why it exists
 
-If a server keeps each client's session, every call must reach a server that has it, and a crash can lose it. Stateless requests remove that tie.
+Suppose a server keeps each user's login in its own memory. Every later request from that user must reach that same server, which is called a sticky session. If the server restarts, the user is logged out. With stateless requests, any server can answer any request. A load balancer, the component that spreads requests across servers, can send each call anywhere, and you can add servers or lose one without users noticing.
 
 ## How it works
 
@@ -48,19 +71,49 @@ If a server keeps each client's session, every call must reach a server that has
   B --> DB`}
 />
 
-- The token proves who is calling on every request; see [JWT vs session cookie](compare:jwt-vs-session-cookie).
-- A stateless request also tells a cache everything it needs to reuse a response.
+1. The app logs in once, receives a token and keeps it.
+2. Request 1 carries the token in the `Authorization` header. The load balancer sends it to instance A, which checks the token and answers.
+3. Request 2 carries the same token and lands on instance B. B has never seen this client and does not need to: everything it needs is in the request.
+4. Both instances read and write payments in one shared database, so the data looks the same from either.
+
+So the client keeps the conversation, and the server keeps only the resources.
+
+## Example
+
+The same "next page of payments" request, first stateful and then stateless:
+
+```text
+Stateful: the server remembers the page     Stateless: the client says the page
+GET /api/payments/next-page                 GET /api/payments?page=2&size=20
+Cookie: SESSION=8f3a                        Authorization: Bearer <token>
+```
+
+What to notice:
+
+- On the left, "next" means nothing on its own. Only the server that holds session `8f3a` knows which page this user saw, and after a restart nobody knows.
+- On the right, the request says exactly what it wants, so any instance can answer it, a cache can store it, and a retry gives the same page.
+- The token is sent and checked again on every call. That repeated work is the price of statelessness.
+
+## Rules and defaults
+
+- **HTTP is stateless (RFC 9110):** each message can be understood on its own. Cookies (RFC 6265) are what let servers add a stateful session on top.
+- **Two kinds of state:** session state lives on the client and travels with each request; resource state, such as the payments, lives on the server.
+- **Server-side sessions:** a session kept on the server breaks this rule. Tools such as Spring Session store sessions in a shared store, such as Redis or a database, so any instance can read them. That removes sticky sessions, but every request now needs a lookup, and the session is still server state.
+
+## Not to be confused with
+
+A session cookie holds only an id; the server looks up the session data behind it, so the server keeps state. A token such as a [JWT](card:jwt), which you will see later, carries the signed facts about the caller itself, so any instance can check it without a lookup. Rule: session cookie = the server remembers; self-contained token = the request carries it.
 
 ## Interview Qs
 
 ### What makes a REST API stateless?
 
-Each request carries everything needed to process it, such as credentials and ids. The server does not depend on session state stored from earlier requests.
+Each request carries everything needed to process it, such as credentials, ids and options. The server does not rely on anything stored from earlier requests of that client. Data such as payments can still live in a database; that is resource state.
 
 ### Why does statelessness help scaling?
 
-No request needs a particular server, so a load balancer can send it to any instance. You add instances freely and survive one failing without sticky sessions.
+No request needs a particular server, so a load balancer can send it to any instance. You add instances when traffic grows and lose one without logging users out. Fielding also lists visibility and reliability: one request is enough to understand it, and recovery after a failure is simpler.
 
-### Can a stateless API store data in a database?
+### HTTP is stateless. Isn't every HTTP API stateless, then?
 
-Yes. Stateless is about session state between requests. The payments themselves are resource state and live in the database.
+No. HTTP messages are self-contained, but cookies let a server keep a session and look it up on each request. An API that stores login or progress in a server session is stateful, even over HTTP.

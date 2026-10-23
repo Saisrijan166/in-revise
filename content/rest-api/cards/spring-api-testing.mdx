@@ -5,24 +5,34 @@ title: Testing Spring REST Controllers
 topic: spring
 level: intermediate
 heat: 2
-hook: "Test a controller with @WebMvcTest and MockMvcTester: real Spring MVC, no server, services mocked with @MockitoBean."
+hook: "Test a controller with @WebMvcTest: real Spring MVC handles a fake request without a server, and the service is replaced by a mock you control."
 points:
-  - { k: "MockMvc", v: "full Spring MVC handling with mock request and response, no server" }
-  - { k: "MockMvcTester", v: "AssertJ API over MockMvc (Spring Framework 6.2+)" }
-  - { k: "@MockitoBean", v: "puts a Mockito mock in the context; @MockBean removed in Boot 4" }
-  - { k: "RestTestClient", v: "new in Framework 7.0: one API for mock and live-server tests" }
-  - { k: "Boot 4 module", v: "@WebMvcTest lives in spring-boot-webmvc-test" }
+  - { k: "@WebMvcTest", v: "starts only the web layer: controllers, advice and JSON converters, but no services or repositories" }
+  - { k: "MockMvc", v: "runs the full Spring MVC handling of a request with mock objects; no server and no network" }
+  - { k: "MockMvcTester", v: "an AssertJ-style API over MockMvc for requests and checks (Spring Framework 6.2+)" }
+  - { k: "@MockitoBean", v: "puts a Mockito mock into the test context; @MockBean was removed in Spring Boot 4.0", kind: minus }
+  - { k: "@SpringBootTest (Boot 4.1)", v: "starts the whole app in a mock web environment by default; RANDOM_PORT starts a real server", kind: default }
 trap:
   wrong: "@WebMvcTest also loads my services and repositories."
-  right: "It scans only web beans such as @Controller and @ControllerAdvice. Mock the service with @MockitoBean."
-sayIt: "For a controller I use @WebMvcTest with MockMvcTester and mock the service with @MockitoBean, then check status and JSON. For a full flow over real HTTP I use @SpringBootTest with RANDOM_PORT."
+  right: "It loads only web beans such as @Controller and @ControllerAdvice. Provide the service as a mock with @MockitoBean."
+  why: "@WebMvcTest starts a Spring context, and people expect a Spring context to hold all their beans, as the running app does."
+sayIt: "For each controller I write @WebMvcTest tests with MockMvcTester and mock the service with @MockitoBean, then check the status and the JSON. For a few full flows over real HTTP I use @SpringBootTest with RANDOM_PORT and RestTestClient."
+cheat:
+  idea: "@WebMvcTest starts only the web layer, and MockMvc sends fake requests through real Spring MVC without a server. The service is a Mockito mock that the test controls."
+  remember: "@WebMvcTest loads no services: mock them with @MockitoBean, since @MockBean is gone in Spring Boot 4."
+buildsOn: [spring-rest-controllers, request-binding-validation, exception-handling]
+scenarios:
+  - q: "A @WebMvcTest for PaymentController fails at startup with \"No qualifying bean of type PaymentService\". Why, and what is the fix?"
+    a: "The web slice does not load @Service beans, so the controller's constructor has nothing to receive. Add @MockitoBean PaymentService service to the test class, and tell the mock what to return in each test."
+  - q: "A @SpringBootTest with RANDOM_PORT and @Transactional creates a payment through HTTP. Is the row rolled back after the test?"
+    a: "No. The HTTP client and the server run on different threads, so the server's work happens in its own transaction, which the test's rollback does not touch. Clean up the data yourself or use a fresh database."
 confusedWith: [unit-vs-integration-vs-contract-test]
 tags: [spring, testing, mockmvc]
-visual: table
+visual: code
 sources:
   - title: "Testing Spring Boot Applications: @WebMvcTest, web environments, RestTestClient (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/testing/spring-boot-applications.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Spring Boot 4.0 Migration Guide: @MockBean removal, MockMvc and @SpringBootTest"
     url: "https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide"
     verifiedOn: "2026-10-20"
@@ -37,51 +47,75 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A controller test checks the HTTP side of an endpoint: the mapping, the binding and validation, the status code and the JSON. `@WebMvcTest` is a Spring Boot test slice: it starts only the web part of the app. MockMvc then sends fake requests through real Spring MVC, without starting a server. The service is replaced by a mock, made with Mockito, a fake object whose answers the test sets.
+
 ## Why it exists
 
-Controller bugs are wrong mappings, status codes, JSON or validation. Sending a fake request through Spring MVC catches them in milliseconds, without starting the whole app.
+Starting the whole app with a database for every controller check is slow, and a failure could come from anywhere. Calling the controller as a plain Java method is fast, but it skips what usually breaks: wrong paths, a missing `@Valid`, wrong status codes and JSON field names. A web slice test runs the real Spring MVC handling, so those bugs show up in milliseconds, while the mock keeps the service's logic out of the test.
 
 ## How it works
 
 <Compare id="webmvctest-vs-springboottest" />
 
-- A RANDOM_PORT test runs the server on another thread, so `@Transactional` on the test does not roll back its data.
-- Which cases to test for POST /api/payments: [API testing strategy](card:api-testing-strategy).
+1. `@WebMvcTest(PaymentController.class)` builds a small Spring context with that controller, the advice classes, the JSON converters and MockMvc, but no services or repositories.
+2. `@MockitoBean` adds a mock `PaymentService` to that context, so the controller's constructor receives it.
+3. The test tells the mock what to return, for example payment PAY101.
+4. MockMvcTester sends a request through Spring MVC. Mapping, binding, validation, the controller and the advice all run, just as in the real app.
+5. The test checks the status and the JSON of the response.
 
 ## Example
+
+One test checks a good payment and a negative amount. It ran and passed on Spring Boot 4.0.3.
 
 ```java
 @WebMvcTest(PaymentController.class)
 class PaymentControllerTests {
     @Autowired MockMvcTester mvc;
-    @MockitoBean PaymentService service;                 // the slice does not load services
+    @MockitoBean PaymentService service;                     // the slice loads no services
     @Test void createsPaymentAndRejectsNegativeAmount() {
-        when(service.create(any())).thenReturn(new PaymentResponse("PAY101", "PENDING", new BigDecimal("500")));
-        assertThat(pay(500)).hasStatus(HttpStatus.CREATED);
-        assertThat(pay(-500)).hasStatus(HttpStatus.BAD_REQUEST);          // @Positive fails
+        when(service.create(any(), any())).thenReturn(new PaymentResponse("PAY101", "PENDING", new BigDecimal("500")));
+        assertThat(pay(500)).hasStatus(HttpStatus.CREATED).bodyJson().extractingPath("$.paymentId").isEqualTo("PAY101");
+        assertThat(pay(-500)).hasStatus(HttpStatus.BAD_REQUEST);           // @Positive fails
     }
-    MockMvcTester.MockMvcRequestBuilder pay(int amount) { return mvc.post().uri("/api/payments")
-            .contentType(MediaType.APPLICATION_JSON).content("{\"amount\": %d, \"currency\": \"INR\", \"method\": \"UPI\"}".formatted(amount)); }
+    MockMvcTester.MockMvcRequestBuilder pay(int amount) {
+        return mvc.post().uri("/api/payments").header("Idempotency-Key", "order-789-payment")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"amount\": %d, \"currency\": \"INR\", \"method\": \"UPI\"}".formatted(amount));
+    }
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| `@SpringBootTest` web environment | `MOCK`: no server starts | Spring Boot 4.1 |
-| MockMvc in `@SpringBootTest` | only with `@AutoConfigureMockMvc` | Spring Boot 4.0+ |
+- No server and no database start; the test exercises the real mapping, `@Valid` and the 201 from `ResponseEntity.created`.
+- The mock answers `create`, so the test checks the controller, not the payment rules. The rules get their own unit tests.
+- The −500 request never reaches the mock: validation rejects it with 400 first.
+- Remove `@MockitoBean` and the context fails to start, because the controller needs a `PaymentService` and the slice has none.
+
+## Rules and defaults
+
+- **Mocks (Spring Boot 4.0+):** use `@MockitoBean` from Spring Framework (6.2+). `@MockBean` was deprecated in Spring Boot 3.4 and removed in 4.0.
+- **Where it lives (Spring Boot 4):** `@WebMvcTest` is in the `spring-boot-webmvc-test` module, package `org.springframework.boot.webmvc.test.autoconfigure`.
+- **@SpringBootTest:** the default web environment is `MOCK`, so no server starts. MockMvc is available there only with `@AutoConfigureMockMvc`.
+- **Real HTTP:** `webEnvironment = RANDOM_PORT` starts a server on a free port; `@AutoConfigureRestTestClient` gives a `RestTestClient` (new in Spring Framework 7.0) that calls it.
+- **Rollback:** with a real server, a test's `@Transactional` does not roll back what the server wrote, because the server runs on another thread.
+
+## Not to be confused with
+
+A unit test checks one class alone, created with plain `new` and given mocks, with no Spring at all. A `@WebMvcTest` is a slice: real Spring MVC, but only the web layer. Integration and contract tests, and which level suits which check, come in [API testing strategy](card:api-testing-strategy). Rule: business rules → unit test; HTTP behaviour → slice.
 
 ## Interview Qs
 
 ### @WebMvcTest or @SpringBootTest?
 
-@WebMvcTest loads only the web layer, so it quickly checks mappings, validation, JSON and status codes. @SpringBootTest loads the whole app; use a few of them for full flows.
+`@WebMvcTest` loads only the web layer, so it quickly checks mappings, validation, JSON and status codes, with services mocked. `@SpringBootTest` loads the whole app; I use a few of them for full flows, with RANDOM_PORT when I want real HTTP.
 
 ### Does MockMvc start a server?
 
-No. It runs full Spring MVC request handling, mappings, validation and advice included, with mock request and response objects. For real HTTP, use RANDOM_PORT with RestTestClient.
+No. It runs full Spring MVC request handling, mappings, validation and advice included, with mock request and response objects. For real HTTP, I use `@SpringBootTest` with RANDOM_PORT and `RestTestClient`.
 
 ### @MockBean or @MockitoBean?
 
-@MockitoBean, from Spring Framework. Spring Boot 3.4 deprecated @MockBean, and Spring Boot 4.0 removed it.
+`@MockitoBean`, from Spring Framework. Spring Boot 3.4 deprecated `@MockBean`, and Spring Boot 4.0 removed it, so old tests must switch when they upgrade.

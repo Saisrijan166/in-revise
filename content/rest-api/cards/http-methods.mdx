@@ -5,69 +5,122 @@ title: "HTTP Methods: Safe and Idempotent"
 topic: http
 level: beginner
 heat: 3
-hook: "Safe means read-only; idempotent means a repeat has the same effect. GET is both, PUT and DELETE are idempotent, POST is neither."
+hook: "Safe: the request asks for no change. Idempotent: repeating it has the same effect as once. GET is both, PUT and DELETE are idempotent, POST is neither."
 points:
-  - { k: "Safe", v: "GET, HEAD, OPTIONS: the client asks for no change on the server" }
-  - { k: "Idempotent", v: "safe methods plus PUT and DELETE: same effect, not same response" }
-  - { k: "DELETE twice", v: "first 204, then 404: the state is the same, the reply is not" }
-  - { k: "POST", v: "neither: a retried ₹500 POST can charge twice", kind: minus }
-  - { k: "PATCH", v: "not idempotent by definition (RFC 5789), but can be designed to be" }
+  - { k: "Method", v: "the verb in the request line that says what to do with the resource: GET, POST, PUT, PATCH, DELETE" }
+  - { k: "Safe", v: "the client asks for no change on the server: GET, HEAD and OPTIONS (and the rarely used TRACE)" }
+  - { k: "Idempotent", v: "sending it twice has the same effect on the server as once: the safe methods plus PUT and DELETE" }
+  - { k: "POST", v: "neither safe nor idempotent: a repeated ₹500 POST can create a second payment", kind: minus }
+  - { k: "PATCH (RFC 5789)", v: "not idempotent by definition, but a PATCH that only sets fields to values can be" }
 trap:
-  wrong: "PUT or PATCH validates the input, checks permissions and runs in a transaction."
-  right: "A method only states intent. Validation, authorisation and transactions are the server's job for every method."
-sayIt: "GET, HEAD and OPTIONS are safe: read-only. PUT and DELETE are idempotent too: repeating them has the same effect. POST is neither, so a payment POST needs an idempotency key."
+  wrong: "Idempotent means every repeat of a request returns the same response."
+  right: "It means the same effect on the server. DELETE twice returns 204, then 404, and the card is gone either way."
+  why: "Idempotent is often taught as \"same result\", and people read result as the response they get back."
+sayIt: "GET, HEAD and OPTIONS are safe: they ask for no change. PUT and DELETE are also idempotent: repeating them has the same effect as once, so they are safe to retry. POST is neither, so a payment POST needs an idempotency key before anyone retries it."
+cheat:
+  idea: "An HTTP method says what to do with a resource. Safe methods, such as GET, change nothing; idempotent ones, such as GET, PUT and DELETE, have the same effect however often they are repeated."
+  remember: "POST is neither safe nor idempotent, so a retried payment POST can charge twice without an idempotency key."
+buildsOn: [http-request-response, resources-and-uris]
+scenarios:
+  - q: "An admin page has a link GET /api/payments/PAY101/cancel. A link checker visits every link on the page. What happens, and whose fault is it?"
+    a: "The checker cancels PAY101. Tools assume GET is safe and call it freely, so the API's design is at fault, not the tool. RFC 9110 makes the resource owner responsible: an action that changes state must not run on a safe method. Use POST for it."
+  - q: "DELETE /api/saved-cards/CARD7 times out on a mobile app. Can the app send it again?"
+    a: "Yes. DELETE is idempotent: if the first one worked, the retry gets 404, but the card is gone either way. The app should treat a 404 on the retry as done."
 confusedWith: [put-vs-patch-vs-post]
 tags: [http-methods, idempotency, safe-methods]
 visual: table
 sources:
-  - title: "RFC 9110 HTTP Semantics, 9.2 Common Method Properties and 9.3 Method Definitions"
+  - title: "RFC 9110 HTTP Semantics, 9.2 Common Method Properties (safe, idempotent, automatic retry) and 9.3 Method Definitions"
     url: "https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "RFC 5789 PATCH Method for HTTP"
     url: "https://www.rfc-editor.org/rfc/rfc5789.html"
     verifiedOn: "2026-10-20"
+  - title: "RFC 7396 JSON Merge Patch (application/merge-patch+json)"
+    url: "https://www.rfc-editor.org/rfc/rfc7396.html"
+    verifiedOn: "2026-10-22"
+  - title: "RFC 6902 JSON Patch (application/json-patch+json)"
+    url: "https://www.rfc-editor.org/rfc/rfc6902.html"
+    verifiedOn: "2026-10-22"
   - title: "REST API Interview Questions (InterviewBit)"
     url: "https://www.interviewbit.com/rest-api-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An HTTP method is the verb in the [request line](card:http-request-response) that says what the client wants done to the resource: `GET` reads it, `POST` creates one, `PUT` replaces it, `PATCH` changes part of it and `DELETE` removes it. Two properties of a method matter most. A method is safe if the client asks for no change on the server. It is idempotent if sending the same request many times has the same effect on the server as sending it once.
+
 ## Why it exists
 
-Clients, proxies and crawlers must know which requests are harmless to send again. The method tells them before they read the body.
+Networks fail. If the connection drops after a request was sent, the client cannot tell whether the server did the work. The method answers the key question: is it harmless to send again? A repeated `GET` only reads again, and a repeated `DELETE` finds nothing more to delete. A repeated `POST` can create a second ₹500 payment. Browsers, proxies and HTTP libraries read the method to decide what they may retry, prefetch or cache.
 
 ## How it works
 
-| Method | ₹500 payment use | Safe | Idempotent | Cacheable |
+| Method | Payment use | Safe | Idempotent | Response cacheable |
 |---|---|---|---|---|
 | GET | read PAY101 | yes | yes | yes |
 | HEAD | headers of PAY101, no body | yes | yes | yes |
-| OPTIONS | which methods the URL allows | yes | yes | no |
+| OPTIONS | which methods a URL allows | yes | yes | no |
 | POST | create a payment | no | no | rarely |
 | PUT | replace the whole note of PAY101 | no | yes | no |
 | PATCH | change a few fields | no | no | rarely |
 | DELETE | remove a saved card | no | yes | no |
 
-- Idempotent requests may be retried automatically after a dropped connection; POST needs an [Idempotency-Key](card:idempotency-keys).
-- OPTIONS is also the browser's [CORS preflight](card:cors).
-- "Rarely": POST and PATCH replies are cacheable only with explicit freshness and Content-Location; most caches skip them.
+What happens when a reply is lost:
+
+1. The client sends a request, and the connection drops before the response arrives.
+2. The client cannot tell whether the server did the work.
+3. If the method is idempotent, the client sends it again: one run or two leave the same state.
+4. If it is `POST`, RFC 9110 says a client should not retry it automatically, unless it knows this request is idempotent or was never applied.
+5. So a payment `POST` carries an `Idempotency-Key` header that lets the server spot the repeat, as you will see in [idempotency keys](card:idempotency-keys).
 
 ## Example
 
-```text
-PATCH /api/payments/PAY101
-Content-Type: application/merge-patch+json
+The methods on the payment API, each sent twice:
 
-{"note": "Rent for October", "tag": null}
+```text
+GET    /api/payments/PAY101        twice: the same payment read twice
+POST   /api/payments               twice: PAY101 and PAY102, ₹1000 charged
+PUT    /api/payments/PAY101/note   twice: the note is "Rent", as after once
+PATCH  /api/payments/PAY101        twice: {"tag": "rent"} set again, no change
+DELETE /api/saved-cards/CARD7      twice: 204, then 404; the card is gone
 ```
 
-The note is set and `tag` is removed; other fields stay as they are.
+What to notice:
+
+- `PUT` sends the whole new note, so the second run writes the same value again. That is why PUT is idempotent.
+- `DELETE` returns different responses, 204 No Content and then 404 Not Found, but the state after both is the same. Idempotent is about the effect, not the reply.
+- This `PATCH` only sets a field, so a repeat is harmless. A PATCH that adds an item to a list would add it twice, which is why PATCH is not idempotent by definition.
+
+## Rules and defaults
+
+- **Safe methods (RFC 9110):** `GET`, `HEAD`, `OPTIONS` and `TRACE`. The server may still write access logs; safe means the client did not ask for a change.
+- **Idempotent methods:** the safe ones plus `PUT` and `DELETE`.
+- **Automatic retries:** a client should not retry a non-idempotent request by itself, and a proxy must not.
+- **Cacheable responses:** `GET` and `HEAD` in practice. `POST` and `PATCH` only in rare cases that need extra headers. `PUT`, `DELETE` and `OPTIONS` responses never.
+- **PATCH body:** its media type says how to apply the change: JSON Merge Patch (`application/merge-patch+json`) or JSON Patch (`application/json-patch+json`).
+- **OPTIONS:** also the browser's preflight check, which you will see in [CORS](card:cors).
+
+## Not to be confused with
+
+`PUT` sends the complete new resource to its own URL, so fields left out are gone. `PATCH` sends only the changes, so other fields stay. `POST` sends input to a collection or action, and the server decides what to create. Rule: PUT replaces, PATCH edits, POST creates or runs an action.
+
+## Common mistakes
+
+- **"PUT or PATCH validates input, checks permissions and runs in a transaction."** A method only states the intent. Validation, authorisation and transactions are the server's job, for every method.
+- **"A GET that changes a little data is fine."** Crawlers, prefetchers and link checkers call GET freely. RFC 9110 makes the resource owner responsible for keeping actions off safe methods.
 
 ## Interview Qs
 
 ### What is the difference between safe and idempotent?
 
-Safe: the client asks for no state change (GET). Idempotent: many identical requests have the same effect as one (PUT, DELETE). Every safe method is idempotent; DELETE is idempotent but not safe.
+Safe: the client asks for no state change, like GET. Idempotent: many identical requests have the same effect as one, like PUT and DELETE. Every safe method is idempotent, but DELETE is idempotent without being safe, because it does change the state once.
 
 ### Is PATCH idempotent?
 
-Not by definition. Setting `note` to a value is idempotent; a JSON Patch "add" to an array is not. To stop a retried PATCH applying twice, send [If-Match](card:conditional-requests) with the ETag.
+Not by definition. A PATCH that sets `note` to a value is idempotent; a JSON Patch `add` to an array is not, because each repeat adds again. To stop a retried PATCH from applying on top of a newer change, send [If-Match](card:conditional-requests) with the version you read.
+
+### Why is POST not idempotent, and how do you make a payment POST safe to retry?
+
+Each POST asks the server to create something new, so two POSTs create two payments. The client sends a unique `Idempotency-Key` header; the server stores the first result under that key and returns it for any repeat instead of charging twice. [Idempotency keys](card:idempotency-keys) covers the details.

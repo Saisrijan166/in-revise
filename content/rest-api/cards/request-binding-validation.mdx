@@ -5,87 +5,139 @@ title: Request Binding and Bean Validation
 topic: spring
 level: intermediate
 heat: 2
-hook: "Annotations bind path, query, header and body values; @Valid checks them, so bad input gets 400 before your code runs."
+hook: "Spring copies path, query, header and body values into your method's parameters; @Valid then checks them, so bad input gets 400 before your code runs."
 points:
-  - { k: "@Valid", v: "checks the object; a nested object only if its field also has @Valid" }
-  - { k: "Body fails", v: "MethodArgumentNotValidException, turned into 400" }
-  - { k: "Parameter fails", v: "@Positive on a @RequestParam: HandlerMethodValidationException (6.1+)" }
-  - { k: "@Validated", v: "Spring's variant: validation groups, class-level method checks" }
-  - { k: "@NotBlank vs @NotNull", v: "@NotBlank also rejects empty and spaces-only text" }
+  - { k: "Binding", v: "Spring copies values from the path, query, headers and body into parameters and converts them to Java types" }
+  - { k: "@Valid", v: "turns on the checks for that parameter; without it, @NotNull and @Positive on the fields do nothing" }
+  - { k: "Failed check", v: "Spring throws MethodArgumentNotValidException, your method never runs, and the client gets 400" }
+  - { k: "Required (Spring 7.0)", v: "@RequestParam and @RequestHeader values are required by default; a missing one gets 400", kind: default }
+  - { k: "@NotNull vs @NotBlank", v: "@NotNull rejects only null; @NotBlank also rejects empty and spaces-only text" }
+  - { k: "Needs the starter", v: "the Spring Boot web starter has no validator; add spring-boot-starter-validation", kind: minus }
 trap:
-  wrong: "The app already checks the amount, so the API can trust it."
-  right: "Anyone can call the API directly. Validate on the server; client checks are only quick feedback."
-sayIt: "I bind path, query, header and body values with annotations, put constraints like @NotBlank and @Positive on a record DTO, and add @Valid. Invalid input fails with 400 before the method runs."
+  wrong: "The mobile app already checks the amount, so the API can trust it."
+  right: "Anyone can call the API directly with curl or a script. Validate on the server; checks in the app only give the user quick feedback."
+  why: "During development every request comes from your own app, which never sends bad data, so server checks look like duplicate work."
+sayIt: "I bind path, query, header and body values with annotations, put constraints like @NotBlank and @Positive on a record DTO, and mark the body parameter @Valid. Invalid input fails with 400 before the method runs, the same way for every endpoint."
+cheat:
+  idea: "Binding copies path, query, header and body values into method parameters as Java types. @Valid then checks the constraints on the body's fields, such as @Positive."
+  remember: "A failed check gives 400 and your method never runs; without @Valid the constraints are ignored."
+buildsOn: [spring-rest-controllers]
+scenarios:
+  - q: "A client posts {\"amount\": 0, \"currency\": \"INR\", \"method\": \"UPI\"}. The amount field has @NotNull @Positive. What happens?"
+    a: "400 Bad Request. @Positive means strictly greater than zero, so 0 fails, Spring throws MethodArgumentNotValidException and the method never runs; no payment is created. @PositiveOrZero would allow 0."
+  - q: "A client posts \"amount\": \"abc\". Which step rejects it?"
+    a: "Binding, before validation. Jackson cannot turn \"abc\" into a BigDecimal, so Spring throws HttpMessageNotReadableException and answers 400. Validation only runs on an object that was built successfully."
 confusedWith: [path-vs-query-parameter]
 tags: [spring, validation, binding]
 visual: table
 sources:
-  - title: "Validation (Spring Framework 7.0 reference)"
+  - title: "Validation: MethodArgumentNotValidException and HandlerMethodValidationException (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-validation.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "HandlerMethodValidationException: 400 for input errors, since 6.1 (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/method/annotation/HandlerMethodValidationException.html"
+    verifiedOn: "2026-10-21"
   - title: "@RequestBody (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann-methods/requestbody.html"
+    verifiedOn: "2026-10-20"
+  - title: "@RequestParam: required by default (Spring Framework 7.0 API)"
+    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/bind/annotation/RequestParam.html"
     verifiedOn: "2026-10-20"
   - title: "Jakarta Validation 3.1 specification"
     url: "https://jakarta.ee/specifications/bean-validation/3.1/jakarta-validation-spec-3.1.html"
     verifiedOn: "2026-10-20"
-  - title: "@RequestParam (Spring Framework 7.0 API)"
-    url: "https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/bind/annotation/RequestParam.html"
-    verifiedOn: "2026-10-20"
+  - title: "Validation: needs a Bean Validation provider such as Hibernate Validator from spring-boot-starter-validation (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/io/validation.html"
+    verifiedOn: "2026-10-21"
+  - title: "spring-boot-starter-webmvc 4.1.1 POM: no validation dependency (Maven Central)"
+    url: "https://repo1.maven.org/maven2/org/springframework/boot/spring-boot-starter-webmvc/4.1.1/spring-boot-starter-webmvc-4.1.1.pom"
+    verifiedOn: "2026-10-21"
   - title: "Input Validation Cheat Sheet (OWASP)"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Request binding is Spring copying values from the request into your method's parameters and converting the text into Java types: a path segment into a `String`, a query value into an `int`, the JSON body into an object. Validation then checks those values against rules you write as annotations on the fields, such as `@NotNull` or `@Positive`. These rules come from Jakarta Bean Validation, the Java standard for declaring constraints. `@Valid` on a parameter asks Spring to run them.
+
 ## Why it exists
 
-Input arrives as text in the path, query, headers and body. Spring converts it to Java types and checks it declaratively, so controllers skip repeated if-checks.
+Everything in an HTTP request arrives as text. Without binding, each method would parse strings, catch number errors and check for nulls by hand, and each endpoint would reject bad input in its own way. The checks cannot live only in the mobile app either, because anyone can call the API with curl. Binding and validation run on the server, the same way for every endpoint, and bad input gets 400 before your method runs.
 
 ## How it works
 
-| Annotation | Reads | Example |
+| Annotation | Reads | Payment API example |
 | --- | --- | --- |
 | `@PathVariable` | a `{placeholder}` in the path | `/api/payments/{id}` → `PAY101` |
-| `@RequestParam` | a query or form parameter | `?status=SUCCESS` |
+| `@RequestParam` | a query parameter | `?status=SUCCESS` |
 | `@RequestHeader` | one request header | `Idempotency-Key: order-789-payment` |
-| `@RequestBody` | the body, via an HttpMessageConverter | JSON → `PaymentRequest` |
+| `@RequestBody` | the whole body, through Jackson | JSON → `PaymentRequest` |
 
-- `@Valid` alone checks nothing: the field constraints do.
-- Give both exceptions one error shape: [exception handling](card:exception-handling).
+1. Spring picks the controller method, as in the [previous concept](card:spring-rest-controllers).
+2. For each parameter, it reads the part of the request named by its annotation and converts it to the parameter's type. A missing required value, or a failed conversion such as `"abc"` for a number, stops here with 400.
+3. For `@RequestBody`, Jackson builds a `PaymentRequest` from the JSON.
+4. If the parameter has `@Valid`, the validator checks every constraint on its fields.
+5. If any check fails, Spring throws `MethodArgumentNotValidException`, the method never runs, and the client gets 400. Otherwise your method runs with clean values.
 
 ## Example
+
+The create endpoint takes the idempotency key from a header and the payment from the body. The rules sit on the request record.
 
 ```java
 record PaymentRequest(
         @NotNull @Positive BigDecimal amount,              // 0 and -500 fail
         @NotBlank @Size(min = 3, max = 3) String currency, // "INR"
-        @NotNull PaymentMethod method) { }                 // UPI, CARD, WALLET
+        @NotNull PaymentMethod method) { }                 // UPI, CARD or WALLET
 
 @PostMapping
-ResponseEntity<PaymentResponse> create(
-        @RequestHeader("Idempotency-Key") String key,
-        @Valid @RequestBody PaymentRequest req) {
-    return ResponseEntity.status(HttpStatus.CREATED).body(service.create(key, req));
+PaymentResponse create(@RequestHeader("Idempotency-Key") String key,
+                       @Valid @RequestBody PaymentRequest req) {
+    return service.create(key, req);
 }
 ```
 
-## Defaults
+```bash
+curl -s -X POST http://localhost:8080/api/payments -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: order-789-payment' -d '{"amount": -500, "currency": "INR", "method": "UPI"}'
+```
 
-| What | Default | Where |
-| --- | --- | --- |
-| `@PathVariable`, `@RequestParam`, `@RequestHeader` | required; missing value fails | Spring Framework 7.0 |
-| `@RequestParam(defaultValue = "0")` | makes the parameter optional | Spring Framework 7.0 |
+```text output
+{"timestamp":"2026-10-21T16:35:54.311Z","status":400,"error":"Bad Request","path":"/api/payments"}
+```
+
+What to notice:
+
+- The amount −500 fails `@Positive`, so `service.create` never runs and no payment exists.
+- Remove `@Valid` and nothing is checked: −500 reaches the service.
+- A request without the `Idempotency-Key` header also gets 400, because `@RequestHeader` is required by default.
+- Spring Boot's default error body does not say which field failed. [Exception handling](card:exception-handling), two concepts on, sends a clearer body.
+
+## Rules and defaults
+
+- **Required by default:** `@RequestParam` and `@RequestHeader` values must be present, or the client gets 400. `required = false` or a `defaultValue` makes them optional.
+- **Nested objects:** `@Valid` checks a nested object, such as a billing address inside the request, only if that field also has `@Valid`.
+- **Constraints on parameters (Spring Framework 6.1+):** a constraint placed directly on a parameter, like `@RequestParam @Max(100) int size`, runs Spring MVC's built-in method validation. A failure throws `HandlerMethodValidationException`, also 400, so handle both exceptions. Do not put `@Validated` on the controller class: it switches to the older proxy-based checks.
+- **Validator needed:** Spring Boot's web starter has no validator. Add `spring-boot-starter-validation`, which brings Hibernate Validator.
+
+## Not to be confused with
+
+`@PathVariable` reads the part of the path that names the resource, PAY101 in `/api/payments/PAY101`. `@RequestParam` reads an option after `?`, such as `status=SUCCESS`. Separately, `@Valid` is the Jakarta annotation that turns on validation, and `@Validated` is Spring's version, which can also select validation groups. Rule: path = which resource, query = how to filter it.
 
 ## Interview Qs
 
-### @PathVariable vs @RequestParam?
-
-@PathVariable reads the path part that names the resource (PAY101); @RequestParam reads a query option (?status=SUCCESS). See [path vs query](compare:path-vs-query-parameter).
-
 ### How do you validate a request body?
 
-Put Jakarta constraints such as @NotNull and @Positive on the DTO fields and mark the @RequestBody parameter with @Valid. A failure throws MethodArgumentNotValidException, which becomes 400.
+Put Jakarta constraints such as `@NotNull` and `@Positive` on the DTO fields, and mark the `@RequestBody` parameter with `@Valid`. A failure throws `MethodArgumentNotValidException`, which Spring MVC turns into 400 before the method runs. In Spring Boot this needs `spring-boot-starter-validation` on the classpath.
+
+### @PathVariable vs @RequestParam?
+
+`@PathVariable` reads a segment of the path that identifies the resource, like PAY101. `@RequestParam` reads a query parameter that filters, sorts or pages, like `?status=SUCCESS`. Both are required by default.
 
 ### @Valid vs @Validated?
 
-@Valid is the Jakarta annotation: validate this object, and nested objects whose fields also carry @Valid. @Validated is Spring's: it can name validation groups, and on a class it turns on method validation through a proxy.
+`@Valid` is the Jakarta annotation: validate this object, and nested objects whose fields also carry `@Valid`. `@Validated` is Spring's: it can name validation groups, for example different rules for create and update, and on a service class it turns on method validation through a proxy.
+
+### If the client already validates, why validate on the server?
+
+Client checks are for user experience. Anyone can skip them by calling the API directly, so only server checks protect the data. OWASP treats server-side validation as the real control.

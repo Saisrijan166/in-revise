@@ -5,24 +5,43 @@ title: HTTPS and TLS for APIs
 topic: security
 level: beginner
 heat: 2
-hook: "HTTPS is HTTP inside TLS: the traffic is encrypted, tamper-proof and sent to a server that proved who it is."
+hook: "HTTPS is HTTP sent inside a TLS connection: nobody on the network can read or change the traffic, and the client knows it reached the real server."
 points:
-  - { k: "TLS gives", v: "encryption, integrity and server authentication" }
-  - { k: "Versions", v: "TLS 1.3 (RFC 9846, 2026); 1.0 and 1.1 deprecated (RFC 8996)", kind: default }
-  - { k: "HSTS", v: "Strict-Transport-Security: browsers use HTTPS only" }
-  - { k: "mTLS", v: "the client shows a certificate too; common between services" }
-  - { k: "Termination", v: "often at the load balancer, which decrypts and forwards" }
+  - { k: "TLS gives", v: "encryption (nobody can read), integrity (nobody can change) and server authentication (the real server)" }
+  - { k: "Versions", v: "TLS 1.3 (RFC 9846, 2026) preferred; TLS 1.0 and 1.1 are deprecated (RFC 8996)", kind: default }
+  - { k: "Certificate", v: "the client checks that a trusted authority signed it, that it has not expired, and that it names the host" }
+  - { k: "mTLS", v: "the client also shows a certificate, so the server knows which service is calling" }
+  - { k: "Termination", v: "the load balancer often decrypts; behind it, traffic is plain unless re-encrypted", kind: minus }
 trap:
   wrong: "We use HTTPS, so the payment data is secure."
   right: "TLS protects data on the wire only. You still need authentication, authorisation, encryption at rest and safe token handling."
-sayIt: "Every API endpoint is HTTPS only, with TLS 1.3 preferred and 1.0 and 1.1 disabled. TLS often ends at the load balancer; between services we can use mTLS. HTTPS protects transit, not the data at rest."
+  why: "The padlock icon and the word 'secure' suggest the whole system is protected, not only the connection."
+sayIt: "Every API endpoint is HTTPS only, with TLS 1.3 preferred and 1.0 and 1.1 disabled. TLS often ends at the load balancer; between services we can use mTLS. HTTPS protects data in transit, not data at rest or a stolen token."
+cheat:
+  idea: "HTTPS is HTTP inside TLS. TLS encrypts the traffic, detects any change, and the server's certificate proves the client reached the real server."
+  remember: "TLS protects data in transit only. Prefer TLS 1.3, disable 1.0 and 1.1, and send credentials only over HTTPS."
+buildsOn: [http-request-response, authentication-methods]
+scenarios:
+  - q: "A developer calls the payment API with curl -k to get past a certificate error. Why is that dangerous if it reaches production?"
+    a: "-k skips certificate verification, so the client no longer checks that it is talking to the real api.shop.example. An attacker in the middle could present any certificate, read the bearer token and change the request. Fix the certificate or the trust store instead."
+  - q: "TLS ends at the load balancer, which forwards to the payment services over plain HTTP inside the network. What risk remains, and what are the options?"
+    a: "Anyone who gets into the internal network can read tokens and card data between the load balancer and the services. Re-encrypt from the load balancer to the services, or use mTLS between services so both sides also prove who they are."
 confusedWith: []
 tags: [https, tls, hsts, mtls, certificates]
 visual: flow
 sources:
   - title: "RFC 9846 TLS 1.3 (July 2026, obsoletes RFC 8446)"
     url: "https://www.rfc-editor.org/rfc/rfc9846"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 8996 Deprecating TLS 1.0 and TLS 1.1"
+    url: "https://www.rfc-editor.org/rfc/rfc8996"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 7568 Deprecating Secure Sockets Layer Version 3.0"
+    url: "https://www.rfc-editor.org/rfc/rfc7568"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 6797 HTTP Strict Transport Security (HSTS)"
+    url: "https://www.rfc-editor.org/rfc/rfc6797"
+    verifiedOn: "2026-10-21"
   - title: "Transport Layer Security Cheat Sheet (OWASP)"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html"
     verifiedOn: "2026-10-20"
@@ -32,11 +51,18 @@ sources:
   - title: "HTTPS listeners for your Application Load Balancer (AWS docs)"
     url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-https-listener.html"
     verifiedOn: "2026-10-20"
+  - title: "curl man page: -k, --insecure"
+    url: "https://curl.se/docs/manpage.html#-k"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+TLS (Transport Layer Security) is a protocol that wraps a network connection in encryption. HTTPS is ordinary HTTP sent over a TLS connection, which is why the URL starts with `https://`. Before any request is sent, the server proves who it is with a certificate: a file, signed by a certificate authority that operating systems and browsers trust, that ties the server's name to a key only that server holds.
 
 ## Why it exists
 
-Plain HTTP sends tokens, passwords and card details as readable text that anyone on the network can copy or change. TLS closes that gap.
+On plain HTTP every byte, including the `Authorization` header, travels as readable text through Wi-Fi routers, internet providers and proxies. Anyone on that path could copy a bearer token or a Basic password and reuse it, or change ₹500 to ₹5,000. TLS encrypts the traffic, detects any change, and lets the client check it is talking to `api.shop.example` and not an impostor.
 
 ## How it works
 
@@ -48,19 +74,55 @@ Plain HTTP sends tokens, passwords and card details as readable text that anyone
   S -- "HTTPS or mTLS" --> G[Payment provider]`}
 />
 
-- Basic auth, API keys and bearer tokens are only safe inside TLS ([authentication methods](card:authentication-methods)).
-- HSTS is for browsers; API clients should simply refuse plain `http://` URLs.
+1. The client opens a connection and offers the TLS versions and ciphers (encryption methods) it supports; the server picks one, ideally TLS 1.3.
+2. The server sends its certificate. The client checks that a trusted certificate authority signed it, that it has not expired, and that it names the host in the URL. If any check fails, the client stops before sending the request.
+3. Both sides agree on fresh session keys. Every HTTP request and response after that is encrypted and checked for changes.
+4. In production TLS often ends at the load balancer, which holds the certificate, decrypts, and forwards to the service, either re-encrypted or over mTLS (mutual TLS, where the client shows a certificate too).
+
+So the key is: TLS protects data while it moves, not where it is stored.
+
+## Example
+
+This real run connects to a public API and prints what curl checked during the TLS handshake.
+
+```bash
+curl -sv -o /dev/null https://api.github.com/ 2>&1 | grep -E "SSL connection|subject:|issuer:|verify ok"
+```
+
+```text output
+* SSL connection using TLSv1.3 / TLS_AES_128_GCM_SHA256 / X25519 / id-ecPublicKey
+*  subject: CN=*.github.com
+*  issuer: C=GB; O=Sectigo Limited; CN=Sectigo Public Server Authentication CA DV E36
+*  SSL certificate verify ok.
+```
+
+What to notice:
+
+- `TLSv1.3` is the negotiated version, and `TLS_AES_128_GCM_SHA256` is the cipher that encrypts the traffic and detects changes.
+- `subject: CN=*.github.com` is the name in the certificate. It matches the host `api.github.com`, so curl knows it reached the real server. The `issuer` is the certificate authority that vouched for it.
+- `verify ok` means every certificate check passed. With a wrong host name or an expired certificate, curl stops with an error instead. The `-k` flag skips these checks and must never be used in production.
+
+## Rules and defaults
+
+- **Versions:** TLS 1.3 is RFC 9846 (July 2026), which replaced RFC 8446. TLS 1.0 and 1.1 are deprecated by RFC 8996 (March 2021); disable them.
+- **HSTS:** the `Strict-Transport-Security: max-age=<seconds>` response header makes browsers use only HTTPS for that host for that many seconds (RFC 6797). It helps browser apps; API clients should be configured with `https://` URLs and refuse plain `http://`.
+- **Termination:** when the load balancer decrypts, traffic behind it is plain unless you re-encrypt it or use mTLS.
+- **Not covered by TLS:** data at rest in the database, a token stolen from a device or a log, and bugs in your authorisation.
+
+## Not to be confused with
+
+SSL (Secure Sockets Layer) is the older protocol that TLS replaced. SSL 3.0 must not be used (RFC 7568), yet people still say "SSL certificate" for what is now a TLS certificate. Rule: say TLS; SSL is only the old name.
 
 ## Interview Qs
 
 ### What does TLS protect, and what does it not?
 
-It protects data in transit: nobody on the path can read or alter it, and the client knows it reached the real server. It does not protect stored data, a stolen token, or a bug in your authorisation.
+It protects data in transit: nobody on the path can read or change it, and the client knows it reached the real server. It does not protect stored data, a token stolen from a device, or a bug in your authorisation.
 
 ### What is mTLS and when do you use it?
 
-Mutual TLS: both sides present certificates, so the server also knows which client is calling. Each microservice can then prove who it is to the others, so it suits service-to-service calls.
+Mutual TLS: both sides present certificates, so the server also knows which client is calling. Each microservice can then prove its identity to the others without passwords, so mTLS suits service-to-service calls inside a system.
 
 ### What is TLS termination?
 
-The load balancer holds the certificate and decrypts traffic, so app servers skip that work. The trade-off: traffic behind it is plain unless you re-encrypt it.
+The load balancer holds the certificate and decrypts incoming traffic, so the app servers skip that work and certificates are managed in one place. The trade-off: traffic behind it is plain unless you re-encrypt it or use mTLS.

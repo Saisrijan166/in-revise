@@ -5,16 +5,28 @@ title: API Testing Strategy
 topic: docs
 level: intermediate
 heat: 2
-hook: "Test each layer for what only it can catch: rules in unit tests, wiring in integration tests, agreements in contract tests."
+hook: "Test each promise of the API at the cheapest level that can catch its bug: rules in unit tests, wiring in integration tests, agreements between teams in contract tests."
 points:
-  - { k: "Pyramid", v: "many unit tests, fewer integration tests, very few end-to-end" }
-  - { k: "Test double", v: "a stand-in for a real dependency; Mockito builds them in Java" }
-  - { k: "Contract test", v: "consumer-driven ones check only what consumers really use" }
-  - { k: "Newman", v: "no longer maintained; run collections with the Postman CLI", kind: minus }
+  - { k: "Test pyramid", v: "many fast unit tests, fewer integration tests, and only a few slow end-to-end tests" }
+  - { k: "Test double", v: "an object that stands in for a real dependency in a test, such as a fake payment provider" }
+  - { k: "Stub vs mock", v: "a stub returns canned answers; a mock also fails the test if the expected calls did not happen" }
+  - { k: "Contract test", v: "checks consumer and provider separately against one shared contract, so they need not be deployed together", kind: plus }
+  - { k: "Postman and Newman", v: "Postman sends and saves requests; Newman, its old CLI runner, is no longer maintained: use the Postman CLI", kind: minus }
 trap:
   wrong: "All unit tests pass with mocks, so the API works."
   right: "Mocks hide JSON, query and wiring bugs. Integration tests with a real database and HTTP layer catch those."
-sayIt: "I keep many fast unit tests with Mockito, integration tests against a real database, and Pact or Spring Cloud Contract between services. For POST /api/payments I test 201, 400, 401, 403, a duplicate key and a provider timeout."
+  why: "A green unit suite feels like proof, but a mock answers exactly what the test author expected, so a mismatch with the real database or JSON never shows."
+sayIt: "I keep many fast unit tests with Mockito, integration tests against a real database, and Pact or Spring Cloud Contract between services. For POST /api/payments I test 201, 400 or 422, 401, 403, a duplicate key and a provider timeout."
+cheat:
+  idea: "An API testing strategy decides which test checks which promise: unit tests for rules, integration tests for database and HTTP wiring, contract tests for what other teams use."
+  flow: "Many unit → fewer integration → few end-to-end"
+  remember: "Mocks answer what you told them; only a real database and HTTP layer prove the SQL and JSON."
+buildsOn: [status-codes, idempotency-keys, spring-api-testing]
+scenarios:
+  - q: "Every unit test mocks PaymentRepository and passes. In production, POST /api/payments fails with a 500 because a column name in the SQL is wrong. Which test would have caught it?"
+    a: "An integration test that runs the repository against a real database of the same kind, for example in a Docker container. The mock never ran the SQL, so it could not notice the wrong column."
+  - q: "The mobile app reads the field status. The backend team renames it to state, and both teams' own test suites stay green. What would have caught the break?"
+    a: "A consumer-driven contract test. The mobile app's contract records that it reads status; when the provider runs the contract against the renamed API, verification fails before the change is released."
 confusedWith: [webmvctest-vs-springboottest]
 tags: [testing, contract-testing, mockito, pact]
 visual: table
@@ -31,44 +43,70 @@ sources:
   - title: "Introducing Spring Cloud Contract (Spring docs)"
     url: "https://docs.spring.io/spring-cloud-contract/reference/getting-started/introducing-spring-cloud-contract.html"
     verifiedOn: "2026-10-20"
-  - title: "Run collections using Newman (Postman docs, v12)"
+  - title: "Run collections using Newman: Newman is no longer maintained (Postman docs, v12)"
     url: "https://learning.postman.com/docs/collections/using-newman-cli/command-line-integration-with-newman/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+An API testing strategy is the plan for which kinds of tests you write for an API and what each one checks. A unit test checks one class on its own, with its dependencies replaced by a [test double](card:test-double), a stand-in object. An integration test runs your code with real parts, such as the database and the HTTP layer. A contract test checks that the API and the clients calling it agree on requests and responses. An end-to-end test runs the whole deployed system.
 
 ## Why it exists
 
-No single kind of test catches everything. Mocks hide wiring bugs, and full end-to-end runs are slow and flaky. Each level catches one class of bug cheaply.
+With only end-to-end tests, the suite is slow and often fails for reasons unrelated to your change, such as a network blip, and a failure does not point to the broken line. With only unit tests and mocks, a wrong JSON field name, a broken SQL query or a missing security rule still passes, because the mock never runs them. Each level catches one kind of bug cheaply, so you need a mix.
 
 ## How it works
 
 <Compare id="unit-vs-integration-vs-contract-test" />
 
-- A [test double](card:test-double) is a stub, mock or fake standing in for a real dependency, such as the payment provider.
-- The Spring annotations for each level live in [Testing Spring REST Controllers](card:spring-api-testing).
-- Push each check as low as it can go; keep end-to-end tests to a few key journeys.
+1. List the promises the endpoint makes: its status codes, its error body, who may call it, what happens on a repeated request, and what happens when a dependency fails.
+2. Test each business rule, such as "the amount must be positive", in a fast unit test of the class that owns it.
+3. Test the HTTP contract of the controller, meaning status codes, JSON fields and 401 or 403, with a web-layer test; the Spring annotations for this are in [Testing Spring REST Controllers](card:spring-api-testing).
+4. Run integration tests against a real database of the same kind, so queries and the unique constraint on the idempotency key really execute.
+5. Where another team calls your API, add contract tests, and keep end-to-end tests for a few journeys, such as "pay and see SUCCESS".
+
+So the key is: push each check down to the lowest level that can still catch its bug.
 
 ## Example
 
-| Case for `POST /api/payments` | Expect | Rule lives in |
+The six cases that prove `POST /api/payments`, with the level that tests each one:
+
+| Case | Expect | Test level |
 |---|---|---|
-| Valid ₹500, token, new key | 201, Location, status PENDING | [Status codes](card:status-codes) |
-| Amount -500 | 400 or 422 with a problem body | [Error responses](card:error-responses) |
-| No `Authorization` header | 401 | [401 vs 403](compare:401-vs-403) |
-| Token of another customer | 403 | [OWASP API Top 10](card:owasp-api-security) |
-| Same `Idempotency-Key` twice | Same response, one charge | [Idempotency keys](card:idempotency-keys) |
-| Provider times out | Stays recoverable, never charged twice | [Unknown outcomes](card:unknown-outcomes) |
+| Valid ₹500, valid token, new key | 201, `Location` header, status PENDING | Web layer, then integration |
+| Amount -500 | 400 or 422 with a [problem details](card:error-responses) body | Unit (rule) and web layer |
+| No `Authorization` header | 401 | Web layer with security on |
+| Token of another customer | 403 | Web layer with security on |
+| Same `Idempotency-Key` sent twice | Same response, one charge | Integration (real unique constraint) |
+| Provider times out | Payment stays recoverable, never charged twice | Unit with a provider stub that times out |
+
+What to notice:
+
+- The 401 and 403 rows need the security rules switched on in the test. A web-layer test that disables security passes even if any customer can read any payment.
+- The duplicate-key row needs a real database, because the protection is the unique constraint from [idempotency keys](card:idempotency-keys); a mocked repository would happily save twice.
+- The timeout row uses a stub that never answers, so you can check the [unknown outcome](card:unknown-outcomes) handling without a real provider.
+
+## Rules and defaults
+
+- **Kinds of test double:** dummy, fake, stub, spy and mock; Mockito builds stubs, spies and mocks in Java.
+- **Contract test tools:** Pact is consumer-driven: the consumer's tests write a contract file, and the provider replays it. Spring Cloud Contract writes contracts in a DSL, such as Groovy or YAML, and generates provider tests and WireMock stubs.
+- **Postman:** good for exploring an API by hand and saving requests as collections. To run collections in CI, use the Postman CLI; Newman is no longer maintained and does not support the collection v3 format of Postman v12.
+
+## Not to be confused with
+
+A testing strategy decides which level checks which promise. `@WebMvcTest` and `@SpringBootTest` are only the Spring tools that run two of those levels, the web layer and the full application, as [Testing Spring REST Controllers](card:spring-api-testing) showed. Rule: the strategy says what to test where; the annotations say how Spring runs it.
 
 ## Interview Qs
 
 ### What would you test for a payment endpoint?
 
-The happy path (201), bad input (400 or 422), no token (401), another customer's token (403), a repeated Idempotency-Key that must not charge twice, and a provider timeout that leaves the payment recoverable.
+The happy path (201 with a `Location`), bad input (400 or 422 with a problem body), no token (401), another customer's token (403), a repeated `Idempotency-Key` that must not charge twice, and a provider timeout that leaves the payment recoverable instead of failed or charged twice.
 
 ### What is the difference between a mock and a stub?
 
-A stub returns canned answers. A mock is also set up with expected calls and fails the test if they do not happen. Both are test doubles.
+A stub returns canned answers so the code under test can run. A mock is also set up with the calls it expects, and the test fails if they do not happen. Both are test doubles; Mockito can build either.
 
 ### Why contract tests if we already have integration tests?
 
-Integration tests against a fake only prove you can parse the fake. A contract test checks the real provider against what consumers need, without deploying every service together.
+An integration test against a fake of another service only proves you can parse the fake. A contract test checks the real provider against what each consumer actually uses, without deploying every service together, so a breaking change is caught before release.

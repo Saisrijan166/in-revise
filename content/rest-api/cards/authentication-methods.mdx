@@ -5,17 +5,28 @@ title: API Authentication Methods
 topic: security
 level: beginner
 heat: 3
-hook: "Authentication asks who you are; authorisation asks what you may do. Check both on every request, never just at login."
+hook: "Every API request must prove who sent it. The client puts a credential, such as a password, an API key or a token, in the Authorization header, and the server checks it."
 points:
-  - { k: "Basic auth", v: "Base64 of user:password: encoding, not encryption", kind: minus }
-  - { k: "API key", v: "identifies the calling app, not a person" }
-  - { k: "Bearer token", v: "whoever holds it can use it, so HTTPS only" }
-  - { k: "Session cookie", v: "server keeps the session; the browser sends its ID" }
-  - { k: "Secrets", v: "in a secret manager, never in code, Git or the frontend", kind: minus }
+  - { k: "Credential", v: "the proof a request carries: a password, an API key or a token, in the Authorization header" }
+  - { k: "Basic auth", v: "sends user:password in Base64 on every call; anyone can decode it, so only over HTTPS", kind: minus }
+  - { k: "API key", v: "a long-lived secret that identifies the calling app or project, not the person using it" }
+  - { k: "Bearer token", v: "a short-lived token from a login server; whoever holds it can use it, so HTTPS only" }
+  - { k: "401 then 403", v: "no valid credential gets 401; a known caller without permission gets 403" }
+  - { k: "Secrets", v: "keys and client secrets stay in a server-side secret manager, never in code, Git or the frontend", kind: minus }
 trap:
   wrong: "The user logged in, so they can see any payment they ask for."
-  right: "Login proves identity only. Each request must still check the caller may access that object, such as PAY101."
-sayIt: "Authentication proves who is calling, usually with a bearer token; authorisation then checks scopes and ownership for every request. Failing the first is 401, failing the second is 403."
+  right: "Login proves identity only. Every request must still check that this caller may access the object, such as PAY101."
+  why: "Many login tutorials stop once the token is valid, so a working login feels like the whole security job."
+sayIt: "Authentication proves who is calling on every request, usually with a bearer token in the Authorization header over HTTPS. Authorisation then checks scopes and ownership. No valid credential is 401; a known caller without the right is 403."
+cheat:
+  idea: "Authentication checks who is calling. Each request carries a credential, such as Basic user:password, an API key or a bearer token, in the Authorization header."
+  remember: "Authentication first (401 if it fails), then authorisation for each action and object (403). Credentials never go in the URL."
+buildsOn: [statelessness, headers-content-negotiation, status-codes]
+scenarios:
+  - q: "A partner calls GET /api/payments?api_key=abc123. What is wrong, and how do you fix it?"
+    a: "The key sits in the URL, and URLs are written to server, proxy and browser logs, so the key leaks. Send it in a header instead, such as Authorization or X-API-Key, and only over HTTPS."
+  - q: "customer-42 has a valid token and calls GET /api/payments/PAY101, which belongs to another customer. Should the API return 401?"
+    a: "No. The token is valid, so authentication passed and 401 would be wrong. Authorisation fails, so the answer is 403 Forbidden, or 404 Not Found if you do not want to reveal that PAY101 exists. RFC 9110 allows both."
 confusedWith: [authentication-vs-authorization, jwt-vs-session-cookie, 401-vs-403]
 tags: [authentication, authorisation, api-key, bearer-token, basic-auth]
 visual: table
@@ -23,8 +34,11 @@ sources:
   - title: "RFC 7617 The 'Basic' HTTP Authentication Scheme"
     url: "https://www.rfc-editor.org/rfc/rfc7617"
     verifiedOn: "2026-10-20"
-  - title: "RFC 6750 OAuth 2.0 Bearer Token Usage"
+  - title: "RFC 6750 OAuth 2.0 Bearer Token Usage: header, query parameter, error codes, TLS"
     url: "https://www.rfc-editor.org/rfc/rfc6750"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 9110 HTTP Semantics: 401 Unauthorized and 403 Forbidden"
+    url: "https://www.rfc-editor.org/rfc/rfc9110#section-15.5.2"
     verifiedOn: "2026-10-20"
   - title: "API keys overview (Google Cloud authentication docs)"
     url: "https://cloud.google.com/docs/authentication/api-keys"
@@ -34,39 +48,73 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Authentication is the API checking who is calling. The caller sends a credential, a piece of proof, with each request: a password, an API key (a long secret string a provider gives to an app) or a bearer token (a short-lived pass issued after login). The server checks it before doing any work. Authorisation comes next and decides what this known caller may do, such as reading payment PAY101.
+
 ## Why it exists
 
-A REST API is stateless, so every request must carry its own proof of who sent it. The server then decides what that caller may do.
+A REST API is [stateless](card:statelessness): the server remembers nothing between requests, so it cannot rely on "this user logged in earlier". Without a credential on each request, anyone who knows the URL could create a ₹500 payment or read someone else's. Sending proof with every request lets any server instance check the caller on its own.
 
 ## How it works
 
 <Compare id="basic-vs-api-key-vs-bearer-token" />
 
-- Credentials go in the `Authorization` header, not the URL: URLs end up in logs (RFC 6750).
-- Bearer tokens usually come from [OAuth 2.0](card:oauth2-and-oidc) and are often a [JWT](card:jwt).
-- All of these need [HTTPS](card:https-tls); over plain HTTP anyone on the path can copy them.
+1. The client gets a credential once: a password it already knows, an API key from the provider's dashboard, or a token from a login server.
+2. On every request it sends the credential in a request header, usually `Authorization`, never in the URL, because URLs are written to server and proxy logs.
+3. The server checks the credential. If it is missing, wrong or expired, the server answers [401 Unauthorized](card:status-codes) with a `WWW-Authenticate` header naming the scheme to use.
+4. If the credential is valid, the server knows the caller and moves on to authorisation: may this caller do this action on this object? If not, it answers 403 Forbidden.
+
+So the key is: authentication on every request, then authorisation for every action and object.
 
 ## Example
 
-```text
-POST /api/payments HTTP/1.1
-Host: api.shop.example
-Authorization: Bearer eyJhbGciOiJSUzI1NiJ9...
-Content-Type: application/json
+The payment team's internal admin script uses Basic auth. These two commands show what the `Authorization: Basic` value really is.
 
-{"amount": 500, "currency": "INR", "method": "UPI"}
+```bash
+echo -n 'shop-app:s3cret' | base64        # the client sends "Basic <this>"
+echo 'c2hvcC1hcHA6czNjcmV0' | base64 -d   # anyone who sees the header can undo it
 ```
+
+```text output
+c2hvcC1hcHA6czNjcmV0
+shop-app:s3cret
+```
+
+What to notice:
+
+- The request header becomes `Authorization: Basic c2hvcC1hcHA6czNjcmV0`. Base64 is an encoding for safe transport, not encryption: no key is needed to reverse it.
+- The second command recovers the password with no secret at all, so Basic auth is safe only inside an encrypted connection, which you will see in [HTTPS and TLS](card:https-tls).
+- The same password travels on every request, so one leaked log line exposes it until someone changes it. A bearer token in the same header would at least expire.
+
+## Rules and defaults
+
+- **Where it goes:** the `Authorization` header (`Basic …` or `Bearer …`); API keys often use a vendor header such as `X-API-Key`. RFC 6750 says a token in the URL query SHOULD NOT be used, because the URL is likely to be logged.
+- **HTTPS only:** RFC 6750 makes TLS mandatory for bearer tokens, and RFC 7617 says Basic auth is not secure without it.
+- **Failure responses (RFC 6750):** an expired or bad token gets 401 with `WWW-Authenticate: Bearer error="invalid_token"`; a valid token without the needed scope gets 403 with `error="insufficient_scope"`.
+- **Secrets:** keep API keys and client secrets in a secret manager or server-side configuration. Anything shipped in a browser or mobile app can be extracted.
+
+## Not to be confused with
+
+Authentication answers "who are you?" by checking the credential. Authorisation answers "what may you do?" by checking roles, scopes and ownership for this action. Rule: 401 means "we do not know who you are"; 403 means "we know, and the answer is no".
+
+A session cookie holds only a random ID, and the server keeps the login in its session store. A bearer token carries the proof itself, often as a [JWT](card:jwt), the next concept.
+
+## Common mistakes
+
+- **"An API key tells us which user is calling."** It identifies the calling app or project. Use it for quotas and billing; user data needs a user token.
+- **"The key is safe in the frontend bundle."** Anyone can read a web or mobile app's code. Keep the key on your server and let the server call the provider.
 
 ## Interview Qs
 
-### Authentication vs authorisation?
+### What is the difference between authentication and authorisation?
 
-Authentication proves identity: is this token valid? Authorisation checks rights: may this customer read PAY101? Authentication comes first; authorisation runs on every action. See [401 vs 403](compare:401-vs-403).
+Authentication proves identity: is this token valid, and whose is it? Authorisation checks rights: may this customer read PAY101 or refund it? Authentication comes first; authorisation runs for every action. Failing authentication gives 401, failing authorisation gives 403.
 
 ### Is an API key enough to secure an API?
 
-Not for user data. A key ties a call to an app for quotas and billing; it does not prove which person is calling, and leaked keys work until revoked. Use OAuth 2.0 tokens for user access.
+Not for user data. A key ties a call to an app for quotas and billing; it does not prove which person is calling, and a leaked key works until someone revokes it. Use OAuth 2.0 tokens for user access, and keep keys for identifying partner apps.
 
-### Is Basic auth secure?
+### Why should a token never go in the URL?
 
-Only over TLS. Base64 is reversible, so the password travels on every request in readable form. RFC 7617 itself says the scheme is not secure on its own.
+URLs are stored in server access logs, proxy logs and browser history, so a token in the query string leaks to everyone who reads them. RFC 6750 says the query-parameter method SHOULD NOT be used; send the token in the `Authorization` header instead.

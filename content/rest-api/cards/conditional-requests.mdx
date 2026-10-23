@@ -5,24 +5,34 @@ title: Conditional Requests and Optimistic Concurrency
 topic: http
 level: intermediate
 heat: 2
-hook: "Send the ETag back in If-Match. If the resource changed since you read it, the server refuses with 412 instead of overwriting."
+hook: "Send back the ETag you read in If-Match. If the resource changed since then, the server refuses with 412 instead of overwriting someone else's change."
 points:
-  - { k: "Lost update", v: "two clients read, both write: the last write silently wins", kind: minus }
-  - { k: "If-Match", v: "apply the write only if the current ETag still matches" }
-  - { k: "412", v: "Precondition Failed: the check failed and nothing changed" }
-  - { k: "428", v: "Precondition Required (RFC 6585): the server insists on If-Match" }
-  - { k: "Strong ETags only", v: "If-Match uses strong comparison: a W/ tag never matches" }
+  - { k: "Lost update", v: "two clients read the same version and both write; the second write silently erases the first", kind: minus }
+  - { k: "If-Match", v: "the server applies the write only if the resource's current ETag equals the one the client sent" }
+  - { k: "412", v: "Precondition Failed: the version changed, so nothing was written; read again, then retry" }
+  - { k: "428 (RFC 6585)", v: "Precondition Required: the server refuses writes that do not send If-Match" }
+  - { k: "Strong ETags only", v: "If-Match uses strong comparison, so a weak ETag such as W/\"v3\" never matches" }
 trap:
-  wrong: "Optimistic locking keeps the row locked while the user edits."
-  right: "No lock is held. Each write carries the version it read; a mismatch rejects the write and the client reads again."
-sayIt: "To stop lost updates I return an ETag on GET and require If-Match on PUT and PATCH. If the resource changed meanwhile, the server answers 412 and the client re-reads and retries."
+  wrong: "Optimistic locking keeps the payment locked while the user edits it."
+  right: "No lock is held. Each write carries the version it read; if that version is no longer current, the write is rejected and the client reads again."
+  why: "Locking is usually taught as holding a lock, so \"optimistic locking\" sounds like a gentler lock held during the edit."
+sayIt: "To stop lost updates I return an ETag on GET and require If-Match on PUT and PATCH. If the resource changed in between, the server answers 412 and writes nothing, and the client re-reads and retries. No lock is held while users edit."
+cheat:
+  idea: "A conditional request runs only if the resource is still at the version the client read. The client sends that version's ETag in If-Match, and the server refuses with 412 if it changed."
+  remember: "412 = If-Match failed and nothing was written; 428 = the server demands If-Match."
+buildsOn: [http-methods, http-caching]
+scenarios:
+  - q: "A client sends PATCH /api/payments/PAY101 with If-Match: W/\"v3\", and the server's current ETag is W/\"v3\". What happens?"
+    a: "The server answers 412. If-Match uses strong comparison, and a weak ETag never matches strongly, even with the same value. Resources that clients update need strong ETags."
+  - q: "Ravi's PATCH with If-Match: \"v3\" succeeded, but the reply was lost, so his app sends it again. The ETag is now \"v4\". Must the server answer 412?"
+    a: "Not necessarily. RFC 9110 lets the server answer 2xx when the requested change already appears to be applied, for example when the note already has Ravi's text. Otherwise it sends 412, and Ravi's app re-reads and sees that its change is there."
 confusedWith: []
 tags: [etag, if-match, optimistic-locking, concurrency]
 visual: flow
 sources:
   - title: "RFC 9110 HTTP Semantics, 13.1.1 If-Match, 8.8.3 ETag, 15.5.13 412"
     url: "https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.1"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "RFC 6585 Additional HTTP Status Codes, 3. 428 Precondition Required"
     url: "https://www.rfc-editor.org/rfc/rfc6585.html#section-3"
     verifiedOn: "2026-10-20"
@@ -31,24 +41,42 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A conditional request is a request the server carries out only if a condition about the resource's current version is true. For a write, the client sends the [ETag](card:http-caching) it read in the `If-Match` header, meaning "apply this change only if the payment is still at this version". This is called optimistic concurrency: nobody holds a lock while a user edits, and a clash is detected only when the write arrives.
+
 ## Why it exists
 
-Two support agents edit the note on PAY101 at the same time. Without a check, the second save erases the first without anyone noticing.
+Two support agents, Asha and Ravi, open payment PAY101 at the same time to edit its note. Asha saves first; Ravi saves a minute later. Without a check, Ravi's save replaces the whole note, and Asha's change disappears without anyone noticing. This is the lost update problem. With `If-Match`, Ravi's save is refused because the payment changed after he read it, so he sees Asha's note before writing his own.
 
 ## How it works
 
-<Steps label="Two agents edit PAY101">
-  <Step title="Both read">Asha and Ravi GET PAY101 and receive `ETag: "v3"`.</Step>
-  <Step title="Asha saves">PATCH with `If-Match: "v3"` matches: 200, the ETag becomes `"v4"`.</Step>
-  <Step title="Ravi saves">PATCH with `If-Match: "v3"` no longer matches: 412, nothing changes.</Step>
-  <Step title="Ravi retries">He GETs `"v4"`, reapplies his edit and sends If-Match `"v4"`.</Step>
-</Steps>
+<Mermaid
+  alt="Asha and Ravi both GET PAY101 and receive ETag v3. Asha sends PATCH with If-Match v3; it matches, the server saves and the ETag becomes v4. Ravi sends PATCH with If-Match v3; it no longer matches, so the server replies 412 and changes nothing. Ravi reads again, gets v4, and sends his PATCH with If-Match v4."
+  chart={`sequenceDiagram
+  participant A as Asha
+  participant S as Server
+  participant R as Ravi
+  A->>S: GET PAY101
+  S-->>A: 200, ETag "v3"
+  R->>S: GET PAY101
+  S-->>R: 200, ETag "v3"
+  A->>S: PATCH, If-Match "v3"
+  S-->>A: 200, ETag "v4"
+  R->>S: PATCH, If-Match "v3"
+  S-->>R: 412, nothing changed`}
+/>
 
-- In JPA, a `@Version` column does the same check in the database; its value makes a good ETag.
-- If the same change already seems applied (a lost reply), the server may answer 2xx instead of 412.
-- ETags and 304 for reads: [HTTP caching](card:http-caching).
+1. Asha and Ravi both read PAY101 and receive `ETag: "v3"`.
+2. Asha sends her PATCH with `If-Match: "v3"`. It matches the current version, so the server saves it, and the ETag becomes `"v4"`.
+3. Ravi sends his PATCH with `If-Match: "v3"`. The server checks the condition before doing anything, finds `"v4"`, and answers 412 Precondition Failed without writing.
+4. Ravi's app reads PAY101 again, shows Asha's note, and sends his edit with `If-Match: "v4"`.
+
+So the version travels with the write, and the server compares it at the last moment.
 
 ## Example
+
+Ravi's refused write on the wire:
 
 ```text
 PATCH /api/payments/PAY101
@@ -60,12 +88,34 @@ Content-Type: application/merge-patch+json
 HTTP/1.1 412 Precondition Failed
 ```
 
+What to notice:
+
+- `If-Match: "v3"` is the version Ravi read. The server compares it with the current ETag before it applies the change.
+- 412 means nothing was written, so it is always safe for the client to re-read and try again.
+- Remove the `If-Match` line and the same PATCH succeeds, erasing Asha's note. A server that answers such writes with 428 Precondition Required forces every client to send the header.
+
+## Rules and defaults
+
+- **Strong comparison (RFC 9110):** `If-Match` must use it, so a weak ETag (`W/"v3"`) never matches.
+- **`If-Match: *`:** true only if the resource exists; useful to stop a PUT from creating a new one.
+- **Checked first:** the server evaluates `If-Match` before performing the method and must not perform it when the condition is false.
+- **Already applied:** if a failed condition is due to the same change having already succeeded, such as a lost reply, the server may answer 2xx instead of 412.
+- **In the database:** with JPA, Java's standard API for mapping objects to tables, a `@Version` column makes the same check on UPDATE; its value makes a good ETag.
+
+## Not to be confused with
+
+`If-Match` guards writes: it uses strong comparison, and a mismatch gives 412. `If-None-Match` serves reads in [caching](card:http-caching): it accepts weak ETags, and a match gives 304. Rule: If-Match = "write only if unchanged"; If-None-Match = "send the body only if changed".
+
 ## Interview Qs
+
+### How do you prevent lost updates in a REST API?
+
+Return an ETag with every GET and require `If-Match` on PUT and PATCH, answering 428 when it is missing. If the ETag no longer matches, reply 412 and write nothing; the client re-reads and retries. Inside the service, a JPA `@Version` column gives the same check in the database.
 
 ### 409 or 412 for a version clash?
 
-412 when a precondition header such as If-Match fails. 409 when the body itself conflicts with the current state, for example an old version number inside the JSON (RFC 9110 gives this example for PUT).
+412 when a precondition header such as `If-Match` fails. 409 when the body itself conflicts with the current state, for example when the JSON carries an old version number. RFC 9110 gives that second case as an example of 409 for PUT.
 
 ### Why must If-Match use a strong ETag?
 
-A weak ETag (W/"v3") only says two versions are equivalent, not identical. If-Match must block any change, so RFC 9110 requires strong comparison.
+A weak ETag (`W/"v3"`) only says two versions are equivalent for practical use, not byte-for-byte identical. If-Match must block a write after any change at all, so RFC 9110 requires strong comparison.

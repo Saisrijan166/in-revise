@@ -5,17 +5,27 @@ title: Rate Limiting and 429
 topic: security
 level: intermediate
 heat: 2
-hook: "Rate limiting caps how many requests each caller may send per time window; extra calls get 429 Too Many Requests."
+hook: "Rate limiting caps how many requests each caller may send in a time window. Calls over the limit get 429 Too Many Requests instead of being served."
 points:
-  - { k: "Why", v: "stop abuse and brute force, keep it fair, protect the database" }
-  - { k: "Key on", v: "user, API key or IP; RFC 6585 leaves the choice open" }
-  - { k: "Over the limit", v: "429 (RFC 6585), optionally with Retry-After", kind: default }
-  - { k: "Several servers", v: "one shared counter store (such as Redis) or the gateway" }
-  - { k: "Quota headers", v: "RateLimit fields are an IETF draft; X-RateLimit-* are vendor ones", kind: minus }
+  - { k: "Limit per caller", v: "count requests per user, API key or IP in a time window, such as 100 per minute per key" }
+  - { k: "Over the limit", v: "answer 429 Too Many Requests (RFC 6585), optionally with Retry-After saying how long to wait", kind: default }
+  - { k: "Token bucket", v: "tokens refill at a steady rate and each call spends one, so a short burst passes, then a steady rate", kind: plus }
+  - { k: "Many servers", v: "keep one shared count, in Redis or at the gateway; separate counters per server multiply the limit" }
+  - { k: "Quota headers", v: "RateLimit header fields are still an IETF draft; X-RateLimit-* headers are vendor conventions", kind: minus }
 trap:
   wrong: "Return 503 or 500 when a client sends too many requests."
-  right: "Return 429 Too Many Requests, ideally with Retry-After. 503 means the server itself is unavailable."
+  right: "Return 429 Too Many Requests, ideally with Retry-After. 503 means the server itself cannot serve anyone right now."
+  why: "Both 429 and 503 mean 'try later', and many servers answer every overload with a 5xx code."
 sayIt: "I limit each user or API key, usually with a token bucket at the gateway or a shared Redis counter. Over the limit the API returns 429 with Retry-After, and clients back off before retrying."
+cheat:
+  idea: "Rate limiting counts requests per caller, such as per API key, and refuses calls over the limit with 429 Too Many Requests, often with Retry-After."
+  remember: "With several servers, keep one shared count (Redis or the gateway). 429 means slow down; 503 means the server is down."
+buildsOn: [status-codes, authentication-methods]
+scenarios:
+  - q: "The payment API runs on ten servers, each with its own in-memory limit of 100 calls per minute per API key. How many calls can one key really make?"
+    a: "Up to 1,000 per minute, because the load balancer spreads the calls over ten separate counters. Keep the count in one shared store, such as Redis with an atomic increment and expiry, or enforce the limit at the gateway."
+  - q: "A merchant's script gets 429 with Retry-After: 30. What should it do?"
+    a: "Wait at least 30 seconds, then retry with backoff. Retrying at once only spends more of its quota, keeps it blocked, and adds load for everyone else."
 confusedWith: [502-vs-503-vs-504]
 tags: [rate-limiting, throttling, "429", token-bucket, retry-after]
 visual: table
@@ -23,6 +33,9 @@ sources:
   - title: "RFC 6585 Additional HTTP Status Codes: 429 Too Many Requests"
     url: "https://www.rfc-editor.org/rfc/rfc6585#section-4"
     verifiedOn: "2026-10-20"
+  - title: "RFC 9110 HTTP Semantics: Retry-After"
+    url: "https://www.rfc-editor.org/rfc/rfc9110#section-10.2.3"
+    verifiedOn: "2026-10-21"
   - title: "RateLimit header fields for HTTP (IETF draft-ietf-httpapi-ratelimit-headers-11)"
     url: "https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/"
     verifiedOn: "2026-10-20"
@@ -34,42 +47,87 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Rate limiting is the API counting requests per caller and refusing the ones over a set limit, for example 100 payment calls per minute per API key. The caller is identified by its user ID, [API key](card:authentication-methods) or IP address. A refused call gets the status 429 Too Many Requests (RFC 6585), often with a `Retry-After` header that says how many seconds to wait.
+
 ## Why it exists
 
-Without limits, one script can flood the API, guess passwords, or run up costs, and every other customer pays for it. OWASP lists this as [API4](card:owasp-api-security).
+Without a limit, one buggy retry loop or one attacker can send thousands of requests a second. The database slows down for every other merchant, a password-guessing script gets unlimited tries, and paid downstream calls, such as SMS messages, run up a bill. A limit per caller stops one client's traffic from hurting everyone else.
 
 ## How it works
 
 | Algorithm | How it counts | Watch out |
 |---|---|---|
-| Fixed window | Counter per clock minute | Spikes around the window edge |
-| Sliding window | Blends last and current window counts | An approximation, not exact |
+| Fixed window | One counter per clock minute | Up to twice the limit in a short span around the window edge |
+| Sliding window | Blends the last and current window counts | An approximation, not an exact count |
 | Token bucket | Tokens refill steadily; each call takes one | Allows short bursts by design |
-| Leaky bucket | Calls drain at a fixed rate | Bursts wait or are dropped |
+| Leaky bucket | Calls drain at a fixed rate | Bursts wait in a queue or are dropped |
 
-- Token bucket is the usual answer: Amazon API Gateway throttles with it.
-- What the client does after a 429 belongs to [retries and timeouts](card:retries-and-timeouts).
+1. A request arrives, usually at the API gateway, the single entry point in front of the services.
+2. The limiter finds the caller's key, such as the API key, and its counter in a shared store such as Redis, so every server sees the same count.
+3. It updates the counter in one atomic step, so two servers cannot both read 99 and let call 101 through, and compares it with the limit.
+4. Under the limit, the request goes on to the service. Over the limit, the limiter answers 429 at once, and the service never sees the call.
+5. A well-behaved client waits for `Retry-After` and retries with backoff, which you will see in [retries and timeouts](card:retries-and-timeouts).
 
 ## Example
 
-```text
-HTTP/1.1 429 Too Many Requests
-Retry-After: 30
-Content-Type: application/problem+json
+A token bucket with room for 3 tokens that refills 1 token per second. Five calls arrive at the same moment.
 
-{"title": "Too many payment attempts", "status": 429}
+```java
+class TokenBucket {
+    final int capacity; final double perSecond;
+    double tokens; long last = System.nanoTime();
+    TokenBucket(int capacity, double perSecond) { this.capacity = capacity; this.perSecond = perSecond; tokens = capacity; }
+    synchronized boolean tryTake() {
+        long now = System.nanoTime();
+        tokens = Math.min(capacity, tokens + (now - last) / 1e9 * perSecond); // refill for time passed
+        last = now;
+        if (tokens < 1) return false;                  // bucket empty: the API answers 429
+        tokens--;                                      // spend one token on this call
+        return true;
+    }
+}
+var bucket = new TokenBucket(3, 1);                    // burst of 3, then 1 per second
+for (int i = 1; i <= 5; i++) System.out.println("call " + i + ": " + (bucket.tryTake() ? 200 : 429));
 ```
+
+```text output
+call 1: 200
+call 2: 200
+call 3: 200
+call 4: 429
+call 5: 429
+```
+
+What to notice:
+
+- The bucket starts full, so the first three calls pass at once: the capacity is the allowed burst.
+- Calls 4 and 5 arrive microseconds later, when far less than one token has refilled, so they get 429. A client that waits one second gets one more call.
+- Remove the refill line and the bucket never fills again, so the caller stays blocked for ever.
+- This bucket lives in one JVM. With ten servers, each would have its own, which is why real limiters keep the state in Redis or at the gateway.
+
+## Rules and defaults
+
+- **Status:** 429 Too Many Requests (RFC 6585), which MAY include `Retry-After`. `Retry-After` holds either seconds or a date (RFC 9110).
+- **Who to count:** RFC 6585 leaves the choice open. Per user or API key is fairer than per IP, because many users behind one office network share an IP.
+- **Quota headers:** the `RateLimit` and `RateLimit-Policy` fields are an IETF draft, not an RFC. `X-RateLimit-*` headers are vendor conventions, so document whichever you send.
+- **Managed gateways:** Amazon API Gateway throttles with a token bucket and returns 429 when a limit is hit.
+
+## Not to be confused with
+
+429 says this caller sent too many requests and should slow down; the server is fine. 503 Service Unavailable says the server cannot serve anyone right now, for example during overload or maintenance. Rule: 429 = you, slow down; 503 = us, we are down.
 
 ## Interview Qs
 
 ### How do you rate limit across ten app servers?
 
-Keep the counter in one shared store, such as Redis with an atomic increment and expiry, or enforce it at the API gateway. Separate counters per server let a caller get up to ten times the limit.
-
-### Throttling vs rate limiting?
-
-Mostly the same idea and often used interchangeably: Amazon API Gateway calls its limits throttling and returns 429.
+Keep the counter in one shared store, such as Redis with an atomic increment and an expiry, or enforce the limit at the API gateway. Separate counters per server let a caller get up to ten times the limit, because the load balancer spreads its calls.
 
 ### Which algorithm would you pick?
 
-Token bucket: it allows a short burst, then holds a steady average rate. Cloudflare chose a sliding window because it needs only get and increment on a shared counter.
+Token bucket for most APIs: it allows a short burst, then holds a steady average rate, and Amazon API Gateway uses it. Cloudflare chose an approximate sliding window because it needs only a get and an increment on a shared counter.
+
+### Throttling vs rate limiting?
+
+Mostly the same idea, and the words are often used interchangeably. Amazon API Gateway, for example, calls its limits throttling and answers with 429 when they are hit.

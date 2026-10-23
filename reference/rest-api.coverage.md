@@ -1,5 +1,5 @@
 # Coverage: REST API
-Reference: reference/rest-api.md  ·  Last updated: 20-10-2026
+Reference: reference/rest-api.md  ·  Last updated: 21-10-2026
 
 Every reference item (key list: the numbered sections, plus each question, pattern and "X vs Y" row inside them) appears in exactly
 one of Mapped, Corrected or Dropped. A section whose parts went to different places has one row here (Corrected wins over
@@ -270,3 +270,208 @@ Independently verified on 20-10-2026.
 | Reference item | Reason |
 |---|---|
 | I1.CODE-e `System.out.println(response);` | Trivial; replaced by returning the parsed text |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass then checked about 1,370 claims and fixed 32, removing 2.
+
+### Unit basics
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| R1. API, client, server, HTTP, JSON definitions | http-request-response (What it is, points); what-is-rest (What it is, point "API") |
+| R1. Synchronous API | http-request-response (point, Interview Q "What does synchronous mean") |
+| R1. The POST /api/payments example and PENDING response | http-request-response (Example, What to notice: payment status vs HTTP status) |
+| R1. Endpoint = URL + method | resources-and-uris (Example: two endpoints on one URI) |
+| R1.1 REST vs REST API | what-is-rest ("Not to be confused with" section, trap) |
+| R4. Path vs query parameters, request body, PAY101 / includeRefunds | resources-and-uris (URI parts table, steps, scenario 2) |
+| R4. Authorization carries credentials | statelessness (What it is, steps: token in every request) |
+| R5. HATEOAS "not required in every practical REST API" | richardson-maturity-hateoas (trap, Rules "In practice", Interview Q "Why do most APIs stop at level 2?") |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Reference R5 implies HATEOAS is optional for REST | Fielding counts hypermedia as required; level 2 is common practice, not full REST (kept from draft, now with a "why" line) | https://roy.gbiv.com/untangled/2008/rest-apis-must-be-hypertext-driven ; https://learn.microsoft.com/en-us/azure/architecture/best-practices/api-design |
+| Draft point "Body length: Content-Length (or chunked)" was jargon-only | Rule rewritten: Content-Length gives the size in bytes; HTTP/1.1 can otherwise send the body in chunks | RFC 9112 6 |
+| No new reference errors found in R1/R4 parts for this unit | | |
+
+### Unit design
+
+**Added from the reference**
+
+| Reference item | Concept and place |
+|---|---|
+| R5 nouns, methods as verbs, plural names, careful nesting, consistent naming | url-design-rules (numbered steps, Example URL map, points) |
+| R5 pagination, filtering, sorting, `?page=0&size=20` example | pagination-filtering-sorting (steps, Example, Spring Data defaults in Rules) |
+| R5 version APIs (path or header), backward compatibility | api-versioning (What, Why, steps, breaking-change table); comparison uri-vs-header-vs-media-type-versioning (explain, example) |
+| R5 error response: stable code, useful message, no stack traces | error-responses (points, trap, Example, Common mistakes) |
+| R1 asynchronous processing, "returning a status or job ID" | long-running-operations (202 + Location + Retry-After; 201 vs 202 in Not to be confused with) |
+
+**Corrections (draft or reference)**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft pagination: none wrong; the page-shift example was made precise (the last rows of page 1 repeat on page 2) | Concept scenario and comparison example | PostgreSQL 18 docs 7.6 |
+
+**Facts added or re-verified (verifiedOn 2026-10-21)**
+
+- Spring Boot 4.1: `spring.data.web.pageable.max-page-size` = 2000; a larger size is cut with `Math.min` (checked in spring-data-commons 4.0.3 bytecode and the Boot 4.1.1 properties appendix).
+- PostgreSQL 18: LIMIT/OFFSET needs an ORDER BY with a unique order; skipped OFFSET rows are still computed.
+- Microsoft Azure guidelines: omit `nextLink` on the last page (never null); disallow `:` in ids when using `:action` URLs; kebab-case (preferred) or camelCase path segments; Google AIP-122 camelCase collection ids.
+- Spring Framework 7.0 API versioning: missing version → 400; unsupported version → 400; optional (latest used) or default version; supported versions detected from mappings; "2+" baseline; `StandardApiVersionDeprecationHandler` (Deprecation, Sunset, Link).
+- RFC 9745: deprecation does not change behaviour; `@<unix time>` value; Sunset must not be earlier than Deprecation.
+- RFC 9457: missing type = about:blank (title should be the status phrase); status is advisory and must match; unknown extensions are ignored; several problems of one type in one extension, different types → most relevant; adds a registry, multiple-problem guidance and non-dereferenceable type URIs.
+
+### Unit docs
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| R9 six test cases for POST /api/payments | api-testing-strategy Example table, now with the test level for each case and what each needs (security on, real unique constraint, timing-out stub) |
+| R9 mocking, unit, integration, contract | api-testing-strategy What it is, steps, points (stub vs mock), scenarios |
+| R9 Postman | api-testing-strategy Rules (Postman for exploring; Postman CLI in CI) |
+| R9 observability, distributed tracing (trace and span IDs) | observability-for-apis What it is, steps 1-5, Example notes on the traceparent parts |
+| C1 example architecture ("add only when it pays off") | payment-api-walkthrough Mermaid, trap, `trap.why`, final "So the key is" line |
+| C2.1-C2.10 the ten steps | payment-api-walkthrough Steps, rewritten as full sentences; C2.5 (Strategy, Adapter) moved to the Rules bullet "Provider code" (no cross-tech link) |
+| C2 failure scenario (timeout, do not charge again) | payment-api-walkthrough point "Timeout", Common mistake 1, Interview Q 2, scenario 2 (webhook after UNKNOWN) |
+| C2 "Redis locks alone are not sufficient" | still owned by unknown-outcomes; walkthrough only in scenario 3 ("where does Redis fit?") |
+| C3 rapid-fire REST rows | payment-api-walkthrough "Rules and defaults", now rule bullets linking their owners (statelessness, methods, 401 vs 403, 429, versioning). **Coverage file: the "picker table" became these bullets.** |
+| C4 REST and payments rules | payment-api-walkthrough hook (answer order), points, sayIt |
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| Draft Interview Q said SmartBear's donation was followed by "OpenAPI 3.0" as if 3.0 were the renamed 2.0 | The initiative renamed the spec OpenAPI; 3.0 followed in 2017 | https://www.openapis.org/faq |
+| Draft api-styles listed the comparison in `confusedWith` while embedding it (rule 3.3) | `confusedWith: []` | CLAUDE.md 3.3 |
+| Draft websockets text implied SSE passes all proxies | Removed (not confirmed) | n/a |
+No reference claim in these units was found wrong beyond the corrections already in the coverage file (R9 Swagger = OpenAPI).
+
+### Unit http
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| R2. The five-line URL example (GET, POST, PUT, PATCH, DELETE on payments) | http-methods (Example: each sent twice, and the effect) |
+| R2.1 Trap: PUT/PATCH do not guarantee validation, authorisation or transactions | http-methods (Common mistakes; the frontmatter trap is now the common "idempotent = same response" error) |
+| R2. POST not idempotent: duplicate payments | http-methods (Why, How it works step 5, Interview Q 3 linking idempotency-keys) |
+| R3. Scenario table: duplicate request conflicts with state → 409 | status-codes (scenario 2: refund a FAILED payment) |
+| R3. "A failed payment is not automatically 500" | status-codes (trap with why, Example with a FAILED payment read with 200) |
+| R3. 401 = authentication, 403 = permission | status-codes (scenario 1, Not to be confused with); comparison 401-vs-403 (explain, example) |
+| R4. Content-Type, Accept, Authorization, Location, Cookie, Cache-Control | headers-content-negotiation (points, Rules "Other common headers"); http-caching |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft status-codes point marked 401 as `kind: default` | It is a rule, not a default: `kind: key`, "must come with a WWW-Authenticate header" | RFC 9110 15.5.2 |
+| Draft "405 ... send Allow" | RFC 9110 15.5.6: the server MUST generate Allow in a 405 | RFC 9110 15.5.6 |
+| Draft http-methods trap (validation/authorisation) did not test the method concept itself | Trap is now "idempotent means same response" (DELETE 204 then 404); the reference trap kept as a Common mistake | RFC 9110 9.2.2 |
+
+### Unit playbook
+
+### Unit reliability
+
+**Added from the reference**
+
+| Reference item | Concept and place |
+|---|---|
+| R7 idempotency key, deduplication, exactly-once effect, `order-789-payment` example | idempotency-keys (What, Why, steps, Example) |
+| R7 retry, exponential backoff, jitter, timeout, circuit breaker | retries-and-timeouts (What, steps, Example); comparison retry-vs-circuit-breaker (explain, example) |
+| R7 "a timeout does not prove that a payment failed"; C2.11 failure scenario; C2 "Redis locks alone are not sufficient" | unknown-outcomes (hook, trap, state diagram, steps, scenarios, Interview Qs) |
+| R7 at-least-once delivery | webhooks (point, trap, Interview Q) |
+
+**Corrections (draft or reference)**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft retries-and-timeouts cited RFC 9110 for Retry-After on 429 | RFC 9110 defines Retry-After for 503 and 3xx; 429 and its Retry-After come from RFC 6585 | https://www.rfc-editor.org/rfc/rfc6585.html#section-4 |
+| Reference R7 "Timeout: maximum time a caller waits" (one limit) | Two limits: connect timeout applies only when a new connection is opened; request timeout covers waiting for the response (JDK HttpClient, Java 25) | https://docs.oracle.com/en/java/javase/25/docs/api/java.net.http/java/net/http/HttpClient.Builder.html |
+| Reference R7 "server should return the original result" (too simple, kept from earlier coverage) | Stripe saves a result only once the endpoint starts running; a request rejected by validation or a concurrent conflict saves nothing; a 500 is saved and replayed for that key | https://docs.stripe.com/api/idempotent_requests |
+| Draft unknown-outcomes: Stripe "after 24 hours, reconcile, never resend" | Kept, sharpened: after 24 hours retry with neither the old key nor a new one; a 500 is indeterminate and cached for the key | https://docs.stripe.com/error-low-level |
+
+**Facts added or re-verified (verifiedOn 2026-10-21)**
+
+- JDK HttpClient (Java 25): no request timeout means `send()` blocks forever; connect timeout applies only to new connections; `HttpTimeoutException` / `HttpConnectTimeoutException`.
+- RFC 9110 Retry-After with 503 and 3xx; RFC 6585 allows it on 429.
+- Stripe: a 500 is indeterminate and cached for the key; after 24 hours, retry with neither key and reconcile; store your id in metadata to match webhooks.
+- Idempotency-Key draft-07: 400 / 422 / 409; guessable keys are a risk. Stripe: 255-character keys, no personal data, `Idempotent-Replayed: true`, GET and DELETE need no key.
+- AWS SDKs standard mode: 3 attempts, full jitter, 20 s cap, retry quota token bucket. Amazon Builders' Library: retry at a single layer, 243x amplification, timeouts from p99.9.
+- Stripe webhooks: 3xx counts as failure; live endpoints must be HTTPS with TLS 1.2 or 1.3; IP allow-list; sandbox retries three times over a few hours; event order not guaranteed and timestamps in seconds, so track ids; old secret kept up to 24 hours during rotation. Standard Webhooks: signed content `id.timestamp.body`, `whsec_` base64 secret, space-separated `v1,` signatures.
+- `MessageDigest.isEqual`: time depends only on the length of the first argument (pass the computed value first).
+
+### Unit security
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| R6 authentication vs authorisation, "backend validates the token and then checks PAY101" | authentication-methods (What it is, steps, trap, Interview Q, scenario 401 vs 403/404) |
+| R6 API key "not equivalent to a user login" | authentication-methods (point, Common mistakes, Interview Q) |
+| R6 secret management, "not frontend code" | authentication-methods (point, Rules, Common mistakes) |
+| R6 bearer token in Authorization header | authentication-methods (steps, Rules: RFC 6750 query SHOULD NOT, error codes) |
+| R6 JWT trap: signed not encrypted; expiry, signature, issuer, audience | jwt (Mermaid chain, steps, runnable decode example, scenarios on tampering and aud) |
+| R6 OAuth 2.0 delegated authorisation, OIDC identity layer | oauth2-and-oidc (What/Why, PKCE sequence, Common mistakes) |
+| R6 CORS "not a replacement for server-side authorisation" | cors (hook, trap, point "Browser only") |
+| R6 TLS/HTTPS | https-tls (What, steps, real curl handshake example) |
+| R6 rate limiting | rate-limiting (steps, runnable token bucket) |
+| R6 SQL injection, input validation, least privilege | owasp-api-security (points, Rules, Interview Q) |
+| R2 OPTIONS for CORS preflight | cors (steps, Example) |
+| R3 429 Too Many Requests | rate-limiting (hook, points, trap, Not to be confused with 503) |
+| I9.R closing rule: production needs secrets, security | authentication-methods (Secrets) |
+Also added (verified): RFC 6750 error codes (invalid_token 401, insufficient_scope 403); Spring Security resource-server defaults (discovery from issuer-uri on first request, checks signature/exp/nbf/iss, aud not checked unless `audiences` set, RS256 only, 60 s clock skew); PKCE mechanics (RFC 7636) and RFC 9700 rules (public MUST, confidential RECOMMENDED, S256, audience restriction); public vs confidential client; simple-request definition, preflight never carries cookies, Max-Age 5 s default, Spring global CORS defaults (GET, HEAD, POST), Spring Security must process CORS first; a simple request reaches the server even when the browser hides the answer; SSL vs TLS (RFC 7568); curl -k; HSTS max-age semantics; Retry-After seconds or date (RFC 9110); fixed window up to 2x at the edge; injection was API8:2019 and has no own 2023 item; 2023 merged excessive data exposure and mass assignment into API3; mass assignment Interview Q; BOLA vs BFLA.
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft point "Injection" sat in the Top 10 points as if it were a 2023 item | Rules: injection was API8:2019 and has no own item in 2023; the defence still applies | https://api-security.owasp.org/editions/2019/en/0x11-t10 ; https://api-security.owasp.org/editions/2023/en/0x11-t10 |
+| Draft "client credentials: no user, no refresh token" (absolute) | "normally with no refresh token"; RFC 6749 4.4.3 says a refresh token SHOULD NOT be included | https://www.rfc-editor.org/rfc/rfc6749 |
+| Draft OAuth Example implied audience is always checked | Spring Security does not check aud by default; only with `audiences` | https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html |
+
+### Unit spring
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| R8 PaymentController example (POST + GET, controller calls a service) | spring-rest-controllers (Example, GET), response-entity (Example, POST with 201 + Location) |
+| R8 @RequestMapping / @GetMapping … @DeleteMapping | spring-rest-controllers (Rules and defaults, trap, scenarios: 405 with Allow, all-methods match) |
+| R8 @PathVariable, @RequestParam, @RequestBody | request-binding-validation (table, steps, Not to be confused with) |
+| R8 Bean Validation @NotNull @NotBlank @Positive | request-binding-validation (Example, points, scenario amount 0) |
+| R8 ResponseEntity (status, headers, body) | response-entity |
+| R8 DTO | dto-mapping (steps, scenario on extra "status" field) |
+| R8 @ControllerAdvice / @ExceptionHandler | exception-handling (flow, Not to be confused with, Interview Q) |
+| R9 MockMvc, @WebMvcTest, @SpringBootTest, mocking | spring-api-testing; comparison webmvctest-vs-springboottest |
+| R9 unit / integration / contract testing | comparison unit-vs-integration-vs-contract-test (explain, example) |
+| I1 "Remember only" shape, I9 integration map, I9.R "skeleton is not production" | openai-api-integration (steps, table, new Interview Q "Is this small client production-ready?") |
+| Final rules: "validation … are everyday backend concepts" | request-binding-validation (Interview Q "why validate on the server") |
+New facts beyond the draft (all verified 21-10-2026; most also observed in a real run):
+- Unmapped HTTP method on a known path gets 405 with an Allow header (run; Spring Framework request-mapping docs).
+- Embedded server port 8080 by default (Spring Boot servlet docs).
+- Jackson 3 ignores unknown JSON properties by default: FAIL_ON_UNKNOWN_PROPERTIES = false (JSTEP-2; run with plain JsonMapper and in the app).
+- The Spring Boot web starter has no validator; spring-boot-starter-validation is needed (Boot validation docs; spring-boot-starter-webmvc 4.1.1 POM).
+- Parameter constraints use built-in method validation since 6.1; HandlerMethodValidationException is 400 for input errors; class-level @Validated switches to the proxy (Framework validation docs, Javadoc).
+- A non-numeric amount fails in binding with HttpMessageNotReadableException, 400 (run).
+- Returning the object from a POST gives 200, not 201 (run).
+- @ResponseStatus does not override a ResponseEntity status (Javadoc, run: @ResponseStatus(CREATED) + ok() gave 200).
+- Local @ExceptionHandler methods run before advice ones; advice scope narrows by package or annotations (Framework controller-advice docs).
+- Spring fills ProblemDetail.instance with the request path (run).
+- RestClient read timeout throws ResourceAccessException; a 4xx throws HttpClientErrorException (run with a local slow server).
+- Spring Boot's HTTP client library order (Apache, Jetty, Reactor Netty, JDK HttpClient, HttpURLConnection) and spring.http.serviceclient.<group>.base-url (Boot rest-client docs).
+- @WebMvcTest without a mock for the controller's service fails with "No qualifying bean" (run).
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft rule "@PathVariable, @RequestParam, @RequestHeader: required; missing value fails" put @PathVariable with the 400 cases | Only @RequestParam and @RequestHeader are stated as "missing → 400" (verified by run for the header) | https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/bind/annotation/RequestParam.html |
+| Draft rest-clients Defaults listed a WebClient.Builder bean next to RestClient.Builder without a condition | Only the prototype RestClient.Builder is stated (the Boot page confirms that one) | https://docs.spring.io/spring-boot/reference/io/rest-client.html |
+| Reference R8 example: GET returns the String "Payment: " + id | GET returns a PaymentResponse DTO, written as JSON | https://docs.spring.io/spring-framework/reference/web/webmvc/mvc-controller/ann.html |
+| Reference R8 example: create returns ResponseEntity.status(CREATED) with no Location | ResponseEntity.created(location) with ServletUriComponentsBuilder, 201 + Location | https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/http/ResponseEntity.html |
+| Reference R8 example: controller builds the response itself | Controller calls PaymentService (the reference's own note), thin controller | as above |

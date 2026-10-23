@@ -5,39 +5,60 @@ title: HTTP Status Codes
 topic: http
 level: beginner
 heat: 3
-hook: "The first digit tells who acted or failed: 2xx worked, 3xx go elsewhere, 4xx the client erred, 5xx the server failed."
+hook: "The first digit says how the request went: 2xx it worked, 3xx look elsewhere, 4xx the client must fix the request, 5xx the server failed."
 points:
-  - { k: "Unknown code", v: "treat it as x00 of its class: 471 acts as 400" }
-  - { k: "201 Created", v: "send Location with the new resource's URL" }
-  - { k: "401", v: "must carry a WWW-Authenticate challenge (RFC 9110)", kind: default }
-  - { k: "403 or 404", v: "a server may send 404 to hide that the resource exists" }
-  - { k: "Business result", v: "a declined payment is data in the body, not a 5xx" }
+  - { k: "Classes", v: "2xx worked, 3xx look elsewhere, 4xx the client must change the request, 5xx the server failed" }
+  - { k: "Unknown code", v: "a client treats a code it does not know as the x00 of its class, so 471 is handled like 400" }
+  - { k: "201 Created", v: "the response's Location header gives the URL of the new resource" }
+  - { k: "401 (RFC 9110)", v: "must come with a WWW-Authenticate header that says how to authenticate" }
+  - { k: "403 or 404", v: "a server may answer 404 instead of 403 to hide that the resource exists" }
+  - { k: "Business result", v: "a declined payment is data in the body, not a 5xx; 500 means the server itself broke" }
 trap:
   wrong: "The bank declined the ₹500 payment, so return 500 Internal Server Error."
-  right: "The API worked: send status FAILED in the body with 200/201 or a 4xx (Stripe uses 402). 500 means the server itself broke."
-sayIt: "2xx is success, 4xx is the client's fault, 5xx the server's. I return 201 with Location on create, 401 for no valid login, 403 for no permission, and keep business outcomes in the body."
+  right: "The API worked: send status FAILED in the body with 200 or 201, or a 4xx, as Stripe does. 500 means the server broke."
+  why: "The payment failed, and a failure sounds like an error code, so people map a business failure to a server error."
+sayIt: "2xx is success, 4xx the client's fault, 5xx the server's. I return 201 with Location on create, 401 when there is no valid login, 403 when the caller lacks permission, and I keep business outcomes such as a declined payment in the body."
+cheat:
+  idea: "A status code is the three-digit result of a request. Its first digit says who must act: 2xx it worked, 3xx look elsewhere, 4xx the client must fix the request, 5xx the server failed."
+  remember: "A declined payment is a business result in the body, not a 500, which means the server broke."
+buildsOn: [http-request-response, http-methods]
+scenarios:
+  - q: "A support agent is logged in with a valid token but has no refund rights, and calls POST /api/payments/PAY101/refunds. 401 or 403?"
+    a: "403 Forbidden. The server knows who the agent is; the agent just lacks permission. A 401 would make the app ask the agent to log in again, which cannot help."
+  - q: "A client asks to refund PAY101, but PAY101's status is FAILED, so there is nothing to refund. Which code fits?"
+    a: "409 Conflict. The request is well formed, but it clashes with the resource's current state. The client should not resend it unchanged; it should read the payment's state first."
 confusedWith: [401-vs-403, 502-vs-503-vs-504]
 tags: [status-codes, http]
 visual: table
 sources:
-  - title: "RFC 9110 HTTP Semantics, 15 Status Codes"
+  - title: "RFC 9110 HTTP Semantics, 15 Status Codes (classes, unknown codes, 201, 401, 403, 405, 422)"
     url: "https://www.rfc-editor.org/rfc/rfc9110.html#section-15"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 4918 WebDAV, 11.2 422 Unprocessable Entity (the original name of 422)"
+    url: "https://www.rfc-editor.org/rfc/rfc4918.html#section-11.2"
+    verifiedOn: "2026-10-22"
+  - title: "RFC 9112 HTTP/1.1, 4 Status Line (clients ignore the reason phrase)"
+    url: "https://www.rfc-editor.org/rfc/rfc9112.html#section-4"
+    verifiedOn: "2026-10-21"
   - title: "Errors: HTTP status code summary (Stripe API reference)"
     url: "https://docs.stripe.com/api/errors"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "REST API Interview Questions (InterviewBit)"
     url: "https://www.interviewbit.com/rest-api-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A status code is the three-digit number in the response's [status line](card:http-request-response) that tells the client how its request went. The first digit is the class: 1xx is an interim message, 2xx success, 3xx go somewhere else, 4xx the client made a mistake and 5xx the server failed. The client acts on the number; the short reason phrase after it, such as `Created`, is only for people.
+
 ## Why it exists
 
-Clients need to react without parsing every body: retry, log in again, fix the input or give up. The three-digit code says which.
+A client must react without reading every body: show the result, ask the user to log in again, fix the input, try later or give up. If an API returned 200 for everything with an error hidden in the body, every client would need custom parsing. Generic tools such as monitors, gateways and retry libraries could not tell success from failure either. Standard codes let all of them react the same way.
 
 ## How it works
 
-| Code | Means | ₹500 payment case |
+| Code | Means | Payment case |
 |---|---|---|
 | 200 OK | worked, body follows | GET PAY101 |
 | 201 Created | new resource made | POST created PAY101 |
@@ -46,20 +67,66 @@ Clients need to react without parsing every body: retry, log in again, fix the i
 | 401 Unauthorized | no valid credentials | expired token |
 | 403 Forbidden | known caller, not allowed | agent without refund rights |
 | 404 Not Found | no such resource | GET PAY999 |
-| 405 Method Not Allowed | method not supported here; send Allow | PUT on /api/payments |
+| 405 Method Not Allowed | method not supported here | PUT on /api/payments |
 | 409 Conflict | clashes with current state | refund a FAILED payment |
 | 422 Unprocessable Content | valid JSON, wrong meaning | amount -500 |
-| 500 Internal Server Error | unexpected server failure | NullPointerException |
+| 500 Internal Server Error | unexpected server failure | a bug throws an exception |
 
-- Elsewhere: [202](card:long-running-operations), [304](card:http-caching), [406 and 415](card:headers-content-negotiation), [412](card:conditional-requests), [429](card:rate-limiting); 502, 503, 504: [compare](compare:502-vs-503-vs-504).
-- The body's shape is one [error format](card:error-responses) for all codes.
+How a client reacts to a response:
+
+1. It reads the first digit. A code it does not know, such as 471, counts as the x00 of its class, here 400.
+2. On 2xx it uses the body; after a 201 it can also read the new resource's address from `Location`.
+3. On 3xx it follows the `Location` header to the new address.
+4. On 4xx it must change something first, such as logging in or fixing the input. The same request sent again usually fails again.
+5. On 5xx the server failed, so the same request may work later, and a careful retry can make sense.
+
+So the class tells the client what to do next, even before it reads the body.
+
+## Example
+
+Reading a payment that the bank declined:
+
+```text
+GET /api/payments/PAY101
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{"paymentId": "PAY101", "status": "FAILED", "reason": "BANK_DECLINED"}
+```
+
+What to notice:
+
+- `200` means the read worked. The bank's decline is a business result, so it lives in the body as `status: FAILED`.
+- A `500` here would tell monitors that the server broke and tell retry libraries to try again, which would be wrong on both counts.
+- When the decline happens during `POST /api/payments`, a 4xx is also fine; Stripe answers a declined card with a 4xx. Either way, it is not a 5xx.
+
+## Rules and defaults
+
+- **401 (RFC 9110):** must include a `WWW-Authenticate` header that says how to authenticate.
+- **405 (RFC 9110):** must include an `Allow` header listing the methods the URL supports.
+- **201:** the new resource is named by the `Location` header, or by the request URL when there is none.
+- **Hiding a resource:** a server may answer 404 instead of 403, so a caller cannot learn that the resource exists.
+- **Codes owned by later concepts:** [202](card:long-running-operations), [304](card:http-caching), [406 and 415](card:headers-content-negotiation), [412](card:conditional-requests) and [429](card:rate-limiting).
+
+## Not to be confused with
+
+401 means the server does not know who you are, because the credentials are missing or invalid. 403 means it knows who you are, but you may not do this. 502, 503 and 504 are server-side failures: a bad reply from the server behind a gateway, a server too busy or under maintenance, and a gateway that gave up waiting. Rule: 401 = log in, 403 = not allowed; 502 = bad reply, 503 = not now, 504 = no reply in time.
+
+## Common mistakes
+
+- **"Return 200 with an error inside the body."** Clients, monitors and retry tools then see success. Use the code that matches the outcome, and put the details in the [error body](card:error-responses).
 
 ## Interview Qs
 
 ### Invalid amount: 400 or 422?
 
-Both are defensible. 400 covers any client error; 422 (RFC 9110, formerly WebDAV's "Unprocessable Entity") means the syntax is fine but the content cannot be processed. Pick one for validation errors and use it everywhere.
+Both are defensible. 400 covers any client error. 422 (RFC 9110, formerly WebDAV's "Unprocessable Entity") means the syntax is fine but the content cannot be processed, such as an amount of -500. Pick one for validation errors and use it everywhere in the API.
 
 ### Why is 301 or 302 risky for a POST?
 
-Clients may change a redirected POST into a GET, for historical reasons. Use 307 (temporary) or 308 (permanent): they must keep the method.
+For historical reasons, clients may turn a redirected POST into a GET, so the body is lost. Use 307 (temporary) or 308 (permanent), which RFC 9110 names for this case: with them the client keeps the method and the body when it follows the redirect.
+
+### What should a client do with a status code it does not know?
+
+Treat it as the x00 code of its class, as RFC 9110 requires: an unknown 471 is handled as 400 and an unknown 599 as 500. This is why the first digit must always match the meaning.

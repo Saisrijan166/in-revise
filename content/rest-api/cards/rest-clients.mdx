@@ -5,20 +5,32 @@ title: "Spring HTTP Clients: RestClient, WebClient, Interfaces"
 topic: spring
 level: intermediate
 heat: 2
-hook: "Call other APIs with RestClient when blocking or WebClient when reactive; RestTemplate is being retired. Always set timeouts."
+hook: "When your service calls another API, such as the payment gateway, use RestClient for normal code and WebClient for reactive code, and always set timeouts."
 points:
-  - { k: "RestClient", v: "synchronous, fluent API (Spring Framework 6.1+); default choice" }
-  - { k: "WebClient", v: "non-blocking, reactive; for WebFlux and streaming" }
-  - { k: "@HttpExchange", v: "declare a Java interface; Spring generates the client" }
-  - { k: "onStatus", v: "your own handling for a 4xx or 5xx response" }
-  - { k: "Timeouts", v: "spring.http.clients.connect-timeout and read-timeout (Boot 4.1)" }
+  - { k: "RestClient", v: "Spring's blocking HTTP client with a fluent API (Spring Framework 6.1+); the default choice for new code" }
+  - { k: "WebClient", v: "the non-blocking, reactive client from spring-webflux; results arrive later as Mono or Flux" }
+  - { k: "@HttpExchange interface", v: "you declare a Java interface for the remote API, and Spring generates the client behind it", kind: plus }
+  - { k: "4xx or 5xx reply", v: "retrieve() throws a RestClientException subclass unless onStatus handles that status" }
+  - { k: "Timeouts (Boot 4.1)", v: "spring.http.clients.connect-timeout and read-timeout apply to every auto-configured client", kind: default }
 trap:
   wrong: "RestTemplate was removed in Spring Boot 4."
-  right: "It still works. Framework 7.0 docs mark it deprecated; @Deprecated is planned for 7.1 and removal for 8.0."
-sayIt: "For new blocking code I use RestClient from the injected builder, or an @HttpExchange interface on top. WebClient is for reactive code. RestTemplate is being deprecated. I always set connect and read timeouts."
+  right: "It still works. Framework 7.0 announced its deprecation; @Deprecated is planned for 7.1 and removal for 8.0. New code uses RestClient."
+  why: "Blog posts and the Spring announcement say RestTemplate is \"deprecated\", which many people read as already gone."
+sayIt: "For new blocking code I build a RestClient from the injected builder, or declare an @HttpExchange interface on top. WebClient is for reactive code. RestTemplate is on its way out. I always set connect and read timeouts, and send an idempotency key on retried calls."
+cheat:
+  idea: "RestClient is Spring's blocking HTTP client for calling other APIs: it writes the request, sends it and turns the JSON reply into an object. WebClient does the same without blocking."
+  code: |
+    http.post().uri("/charges").body(req).retrieve().body(GatewayResult.class);
+  remember: "Set connect and read timeouts; RestTemplate still works but is being retired."
+buildsOn: [spring-rest-controllers, retries-and-timeouts]
+scenarios:
+  - q: "The read timeout is 3 seconds, and the gateway takes 10 seconds to answer a charge. What does your code see, and what should it do?"
+    a: "Once the 3-second read timeout passes, RestClient throws ResourceAccessException. The charge may still succeed at the gateway, so the outcome is unknown: retry only with the same Idempotency-Key, or check the status first, so the customer is not charged twice."
+  - q: "The gateway answers 422 because the card is expired. You did not add onStatus. What happens?"
+    a: "retrieve() throws HttpClientErrorException, a RestClientException subclass, with status 422. Add onStatus to turn it into your own exception, such as GatewayRejected, so the service can answer the client clearly."
 confusedWith: []
 tags: [spring, http-client, rest-client]
-visual: table
+visual: code
 sources:
   - title: "REST Clients: RestClient, WebClient, RestTemplate, HTTP Service Clients (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/integration/rest-clients.html"
@@ -26,58 +38,76 @@ sources:
   - title: "The state of HTTP clients in Spring: RestTemplate deprecation plan (spring.io blog, 30-09-2025)"
     url: "https://spring.io/blog/2025/09/30/the-state-of-http-clients-in-spring"
     verifiedOn: "2026-10-20"
-  - title: "Calling REST Services: builders and timeouts (Spring Boot 4.1 reference)"
+  - title: "Calling REST Services: prototype RestClient.Builder, spring.http.clients timeouts, client library order (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/io/rest-client.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+An HTTP client is the code your service uses to call another API, such as the payment gateway. Spring's clients turn a Java object into an HTTP request, send it, and turn the JSON reply back into an object. `RestClient` is the main one for normal code: the calling thread waits for the reply, which is called blocking. `WebClient` is the reactive one: the thread does not wait, and the result arrives later as a `Mono` or `Flux`, reactive types for one value or many.
 
 ## Why it exists
 
-A service often calls others, such as a payment gateway. A client turns Java objects into HTTP requests and responses back into objects, and handles errors and timeouts.
+Calling the gateway by hand means opening connections, writing headers, turning JSON into objects and checking status codes, in every place that calls out. A Spring client does that in one chain of calls, reuses Spring Boot's JSON setup, and throws a clear exception on 4xx or 5xx. It also gives you one place to set timeouts, so a slow gateway cannot hold your threads for as long as it likes, a risk [retries and timeouts](card:retries-and-timeouts) covered.
 
 ## How it works
 
 <Compare id="resttemplate-vs-restclient-vs-webclient" />
 
-- Group many interface clients with `@ImportHttpServices` (Spring Framework 7.0).
-- Why timeouts and which calls to retry: [retries and timeouts](card:retries-and-timeouts).
-- The same client calls an LLM: [OpenAI API from Java](card:openai-api-integration).
+1. Your class asks for a `RestClient.Builder` in its constructor. Spring Boot provides one that already has the JSON converters and the timeout settings.
+2. It builds the client once, with the gateway's base URL, and keeps it in a field.
+3. For each call it chains the HTTP method, the URI, headers and the body, then calls `retrieve()`.
+4. `.body(Type.class)` sends the request and converts the JSON reply into that type.
+5. If the reply is 4xx or 5xx, `retrieve()` throws unless an `onStatus` handler deals with that status first.
 
 ## Example
+
+The payment service charges the customer through the gateway.
 
 ```java
 @Service
 class GatewayClient {
     private final RestClient http;
-    GatewayClient(RestClient.Builder b) { http = b.baseUrl("https://gateway.example.com").build(); }
-    GatewayResult charge(ChargeRequest req, String key) {
+    GatewayClient(RestClient.Builder builder) {
+        this.http = builder.baseUrl("https://gateway.example.com").build();
+    }
+    GatewayResult charge(ChargeRequest req, String idempotencyKey) {
         return http.post().uri("/charges")
-                .header("Idempotency-Key", key)                  // order-789-payment
-                .body(req)
+                .header("Idempotency-Key", idempotencyKey)       // order-789-payment
+                .body(req)                                       // written as JSON
                 .retrieve()
                 .onStatus(HttpStatusCode::is4xxClientError, (rq, rs) -> { throw new GatewayRejected(rs.getStatusCode()); })
-                .body(GatewayResult.class);
+                .body(GatewayResult.class);                      // JSON reply -> record
     }
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Beans you inject | prototype `RestClient.Builder` and `WebClient.Builder`; no `RestTemplate` bean, only `RestTemplateBuilder` | Spring Boot 4.1 |
-| 4xx or 5xx with `retrieve()` | throws a `RestClientException` subclass | Spring Framework 7.0 |
+- The builder comes from Spring Boot, so the client gets the same JSON settings and timeouts as the rest of the app. A client made with `RestClient.create()` would skip them.
+- The `Idempotency-Key` header lets the gateway spot a retried charge and not charge twice, as in [idempotency keys](card:idempotency-keys).
+- `onStatus` turns a 4xx into the service's own `GatewayRejected`. Without it, the caller gets Spring's `HttpClientErrorException`.
+- The reply is read straight into the `GatewayResult` record; no JSON parsing code is written by hand.
+
+## Rules and defaults
+
+- **Builders you can inject (Spring Boot 4.1):** a prototype `RestClient.Builder`, so each class gets its own copy. There is no `RestTemplate` bean, only a `RestTemplateBuilder`.
+- **Timeouts (Spring Boot 4.1):** `spring.http.clients.connect-timeout` and `spring.http.clients.read-timeout` apply to all auto-configured clients. A read timeout throws `ResourceAccessException`.
+- **Which library sends the request:** Spring Boot picks Apache HttpClient if it is on the classpath, then Jetty, Reactor Netty, the JDK `HttpClient`, and finally `HttpURLConnection`.
+- **Interface clients:** methods marked `@GetExchange` or `@PostExchange` on an interface; `@ImportHttpServices` registers them, and `spring.http.serviceclient.<group>.base-url` sets the URL.
+- **RestTemplate:** still works in Spring Framework 7.0. `@Deprecated` is planned for 7.1 and removal for 8.0.
 
 ## Interview Qs
 
 ### RestTemplate vs RestClient vs WebClient?
 
-RestTemplate is the old blocking client with template methods; its removal is planned for Spring Framework 8.0. RestClient is also blocking, with a fluent API. WebClient is non-blocking and reactive. New blocking code uses RestClient.
+RestTemplate is the old blocking client with template methods like `getForObject`; its removal is planned for Spring Framework 8.0. RestClient is also blocking, with a fluent API. WebClient is non-blocking and reactive. New blocking code uses RestClient; reactive code uses WebClient.
 
 ### What is an HTTP interface client?
 
-A Java interface whose methods carry @GetExchange or @PostExchange. Spring creates a proxy that makes the calls through RestClient or WebClient, so the remote API is declared once.
+A Java interface whose methods carry `@GetExchange` or `@PostExchange` with the path. Spring creates a proxy, an object that implements the interface by making the HTTP calls through RestClient or WebClient. The remote API is declared once, and callers use plain method calls.
 
 ### How do you handle a 4xx from the called API?
 
-By default retrieve() throws a RestClientException subclass. Add onStatus to map, for example, a 4xx to your own exception, or use exchange() to read the response yourself.
+By default `retrieve()` throws a `RestClientException` subclass, such as `HttpClientErrorException` for 4xx. Add `onStatus` to map a status to your own exception, or use `exchange()` to read the response yourself.

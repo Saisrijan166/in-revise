@@ -5,50 +5,82 @@ title: "API Observability: Correlation IDs, Logs, Metrics, Traces"
 topic: docs
 level: intermediate
 heat: 2
-hook: "Give every request one ID, carry it to every service and log line, and logs, metrics and traces tell one story."
+hook: "Give every request one ID, carry it to every service and every log line, and the logs, metrics and traces of one payment tell one story."
 points:
-  - { k: "Correlation ID", v: "one ID per request, logged and sent on every downstream call" }
-  - { k: "Standard header", v: "W3C traceparent; X-Request-ID is only a convention" }
-  - { k: "RED metrics", v: "rate, errors and duration for every endpoint" }
-  - { k: "Never log", v: "tokens, passwords, card data, sensitive personal data", kind: minus }
+  - { k: "Correlation ID", v: "one ID per request, written in every log line and sent on every downstream call" }
+  - { k: "traceparent", v: "the W3C standard header carrying the trace ID, the caller's span ID and a sampled flag" }
+  - { k: "RED metrics", v: "for every endpoint, watch the request Rate, the Errors and the Duration" }
+  - { k: "p99 latency", v: "99% of requests finish faster than this; it shows the slow tail that an average hides" }
+  - { k: "Never log", v: "access tokens, passwords, session IDs, keys, card or bank data and sensitive personal data", kind: minus }
+  - { k: "Sampling", v: "Spring Boot 4.1 records a trace for 10% of requests by default (management.tracing.sampling.probability)", kind: default }
 trap:
   wrong: "The average response time shows whether the API is healthy."
   right: "An average hides the slow tail. Watch p95 and p99 latency, and track the latency of failed requests separately."
+  why: "An average is one easy number, and because most requests are fast, a few very slow ones barely move it."
 sayIt: "Every request carries a trace ID in the W3C traceparent header, passed to each downstream call and printed in JSON logs. I watch rate, errors and p99 duration per endpoint, and never log tokens or card data."
+cheat:
+  idea: "Observability means you can tell what a running API does, and why it fails, from logs, metrics and traces it emits. One trace ID per request joins them."
+  flow: "Metric alerts → trace shows where → log shows why"
+  remember: "Watch p99, not the average; forward traceparent on every call; never log tokens or card data."
+buildsOn: [headers-content-negotiation, status-codes]
+scenarios:
+  - q: "The average latency of POST /api/payments is 120 ms, yet customers complain that paying is slow. What do you look at?"
+    a: "The p95 and p99 latency from a histogram. If 1% of payments take 8 seconds, the average barely moves but those customers wait. Then open the trace of a slow request to see which span, such as the provider call, took the time."
+  - q: "In your test environment every request shows up as a trace, but in production only about one in ten does. Is tracing broken?"
+    a: "No. Spring Boot 4.1 samples 10% of requests by default to keep the load on the trace backend low. Set management.tracing.sampling.probability to 1.0 to record all of them, if the backend can take it."
 confusedWith: []
 tags: [observability, tracing, logging, metrics]
 visual: table
 sources:
-  - title: "Trace Context, W3C Recommendation"
+  - title: "Trace Context, W3C Recommendation: traceparent format and parent-id mutation"
     url: "https://www.w3.org/TR/trace-context/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Monitoring Distributed Systems (Google SRE book)"
     url: "https://sre.google/sre-book/monitoring-distributed-systems/"
     verifiedOn: "2026-10-20"
+  - title: "The RED Method: Rate, Errors, Duration for every service (Grafana Labs blog, Tom Wilkie)"
+    url: "https://grafana.com/blog/2018/08/02/the-red-method-how-to-instrument-your-services/"
+    verifiedOn: "2026-10-22"
   - title: "Logging Cheat Sheet (OWASP)"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
     verifiedOn: "2026-10-20"
-  - title: "Common Application Properties (Spring Boot 4.1 reference)"
+  - title: "Common Application Properties: tracing, endpoints, metrics distribution (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
-    verifiedOn: "2026-10-20"
-  - title: "Tracing (Spring Boot 4.1 reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Tracing: 10% sampling, log correlation, OpenTelemetry starter (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/actuator/tracing.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Metrics: Spring MVC metrics, http.server.requests (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/actuator/metrics.html"
+    verifiedOn: "2026-10-21"
+  - title: "Endpoints: only health is exposed over HTTP by default (Spring Boot 4.1.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/actuator/endpoints.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Observability means you can tell what a running API is doing, and why it fails, from the data it sends out. That data comes in three kinds. A log is a record of one event, such as "provider timeout for PAY101". A metric is a number measured over time, such as requests per second. A trace follows one request through every service it touches; each step in it is a span. A correlation ID is one ID per request that appears in all three, so you can join them.
 
 ## Why it exists
 
-One ₹500 payment crosses the gateway, the payment service and the provider. Without a shared ID you cannot join their logs, so one failure takes hours to find.
+One ₹500 payment passes through the API gateway, the payment service and the provider adapter. When a customer says PAY101 is stuck, you need the matching lines from all three services. Without a shared ID you search each service's logs by timestamp and guess. Averages hide problems too: if 1% of payments take 8 seconds, the average stays low while real customers wait. Shared IDs and the right metrics turn hours of searching into one query.
 
 ## How it works
 
 <Compare id="logs-vs-metrics-vs-traces" />
 
-- At the edge, accept or create the ID; put it in every log line; forward it on every outgoing call.
-- Spring Boot 4.1: Actuator with Micrometer Observation records `http.server.requests`; Micrometer Tracing adds traceId and spanId to logs.
-- Write structured JSON logs so tools can search by traceId or paymentId.
+1. The first service that receives the request reads its `traceparent` header, or starts a new trace with a new trace ID if there is none.
+2. It records a span for its own work and writes the trace ID, and its span ID, into every log line for that request.
+3. On each outgoing call it sends `traceparent` with the same trace ID and its own span ID as the parent, so the next service's span links to it.
+4. Every service also counts requests, errors and durations per endpoint, and keeps durations as a histogram so p95 and p99 can be read.
+5. During an incident you go from the metric that alerted, to a slow or failed trace, to the logs that carry that trace ID.
+
+So the key is that one ID travels with the request everywhere it goes.
 
 ## Example
+
+The payment service receives a request, calls the provider and logs a timeout:
 
 ```text
 POST /api/payments HTTP/1.1
@@ -61,24 +93,40 @@ traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-b7ad6b7169203331-01
 {"level":"ERROR","traceId":"4bf92f3577b34da6a3ce929d0e0e4736","paymentId":"PAY101","msg":"provider timeout"}
 ```
 
-## Defaults
+What to notice:
+
+- The header has four parts: version `00`, the 32-character trace ID, the 16-character parent span ID, and the flags, where `01` means "sampled".
+- The trace ID stays the same on the outgoing call, but the parent ID changes to the payment service's own span. That is how a tracing tool draws the tree of calls.
+- The log line is JSON with named fields, so a log search for that `traceId` or for `PAY101` finds it. It holds IDs only: no token and no card number.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Trace sampling | 10% of requests (0.1) | Spring Boot 4.1, `management.tracing.sampling.probability` |
-| Propagation sent | W3C | Spring Boot 4.1, `management.tracing.propagation.produce` |
+| Traces recorded | 10% of requests (`0.1`) | Spring Boot 4.1, `management.tracing.sampling.probability` |
+| Header sent to other services | W3C `traceparent` | Spring Boot 4.1, `management.tracing.propagation.produce` |
+| Request metric | `http.server.requests` | Spring Boot 4.1 with Actuator, for Spring MVC |
 | Actuator endpoints over HTTP | `health` only | Spring Boot 4.1, `management.endpoints.web.exposure.include` |
+
+- **Percentiles need a histogram:** set `management.metrics.distribution.percentiles-histogram.http.server.requests=true` so the monitoring system can compute p95 and p99 across instances.
+- **Log correlation:** with Micrometer Tracing on the classpath, Spring Boot adds the trace ID and span ID to log lines; `logging.pattern.correlation` changes the format.
+- **X-Request-ID:** a widely used header, but not a standard; prefer `traceparent`, or accept both at the edge.
+- **Never log (OWASP):** access tokens, passwords, session IDs, encryption keys, card or bank data and sensitive personal data. Mask them or leave them out.
+
+## Not to be confused with
+
+A correlation ID is the general idea: any ID that ties together the log lines of one request, often sent as `X-Request-ID`. A trace ID is the standardised form from W3C Trace Context; it also links the spans of each service into a tree with timings. Rule: a correlation ID joins logs; a trace ID joins logs and shows where the time went.
 
 ## Interview Qs
 
 ### How do you follow one request across microservices?
 
-Use distributed tracing: the first service starts a trace, each hop sends the W3C traceparent header, and each service adds its own span. Logs carry the same trace ID, so one search shows the whole path.
+Use distributed tracing. The first service starts a trace, each call sends the W3C `traceparent` header, and each service records its own span with the same trace ID. Logs carry that trace ID too, so one search shows the whole path and which hop was slow or failed.
 
 ### Which metrics do you watch for an API?
 
-RED per endpoint: request rate, error rate and duration. For duration use p95 and p99 percentiles from a histogram, not the average.
+RED per endpoint: the request rate, the error rate and the duration. For duration, use p95 and p99 from a histogram, not the average, and alert on them together with the rate of 5xx responses.
 
 ### What must never go into logs?
 
-Access tokens, passwords, session IDs, encryption keys, card or bank data and sensitive personal data. Mask or drop them; log IDs such as paymentId and traceId instead.
+Access tokens, passwords, session IDs, encryption keys, card or bank data and sensitive personal data. Mask them or drop them, and log IDs such as `paymentId` and `traceId` instead, which are enough to find everything else.

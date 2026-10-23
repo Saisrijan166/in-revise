@@ -5,49 +5,91 @@ title: OAuth 2.0 and OpenID Connect
 topic: security
 level: intermediate
 heat: 2
-hook: "OAuth 2.0 gets an app an access token for an API; OpenID Connect adds an ID token saying who logged in."
+hook: "OAuth 2.0 gives an app a limited access token to call an API, without the user's password. OpenID Connect adds an ID token that says who logged in."
 points:
-  - { k: "Four roles", v: "resource owner, client, authorization server, resource server" }
-  - { k: "With a user", v: "authorization code + PKCE" }
-  - { k: "Service to service", v: "client credentials: no user, no refresh token" }
-  - { k: "Old grants", v: "implicit and password: avoid them (RFC 9700, January 2025)", kind: minus }
+  - { k: "Four roles", v: "resource owner (user), client (app), authorization server (issues tokens), resource server (the API)" }
+  - { k: "With a user", v: "authorization code + PKCE: the user logs in at the authorization server; the app swaps a code for tokens" }
+  - { k: "No user", v: "client credentials: a service gets a token with its own ID and secret, normally with no refresh token" }
+  - { k: "Scopes", v: "scopes such as payments:write limit what a token allows; the API still checks ownership" }
+  - { k: "Retired grants", v: "implicit SHOULD NOT and password MUST NOT be used (RFC 9700, January 2025)", kind: minus }
+  - { k: "ID token", v: "OIDC adds a JWT about the login, meant for the client app, never for calling APIs" }
 trap:
   wrong: "Send the ID token to the payments API as proof of login."
-  right: "The ID token is for the client app (its aud is the client). Call APIs with the access token."
-sayIt: "OAuth 2.0 is delegated authorisation: the app gets a scoped access token via authorization code with PKCE, or client credentials for services. OIDC adds an ID token for identity."
+  right: "The ID token is for the client app (its aud is the client ID). Call APIs with the access token."
+  why: "Both are often JWTs from the same login, and the ID token holds the user's identity, so it looks like the better proof."
+sayIt: "OAuth 2.0 is delegated authorisation: the app gets a scoped access token, through authorization code with PKCE when a user is present, or client credentials between services. OpenID Connect adds an ID token so the app knows who logged in. APIs accept only access tokens."
+cheat:
+  idea: "OAuth 2.0 gives an app a scoped access token for an API without the user's password; OpenID Connect adds an ID token saying who logged in."
+  flow: "login at auth server → code → code + verifier → access token → API"
+  remember: "With a user: authorization code + PKCE. Between services: client credentials. Only access tokens go to APIs."
+buildsOn: [authentication-methods, jwt]
+scenarios:
+  - q: "A nightly settlement job must call the payments API, and no person is involved. Which OAuth grant fits?"
+    a: "Client credentials. The job authenticates as itself with its client ID and secret and gets an access token. Authorization code needs a user to log in and approve, so it does not fit a job with no user."
+  - q: "Malware on a phone steals the authorization code from the redirect back to the app. With PKCE, can it get tokens?"
+    a: "No. The token endpoint also needs the code verifier, whose hash the app sent at the start. The malware never saw the verifier, so the server's hash check fails and it returns invalid_grant."
 confusedWith: [authentication-vs-authorization]
 tags: [oauth2, oidc, pkce, access-token, refresh-token, scopes]
-visual: table
+visual: flow
 sources:
   - title: "RFC 6749 The OAuth 2.0 Authorization Framework"
     url: "https://www.rfc-editor.org/rfc/rfc6749"
     verifiedOn: "2026-10-20"
-  - title: "RFC 9700 OAuth 2.0 Security Best Current Practice (January 2025)"
+  - title: "RFC 9700 OAuth 2.0 Security Best Current Practice (January 2025): PKCE, implicit, password, audience"
     url: "https://www.rfc-editor.org/rfc/rfc9700"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "RFC 7636 Proof Key for Code Exchange (PKCE)"
+    url: "https://www.rfc-editor.org/rfc/rfc7636"
+    verifiedOn: "2026-10-21"
   - title: "OpenID Connect Core 1.0"
     url: "https://openid.net/specs/openid-connect-core-1_0.html"
     verifiedOn: "2026-10-20"
   - title: "OAuth2 resource server (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/security/oauth2.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "OAuth 2.0 Resource Server JWT: discovery and default validation (Spring Security 7.1 reference)"
+    url: "https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+OAuth 2.0 is a standard way for an app to get permission to call an API (RFC 6749). Four roles take part: the resource owner (the user), the client (the app), the authorization server (the login server that issues tokens) and the resource server (the API, such as the payment API). The client ends up with an access token, often a [JWT](card:jwt), limited by scopes such as `payments:write`. OpenID Connect (OIDC) is a thin layer on top that also tells the client who the user is.
 
 ## Why it exists
 
-Giving a third-party app your password hands over everything. OAuth 2.0 gives the app a limited, revocable token instead, and OIDC reuses the same flow for "log in with".
+Before OAuth, a budgeting app that wanted your bank data asked for your bank password. It could then do anything as you, for as long as it liked, and the only way to stop it was to change your password. With OAuth 2.0 you log in at the bank itself, the app gets only a token with the scopes you approved, and you can revoke that token without touching your password.
 
 ## How it works
 
-<Compare id="oauth2-vs-oidc" />
+<Mermaid
+  alt="Authorization code flow with PKCE. The app sends the user to the authorization server with a code challenge and scopes. The user logs in and approves there. The authorization server redirects back to the app with a one-time code. The app sends the code and the code verifier to the token endpoint and receives an access token. The app calls the payment API with the access token as a bearer token."
+  chart={`sequenceDiagram
+  participant A as App
+  participant AS as Authorization server
+  participant API as Payment API
+  A->>AS: 1. redirect user: code_challenge, scope
+  Note over AS: 2. user logs in and approves
+  AS-->>A: 3. redirect back with one-time code
+  A->>AS: 4. code + code_verifier
+  AS-->>A: access token (+ refresh token, ID token)
+  A->>API: 5. Authorization: Bearer access token`}
+/>
 
-- Scopes such as `payments:write` limit what a token may do; the API still checks ownership.
-- The access token is often a [JWT](card:jwt), which the API validates by itself.
+1. The app creates a random secret, the code verifier, and sends the user's browser to the authorization server with its SHA-256 hash (the code challenge) and the scopes it wants.
+2. The user logs in and approves there. The app never sees the password.
+3. The authorization server redirects back to the app with a short-lived, one-time authorization code.
+4. The app sends the code and the code verifier to the token endpoint, the authorization server's URL that hands out tokens. The server hashes the verifier and compares it with the challenge. If they match, it returns an access token, often a refresh token, and an ID token if the scopes included `openid`.
+5. The app calls the payment API with `Authorization: Bearer <access token>`, and the API validates it as in [JWT](card:jwt).
+
+So the key is: a stolen code is useless without the verifier, which never left the app.
 
 ## Example
 
+The payment API is a resource server: it only validates tokens and never shows a login page. In Spring Boot 4.1 this takes two properties.
+
 ```yaml
-# Spring Boot 4.1, starter spring-boot-starter-security-oauth2-resource-server
+# starter: spring-boot-starter-security-oauth2-resource-server
 spring:
   security:
     oauth2:
@@ -57,16 +99,39 @@ spring:
           audiences: payments-api
 ```
 
+What to notice:
+
+- `issuer-uri`: on the first request with a JWT, Spring Security reads the issuer's metadata, fetches its public keys, and from then on checks the signature, `exp`, `nbf` and `iss` of every token.
+- `audiences`: Spring does not check `aud` by default. With this line, a token whose `aud` does not include `payments-api` gets 401. Remove it and a token issued for another API would be accepted.
+- With `issuer-uri`, Spring accepts only the signing algorithms of the keys the issuer publishes, and allows 60 seconds of clock skew on the time checks.
+
+## Rules and defaults
+
+- **User present:** use authorization code with PKCE. RFC 9700 says public clients (apps that cannot keep a secret, such as mobile and browser apps) MUST use PKCE, recommends it for confidential clients (server-side apps), and names S256 as the method to use.
+- **No user:** use client credentials. The service authenticates with its own client ID and secret, and RFC 6749 says a refresh token SHOULD NOT be issued.
+- **Retired grants (RFC 9700):** the implicit grant SHOULD NOT be used; the resource owner password grant MUST NOT be used.
+- **Audience:** RFC 9700 says access tokens SHOULD be restricted to the API they are for, and each API rejects tokens not meant for it.
+- **Refresh token:** lives longer than the access token, is sent only to the authorization server, and swapped for a new access token without a new login.
+
+## Not to be confused with
+
+OAuth 2.0 answers "may this app call the API?" with an access token meant for the API. OpenID Connect answers "who logged in?" with an ID token meant for the client app; its `aud` is the client ID. Rule: access token goes to APIs; ID token stays in the app.
+
+## Common mistakes
+
+- **"OAuth 2.0 is a login protocol."** It is delegated authorisation: it says what an app may do, not who the user is. Login comes from OpenID Connect on top of it.
+- **"A token with payments:read can read any payment."** The scope allows the action; the API must still check that PAY101 belongs to this user.
+
 ## Interview Qs
 
 ### Which OAuth flow for a mobile app, and which for a batch job?
 
-Mobile app: authorization code with PKCE, since it cannot keep a secret. Batch job calling another service: client credentials, because no user is involved.
+A mobile app uses authorization code with PKCE: it cannot keep a client secret, and RFC 9700 requires PKCE for such public clients. A batch job calling another service uses client credentials, because no user is involved; the job authenticates as itself.
 
-### Why PKCE?
+### Why do we need PKCE?
 
-The app sends a hash of a one-time secret at the start and the secret itself when trading the code. A stolen authorization code is then useless. RFC 9700 requires it for public clients.
+The app sends a hash of a one-time secret at the start, and the secret itself when it swaps the code for tokens. A code stolen from the redirect is then useless, because the thief does not know the secret. RFC 9700 makes it mandatory for public clients.
 
 ### Access token vs refresh token?
 
-The access token is short-lived and goes to APIs. The refresh token lives longer, goes only to the authorization server, and gets new access tokens without a new login.
+The access token is short-lived and goes to APIs on every call. The refresh token lives longer, goes only to the authorization server, and gets new access tokens without a new login. Revoking the refresh token is how you end a session early.
