@@ -5,24 +5,36 @@ title: "Logs, Events and Metrics in Kubernetes"
 topic: security-ops
 level: intermediate
 heat: 2
-hook: "Apps log to stdout, a node agent ships the logs, events say what Kubernetes did, and Prometheus keeps the metric history."
+hook: "Apps log to stdout and a node agent ships the logs away; events say what Kubernetes did; Prometheus keeps the metric history."
 points:
-  - { k: "Logs", v: "the app writes to stdout and stderr; the runtime saves them on the node" }
-  - { k: "Logs die", v: "an evicted or deleted Pod takes its logs with it: ship them off the node", kind: minus }
-  - { k: "Events", v: "what Kubernetes did (scheduled, pulled, killed); Normal or Warning" }
-  - { k: "metrics-server", v: "latest CPU and memory only, for HPA, VPA and kubectl top" }
-  - { k: "kube-state-metrics", v: "object state as metrics: Deployments, Pods, nodes" }
+  - { k: "Logs", v: "the app writes to stdout and stderr; the container runtime saves them in files on the node" }
+  - { k: "Logs die", v: "when a Pod is deleted or evicted, its logs go with it, so ship them off the node", kind: minus }
+  - { k: "Events", v: "records of what Kubernetes did, such as Scheduled, Pulled or BackOff, of type Normal or Warning" }
+  - { k: "Event lifetime", v: "kube-apiserver keeps events for 1 hour by default (--event-ttl), Kubernetes 1.37", kind: default }
+  - { k: "metrics-server", v: "keeps only the latest CPU and memory per Pod and node, for the HPA and kubectl top" }
+  - { k: "Prometheus", v: "scrapes metrics over HTTP, stores them as history, answers queries and fires alerts", kind: plus }
 trap:
   wrong: "metrics-server and kubectl top are our monitoring system."
   right: "metrics-server keeps only the latest CPU and memory values, for autoscaling. For history, dashboards and alerts, use Prometheus and Grafana."
-sayIt: "Containers log to stdout; a DaemonSet agent ships logs to a central store because they vanish with the Pod. Events explain what Kubernetes did. metrics-server feeds autoscaling; Prometheus and Grafana do monitoring."
+  why: "kubectl top shows live numbers at once, and the HPA works with them, so it looks like monitoring is already there."
+sayIt: "Containers log to stdout, and a DaemonSet agent ships the logs to a central store, because they vanish with the Pod. Events explain what Kubernetes did, but last only an hour. metrics-server feeds autoscaling; Prometheus and Grafana give history, dashboards and alerts."
+cheat:
+  idea: "Three signals: logs (what the app printed), events (what Kubernetes did) and metrics (numbers over time). Kubernetes keeps little, so add a log agent and Prometheus."
+  flow: "stdout → node log files → DaemonSet agent → log store"
+  remember: "Logs vanish with the Pod and events after 1 hour; metrics-server is for autoscaling, Prometheus is for monitoring."
+buildsOn: [daemonsets, autoscaling]
+scenarios:
+  - q: "A payment-service Pod was evicted from its node last night. This morning you want its logs. Can kubectl logs show them?"
+    a: "No. When a Pod is evicted, its containers and their log files go with it, and Kubernetes has no log storage of its own. Only a log agent that shipped the lines off the node in time can give them back."
+  - q: "At 09:00 you investigate a Pod that failed to schedule at 07:30. kubectl get events shows nothing about it. Why?"
+    a: "Events are kept for 1 hour by default, so the 07:30 events are already deleted. Send events to your log or monitoring system too, or check describe soon after the failure."
 confusedWith: []
 tags: [logging, events, metrics, prometheus, monitoring]
 visual: flow
 sources:
   - title: "Logging Architecture (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/cluster-administration/logging/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "kube-apiserver: --event-ttl (Kubernetes 1.37 reference)"
     url: "https://kubernetes.io/docs/reference/command-line-tools-reference/kube-apiserver/"
     verifiedOn: "2026-10-20"
@@ -37,9 +49,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Observability means you can tell from the outside what a running system is doing. On Kubernetes there are three signals. Logs are the lines the app prints. Events are short records of what Kubernetes itself did to your objects, such as "pulled image" or "killed container". Metrics are numbers measured over time, such as CPU use or requests per second. Kubernetes keeps only a little of each, so long-term storage comes from add-on tools.
+
 ## Why it exists
 
-Pods come and go, so you cannot log in and read files. You need logs that outlive Pods, a record of cluster actions, and metric history.
+On a single server you log in and read a log file. The payment service runs as 3 Pods that are replaced at every rollout, each with a new name, and an evicted Pod takes its logs with it. Without central logs and metric history, you cannot answer "what happened at 02:10 last night?" or "has memory been growing all week?". Collecting the signals off the Pods keeps the answers after the Pods are gone.
 
 ## How it works
 
@@ -53,23 +69,53 @@ Pods come and go, so you cannot log in and read files. You need logs that outliv
   R --> G[Grafana]`}
 />
 
-- Spring Boot 4.1: add `micrometer-registry-prometheus` and expose the Actuator `prometheus` endpoint; Prometheus scrapes `/actuator/prometheus`.
-- Commands and the debugging order: [kubectl debugging](card:kubectl-debugging).
+1. The app writes its logs to stdout and stderr. The container runtime saves them in files on the node, and `kubectl logs` reads them through the kubelet.
+2. A log agent, run as a [DaemonSet](card:daemonsets) so there is one per node, reads those files and sends every line to a central log store.
+3. Kubernetes components record events as API objects. `kubectl describe` shows them at the bottom, and they are deleted after 1 hour by default.
+4. The kubelet measures each container's CPU and memory. metrics-server collects the latest values for `kubectl top` and the [HPA](card:autoscaling).
+5. Prometheus scrapes, that is, regularly fetches over HTTP, the app's metrics endpoint and kube-state-metrics, which turns object state such as "2 of 3 replicas ready" into metrics. It stores the history, and Grafana draws dashboards from it.
 
-## Defaults
+So the key is: Kubernetes shows you the present; add-ons keep the past.
+
+## Example
+
+Where to look for each signal of the payment service:
+
+```bash
+kubectl logs deploy/payment-service -n payments --since=10m           # logs from one of its Pods
+kubectl logs payment-service-7d9f8-x2k4q -n payments --previous       # the crashed container before this one
+kubectl get events -n payments --field-selector type=Warning          # what went wrong, last hour only
+kubectl top pods -n payments                                          # live CPU and memory (needs metrics-server)
+```
+
+What to notice:
+
+- `--previous` works only because the kubelet keeps one terminated container's logs after a restart; once the Pod is deleted, even that is gone.
+- `type=Warning` filters out the routine Normal events, such as Scheduled and Pulled, so problems stand out.
+- `kubectl top` shows only the current values; for "memory over the last week" you need Prometheus.
+- In Spring Boot 4.1, the app exposes metrics for Prometheus by adding `micrometer-registry-prometheus` and exposing the Actuator `prometheus` endpoint at `/actuator/prometheus`.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Event retention | 1 hour (`--event-ttl`) | kube-apiserver, Kubernetes 1.37 |
+| Event lifetime | 1 hour (`--event-ttl`) | kube-apiserver, Kubernetes 1.37 |
 | Container log rotation | 10Mi per file, 5 files | kubelet, Kubernetes 1.37 |
 | metrics-server collection | Every 15 seconds | metrics-server (kubernetes-sigs) |
+
+- **No log storage:** Kubernetes has no built-in store for log data; you add a logging backend.
+- **Traces:** OpenTelemetry creates and exports traces, metrics and logs from the app; it is not a storage backend itself.
+
+## Not to be confused with
+
+metrics-server holds only the latest CPU and memory values, so the HPA can scale. Prometheus stores every metric as history, answers queries in PromQL and fires alerts. Rule: metrics-server is for autoscaling now; Prometheus is for monitoring over time. Logs and events also differ: logs come from your app, events come from Kubernetes.
 
 ## Interview Qs
 
 ### A container keeps crashing. Where are its logs, and how do you keep them?
 
-`kubectl logs --previous` shows the last crashed container; the kubelet keeps one. When the Pod is deleted or evicted, its logs go too. Ship them with a node agent run as a [DaemonSet](card:daemonsets).
+`kubectl logs --previous` shows the last crashed container, because the kubelet keeps one. When the Pod is deleted or evicted, its logs go too, so run a node log agent as a DaemonSet that ships every line to a central store. You will use these commands in [debugging with kubectl](card:kubectl-debugging).
 
-### metrics-server or Prometheus: which one for what?
+### How do you monitor a Kubernetes cluster?
 
-metrics-server holds only the latest CPU and memory values; HPA, VPA and `kubectl top` use them. Prometheus scrapes and stores time series, runs PromQL queries and alerts; Grafana draws the dashboards.
+Prometheus scrapes the apps and kube-state-metrics and stores the history; Grafana draws dashboards; Prometheus alert rules warn the team when something crosses a limit. Logs go to a central store through a DaemonSet agent. metrics-server only feeds autoscaling and `kubectl top`.

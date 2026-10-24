@@ -5,72 +5,130 @@ title: StatefulSets
 topic: workloads
 level: intermediate
 heat: 3
-hook: "A StatefulSet gives each Pod a fixed name, its own volume and an ordered start: payments-db-0 stays payments-db-0."
+hook: "A StatefulSet gives each Pod a fixed name, its own disk and an ordered start, so payments-db-0 is always payments-db-0 with the same data."
 points:
-  - { k: "Stable name", v: "name-0, name-1 …; a replacement keeps the name, not the IP" }
-  - { k: "Own storage", v: "volumeClaimTemplates give each Pod its own PVC, reattached on restart" }
-  - { k: "Ordered", v: "created 0 to N-1, each Ready first; removed N-1 down to 0" }
-  - { k: "PVCs kept", v: "delete or scale-down keeps PVCs (Retain) unless the policy says Delete", kind: default }
-  - { k: "Headless Service", v: "needed for the per-Pod DNS names; you create it", kind: minus }
+  - { k: "Stable name", v: "Pods are named set-0, set-1 and so on; a replacement keeps the name, not always the IP" }
+  - { k: "Own storage", v: "volumeClaimTemplates give each Pod its own disk claim, attached again when it is recreated" }
+  - { k: "Ordered (1.37)", v: "by default Pods start 0 to N-1, each Ready first, and stop from N-1 down to 0", kind: default }
+  - { k: "Claims are kept (1.37)", v: "deleting or scaling down the StatefulSet keeps the disk claims unless you set the retention policy to Delete", kind: default }
+  - { k: "Headless Service", v: "you create it yourself; it gives each Pod a DNS name like payments-db-0.payments-db", kind: minus }
 trap:
   wrong: "A StatefulSet makes PostgreSQL replicated and highly available."
-  right: "It only gives identity, order and storage. Replication, failover and backups are the database's job, or an operator's."
-sayIt: "I use a StatefulSet when each replica needs its own identity and disk, like a database: stable names, one PVC per Pod, ordered rollout. It does not replicate data; the database or an operator does that."
-confusedWith: []
+  right: "It only gives each Pod a fixed identity, an order and its own disk. Replication, failover and backups are the database's job, or an operator's."
+  why: "StatefulSets are known as the database workload, and 2 replicas sounds like 2 synced copies; in fact each Pod gets its own empty disk."
+sayIt: "I use a StatefulSet when each replica needs its own identity and disk, like a database: stable names, one disk claim per Pod, ordered start and stop. It does not replicate data; the database or an operator does that."
+cheat:
+  idea: "A StatefulSet runs Pods that are not interchangeable. Each one gets a fixed name with a number, its own disk, and a DNS name, and they start and stop in order."
+  remember: "A StatefulSet gives identity and storage, not replication: two Pods means two separate disks until the database copies data itself."
+buildsOn: [deployments-and-replicasets]
+scenarios:
+  - q: "payments-db-1 crashes and its node is drained. Where does the new Pod come from, and what data does it see?"
+    a: "The StatefulSet creates a new Pod with the same name, payments-db-1, possibly on another node. It attaches the same claim, data-payments-db-1, so the database finds its old files, provided the disk can move to that node."
+  - q: "You scale the payments-db StatefulSet from 3 to 2, then back to 3. Does payments-db-2 start with an empty disk?"
+    a: "No. Scaling down removes payments-db-2 first but keeps its claim, data-payments-db-2, because the default retention policy is Retain. Scaling up recreates payments-db-2 and attaches the same claim, so the old data is back."
+confusedWith: [deployment-vs-statefulset-vs-daemonset]
 tags: [statefulset, stable-identity, pvc, headless-service]
 visual: table
 sources:
   - title: "StatefulSets (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "StatefulSet Basics tutorial: names, DNS and PVCs (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/tutorials/stateful-application/basic-stateful-set/"
     verifiedOn: "2026-10-20"
+  - title: "Force Delete StatefulSet Pods: at most one Pod per identity (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/tasks/run-application/force-delete-stateful-set-pod/"
+    verifiedOn: "2026-10-21"
   - title: "Workloads: built-in workload resources (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A StatefulSet runs Pods that are not interchangeable, such as the replicas of a database. Each Pod gets a fixed name with a number (`payments-db-0`, `payments-db-1`) and its own disk, requested through a PersistentVolumeClaim (PVC), which you will meet in [Persistent Volumes and Claims](card:persistent-storage). A headless Service, one with no shared virtual IP, gives each Pod its own DNS name. Pods start and stop in a fixed order.
+
 ## Why it exists
 
-Databases and brokers need each replica to keep its name and its disk across restarts. Deployment Pods are interchangeable, with generated names and no per-Pod disk.
+A [Deployment](card:deployments-and-replicasets) treats its Pods as copies: random names, no disk of their own, any order. That is wrong for PostgreSQL. A replacement database Pod must find its own data files again, and a replica must be able to reach the primary by a name that never changes. A StatefulSet ties a name, a DNS entry and a disk to each ordinal, so `payments-db-0` comes back as `payments-db-0` with its data.
 
 ## How it works
 
 <Compare id="deployment-vs-statefulset-vs-daemonset" />
 
-- podManagementPolicy Parallel starts and stops Pods together, keeping names but dropping the order.
-- Rolling updates go from the highest ordinal down, one Pod at a time.
-- Clients connect by Pod DNS name, never by Pod IP.
+1. You create the headless Service and the StatefulSet with `replicas: 2` and a `volumeClaimTemplates` entry.
+2. The controller creates `payments-db-0` and a claim `data-payments-db-0` for it, and waits until that Pod is Running and Ready.
+3. Only then does it create `payments-db-1` with its own claim, `data-payments-db-1`.
+4. If `payments-db-1` is deleted, the controller creates a new Pod with the same name and attaches the same claim, so it sees the same files.
+5. On scale-down or a rolling update, it works from the highest number down, one Pod at a time.
+
+So the key is: the number in the name is the identity, and the disk and DNS name follow that number.
 
 ## Example
 
-```text
-$ kubectl get pods,pvc -n payments -l app=payments-db
-pod/payments-db-0                          1/1   Running
-pod/payments-db-1                          1/1   Running
-persistentvolumeclaim/data-payments-db-0   Bound
-persistentvolumeclaim/data-payments-db-1   Bound
-# DNS: payments-db-0.payments-db.payments.svc.cluster.local
+A two-Pod PostgreSQL StatefulSet for payments, with the password read from a Secret:
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: payments-db, namespace: payments }
+spec:
+  serviceName: payments-db          # headless Service: one DNS name per Pod
+  replicas: 2
+  selector: { matchLabels: { app: payments-db } }
+  template:
+    metadata: { labels: { app: payments-db } }
+    spec:
+      containers:
+        - { name: postgres, image: "postgres:18", envFrom: [{ secretRef: { name: payments-db } }],
+            volumeMounts: [{ name: data, mountPath: /var/lib/postgresql }] }
+  volumeClaimTemplates:             # one claim per Pod, named data-payments-db-<n>
+    - { metadata: { name: data }, spec: { accessModes: [ReadWriteOnce], resources: { requests: { storage: 1Gi } } } }
 ```
 
-## Defaults
+After applying it with its headless Service and Secret, list the Pods and claims:
 
-| What | Default | Where |
-|---|---|---|
-| podManagementPolicy | OrderedReady | Kubernetes 1.37 |
-| updateStrategy | RollingUpdate (or OnDelete) | Kubernetes 1.37 |
+```bash
+kubectl get pods -n payments -l app=payments-db
+kubectl get pvc -n payments -o name
+```
+
+```text output
+NAME            READY   STATUS    RESTARTS   AGE
+payments-db-0   1/1     Running   0          50s
+payments-db-1   1/1     Running   0          42s
+persistentvolumeclaim/data-payments-db-0
+persistentvolumeclaim/data-payments-db-1
+```
+
+What to notice:
+
+- The Pods are numbered, not random, and `payments-db-0` is 8 s older: the controller waited for it to be Ready before creating `payments-db-1`. Each Pod has its own claim, named after the template and the Pod.
+- `serviceName` points at a headless Service you must create yourself; through it, other Pods reach one replica as `payments-db-0.payments-db.payments.svc.cluster.local`.
+- Two Pods means two separate, empty databases. Making `payments-db-1` a copy of `payments-db-0` needs PostgreSQL replication, set up by you or an operator.
+
+## Rules and defaults
+
+- **podManagementPolicy:** `OrderedReady` by default (one Pod at a time, each Ready first). `Parallel` starts and stops all Pods at once; names stay, order goes.
+- **Updates:** `RollingUpdate` by default, from the highest ordinal down, one Pod at a time. `OnDelete` updates a Pod only when you delete it.
+- **Claims:** deleting or scaling down the StatefulSet keeps its claims. `persistentVolumeClaimRetentionPolicy` (stable since 1.32) can set `whenDeleted` or `whenScaled` to `Delete`.
+- **Headless Service:** required for the per-Pod DNS names, and you are responsible for creating it.
+- **Do not set a grace period of 0:** the docs call it unsafe. A StatefulSet promises at most one Pod per identity, and a forced delete can leave two `payments-db-1` Pods running, which can lose data.
+
+## Common mistakes
+
+- **"Call payments-db-0 by its Pod IP."** The IP can change when the Pod is recreated; the DNS name through the headless Service does not.
 
 ## Interview Qs
 
 ### Deployment or StatefulSet for a database?
 
-A StatefulSet, because each replica needs a fixed name and its own volume. It does not replicate or fail over, so for production also weigh a managed database or an operator.
+A StatefulSet, because each replica needs a fixed name and its own disk that follows it. It does not replicate data or fail over, so in production also weigh a managed database or a database operator.
 
 ### Why does a StatefulSet need a headless Service?
 
-The headless Service gives each Pod a DNS name such as payments-db-0.payments-db, so clients can reach one specific replica, for example the primary.
+The headless Service gives each Pod its own DNS name, such as `payments-db-0.payments-db`, instead of one shared virtual IP. Clients can then reach one specific replica, for example the primary, even after its Pod is recreated with a new IP.
 
 ### What happens to the volumes when you scale a StatefulSet down?
 
-By default the PVCs stay, so scaling back up reattaches the same data. persistentVolumeClaimRetentionPolicy, stable since 1.32, can delete them instead.
+By default the claims stay, so scaling back up reattaches the same data to the Pod with the same number. `persistentVolumeClaimRetentionPolicy`, stable since Kubernetes 1.32, can delete them on scale-down or on delete instead.

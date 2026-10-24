@@ -5,31 +5,48 @@ title: Jobs and CronJobs
 topic: workloads
 level: intermediate
 heat: 2
-hook: "A Job runs Pods until the work succeeds; a CronJob creates a Job on a schedule. Make the work safe to run twice."
+hook: "A Job runs Pods until a task finishes successfully, then stops. A CronJob creates a new Job on a schedule. Make the task safe to run twice."
 points:
-  - { k: "Job vs Deployment", v: "a Job finishes and stops; a Deployment keeps Pods running" }
-  - { k: "restartPolicy", v: "Never or OnFailure only; Always is rejected", kind: minus }
-  - { k: "completions, parallelism", v: "how many Pods must succeed; how many run at once" }
-  - { k: "activeDeadlineSeconds", v: "caps the Job's total run time; wins over backoffLimit" }
+  - { k: "Job vs Deployment", v: "a Job's Pods finish and stay finished; a Deployment's Pods run all the time and are replaced" }
+  - { k: "restartPolicy", v: "a Job's Pod template must use Never or OnFailure; Always is rejected", kind: minus }
+  - { k: "backoffLimit (1.37)", v: "the Job is marked Failed after 6 retries by default", kind: default }
+  - { k: "activeDeadlineSeconds", v: "caps the Job's total run time and wins over backoffLimit when it runs out first" }
+  - { k: "concurrencyPolicy (1.37)", v: "Allow by default, so a new CronJob run can start while the last one is still going", kind: default }
+  - { k: "Runs can repeat", v: "a CronJob may create two Jobs or none for one tick, and failed Pods are retried", kind: minus }
 trap:
-  wrong: "A CronJob runs exactly once per schedule."
-  right: "It may create two Jobs or none for one tick, and failed Pods are retried. Make the work idempotent: settle each payment once."
-sayIt: "A Job runs a task to completion, retrying up to backoffLimit; a CronJob creates a Job on a cron schedule. Runs can repeat, so the work must be idempotent, and concurrencyPolicy Forbid stops overlapping runs."
+  wrong: "A CronJob runs my task exactly once per schedule."
+  right: "It may create two Jobs or none for one tick, and failed Pods are retried. Make the task idempotent: settle each payment only once, even if the run repeats."
+  why: "Linux cron on one machine usually does run once per tick, and in testing a CronJob behaves the same, so people expect the same promise."
+sayIt: "A Job runs a task to completion and retries failed Pods up to backoffLimit, 6 by default. A CronJob creates a Job on a cron schedule. Runs can repeat, so the task must be idempotent, and concurrencyPolicy Forbid stops runs from overlapping."
+cheat:
+  idea: "A Job runs Pods until a task succeeds, then stops. A CronJob creates a Job on a cron schedule."
+  flow: "CronJob → Job each tick → Pod → exit 0 = done, else retry"
+  remember: "Runs can repeat or overlap: make the task idempotent, and use concurrencyPolicy: Forbid to stop overlaps."
+buildsOn: [pod-lifecycle, deployments-and-replicasets]
+scenarios:
+  - q: "The nightly settlement CronJob takes 3 hours one night and is scheduled every 2 hours. With default settings, what happens at the next tick?"
+    a: "A second Job starts while the first is still running, because concurrencyPolicy is Allow by default. Both may settle the same payments. Set concurrencyPolicy: Forbid to skip the new run, or Replace to stop the old one."
+  - q: "A migration Job has backoffLimit: 6 and activeDeadlineSeconds: 600. Its Pod fails quickly every time, but retries are spaced out. Which limit stops it?"
+    a: "Whichever is reached first. If the 600 seconds run out before the sixth retry, the Job is marked Failed with reason DeadlineExceeded and no new Pods are started; activeDeadlineSeconds takes precedence over backoffLimit."
 confusedWith: []
 tags: [job, cronjob, batch, idempotency]
 visual: flow
 sources:
   - title: "Jobs (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/job/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "CronJob (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A Job is a workload for a task that should finish, such as a database migration or a settlement report. It starts Pods and keeps retrying until the task succeeds, then stops; the finished Pods are not restarted. A CronJob creates a new Job on a schedule written in cron syntax (minute, hour, day of month, month, day of week). Where a [Deployment](card:deployments-and-replicasets) keeps an app running for ever, a Job is meant to end.
 
 ## Why it exists
 
-Batch work, like a nightly settlement report or a database migration, must run, finish and stop. A Deployment would restart it forever.
+Run a nightly report as a Deployment and its container exits when the report is done; the kubelet restarts it, and the report runs again and again. Batch work needs the opposite rule: run, succeed, stop, and retry only on failure. A Job gives exactly that, plus a retry limit and a time limit. A CronJob adds the clock, so you do not need a cron server outside the cluster.
 
 ## How it works
 
@@ -44,45 +61,66 @@ Batch work, like a nightly settlement report or a database migration, must run, 
   R -- no --> F[Job Failed]`}
 />
 
-- concurrencyPolicy Forbid skips a run while the last one is still going; Replace stops the old one.
-- Set timeZone (stable since 1.27); otherwise the schedule uses the controller manager's time zone.
+1. At 01:30 the CronJob controller creates a Job from its `jobTemplate`.
+2. The Job creates a Pod. Its container runs the report and exits.
+3. Exit code 0 means success. The Job counts one completion; when it has enough (1 by default), it is Complete.
+4. A non-zero exit is a failure. With `restartPolicy: OnFailure` the kubelet reruns the container in the same Pod; with `Never` the Job creates a new Pod.
+5. After `backoffLimit` failures (6 by default), or when `activeDeadlineSeconds` runs out, the Job is marked Failed and its running Pods are stopped.
+
+So the key is: success ends a Job, and only failures cause retries.
 
 ## Example
+
+The nightly settlement report for payments, at 01:30 India time:
 
 ```yaml
 apiVersion: batch/v1
 kind: CronJob
 metadata: { name: settlement-report, namespace: payments }
 spec:
-  schedule: "30 1 * * *"             # 01:30 every night
+  schedule: "30 1 * * *"             # minute 30, hour 1, every day
   timeZone: Asia/Kolkata
-  concurrencyPolicy: Forbid
+  concurrencyPolicy: Forbid          # skip a run while the last one is still going
   jobTemplate:
     spec:
+      backoffLimit: 3
       template:
         spec:
           restartPolicy: OnFailure
           containers: [{ name: report, image: "settlement-report:1.0" }]
 ```
 
-## Defaults
+What to notice:
+
+- `timeZone` makes 01:30 mean India time. Without it, the schedule uses the local time zone of the kube-controller-manager, which may not be yours.
+- `concurrencyPolicy: Forbid` skips a new run if last night's report is still running. Remove it and the default `Allow` lets two reports run at once.
+- `restartPolicy: OnFailure` reruns a failed container in the same Pod. A Job accepts only `OnFailure` or `Never`; `Always` is rejected, because a finished container must stay finished.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
 | backoffLimit (retries) | 6 | Kubernetes 1.37 Job |
+| completions, parallelism | 1 each | Kubernetes 1.37 Job |
 | concurrencyPolicy | Allow (runs may overlap) | Kubernetes 1.37 CronJob |
 | History kept | 3 successful, 1 failed Job | Kubernetes 1.37 CronJob |
+
+- **completions and parallelism:** how many Pods must succeed in total, and how many may run at once.
+- **activeDeadlineSeconds:** caps the whole Job's run time and takes precedence over `backoffLimit`.
+- **Clean-up:** `ttlSecondsAfterFinished` deletes a finished Job and its Pods after that many seconds; the docs recommend setting it for Jobs no CronJob manages.
+- **Retries need care:** a Pod can be started twice even with parallelism 1, so the task must handle leftover files, locks and half-written output.
+- **startingDeadlineSeconds:** a run that cannot start within this many seconds of its time is skipped.
 
 ## Interview Qs
 
 ### What is the difference between a Job and a Deployment?
 
-A Job runs Pods until enough succeed, then stops; its restartPolicy is Never or OnFailure. A Deployment keeps Pods running and replaces them, with restartPolicy Always.
+A Job runs Pods until enough succeed, then stops; its `restartPolicy` must be `Never` or `OnFailure`. A Deployment keeps Pods running all the time and replaces them when they exit, with `restartPolicy: Always`. Use a Job for migrations and reports, a Deployment for servers.
 
 ### Last night's CronJob run is still going when the next one is due. What happens?
 
-With the default Allow, both run. Set concurrencyPolicy Forbid to skip the new run, or Replace to stop the old Job and start the new one.
+With the default `Allow`, both run at the same time. Set `concurrencyPolicy: Forbid` to skip the new run, or `Replace` to stop the running Job and start the new one.
 
-### How do you stop a failing Job from retrying too long?
+### Why must a CronJob's task be idempotent?
 
-backoffLimit (default 6) marks the Job Failed after that many retries. activeDeadlineSeconds caps total run time and takes priority over backoffLimit.
+Kubernetes does not promise exactly one run per tick: in some situations two Jobs are created, or none, and failed Pods are retried. A settlement task that runs twice must not settle a payment twice, so it should record what it has done and skip finished work.

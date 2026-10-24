@@ -5,73 +5,136 @@ title: "How Containers Isolate: Namespaces and cgroups"
 topic: basics
 level: intermediate
 heat: 2
-hook: "Namespaces decide what a container can see; cgroups decide how much it can use. Both are Linux kernel features."
+hook: "Namespaces decide what a container can see; cgroups decide how much it can use. Both are Linux kernel features, so no second OS is needed."
 points:
-  - { k: "Namespaces", v: "own view of PIDs, network, mounts, hostname, IPC; user ns opt-in" }
-  - { k: "cgroups", v: "group processes to limit and measure CPU, memory, PIDs and I/O" }
-  - { k: "docker run", v: "creates a set of namespaces and a cgroup for each container" }
-  - { k: "Shared kernel", v: "a kernel flaw or weak setting can break isolation", kind: minus }
+  - { k: "Namespace", v: "gives a process its own private copy of one kernel resource, such as the process list or the network" }
+  - { k: "cgroup", v: "a control group: processes whose CPU, memory, process count and disk I/O the kernel limits and measures" }
+  - { k: "Per container", v: "docker run creates a new set of namespaces and a new cgroup for every container" }
+  - { k: "User namespace", v: "Docker Engine 29: off by default, so root in a container has the host root's user ID unless you enable it", kind: default }
+  - { k: "No guest OS", v: "the host kernel itself does the isolating, so a container starts like a process", kind: plus }
+  - { k: "Shared kernel", v: "a kernel bug or a weak setting, such as extra privileges, can break the isolation", kind: minus }
 trap:
   wrong: "A container is a lightweight VM with its own kernel."
-  right: "It is a host process with a restricted view (namespaces) and capped resources (cgroups), on one shared kernel."
-sayIt: "Docker builds containers from kernel features: namespaces give the process its own view of PIDs, network and files, and cgroups cap its CPU and memory. It is still a host process on a shared kernel."
+  right: "It is a normal host process with a restricted view (namespaces) and capped resources (cgroups), on one shared kernel."
+  why: "Inside the container, ps shows only its own processes and hostname shows its own name, which looks exactly like a separate machine."
+sayIt: "Docker builds containers from kernel features: namespaces give the process its own view of processes, network, files and hostname, and cgroups limit its CPU and memory. It is still a host process on a shared kernel, so isolation is weaker than a VM's."
+cheat:
+  idea: "Namespaces give a container its own view of processes, network, files and hostname. cgroups limit and measure how much CPU, memory and I/O it can use."
+  remember: "Namespaces = what it sees; cgroups = how much it uses. It is still a host process on the shared kernel."
+buildsOn: [containers-and-vms, docker-architecture]
+scenarios:
+  - q: "Inside the payment-service container, ps shows java as PID 1. On the host, ps shows the same java process with PID 48210. How can both be true?"
+    a: "The container runs in its own PID namespace, where numbering starts at 1. The host sees all namespaces, so it shows the real host PID. It is one process with two IDs, one per view."
+  - q: "A memory leak in one container on a shared host slowly eats all the RAM, and other apps are killed. Which kernel feature should have stopped it, and why did it not?"
+    a: "cgroups, which can cap a container's memory. By default Docker sets no memory limit, so the cgroup only measured usage. With a limit such as --memory 512m, the kernel holds that container to its cap and the leak hurts only that container."
 confusedWith: []
 tags: [namespaces, cgroups, isolation, linux-kernel]
 visual: flow
 sources:
   - title: "namespaces(7) (Linux manual page)"
     url: "https://man7.org/linux/man-pages/man7/namespaces.7.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "cgroups(7) (Linux manual page)"
     url: "https://man7.org/linux/man-pages/man7/cgroups.7.html"
     verifiedOn: "2026-10-20"
-  - title: "Docker Engine security: namespaces and control groups (Docker docs)"
+  - title: "Docker Engine security: kernel namespaces and control groups (Docker docs)"
     url: "https://docs.docker.com/engine/security/"
-    verifiedOn: "2026-10-20"
-  - title: "Runtime metrics: cgroup v2 (Docker docs)"
-    url: "https://docs.docker.com/engine/containers/runmetrics/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Isolate containers with a user namespace (Docker docs)"
+    url: "https://docs.docker.com/engine/security/userns-remap/"
+    verifiedOn: "2026-10-21"
+  - title: "Resource constraints: no limits by default (Docker docs)"
+    url: "https://docs.docker.com/engine/containers/resource_constraints/"
+    verifiedOn: "2026-10-21"
+  - title: "dockerd: default cgroup namespace mode (Docker CLI reference)"
+    url: "https://docs.docker.com/reference/cli/dockerd/"
+    verifiedOn: "2026-10-21"
+  - title: "Docker Engine version 29 release notes: cgroup v1 deprecated"
+    url: "https://docs.docker.com/engine/release-notes/29/"
+    verifiedOn: "2026-10-21"
   - title: "Docker Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/docker-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A container is a normal host process that the kernel isolates with two Linux features. Namespaces control what the process can see: each namespace gives it a private copy of one thing, such as the list of processes, the network or the hostname. cgroups, short for control groups, control how much it can use: CPU, memory, number of processes and disk I/O. runc sets up both when [dockerd starts a container](card:docker-architecture).
+
 ## Why it exists
 
-Processes on one host can see and starve each other. The kernel needs a way to hide other processes from a group and to cap what that group uses.
+Without isolation, the payment-service process on a shared server can see every other process, clash with other apps over ports and files, and a memory leak in it can use up the host's RAM until other apps are killed. Namespaces hide everything that does not belong to the container. cgroups cap what it may use. Because both are built into the kernel, Docker gets this isolation without booting a [second OS](card:containers-and-vms).
 
 ## How it works
 
 <Mermaid
-  alt="A container process gets two kinds of kernel features. Namespaces control what it can see: PID, network, mount, UTS, IPC and cgroup namespaces; a user namespace only when enabled. cgroups control how much it can use: memory, CPU, number of PIDs and I/O. Both run on one shared host kernel."
+  alt="A container process gets two kinds of kernel features. Namespaces control what it can see: PID, network, mount, UTS, IPC and cgroup namespaces, plus a user namespace only when enabled. cgroups control how much it can use: memory, CPU, number of processes and I/O. Both run on one shared host kernel."
   chart={`flowchart LR
   P([Container process]) --> NS["Namespaces: what it can SEE"]
   P --> CG["cgroups: how much it can USE"]
-  NS --> N1["pid, net, mnt, uts, ipc, cgroup; user is opt-in"]
+  NS --> N1["pid, net, mnt, uts, ipc, cgroup; user only if enabled"]
   CG --> C1["memory, CPU, PIDs, I/O"]
   N1 --> K[(One shared host kernel)]
   C1 --> K`}
 />
 
-- The flags that set the limits are in [resource limits](card:resource-limits).
-- Isolation is real but not complete; harden it with [runtime security](card:container-runtime-security).
+1. On `docker run`, runc creates a new set of namespaces for the container: PID (process IDs), network, mount (the file view), UTS (the hostname), IPC (shared memory between processes) and cgroup.
+2. runc places the process in a new cgroup, with any limits you asked for, such as a memory cap.
+3. The process starts inside them. In its PID namespace it is PID 1, in its mount namespace it sees only the image's files, and in its network namespace it has its own IP address and ports.
+4. While it runs, the kernel counts its CPU and memory use in the cgroup and enforces the limits.
+5. From the host, it is still an ordinary process, with a normal host PID.
+
+So the key is: namespaces change the view, cgroups change the budget, and the kernel stays shared.
 
 ## Example
 
+The same `sleep` process seen from two sides, then a memory limit read back from the cgroup:
+
 ```bash
-docker run --rm alpine ps          # PID namespace: it sees only itself
+docker run --rm alpine:3.22 ps                       # the container's view
+docker run -d --name pay-ns-demo alpine:3.22 sleep 300 >/dev/null
+pgrep -a -f 'sleep 300'                              # the host's view
+docker rm -f pay-ns-demo >/dev/null
+docker run --rm --memory 512m alpine:3.22 cat /sys/fs/cgroup/memory.max
+```
+
+```text output
 PID   USER     TIME  COMMAND
     1 root      0:00 ps
-docker run --rm --memory 512m alpine cat /sys/fs/cgroup/memory.max
-536870912                          # cgroup v2 memory limit: 512 MiB
+204947 sleep 300
+536870912
 ```
+
+What to notice:
+
+- Inside the container, `ps` sees only itself, as PID 1: the PID namespace hides every host process.
+- The host sees the container's `sleep` as a normal process with a large host PID. A container is not a separate machine.
+- `--memory 512m` wrote 536870912 bytes (512 MiB) into the container's cgroup file `memory.max`. The kernel enforces that number. The flags and what happens at the limit are in [resource limits](card:resource-limits).
+
+## Rules and defaults
+
+- **User namespace off:** Docker does not use a user namespace by default, so root inside a container runs as user ID 0, the host's root, though with fewer privileges. Enable `userns-remap` to map it to an unprivileged host user.
+- **cgroup namespace:** private by default for each container on cgroup v2 hosts (`--default-cgroupns-mode`).
+- **cgroup version:** Docker Engine 29 deprecates cgroup v1, with support until at least May 2029; current distributions such as Ubuntu 21.10 and later use cgroup v2.
+
+## Not to be confused with
+
+A namespace changes what a process can see, such as its own process list. A cgroup changes how much a process can use, such as at most 512 MiB of memory. Rule: namespaces for visibility, cgroups for resources.
+
+## Common mistakes
+
+- **"Containers are fully isolated, like VMs."** They share the host kernel. Extra capabilities, `--privileged` or host mounts weaken the walls; hardening is in [runtime security](card:container-runtime-security).
 
 ## Interview Qs
 
 ### How does Docker isolate containers?
 
-With Linux namespaces and cgroups. Namespaces give each container its own process tree, network stack, mounts and hostname. cgroups limit and account its CPU, memory and process count, so one container cannot starve the host.
+With two Linux kernel features. Namespaces give each container its own process tree, network stack, mounts and hostname, so it cannot see other processes. cgroups limit and measure its CPU, memory and process count, so it cannot starve the host when limits are set.
 
 ### Are containers completely isolated?
 
-No. All containers share the host kernel, so a kernel flaw or a weak setting, such as extra capabilities or host mounts, can break isolation. A VM gives a stronger boundary.
+No. All containers share the host kernel, so a kernel flaw, or a weak setting such as `--privileged`, extra capabilities or a host mount, can break isolation. A VM gives a stronger boundary because it has its own kernel.
+
+### What is the difference between a namespace and a cgroup?
+
+A namespace limits what a process can see: its own PIDs, network or mounts. A cgroup limits how much it can use: CPU, memory, process count and I/O. A container uses both together.

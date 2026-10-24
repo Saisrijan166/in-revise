@@ -5,50 +5,78 @@ title: "High Availability on Kubernetes"
 topic: scaling-releases
 level: interview
 heat: 2
-hook: "Run 3 or more replicas spread over nodes and zones, gate traffic on readiness, and set a PDB so drains keep enough Pods up."
+hook: "Run 3 or more replicas spread over nodes and zones, send traffic only to ready Pods, and set a PodDisruptionBudget so maintenance never takes too many down."
 points:
-  - { k: "PDB", v: "minAvailable or maxUnavailable for a label selector (policy/v1)" }
-  - { k: "PDB limits", v: "evictions: kubectl drain, node upgrades, node scale-down", kind: plus }
-  - { k: "PDB cannot stop", v: "node crashes, deleting Pods or Deployments, rollouts", kind: minus }
-  - { k: "etcd quorum", v: "(n/2)+1 members: 3 survive 1 failure, 5 survive 2" }
-  - { k: "Control plane", v: "several API servers behind a load balancer; 3+ control-plane nodes" }
+  - { k: "Spread, not just copies", v: "3 replicas on one node die together; spread them over nodes and zones with topology spread or anti-affinity" }
+  - { k: "PodDisruptionBudget (PDB)", v: "minAvailable or maxUnavailable for the Pods a label selector picks; evictions that break it are refused" }
+  - { k: "PDB covers", v: "evictions through the Eviction API: kubectl drain, node upgrades, node autoscaler scale-down", kind: plus }
+  - { k: "PDB cannot stop", v: "a node crash, deleting Pods or Deployments directly, or a Deployment's own rolling update", kind: minus }
+  - { k: "etcd quorum", v: "etcd needs a majority, (n/2)+1, to write: 3 members survive 1 failure, 5 survive 2" }
 trap:
   wrong: "A PodDisruptionBudget keeps my Pods up when a node crashes."
-  right: "A PDB only limits voluntary evictions such as a drain. Crashes still happen; spreading replicas is what survives them."
-sayIt: "I run at least 3 replicas spread over zones, with readiness probes, graceful shutdown and a PDB so drains keep 2 up. The control plane gets several API servers and an odd etcd cluster, 3 or 5."
+  right: "A PDB only limits voluntary evictions, such as a drain. Nothing can refuse a crash; replicas spread over nodes and zones survive it."
+  why: "The name says disruption budget, and a node crash is the most obvious disruption. The docs split disruptions into voluntary and involuntary, and the PDB only covers the first."
+sayIt: "I run at least 3 replicas spread over zones, with readiness probes, graceful shutdown and a PDB of minAvailable 2 so drains keep two up. For the control plane: several API servers behind a load balancer and an odd etcd cluster, 3 or 5 members."
+cheat:
+  idea: "High availability means the app keeps serving when a Pod, a node or a zone fails, or when an admin drains a node. It comes from spread replicas plus a PodDisruptionBudget."
+  remember: "A PDB limits drains and upgrades, not crashes; only replicas on different nodes and zones survive a crash."
+buildsOn: [deployments-and-replicasets, scheduling, probes]
+scenarios:
+  - q: "payment-service has 3 replicas on 3 nodes and a PDB with minAvailable 2. An admin drains node-1, and a minute later drains node-2. What happens?"
+    a: "The first drain evicts one Pod, since 3 are available and 2 are needed. The second drain must wait: evicting another Pod would leave 1. It succeeds once the replacement for the first Pod is Ready on another node, so 3 are available again."
+  - q: "A teammate says: we have a PDB, so we are safe if a zone goes down. Are they right?"
+    a: "No. A zone outage is an involuntary disruption, and a PDB cannot refuse it. What helps is spreading the replicas over zones, so the Pods in the other zones keep serving while the ReplicaSet replaces the lost ones."
 confusedWith: []
 tags: [high-availability, pdb, etcd, drain, zones]
 visual: table
 sources:
   - title: "Disruptions (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/pods/disruptions/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Options for Highly Available Topology (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/ha-topology/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "FAQ: quorum and failure tolerance (etcd v3.6 docs)"
     url: "https://etcd.io/docs/v3.6/faq/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Specifying a Disruption Budget for your Application (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/tasks/run-application/configure-pdb/"
+    verifiedOn: "2026-10-21"
+  - title: "Safely Drain a Node (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/tasks/administer-cluster/safely-drain-node/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+High availability (HA) means payment-service keeps serving when parts of the cluster fail or are taken down for maintenance. On Kubernetes it is not one setting but several layers: enough replicas, placed on different nodes and zones, traffic only to ready Pods, and a PodDisruptionBudget (PDB). A PDB is a small object that says how many Pods of an app must stay up while admins evict Pods, for example when they drain a node for an upgrade.
 
 ## Why it exists
 
-Nodes fail, and admins drain them for upgrades. Without planning, one bad node or upgrade takes every copy of payment-service down.
+Nodes fail, whole zones go down, and admins drain nodes for upgrades every few weeks. A Deployment with 3 replicas only promises 3 Pods, not 3 Pods in 3 places: all three may sit on one node and die together. And during an upgrade, an admin draining two nodes at once could evict every copy. HA design makes sure one failure or one maintenance step never removes all copies.
 
 ## How it works
 
-| Layer | Do this | Survives |
+| Layer | What you do | It survives |
 |---|---|---|
-| Replicas | 3 or more (HPA min 3) | One Pod crashing |
-| Placement | [Topology spread or anti-affinity](card:scheduling) over nodes and zones | A node or zone going down |
-| Traffic | [Readiness probes](card:probes) | Requests to Pods not ready |
+| Replicas | 3 or more (HPA `minReplicas: 3`) | One Pod crashing |
+| Placement | [Topology spread or anti-affinity](card:scheduling) over nodes and zones | A node or a zone going down |
+| Traffic | [Readiness probes](card:probes) | Requests sent to Pods not ready yet |
 | Shutdown | [Graceful shutdown](card:pod-lifecycle) | Payments cut off mid-request |
-| Evictions | PDB minAvailable 2 | A drain removing too many Pods |
-| Control plane | 3+ nodes, odd etcd members, load balancer | Losing one API server or etcd member |
+| Evictions | PDB `minAvailable: 2` | A drain removing too many Pods |
+| Control plane | 3+ control-plane nodes, odd etcd count, load balancer | Losing one API server or etcd member |
 
-- `kubectl drain` evicts Pods through the Eviction API, which honours PDBs; deleting Pods skips them.
+1. An admin runs `kubectl drain node-1` before an upgrade. First it cordons the node: no new Pods are placed there.
+2. Drain then asks the Eviction API, the API call that removes a Pod only if its budget allows, to evict each Pod on the node. It checks the PDB: with 3 Pods available and 2 required, one eviction is allowed.
+3. The evicted Pod shuts down gracefully, and the ReplicaSet creates a replacement, which the scheduler places on another node.
+4. If a second drain tries to evict another payment Pod before the replacement is Ready, the Eviction API refuses, and drain retries until the budget allows it.
+5. A node crash skips all of this: nothing asks permission. The Pods on other nodes keep serving while replacements start.
+
+So spreading handles crashes, and the PDB handles planned work.
 
 ## Example
+
+The PDB for payment-service keeps at least 2 Pods available during drains.
 
 ```yaml
 apiVersion: policy/v1
@@ -60,18 +88,34 @@ spec:
     matchLabels: { app: payment-service }
 ```
 
-With 3 replicas, a drain may evict one Pod; the next eviction waits until a replacement is ready elsewhere.
+What to notice:
+
+- `selector` must match the Pods' labels, `app: payment-service`, the same labels the Deployment uses.
+- With 3 replicas, `minAvailable: 2` allows one eviction at a time. With only 2 replicas it allows none, and a drain would wait forever.
+- You set either `minAvailable` or `maxUnavailable`, never both. `maxUnavailable: 1` means the same here, and the docs prefer it because it follows the replica count when the HPA adds Pods.
+
+## Rules and defaults
+
+- **Who honours PDBs:** only callers of the Eviction API, such as `kubectl drain`, node upgrades and node autoscalers. `kubectl delete pod` bypasses them (Kubernetes 1.37).
+- **Rolling updates:** a Deployment's rollout is limited by `maxUnavailable`, not by the PDB. But Pods down during a rollout count against the budget, so a drain at the same time may wait.
+- **Percentages:** a % in a PDB is rounded up to a whole number of Pods.
+- **Control plane, kubeadm:** stacked etcd runs one etcd member on each control-plane node and needs at least 3 such nodes; external etcd needs at least 3 more hosts. A managed service (EKS, GKE, AKS) runs the control plane for you.
+- **etcd size:** use an odd number of members. 4 members tolerate only 1 failure, the same as 3.
+
+## Not to be confused with
+
+Cordon only marks a node unschedulable; the Pods already on it keep running. Drain cordons the node and then evicts its Pods, honouring PDBs. Rule: cordon stops new Pods arriving; drain also moves the existing ones off.
 
 ## Interview Qs
 
 ### Are 3 replicas enough for high availability?
 
-Only if they run on different nodes, ideally in different zones. Three Pods on one node die together. Spread them with topology spread constraints or anti-affinity.
+Only if they run on different nodes, ideally in different zones. Three Pods on one node die together when that node fails. By default the scheduler only prefers to spread them, so add topology spread constraints or pod anti-affinity, and a PDB so maintenance does not take two down at once.
 
 ### Why an odd number of etcd members?
 
-etcd needs a majority, (n/2)+1, to commit a write. 3 members survive 1 failure; 4 also survive only 1, so the extra member adds cost, not safety. A 5-member cluster survives 2 failures, enough in most cases.
+etcd needs a majority, (n/2)+1, to commit a write. 3 members need 2 and survive 1 failure. 4 members need 3 and still survive only 1, so the extra member adds cost, not safety. 5 members survive 2 failures, which is enough in most cases.
 
 ### Does a PDB slow down a rolling update?
 
-No. Rollouts follow maxSurge and maxUnavailable, not the PDB. But Pods down during a rollout count against the budget, so a drain at the same time may have to wait.
+No. A rollout follows the Deployment's `maxSurge` and `maxUnavailable`, not the PDB. The two meet only because Pods down during a rollout count against the budget, so a node drain that runs at the same time may have to wait.

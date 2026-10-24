@@ -5,57 +5,80 @@ title: Locking Down a Running Container
 topic: security
 level: interview
 heat: 2
-hook: "A container is only as isolated as you configure it: drop capabilities, make the root filesystem read-only, never use --privileged."
+hook: "A container is only as isolated as its run settings: drop capabilities, make the filesystem read-only, and never use --privileged or mount the Docker socket."
 points:
-  - { k: "Out of the box", v: "a restricted capability set; default seccomp, AppArmor where the host has it", kind: default }
-  - { k: "--cap-drop ALL", v: "then --cap-add only what the app truly needs", kind: plus }
-  - { k: "--privileged", v: "all capabilities and all host devices: avoid it", kind: minus }
-  - { k: "docker.sock mount", v: "control of the daemon means root-level access to the host", kind: minus }
-  - { k: "Rootless mode", v: "the daemon and containers run without root", kind: plus }
+  - { k: "Out of the box", v: "Docker keeps 14 capabilities, applies a seccomp profile, and AppArmor where the host has it", kind: default }
+  - { k: "--cap-drop ALL", v: "removes every capability; add back with --cap-add only what the app truly needs", kind: plus }
+  - { k: "--read-only", v: "the container cannot change its own files; give it a --tmpfs /tmp for scratch space", kind: plus }
+  - { k: "--privileged", v: "all capabilities, all host devices, seccomp and AppArmor off: the container can take over the host", kind: minus }
+  - { k: "docker.sock mount", v: "a container that can talk to the Docker daemon has root-level control of the host", kind: minus }
+  - { k: "Rootless mode", v: "the Docker daemon and its containers run as a normal user, not root", kind: plus }
 trap:
   wrong: "Mounting /var/run/docker.sock is a harmless way to let a container start other containers."
   right: "Whoever can talk to the Docker daemon has root-level access to the host. Guard the socket like a root password."
-sayIt: "Containers share the host kernel, so I harden them: non-root user, --cap-drop ALL, read-only root with a tmpfs for /tmp, no-new-privileges, never --privileged or the Docker socket."
+  why: "It is a one-line volume mount used by many CI and monitoring tools, so it looks routine rather than dangerous."
+sayIt: "Containers share the host kernel, so I harden how they run: a non-root user, --cap-drop ALL with only needed capabilities added back, a read-only root filesystem with a tmpfs for /tmp, and no-new-privileges. Never --privileged, never the Docker socket."
+cheat:
+  idea: "Run settings decide how much a hacked container can do. Drop all capabilities, make the root filesystem read-only, and block new privileges; the defaults already add seccomp and AppArmor."
+  remember: "--privileged and a mounted docker.sock both hand the container the whole host."
+buildsOn: [namespaces-and-cgroups, image-security]
+scenarios:
+  - q: "A monitoring container asks you to mount /var/run/docker.sock so it can list containers. What do you tell the team?"
+    a: "That mount gives it full control of the Docker daemon, so it can start a privileged container that mounts the host's root filesystem. Treat that container as root on the host: allow it only for a trusted image, and prefer a tool that does not need the socket."
+  - q: "You start the payment service with --read-only and it fails writing a temp file. What do you add?"
+    a: "--tmpfs /tmp. It mounts an in-memory folder at /tmp, so the JVM and the app have scratch space while the rest of the filesystem stays read-only."
 confusedWith: []
 tags: [security, capabilities, seccomp, rootless]
 visual: table
 sources:
-  - title: "Docker Engine security (Docker docs)"
+  - title: "Docker Engine security: daemon attack surface, capabilities (Docker docs)"
     url: "https://docs.docker.com/engine/security/"
-    verifiedOn: "2026-10-20"
-  - title: "docker container run (Docker CLI reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Running containers: runtime privilege and Linux capabilities (Docker docs)"
+    url: "https://docs.docker.com/engine/containers/run/"
+    verifiedOn: "2026-10-21"
+  - title: "docker container run: --privileged, --read-only, --security-opt (Docker CLI reference)"
     url: "https://docs.docker.com/reference/cli/docker/container/run/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Seccomp security profiles for Docker (Docker docs)"
     url: "https://docs.docker.com/engine/security/seccomp/"
-    verifiedOn: "2026-10-20"
-  - title: "Linux post-installation steps: docker group (Docker docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Linux post-installation steps: the docker group (Docker docs)"
     url: "https://docs.docker.com/engine/install/linux-postinstall/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Rootless mode (Docker docs)"
     url: "https://docs.docker.com/engine/security/rootless/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Runtime security is the set of `docker run` settings that limit what a container may do once it runs. The main tool is **Linux capabilities**: the kernel splits root's power into small pieces, such as "bind a port below 1024" or "change file owners", and a process gets only the pieces it is given. On top of that, Docker applies **seccomp**, a filter that blocks risky system calls, and **AppArmor**, a profile that limits file and device access.
 
 ## Why it exists
 
-Containers share one kernel with the host ([namespaces and cgroups](card:namespaces-and-cgroups)). A default container is fairly safe, but a few flags can hand it the whole machine.
+All containers share one kernel with the host, as [namespaces and cgroups](card:namespaces-and-cgroups) showed. A default container is fairly safe, but a hacked app inside it can still use whatever the run settings allow. A few flags make it much safer, and a few others, like `--privileged`, remove nearly all isolation. A [non-root image](card:image-security) is the first layer; these settings are the second.
 
 ## How it works
 
 | Setting | What it stops |
 |---|---|
-| `--read-only` + `--tmpfs /tmp` | writes to the root filesystem; scratch space stays in memory |
-| `--cap-drop ALL` | root-only kernel actions, such as raw sockets |
-| `--security-opt no-new-privileges=true` | processes gaining new privileges after start |
+| `--cap-drop ALL` | root-only kernel actions, such as raw sockets or changing file owners |
+| `--read-only` + `--tmpfs /tmp` | writes to the container's files; scratch space stays in memory |
+| `--security-opt no-new-privileges=true` | processes gaining extra privileges after start, for example through setuid programs |
 | no `--privileged` | full host access: all capabilities and devices |
-| no `docker.sock` mount | the container taking over the daemon, and so the host |
+| no `docker.sock` mount | the container taking over the Docker daemon, and so the host |
 
-- Run as a non-root user too: see [Secure Images](card:image-security).
-- The default seccomp profile blocks about 44 of 300+ system calls; avoid `seccomp=unconfined`.
-- CPU and memory caps against noisy neighbours are in [resource limits](card:resource-limits).
+1. When Docker creates a container, it keeps an allowlist of 14 capabilities and drops the rest. `--cap-drop ALL` drops these 14 too.
+2. It applies the default seccomp profile, which blocks about 44 of more than 300 system calls, and the `docker-default` AppArmor profile on hosts that use AppArmor.
+3. Your flags then narrow the container further: a read-only root filesystem, no new privileges, a non-root user.
+4. `--privileged` reverses all of this: every capability, every host device, and the seccomp and AppArmor profiles turned off.
+
+So the key is: start from the defaults, remove more, and never add `--privileged`.
 
 ## Example
+
+The payment service runs with no capabilities and a read-only filesystem. The second command tries to write a file inside it.
 
 ```bash
 docker run -d --name payment-service \
@@ -63,18 +86,37 @@ docker run -d --name payment-service \
   --cap-drop ALL \
   --security-opt no-new-privileges=true \
   -p 8080:8080 payment-service:1.4.0
+docker exec payment-service touch /app/test
 ```
+
+```text output
+touch: cannot touch '/app/test': Read-only file system
+```
+
+What to notice:
+
+- The write fails, so an attacker cannot drop a script into the app folder. Writing to `/tmp` works, because `--tmpfs /tmp` mounts a writable in-memory folder there.
+- The app still answered on `/actuator/health` in this run: a Java web app on port 8080 needs no capabilities at all.
+- If the app had to bind port 80, you would add back only `--cap-add NET_BIND_SERVICE`.
+
+## Rules and defaults
+
+- **Default capabilities (Docker Engine 29):** 14 are kept, including `CHOWN`, `NET_RAW`, `SETUID` and `NET_BIND_SERVICE`; the rest are not granted.
+- **Default seccomp:** on for every container; `--security-opt seccomp=unconfined` turns it off, so avoid it.
+- **The docker group:** members can control the daemon, which the Docker docs call root-level privileges.
+- **Rootless mode vs userns-remap:** both map container root to an unprivileged host user. With userns-remap the daemon still runs as root; in rootless mode the daemon and containers both run as a normal user.
+- **Resource limits** against noisy neighbours are separate: see [resource limits](card:resource-limits).
 
 ## Interview Qs
 
 ### Are containers completely isolated?
 
-No. They share the host kernel, so isolation depends on configuration: dropped capabilities, seccomp, AppArmor or SELinux, a non-root user, and not adding risky flags like `--privileged`.
+No. They share the host kernel, so isolation depends on configuration: dropped capabilities, the seccomp and AppArmor or SELinux profiles, a non-root user, and not adding risky flags like `--privileged` or a Docker socket mount. A VM has its own kernel and is a stronger boundary.
 
-### What does --privileged do?
+### What does --privileged do, and when is it used?
 
-Every capability, all host devices, and the default seccomp and AppArmor profiles turned off; such a container can take over the host. It exists for special cases such as Docker inside Docker; never use it for apps.
+It gives the container every capability and all host devices, makes `/sys` writable, and turns off the default seccomp and AppArmor profiles. Such a container can get a root shell on the host. It exists for special cases such as running Docker inside Docker; I never use it for application containers.
 
-### Rootless mode vs userns-remap?
+### Why is mounting /var/run/docker.sock dangerous?
 
-Both map container root to an unprivileged host user. With userns-remap the daemon still runs as root; in rootless mode the daemon and the containers both run as a normal user.
+The socket is the Docker daemon's API, and the daemon runs as root. A container that can call it can start a new privileged container with the host's `/` mounted, which means full control of the host. Treat that mount like giving out root.

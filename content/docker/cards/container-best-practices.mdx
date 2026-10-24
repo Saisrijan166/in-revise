@@ -5,31 +5,49 @@ title: Container Best Practices
 topic: security
 level: intermediate
 heat: 2
-hook: "One concern per container, no state inside, one image for every environment: replace containers, never patch them."
+hook: "Treat containers as disposable: one concern each, no data or fixes kept inside, and one image for every environment. Replace containers; never patch them."
 points:
-  - { k: "One concern", v: "one main process per container: a rule of thumb, not a law" }
-  - { k: "Ephemeral", v: "stop, delete and replace a container with no manual set-up" }
-  - { k: "Same image everywhere", v: "dev, staging and prod differ only in config" }
-  - { k: "Rebuild often", v: "an image is a snapshot; rebuilds pick up patched dependencies" }
+  - { k: "One concern", v: "the payment service, Postgres and Redis run in three containers, so each can be scaled and replaced alone" }
+  - { k: "Ephemeral", v: "a container can be stopped, deleted and replaced at any time with almost no set-up" }
+  - { k: "Stateless", v: "data in the container's writable layer is lost on docker rm; keep it in volumes or a database", kind: minus }
+  - { k: "Same image everywhere", v: "dev, staging and prod run the same image; only configuration from the environment differs" }
+  - { k: "Rebuild often", v: "an image is a snapshot, so rebuild with --pull to pick up patched base layers" }
 trap:
-  wrong: "Fix the bug by running docker exec and editing files inside the running container."
-  right: "That change is lost when the container is replaced. Fix the code or Dockerfile, build a new image and replace the container."
-sayIt: "I keep one concern per container, keep state in volumes or managed services, promote one immutable image with config from the environment, log to stdout, and add health checks, limits and graceful shutdown."
+  wrong: "Fix the bug quickly with docker exec and edit the files inside the running container."
+  right: "That change is lost when the container is replaced. Fix the code or Dockerfile, build a new image, and replace the container."
+  why: "On a server you would SSH in and patch, and docker exec feels the same; the change even works until the next deploy or restart."
+sayIt: "I keep one concern per container, keep state in volumes or managed services, and promote one immutable image with config from the environment. I log to stdout and add a health check, limits, a restart policy and graceful shutdown, so a container can be replaced at any time."
+cheat:
+  idea: "Containers are disposable: each does one job, keeps no data or fixes inside, and can be deleted and replaced at any moment from the same image."
+  remember: "Never patch a running container; change the image and replace the container."
+buildsOn: [container-lifecycle, volumes-and-mounts, env-and-secrets]
+scenarios:
+  - q: "A teammate wants to run the payment service, Postgres and Redis in one container with a process manager, to keep things simple. What do you say?"
+    a: "Use three containers. Then each can be scaled, upgraded and restarted alone; Postgres can keep its own volume; and Compose or Kubernetes can manage them. One process per container is a rule of thumb, not a law, but unrelated services should not share one."
+  - q: "The payment service writes uploaded receipts to /app/receipts inside the container. After a redeploy they are gone. Why, and what is the fix?"
+    a: "They were in the container's writable layer, which is deleted with the old container. Store them in a named volume mounted at /app/receipts, or better, in object storage outside the container."
 confusedWith: []
 tags: [best-practices, twelve-factor, immutable]
 visual: table
 sources:
   - title: "Building best practices: ephemeral containers, decouple applications, rebuild often (Docker docs)"
     url: "https://docs.docker.com/build/building/best-practices/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "The Twelve-Factor App"
     url: "https://12factor.net/"
     verifiedOn: "2026-10-20"
+  - title: "The Twelve-Factor App: V. Build, release, run"
+    url: "https://12factor.net/build-release-run"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Container best practices are a short list of habits that make containers safe to throw away. A container is meant to be **ephemeral**: you can stop it, delete it and start a new one from the same image with almost no set-up. Most of the habits follow the **Twelve-Factor App**, a well-known guide for cloud apps: keep config in the environment, keep processes stateless, start fast and stop cleanly, and write logs to the console.
 
 ## Why it exists
 
-Containers are meant to be thrown away and replaced. Apps that hide state, settings or fixes inside a running container break when that happens.
+Docker, Compose and Kubernetes replace containers all the time: on every deploy, after a crash, when scaling out. An app that keeps data, settings or hand-made fixes inside its container breaks when that happens, and nobody knows what the running copy really contains. If every container is disposable, replacing it is routine instead of risky.
 
 ## How it works
 
@@ -39,21 +57,53 @@ Containers are meant to be thrown away and replaced. Apps that hide state, setti
 | Config from the environment | one image for every environment | [env and secrets](card:env-and-secrets) |
 | Logs to stdout and stderr | Docker and log tools collect them | [logging](card:container-logging) |
 | Health check | "running" is not "working" | [health checks](card:container-health-checks) |
-| Graceful shutdown | in-flight ₹500 payments finish on SIGTERM | [signals](card:signals-and-graceful-shutdown) |
+| Graceful shutdown | in-flight payments finish on SIGTERM | [signals](card:signals-and-graceful-shutdown) |
 | Memory and CPU limits | one container cannot starve the rest | [resource limits](card:resource-limits) |
 | Restart policy | Docker restarts only if a policy says so | [lifecycle](card:container-lifecycle) |
 | Non-root, scanned image | a hacked app does less damage | [Secure Images](card:image-security) |
 
-- These follow the [Twelve-Factor App](https://12factor.net/): config, processes, disposability, logs.
-- Split the payment service, Postgres and Redis into three containers, not one.
-- Promote one image through every environment: see [Docker in CI/CD](card:docker-in-ci-cd).
+1. Split the app by concern: the payment service, Postgres and Redis each get their own container and image.
+2. Build one image per release and give it a unique tag; never change it afterwards.
+3. Start that same image in every environment, and pass the differences in as environment variables and secrets.
+4. Keep anything that must survive, such as database files, in a volume or an outside service.
+5. When something must change, build a new image and replace the container; the old one is simply deleted.
+
+So the key is: the image is the only source of truth, and the container is a disposable copy of it.
+
+## Example
+
+A "hotfix" made inside a running container disappears when the container is replaced.
+
+```bash
+docker run -d --name payment-service payment-service:1.4.0
+docker exec payment-service sh -c 'echo hotfix > /tmp/patch.txt'
+docker rm -f payment-service
+docker run -d --name payment-service payment-service:1.4.0
+docker exec payment-service cat /tmp/patch.txt
+```
+
+What to notice:
+
+- In a real run the last command printed `cat: /tmp/patch.txt: No such file or directory`: the new container starts from the image, not from the old container.
+- Any change made with `docker exec` behaves the same way, whether it is a config edit or a patched file.
+- The fix is to change the code or Dockerfile, build `payment-service:1.4.1`, and replace the container with it.
+
+## Rules and defaults
+
+- **One process per container:** a rule of thumb, not a hard rule. An init process, or workers the app starts itself, are fine.
+- **Rebuild often:** `docker build --pull` checks for a newer base image; `--no-cache` also reruns every step.
+- **No automatic restart:** Docker restarts a stopped container only when a restart policy says so.
 
 ## Interview Qs
 
 ### Why one process per container?
 
-Separate containers are easier to scale out and reuse. One process is a rule of thumb, not a hard rule: an init process, or workers the app starts itself, are fine.
+Separate containers can be scaled, upgraded and restarted on their own, and each image stays small and simple. It is a rule of thumb from the Docker docs, not a law: an init process, or an app that starts its own worker processes, is fine.
 
 ### Why should containers be stateless?
 
-A container can be deleted and replaced at any time, on a deploy, a crash or a scale-out. State kept inside its writable layer is lost then; keep it in volumes or external services.
+A container can be deleted and replaced at any time, on a deploy, a crash or a scale-out. Anything stored in its writable layer is lost then. Keeping state in volumes or external services means any copy of the container can serve any request.
+
+### What does "immutable image" mean, and why does it matter?
+
+Once an image is built and tagged for a release, it is never changed. A fix means a new build and a new tag. Every environment then runs exactly what was tested, and rolling back means starting the previous tag.

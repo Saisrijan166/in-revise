@@ -5,30 +5,46 @@ title: Secure Images
 topic: security
 level: intermediate
 heat: 2
-hook: "Start from a trusted base, switch to a non-root USER, scan in CI, pin the base and rebuild often."
+hook: "A secure image starts from a small trusted base, runs the app as a non-root user, holds no secrets, and is scanned and rebuilt often."
 points:
-  - { k: "USER", v: "run the app as a non-root user set in the Dockerfile" }
-  - { k: "Trusted base", v: "official or hardened images, as small as the app allows", kind: plus }
-  - { k: "Scan in CI", v: "Docker Scout or Trivy; fail the build on critical CVEs" }
-  - { k: "Pin by digest", v: "repeatable builds, but no automatic security fixes", kind: minus }
-  - { k: "Attestations", v: "SBOM lists contents; provenance records how it was built" }
+  - { k: "Default user", v: "without USER in the Dockerfile or --user at run time, the app runs as root (UID 0)", kind: minus }
+  - { k: "Trusted base", v: "Docker Official Images, Verified Publisher or hardened images, with only the packages you need", kind: plus }
+  - { k: "Scan in CI", v: "Docker Scout or Trivy compare the image's packages with known CVEs and can fail the build" }
+  - { k: "Pin by digest", v: "the same base every build, but no automatic security fixes until you move the digest", kind: minus }
+  - { k: "Attestations", v: "an SBOM lists the image's packages; provenance records how and from what it was built" }
 trap:
   wrong: "Our image passed the scan last month, so it is secure."
-  right: "New CVEs appear every day. Rescan in CI and rebuild often so patched base layers come in."
-sayIt: "I use a small trusted base, run as a non-root USER, keep secrets out of layers, scan every build with Scout or Trivy, and pin the base by digest while rebuilding regularly."
+  right: "New CVEs are published every day. Rescan on every build and on a schedule, and rebuild so patched base layers come in."
+  why: "A scan feels like a certificate, but it only compares the image with the CVEs known on that day."
+sayIt: "I start from a small trusted base, create a non-root user and switch to it with USER, keep secrets out of every layer, and scan each build with Scout or Trivy. I pin the base by digest for repeatable builds and let a bot move the digest so security fixes still arrive."
+cheat:
+  idea: "A secure image has a small trusted base, runs the app as a non-root user, contains no secrets, and is scanned for known vulnerabilities on every build."
+  remember: "Without a USER line the app runs as root; a scan is only true for the day it ran."
+buildsOn: [dockerfile-instructions, registries, env-and-secrets]
+scenarios:
+  - q: "Your Dockerfile starts FROM eclipse-temurin:25-jre and has no USER line. Who does the payment service run as?"
+    a: "root, UID 0. The Temurin image sets no USER, and Docker's default is root. Add a system user and a USER line, so a hacked app does not get root inside the container."
+  - q: "You pinned FROM eclipse-temurin:25-jre@sha256:... six months ago. Is the image still patched?"
+    a: "No. A digest never changes, so the build keeps the old layers, including any packages that now have known CVEs. Let a bot such as Dependabot raise PRs that move the digest, and rebuild."
 confusedWith: [tag-vs-digest]
 tags: [security, non-root, scanning, sbom]
 visual: flow
 sources:
-  - title: "Building best practices (Docker docs)"
+  - title: "Building best practices: base image, pinning, USER (Docker docs)"
     url: "https://docs.docker.com/build/building/best-practices/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Build attestations (Docker docs)"
     url: "https://docs.docker.com/build/metadata/attestations/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "docker scout cves (Docker CLI reference)"
     url: "https://docs.docker.com/reference/cli/docker/scout/cves/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Trivy: exit code configuration (Trivy docs)"
+    url: "https://trivy.dev/docs/latest/guide/configuration/others/"
+    verifiedOn: "2026-10-21"
+  - title: "Docker Hardened Images (Docker docs)"
+    url: "https://docs.docker.com/dhi/"
+    verifiedOn: "2026-10-21"
   - title: "Running containers (Docker docs)"
     url: "https://docs.docker.com/engine/containers/run/"
     verifiedOn: "2026-10-20"
@@ -37,24 +53,33 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Image security means building the image so that it gives an attacker as little as possible. Every package in an image can have a **CVE**, a publicly listed security hole. The rules are: start from a trusted, small base image, run the app as a **non-root user**, keep secrets out of the image, and **scan** it, which means comparing its packages with the list of known CVEs.
+
 ## Why it exists
 
-Every package in an image can carry a known hole. If the app also runs as root, one exploit gives the attacker root in the container.
+An image is shipped to many servers and kept for months. If it carries an old library with a known hole and the app runs as root, one exploit gives the attacker root inside the container, and any container escape is then far worse. A password copied into a layer leaks to anyone who can pull the image. These rules shrink each of those risks before the container ever runs.
 
 ## How it works
 
 <Steps label="Securing the payment-service image">
-  <Step title="Base">A trusted base with only what the app needs ([Smaller Images](card:image-size-optimization)).</Step>
-  <Step title="User">Create a user and set `USER`; `RUN`, `CMD` and `ENTRYPOINT` then run as it.</Step>
-  <Step title="Secrets">Nothing secret in `ENV`, `ARG` or copied files: see [secrets](card:env-and-secrets).</Step>
-  <Step title="Scan">`docker scout cves --exit-code` or `trivy image --exit-code 1` fails CI on findings.</Step>
-  <Step title="Attest">`docker buildx build --sbom=true --provenance=mode=max --push` attaches both to the image.</Step>
+  <Step title="Base">A trusted base with only what the app needs.</Step>
+  <Step title="User">Create a user and switch to it with USER.</Step>
+  <Step title="Secrets">Nothing secret in ENV, ARG or copied files.</Step>
+  <Step title="Scan">CI fails the build on serious CVEs.</Step>
+  <Step title="Attest and rebuild">Attach an SBOM; rebuild often.</Step>
 </Steps>
 
-- Pin `FROM` by [digest](compare:tag-vs-digest); a bot or rebuild job moves it.
-- Run-time flags: [Locking Down a Running Container](card:container-runtime-security).
+1. Choose the base: Docker Official Images, Verified Publisher images or hardened images, as small as the app allows ([smaller images](card:image-size-optimization) compares them).
+2. In the Dockerfile, create a system user and switch to it with `USER`. Every later `RUN`, and the `CMD` or `ENTRYPOINT` of the container, then runs as that user.
+3. Pass secrets at build or run time, never in `ENV`, `ARG` or a copied file ([secrets](card:env-and-secrets) shows how).
+4. In CI, scan the built image: `docker scout cves --exit-code` or `trivy image --exit-code 1 --severity HIGH,CRITICAL`. A non-zero exit code fails the job.
+5. Build with `--sbom=true` to attach a software bill of materials (SBOM), and rebuild on a schedule so patched base layers come in.
 
 ## Example
+
+The payment service image runs as a user called `app` instead of root.
 
 ```dockerfile
 FROM eclipse-temurin:25-jre
@@ -66,23 +91,42 @@ EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]
 ```
 
-## Defaults
+```bash
+docker run --rm --entrypoint id payment-service:1.4.0
+```
 
-| What | Default | Where |
-|---|---|---|
-| User inside a container | `root` (UID 0); `eclipse-temurin` sets no `USER` | Docker Engine 29 |
-| Provenance attestation | `mode=min` added by default; `--provenance=false` turns it off | BuildKit (Buildx) |
+```text output
+uid=999(app) gid=999(app) groups=999(app)
+```
+
+What to notice:
+
+- `USER app` comes after the setup steps, because creating users needs root. Remove that line and the same command prints `uid=0(root)`.
+- `--chown=app:app` makes the jar owned by the app user; without it the file belongs to root.
+- `useradd --system` picked UID 999 here. The Docker docs suggest a fixed UID when other systems, such as volume permissions, depend on it.
+
+## Rules and defaults
+
+- **Default user:** root, unless the image sets `USER` or you pass `--user`. The `eclipse-temurin` images set no `USER`.
+- **Provenance:** BuildKit adds a provenance attestation with `mode=min` by default; `--provenance=mode=max` adds more detail, `--provenance=false` turns it off.
+- **SBOM:** not added by default; opt in with `--sbom=true`.
+- **Scanner exit codes:** `docker scout cves --exit-code` returns 2 when it finds vulnerabilities; Trivy exits 0 unless you set `--exit-code`.
+- **Docker Hardened Images:** minimal images that run as non-root by default; the core catalogue is free under Apache 2.0.
+
+## Not to be confused with
+
+A [tag](card:registries), such as `25-jre`, is a movable name the publisher can point at a newer, patched image. A digest, `sha256:...`, names exactly one image and never changes. Rule: tags bring fixes but can change under you; digests are repeatable but need a bot or a person to move them.
 
 ## Interview Qs
 
 ### Why should a container not run as root?
 
-A hacked app running as root gives the attacker root inside the container, so any escape is far worse. A non-root `USER` limits the damage.
+By default, root inside the container is UID 0 on the host too, limited only by namespaces, capabilities and seccomp. If the app is hacked, the attacker has root inside the container, and any kernel or runtime escape is far worse. A non-root `USER` limits the damage.
 
 ### Should you pin the base image to a digest?
 
-Yes, for repeatable builds: a tag can move, a digest cannot. But patched bases stop arriving, so bump the digest and rebuild on a schedule.
+Yes, for repeatable builds: a tag can move, a digest cannot. But pinning opts out of automatic security fixes, so I let a tool such as Dependabot raise pull requests that move the digest, and rebuild on a schedule.
 
 ### What is an SBOM, and why attach it?
 
-A Software Bill of Materials lists every package in the image, so new CVEs can be matched without pulling it.
+A software bill of materials lists every package and version in the image. When a new CVE appears, you can check which images contain the affected package without pulling and unpacking each one.

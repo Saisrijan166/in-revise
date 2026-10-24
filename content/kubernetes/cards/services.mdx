@@ -5,55 +5,82 @@ title: Services
 topic: networking
 level: beginner
 heat: 3
-hook: "A Service gives a changing set of Pods one stable IP and name, and sends each connection to a ready Pod."
+hook: "A Service gives a changing group of Pods one fixed address and name, and forwards each new connection to one Pod that is ready."
 points:
-  - { k: "Stable front", v: "Pods come and go with new IPs; the Service address stays" }
-  - { k: "selector", v: "labels choose the Pods; EndpointSlices list their IPs" }
-  - { k: "port → targetPort", v: "callers use port 80; the app listens on targetPort 8080" }
-  - { k: "Default type", v: "ClusterIP: reachable only inside the cluster (Kubernetes 1.37)", kind: default }
-  - { k: "Endpoints API", v: "deprecated since 1.33; read EndpointSlices instead", kind: minus }
+  - { k: "Stable address", v: "the Service keeps one ClusterIP and one DNS name while the Pods behind it are replaced" }
+  - { k: "selector", v: "the Service sends traffic to the Pods whose labels match its selector, in its own namespace" }
+  - { k: "port → targetPort", v: "callers dial the Service port (80); traffic arrives at targetPort (8080), where the app listens" }
+  - { k: "Ready Pods only", v: "a Pod gets new connections only while it is ready; with no ready Pod, calls to the Service fail" }
+  - { k: "Default type (1.37)", v: "ClusterIP: the Service address works only from inside the cluster", kind: default }
+  - { k: "Per connection", v: "a Pod is chosen when a connection opens; every request on that connection goes to the same Pod", kind: minus }
 trap:
-  wrong: "The Service port must be the same as the containerPort."
-  right: "port is what callers dial; targetPort is where the app listens. Port 80 → 8080 is normal."
-sayIt: "A Service is a stable virtual IP and DNS name for Pods picked by labels. EndpointSlices track the ready Pods; each connection goes to one of them. ClusterIP is the default."
+  wrong: "The Service port must be the same as the port the container listens on."
+  right: "port is what callers dial; targetPort is where the app listens. A Service on port 80 forwarding to targetPort 8080 is normal."
+  why: "When targetPort is left out it defaults to the same number as port, so many short examples show one number twice and it looks like a rule."
+sayIt: "A Service gives the Pods chosen by its label selector one stable virtual IP and DNS name. EndpointSlices track which Pods are ready, and kube-proxy on every node sends each new connection to a ready one. ClusterIP is the default type."
+cheat:
+  idea: "A Service is a fixed address, a ClusterIP plus a DNS name, for the Pods whose labels match its selector. It forwards each new connection to one ready Pod."
+  flow: "order-service → payment-service:80 → one ready Pod :8080"
+  remember: "port is what callers dial, targetPort is where the app listens; 80 → 8080 is normal."
+buildsOn: [namespaces-labels-selectors, pods, deployments-and-replicasets]
+scenarios:
+  - q: "You roll out a new version of payment-service and all three Pods get new IPs. Does order-service need a configuration change?"
+    a: "No, as long as it calls the Service name. The Service's ClusterIP and DNS name do not change. Kubernetes updates the EndpointSlices with the new Pod IPs, and kube-proxy updates the forwarding rules on every node."
+  - q: "The EndpointSlice for payment-service lists no addresses at all, though three payment Pods are Running. What is the likely cause?"
+    a: "The selector matches no Pods: the labels differ (app: payments against app: payment-service), or the Pods are in another namespace. A readiness problem looks different: the Pods are listed, but marked not ready."
+  - q: "order-service keeps one HTTP connection open to payment-service and sends all its requests over it. One payment Pod is busy and the other two are idle. Why?"
+    a: "kube-proxy picks a Pod once, when the connection opens. Every request on that long-lived connection goes to the same Pod. Spreading single requests needs the client to open several connections, or a proxy that balances per request."
 confusedWith: [deployment-vs-service, loadbalancer-vs-ingress]
 tags: [service, endpointslice, service-discovery]
 visual: flow
 sources:
-  - title: "Service (Kubernetes 1.37 documentation)"
+  - title: "Service: selector, port and targetPort, types, EndpointSlices, Endpoints deprecated (Kubernetes 1.37 documentation)"
     url: "https://kubernetes.io/docs/concepts/services-networking/service/"
-    verifiedOn: "2026-10-20"
-  - title: "EndpointSlices (Kubernetes 1.37 documentation)"
+    verifiedOn: "2026-10-21"
+  - title: "EndpointSlices: ready, serving and terminating conditions (Kubernetes 1.37 documentation)"
     url: "https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/"
-    verifiedOn: "2026-10-20"
-  - title: "Virtual IPs and Service Proxies: session affinity (Kubernetes 1.37 documentation)"
+    verifiedOn: "2026-10-21"
+  - title: "Virtual IPs and Service Proxies: random backend per connection, session affinity (Kubernetes 1.37 documentation)"
     url: "https://kubernetes.io/docs/reference/networking/virtual-ips/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "gRPC Load Balancing on Kubernetes without Tears: connection-level balancing and HTTP/2 (Kubernetes blog, 07-11-2018)"
+    url: "https://kubernetes.io/blog/2018/11/07/grpc-load-balancing-on-kubernetes-without-tears/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A Service is a Kubernetes object that gives a group of Pods one stable address. It picks its Pods with a [label selector](card:namespaces-labels-selectors), for example `app: payment-service`. Kubernetes gives the Service a virtual IP, called the ClusterIP, and a DNS name. Callers use that address, and the Service forwards each connection to one of the matching Pods.
 
 ## Why it exists
 
-Pods are replaced all the time, and each new Pod gets a new IP. Callers need one address that keeps working.
+A [Deployment](card:deployments-and-replicasets) replaces Pods all the time: during a rollout, after a crash, or when a node fails. Each new Pod gets a new IP. If order-service stored the IP of a payment Pod, its calls would break at the next rollout. It would also have to choose between three replicas by itself. A Service removes both problems: the address never changes, and Kubernetes keeps the list of Pods behind it up to date.
 
 ## How it works
 
 <Mermaid
-  alt="order-service calls payment-service on port 80. The selector finds the Pods; the EndpointSlice lists their IPs and which are ready; each connection goes to one Pod on port 8080."
+  alt="order-service calls payment-service on port 80. The Service's selector app=payment-service matches three Pods. The EndpointSlice lists their IPs and whether each is ready. Each new connection goes to one ready Pod on port 8080."
   chart={`flowchart LR
-  C[order-service] -- "payment-service:80" --> S[Service ClusterIP]
-  S -- "selector app=payment-service" --> E[EndpointSlice: Pod IPs + ready flag]
+  C[order-service] -- "payment-service:80" --> S[Service, ClusterIP]
+  S -- "selector app=payment-service" --> E[EndpointSlice: Pod IPs, ready flag]
   E -- ":8080" --> P1[Pod 1]
   E -- ":8080" --> P2[Pod 2]
   E -- ":8080" --> P3[Pod 3]`}
 />
 
+1. You create the Service with a selector and ports. Kubernetes gives it a ClusterIP and a DNS name.
+2. A controller in the control plane finds the Pods whose labels match the selector, in the same namespace. It writes their IPs, ports and ready state into EndpointSlice objects.
+3. [kube-proxy](card:kubernetes-architecture) on every node reads the Services and EndpointSlices and programs forwarding rules on that node.
+4. order-service opens a connection to `payment-service:80`. The rules on its node pick one ready Pod, at random by default, and send the connection to that Pod's port 8080.
+5. When a Pod is replaced, the EndpointSlice changes and the rules follow. The ClusterIP stays the same.
+
+The `type` field decides who can reach the Service:
+
 <Compare id="clusterip-vs-nodeport-vs-loadbalancer" />
 
-- Only ready Pods get traffic. A failing [readiness probe](card:probes) takes a Pod out; with no ready Pods, calls fail.
-- `sessionAffinity: ClientIP` sends one client IP to the same Pod each time.
-- Callers use its [DNS name](card:cluster-networking-dns); outside HTTP comes via [Ingress or Gateway API](card:ingress-and-gateway-api).
-
 ## Example
+
+The Service for the payment service's three Pods in the `payments` namespace:
 
 ```yaml
 apiVersion: v1
@@ -64,26 +91,47 @@ metadata:
 spec:
   type: ClusterIP          # the default; may be left out
   selector:
-    app: payment-service   # must match the Pod labels
+    app: payment-service   # must match the Pod template labels
   ports:
     - port: 80             # callers use payment-service:80
       targetPort: 8080     # Spring Boot listens here
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Service type | ClusterIP | Kubernetes 1.37 |
-| targetPort | same as port | Kubernetes 1.37 |
-| ClientIP affinity timeout | 10800 s (3 hours) | Kubernetes 1.37 |
+- The selector is the only link between the Service and the Pods. If the Deployment's Pod labels say `app: payments`, the Service matches nothing and every call fails, though the Pods are healthy.
+- `port: 80` and `targetPort: 8080` differ on purpose. Callers write `http://payment-service`, and the app keeps its own port.
+- Remove the `type` line and nothing changes, because ClusterIP is the default. The Service is then reachable only from inside the cluster; outside traffic comes through [Ingress or Gateway API](card:ingress-and-gateway-api).
+
+## Rules and defaults
+
+- **Default type:** ClusterIP (Kubernetes 1.37).
+- **targetPort:** defaults to the same value as `port`. It can also be the name of a container port, such as `http`, so the number can change in one place.
+- **Readiness:** EndpointSlices list each Pod with a ready flag. Only ready Pods get new connections; a Pod counts as ready when its readiness check passes, which you will see in [probes](card:probes).
+- **No ready Pods:** the Service still exists, but calls to it fail.
+- **EndpointSlices:** Kubernetes starts a new slice once the existing ones hold 100 endpoints each. The older Endpoints API is deprecated since Kubernetes 1.33.
+- **Session affinity:** `None` by default. `sessionAffinity: ClientIP` sends one client IP to the same Pod, for 10800 seconds (3 hours) by default.
+- **Headless Service:** `clusterIP: None` gives no virtual IP; DNS then returns the Pod IPs, as [Pod networking and DNS](card:cluster-networking-dns) shows.
+
+## Not to be confused with
+
+A Deployment keeps the right number of Pods running and replaces them when they fail. A Service gives those Pods one address and spreads connections over them. Rule: the Deployment decides how many Pods run; the Service decides how callers reach them.
+
+## Common mistakes
+
+- **"The Service balances every HTTP request."** It works per connection. A client that reuses one long-lived connection, as HTTP/2 and gRPC clients do, keeps talking to one Pod.
+- **Calling a Pod IP directly.** It works until the Pod is replaced. Call the Service name instead.
 
 ## Interview Qs
 
 ### A Service exists, but calls to it fail. What do you check first?
 
-Its endpoints: `kubectl get endpointslices -n payments -l kubernetes.io/service-name=payment-service`. Empty means the selector matches no Pod labels or no Pod is ready. Then check targetPort. Full order: [debugging with kubectl](card:kubectl-debugging).
+Its endpoints: `kubectl get endpointslices -n payments -l kubernetes.io/service-name=payment-service`. No addresses means the selector matches no Pod labels. Addresses that are not ready point to a readiness problem. Then check that targetPort is the port the app listens on. You will see the full order in [debugging with kubectl](card:kubectl-debugging).
 
 ### What is the difference between port, targetPort and nodePort?
 
-port is the Service's own port (80). targetPort is the container port it forwards to (8080). nodePort is the port opened on every node, only for NodePort and LoadBalancer Services.
+port is the Service's own port, which callers dial (80). targetPort is the container port the traffic is sent to (8080). nodePort is a port opened on every node, from 30000-32767 by default, and exists only for NodePort and LoadBalancer Services.
+
+### Why not let clients call the Pod IPs directly?
+
+Pod IPs change whenever a Pod is replaced, and clients would have to track every replica and its health themselves. A Service gives one fixed address and keeps the list of ready Pods current, so clients need no changes during rollouts or failures.

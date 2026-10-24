@@ -5,24 +5,36 @@ title: Volumes
 topic: config-storage
 level: beginner
 heat: 2
-hook: "A volume is a folder mounted into a Pod's containers. It survives container restarts; its type decides if it outlives the Pod."
+hook: "A volume is a folder Kubernetes mounts into a Pod's containers. Its files survive a container restart, and its type decides whether they outlive the Pod."
 points:
-  - { k: "Container files", v: "lost on a container restart; files in a volume stay", kind: plus }
-  - { k: ".spec.volumes", v: "declares each volume once for the whole Pod" }
-  - { k: "volumeMounts", v: "each container picks its own mount path" }
-  - { k: "subPath", v: "mounts one sub-folder or file of a volume, not its root" }
-  - { k: "hostPath", v: "mounts a node path: a security risk, avoid it", kind: minus }
+  - { k: "Container files", v: "files a container writes are lost when it restarts; files in a volume stay", kind: plus }
+  - { k: "Declare once, mount anywhere", v: "list the volume once under spec.volumes; each container mounts it at its own mountPath" }
+  - { k: "Ephemeral volumes", v: "emptyDir, configMap, secret and downwardAPI volumes are created with the Pod and deleted with it" }
+  - { k: "persistentVolumeClaim volume", v: "mounts storage that stays after the Pod is deleted, such as a database disk" }
+  - { k: "emptyDir medium: Memory", v: "keeps files in RAM (tmpfs); they count against the writing container's memory limit", kind: minus }
+  - { k: "hostPath", v: "mounts a folder of the node itself; it can expose node credentials, so apps should avoid it", kind: minus }
 trap:
   wrong: "An emptyDir is wiped when its container crashes."
-  right: "emptyDir survives container crashes. It is deleted only when the Pod is removed from the node."
-sayIt: "A volume is a directory the Pod's containers mount. Ephemeral ones like emptyDir live as long as the Pod; a persistentVolumeClaim mounts storage that outlives it. I share files between containers with emptyDir."
+  right: "A crash does not remove the Pod from its node, so emptyDir data survives it. The data is deleted when the Pod is removed from the node."
+  why: "A container's own files are lost on restart, so people assume an emptyDir lives as long as the container, not the Pod."
+sayIt: "A volume is a directory that a Pod's containers mount. Ephemeral types such as emptyDir live as long as the Pod and survive container restarts; a persistentVolumeClaim volume mounts storage that outlives the Pod. I share files with a sidecar through an emptyDir."
+cheat:
+  idea: "A volume is a folder mounted into a Pod's containers. Its files survive container restarts, and containers of one Pod can share it."
+  flow: "spec.volumes → volumeMounts in each container → same files"
+  remember: "emptyDir lives as long as the Pod, not the container. Data that must outlive the Pod needs a PersistentVolumeClaim."
+buildsOn: [pods, multi-container-pods, configmaps-and-secrets]
+scenarios:
+  - q: "The payment-service container writes logs to an emptyDir, runs out of memory and is restarted by the kubelet. Are the logs written before the crash still there?"
+    a: "Yes. The kubelet restarts the container inside the same Pod, and the emptyDir belongs to the Pod, so its files stay. They are deleted only when the Pod leaves the node, for example when it is deleted or evicted."
+  - q: "You mount the payment-config ConfigMap as one file with subPath, then change the ConfigMap. Does the file in the container change?"
+    a: "No. A ConfigMap or Secret mounted with subPath never receives updates. Mount the whole volume at a folder instead, and the kubelet refreshes the files after its sync delay."
 confusedWith: [pv-vs-pvc-vs-storageclass]
 tags: [volumes, emptydir, storage]
-visual: table
+visual: flow
 sources:
-  - title: "Volumes (Kubernetes documentation)"
+  - title: "Volumes: emptyDir, hostPath, subPath, read-only mounts (Kubernetes documentation)"
     url: "https://kubernetes.io/docs/concepts/storage/volumes/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Ephemeral Volumes (Kubernetes documentation)"
     url: "https://kubernetes.io/docs/concepts/storage/ephemeral-volumes/"
     verifiedOn: "2026-10-20"
@@ -31,21 +43,40 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A volume is a directory that Kubernetes makes available to the containers of a [Pod](card:pods), at a path you choose in each container. Without one, a container sees only its image's files plus what it writes, and those writes vanish when the container restarts. The volume type decides where the files really live: on the node's disk, in memory, in a [ConfigMap or Secret](card:configmaps-and-secrets), or in network storage.
+
 ## Why it exists
 
-A container's files vanish when it restarts, and two containers in one Pod cannot see each other's files. A volume fixes both.
+The payment service writes logs to `/app/logs`, and a log-shipper [sidecar](card:multi-container-pods) in the same Pod must read them. Without a volume, two things go wrong. When the payment-service container crashes, the kubelet restarts it with a clean filesystem, so the logs are gone. And the sidecar cannot see the other container's files at all. A volume belongs to the Pod, not to one container, so it fixes both.
 
 ## How it works
 
-<Compare id="emptydir-vs-persistent-volume" />
+<Mermaid
+  alt="The payment-service Pod declares one emptyDir volume named logs. The payment-service container mounts it at /app/logs and writes to it. The log-shipper container mounts the same volume at /logs and reads from it. If a container restarts, the volume and its files stay."
+  chart={`flowchart LR
+  subgraph Pod[payment-service Pod]
+    V[(volume: logs, emptyDir)]
+    A[payment-service] -- "writes /app/logs" --> V
+    B[log-shipper] -- "reads /logs" --> V
+  end`}
+/>
 
-- Ephemeral types (emptyDir, configMap, secret, downwardAPI, CSI ephemeral) are created and destroyed with the Pod.
-- A `persistentVolumeClaim` volume mounts a [PersistentVolume](card:persistent-storage), which stays after the Pod is gone.
+1. You list each volume once under the Pod's `spec.volumes`, with a name and a type, such as `emptyDir`.
+2. Each container that needs it adds a `volumeMounts` entry with the same name and its own `mountPath`.
+3. When the Pod is assigned to a node, the kubelet creates the volume (an empty folder for `emptyDir`) and mounts it into the containers as they start.
+4. If a container crashes, the kubelet restarts it and mounts the same volume again, with its files intact.
+5. When the Pod is removed from the node, ephemeral volumes such as `emptyDir` are deleted. Storage behind a `persistentVolumeClaim` volume stays.
+
+So the key is: a volume lives at the Pod level, and its type decides what happens after the Pod.
 
 ## Example
 
+The payment service and its log shipper share one emptyDir:
+
 ```yaml
-# payment-service writes logs; a sidecar ships them
+# payment-service Pod template (part)
 volumes:
   - name: logs
     emptyDir: { sizeLimit: 500Mi }
@@ -58,16 +89,36 @@ containers:
     volumeMounts: [{ name: logs, mountPath: /logs, readOnly: true }]
 ```
 
+What to notice:
+
+- The volume is declared once, but each container mounts it at its own path: `/app/logs` and `/logs` show the same files.
+- `readOnly: true` stops the shipper from changing or deleting the logs; the payment service can still write.
+- `sizeLimit: 500Mi` caps the folder. The space comes from the node's ephemeral storage, so other users of that disk can fill it first.
+- If you add `medium: Memory`, the folder is RAM-backed and fast, but the log files then count against the payment-service container's memory limit.
+
+## Rules and defaults
+
+- **Common types:** `emptyDir` (scratch space), `configMap` and `secret` (settings as files), `downwardAPI` (the Pod's own name, namespace and labels as files), `projected` (several of these in one folder), `persistentVolumeClaim` (durable storage).
+- **emptyDir medium:** the node's disk by default; `medium: Memory` uses tmpfs. With no `sizeLimit`, a memory-backed emptyDir can grow to the node's allocatable memory.
+- **configMap and secret volumes:** always mounted read-only.
+- **subPath:** mounts one file or sub-folder of a volume instead of its root. A ConfigMap, Secret or downwardAPI volume mounted with `subPath` never receives updates.
+- **hostPath:** mounts a path from the node. It can expose kubelet credentials or the container runtime socket, and Pod Security's Baseline level forbids it. Keep it for node agents.
+- **No nesting:** a volume cannot be mounted inside another volume.
+
+## Not to be confused with
+
+A volume is a field of one Pod's spec: a folder made available to that Pod's containers. A [PersistentVolume](card:persistent-storage), which comes next, is a separate cluster object for real storage that exists without any Pod; a Pod reaches it through a `persistentVolumeClaim` volume. Rule: volume = how a Pod mounts a folder; PersistentVolume = storage that lives on its own.
+
 ## Interview Qs
 
 ### What happens to emptyDir data when a container crashes?
 
-Nothing. The kubelet restarts the container in the same Pod and the files are still there. The data is deleted when the Pod leaves the node, for example when it is deleted or evicted.
+Nothing. A crash does not remove the Pod from the node; the kubelet restarts the container in the same Pod, and the files are still there. The data is deleted permanently when the Pod leaves the node, for example when it is deleted or evicted.
 
 ### Why is hostPath risky?
 
-It exposes the node's filesystem, which can hold kubelet credentials or the container runtime socket: a path to container escape. The [Pod Security](card:pod-security) Baseline level forbids it; keep it for node agents only.
+It gives the container access to the node's filesystem, which can hold kubelet credentials or the container runtime socket, a path to container escape. Pods from one template may also behave differently on different nodes. The [Pod Security](card:pod-security) Baseline level forbids it; keep it for node agents.
 
 ### How do two containers in a Pod share files?
 
-Mount the same volume, usually an emptyDir, in both, as in a [sidecar](card:multi-container-pods). Each container chooses its own `mountPath`.
+Declare one volume, usually an emptyDir, under `spec.volumes` and mount it in both containers. Each container chooses its own `mountPath`, and both see the same files, as in the [sidecar](card:multi-container-pods) pattern.

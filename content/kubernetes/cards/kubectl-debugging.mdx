@@ -5,80 +5,137 @@ title: Debugging with kubectl
 topic: troubleshooting
 level: intermediate
 heat: 3
-hook: "Go from outside in: get, describe and events, logs, then step inside with exec or debug."
+hook: "Debug from the outside in: get, then describe and events, then logs, then exec or debug to look inside."
 points:
-  - { k: "describe", v: "state, Last State, exit code, conditions and events" }
-  - { k: "logs --previous", v: "output of the run that crashed, not the new one" }
-  - { k: "kubectl debug", v: "adds an ephemeral container; stable since 1.25", kind: plus }
-  - { k: "No ready endpoints", v: "selector or readiness problem, not a network one" }
-  - { k: "Node trouble", v: "describe node: Ready, MemoryPressure, DiskPressure" }
+  - { k: "describe", v: "shows each container's state, last exit code, restart count and recent Pod events" }
+  - { k: "logs --previous", v: "prints the run that crashed; plain logs shows the new run, which may not have failed yet" }
+  - { k: "exec needs the tool", v: "exec runs a command in a running container, so it fails if the image has no shell or tool", kind: minus }
+  - { k: "kubectl debug (1.25+)", v: "adds an ephemeral container with your own tools to a running Pod; stable since 1.25", kind: plus }
+  - { k: "No ready endpoints", v: "if a Service's EndpointSlices list no ready Pods, look at the selector or readiness before the network" }
+  - { k: "port-forward", v: "tunnels a local port to one Pod for testing; it stops when that Pod ends and never serves real users", kind: minus }
 trap:
-  wrong: "Expose the app with kubectl port-forward."
-  right: "port-forward tunnels to one Pod and stops when that Pod ends. It is for debugging; real traffic uses a Service and a Gateway."
-sayIt: "I start broad: get pods, then describe and events, then logs --previous. If the image has no shell I use kubectl debug. For a Service, I check the selector, EndpointSlices, targetPort, readiness, DNS and NetworkPolicies."
+  wrong: "Expose the app to users with kubectl port-forward."
+  right: "port-forward tunnels your machine to one Pod and stops when it ends. It is for debugging; real traffic uses a Service and Gateway or Ingress."
+  why: "It works at once: the app answers on localhost, and the command even accepts service/payment-service, so it looks like a load-balanced path through the Service."
+sayIt: "I go outside in: get pods, describe and events, then logs --previous. If the image has no shell, I add an ephemeral container with kubectl debug. For a Service I check ready Pods, EndpointSlices, the selector, targetPort, DNS and NetworkPolicies."
+cheat:
+  idea: "Debug a failing Pod from the outside in: first what is wrong, then what Kubernetes did, then what the app said, and only then look inside."
+  flow: "get → describe and events → logs --previous → exec or debug"
+  remember: "A Service with no ready endpoints is a selector or readiness problem, not a network one."
+buildsOn: [pod-errors, services, probes]
+scenarios:
+  - q: "payment-service keeps crashing. kubectl logs shows only two startup lines and no error. What do you run next, and why?"
+    a: "kubectl logs POD --previous. Plain logs shows the container's current run, which has only just started after the last restart. --previous shows the run that crashed, which holds the error."
+  - q: "The payment-service image is distroless, and kubectl exec -it POD -- sh fails with \"executable file not found\". How do you look at its processes?"
+    a: "Run kubectl debug -it POD --image=busybox:1.37 --target=payment-service. It adds an ephemeral container with busybox tools to the running Pod, and --target shares the app container's process namespace, so ps shows the app's processes if the runtime supports it."
+  - q: "Users get connection errors on payment-service, but every Pod is Running and ready. kubectl get endpointslices for the Service shows no endpoints. Where is the bug?"
+    a: "In the Service selector. Ready Pods that the selector matches would appear as endpoints, so an empty list means the selector matches no Pod, such as app: payments against Pods labelled app: payment-service. Fix the selector to match the Pod labels."
 confusedWith: []
-tags: [troubleshooting, kubectl, debugging]
+tags: [troubleshooting, kubectl, debugging, ephemeral-containers]
 visual: flow
 sources:
-  - title: "Debug Running Pods (Kubernetes docs)"
+  - title: "Debug Running Pods: describe, logs, exec, kubectl debug, node debugging (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/tasks/debug/debug-application/debug-running-pod/"
-    verifiedOn: "2026-10-20"
-  - title: "Debug Services (Kubernetes docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Ephemeral Containers (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/workloads/pods/ephemeral-containers/"
+    verifiedOn: "2026-10-21"
+  - title: "Debug Services (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/tasks/debug/debug-application/debug-service/"
-    verifiedOn: "2026-10-20"
-  - title: "kubectl port-forward (Kubernetes reference)"
+    verifiedOn: "2026-10-21"
+  - title: "kubectl logs: --previous (Kubernetes 1.37 reference)"
+    url: "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_logs/"
+    verifiedOn: "2026-10-21"
+  - title: "kubectl events: --for (Kubernetes 1.37 reference)"
+    url: "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_events/"
+    verifiedOn: "2026-10-21"
+  - title: "kubectl port-forward (Kubernetes 1.37 reference)"
     url: "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_port-forward/"
-    verifiedOn: "2026-10-20"
-  - title: "Node Status: conditions (Kubernetes docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Node Status: conditions (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/reference/node/node-status/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "CKA and CKAD curricula v1.37 (CNCF)"
     url: "https://github.com/cncf/curriculum"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Debugging with kubectl means reading, in a fixed order, what the cluster has already recorded about a failing object. Kubernetes keeps three records: the object's **status**, its **events** (short notes such as "Pulled image" or "Back-off restarting failed container") and each container's **logs**. kubectl reads all three. Two more commands, `exec` and `debug`, let you run commands inside the Pod when the records are not enough.
+
 ## Why it exists
 
-Kubernetes records why things fail in status, events and logs. Reading them in a fixed order beats guessing.
+When payment-service fails, guessing is expensive. You might delete the Pod and lose its logs, or blame the network when the Service selector has a typo. The cluster has usually written down the reason already. An outside-in order reads the broadest, cheapest clue first and goes inside a container last, so each step either finds the cause or tells you which command to run next.
 
 ## How it works
 
-<Steps label="Debug a Pod, outside in">
-  <Step title="get">`kubectl get pods -o wide`: status, restarts, node.</Step>
-  <Step title="describe">Container state, exit code and recent events; meanings in [Pod errors](card:pod-errors).</Step>
-  <Step title="events">`kubectl get events --sort-by=.metadata.creationTimestamp` for the whole namespace.</Step>
-  <Step title="logs">`kubectl logs` and `--previous`; add `-c` for one container.</Step>
-  <Step title="exec">Run a command inside a running container, if it has a shell.</Step>
-  <Step title="debug">`kubectl debug -it POD --image=busybox:1.28 --target=payment-service` when it has none.</Step>
-</Steps>
+<Mermaid
+  alt="Outside-in debugging of a Pod. Step 1 get: status and restarts. Step 2 describe and events: what Kubernetes did. Step 3 logs, with --previous for the crashed run: what the app said. Step 4 exec, or kubectl debug when the image has no shell: look inside."
+  chart={`flowchart LR
+  A[1. get: status] --> B[2. describe + events: what Kubernetes did] --> C[3. logs --previous: what the app said] --> D[4. exec or debug: look inside]`}
+/>
 
-- Events are kept only for a short time: [events and logs](card:observability-in-k8s).
-- Rollout stuck? `kubectl rollout status`: [rollouts](card:rolling-updates-rollbacks).
+1. **get.** `kubectl get pods -n payments -o wide` shows each Pod's status, restart count and node. The status word names the failed stage, as in [Pod errors](card:pod-errors).
+2. **describe and events.** `kubectl describe pod NAME` shows each container's State and Last State, with Reason and Exit Code, then the Pod's events at the bottom. Scheduling, image pull and probe failures are named here. `kubectl events --for pod/NAME` lists the same events on their own; events are kept only for a short time (see [events and logs](card:observability-in-k8s)).
+3. **logs.** `kubectl logs NAME` prints what the app wrote to stdout and stderr. Add `--previous` (or `-p`) for the run that crashed, and `-c NAME` to pick one container in a multi-container Pod.
+4. **exec or debug.** `kubectl exec -it NAME -- sh` opens a shell, if the image has one. A small or distroless image often has none, so `kubectl debug` adds an ephemeral container: a temporary extra container, built from an image you choose, inside the running Pod.
+
+So the key is: never jump straight to step 4; steps 1 to 3 solve most cases.
 
 ## Example
 
-Customers get errors on `/api/payments`. Check the Service path in order:
+payment-service Pods are Running and ready, but the Service gives connection errors. Follow the Service path:
 
 ```bash
-kubectl get pods -n payments -l app=payment-service   # READY 0/1? see probes
 kubectl get endpointslices -n payments -l kubernetes.io/service-name=payment-service
-kubectl get svc payment-service -n payments -o yaml   # selector, targetPort 8080
-kubectl run tmp -n payments --rm -it --image=busybox:1.28 -- nslookup payment-service
-kubectl get networkpolicy -n payments
+kubectl get svc payment-service -n payments -o jsonpath='{.spec.selector}'; echo
+kubectl get pods -n payments --show-labels
 ```
 
-No ready endpoints means the [selector](card:services) matches no Pods or no Pod is [ready](card:probes).
+```text output
+NAME                    ADDRESSTYPE   PORTS     ENDPOINTS   AGE
+payment-service-gnwgd   IPv4          <unset>   <unset>     23s
+{"app":"payments"}
+NAME                             READY   STATUS    RESTARTS   AGE   LABELS
+payment-service-c5cf79fb-85jgv   1/1     Running   0          26s   app=payment-service,pod-template-hash=c5cf79fb
+payment-service-c5cf79fb-n9nff   1/1     Running   0          26s   app=payment-service,pod-template-hash=c5cf79fb
+```
+
+What to notice:
+
+- An EndpointSlice with no endpoints means the Service has no Pod to send traffic to. With every Pod ready, the selector must be wrong.
+- The Service selects `app: payments`, but the Pods carry `app: payment-service`. One typo, and no network tool would have found it.
+- Fix the selector and the endpoints appear within seconds. If they appear but stay not ready, the next suspect is the readiness probe (see [Probes](card:probes)).
+
+## Rules and defaults
+
+- **Service check order:** the Kubernetes Debug Services guide checks that the Service exists, that its name resolves in DNS, that it has EndpointSlices, that its Pods work, and then kube-proxy. Also confirm `targetPort` matches the port the app listens on and that no [NetworkPolicy](card:network-policies) blocks the traffic.
+- **kubectl debug:** ephemeral containers are stable since Kubernetes 1.25. They are never restarted and may not have ports or probes.
+- **--target:** shares the process namespace of the named container, so `ps` shows the app's processes. It needs support from the container runtime.
+- **--copy-to:** debugs a copy of the Pod instead, for example with a changed command or image, when the original crashes too fast to attach to. Delete the copy afterwards.
+- **Node debugging:** `kubectl debug node/NAME -it --image=busybox:1.37` starts a Pod on that node with the node's root filesystem mounted at `/host`.
+- **Node conditions:** `kubectl describe node` shows Ready, MemoryPressure, DiskPressure, PIDPressure and NetworkUnavailable. Ready becomes Unknown when the node has not reported for the node-monitor grace period, 50 seconds by default.
+- **port-forward:** with `service/NAME` or `deployment/NAME`, kubectl picks one matching Pod; the session ends when that Pod ends.
+
+## Not to be confused with
+
+`kubectl exec` runs a command inside an existing container, so it can use only the tools that image contains. `kubectl debug` adds a new container, from an image you choose, to the same Pod, or copies the Pod, or opens a Pod on a node. Rule: exec borrows the app's tools; debug brings your own.
+
+## Common mistakes
+
+- **"Delete the crashing Pod first, to see if a fresh one works."** The old Pod's containers and their logs go with it. Read `describe` and `logs --previous` first, then delete.
 
 ## Interview Qs
 
 ### A Service does not respond. How do you debug it?
 
-Check that Pods are ready, the EndpointSlices list them as ready, the Service selector matches the Pod labels, targetPort matches the container port, DNS resolves the name, and no [NetworkPolicy](card:network-policies) blocks it.
+Check that its Pods are ready, that the EndpointSlices list them as ready, and that the Service selector matches the Pod labels. Then check that `targetPort` matches the container port, that the Service name resolves in DNS from another Pod, and that no NetworkPolicy blocks the traffic.
 
 ### The image has no shell. How do you look inside?
 
-`kubectl debug` adds an ephemeral container with your tools to the running Pod. `--target` shares the app container's process namespace. `--copy-to` debugs a copy instead.
+Use `kubectl debug -it POD --image=busybox:1.37 --target=CONTAINER`. It adds an ephemeral container with your tools to the running Pod, and `--target` lets it see the app's processes. If the app crashes too quickly, `--copy-to` debugs a copy with a different command.
 
 ### A node shows NotReady. What do you check?
 
-`kubectl describe node`: the Ready condition and pressure conditions (memory, disk, PIDs), plus events. `kubectl debug node/NAME` opens a shell in a Pod on that node.
+`kubectl describe node NAME`: the Ready condition, the pressure conditions for memory, disk and process IDs, and recent events. A node that stopped reporting shows Unknown. `kubectl debug node/NAME` opens a shell in a Pod on that node, with its filesystem at `/host`, to check the kubelet and runtime.

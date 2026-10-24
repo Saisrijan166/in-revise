@@ -5,52 +5,75 @@ title: Init Containers and Sidecars
 topic: workloads
 level: intermediate
 heat: 2
-hook: "Init containers run once, in order, before the app; native sidecars start first and keep running beside it."
+hook: "An init container runs once, before the app starts, and must finish. A sidecar starts before the app and keeps running beside it."
 points:
-  - { k: "Init container", v: "runs to completion; the next one starts only after it succeeds" }
-  - { k: "Native sidecar", v: "an init container with restartPolicy Always; stable since 1.33" }
-  - { k: "Sidecar stops last", v: "kept running until the app containers have stopped", kind: plus }
-  - { k: "In a Job", v: "a native sidecar does not stop the Job from completing", kind: plus }
-  - { k: "Cost", v: "each extra container adds resources and moving parts", kind: minus }
+  - { k: "Init container", v: "runs to completion before the app; the next init container starts only after it exits with success" }
+  - { k: "Native sidecar (1.33)", v: "an init container with restartPolicy: Always; stable since Kubernetes 1.33" }
+  - { k: "Sidecar stops last", v: "the kubelet stops sidecars only after the app containers have stopped", kind: plus }
+  - { k: "Sidecar in a Job", v: "a running sidecar does not stop the Job from completing when the main container ends", kind: plus }
+  - { k: "Probes", v: "plain init containers support no probes; sidecars support liveness, readiness and startup" }
+  - { k: "Cost", v: "every extra container needs its own CPU and memory and is one more thing that can fail", kind: minus }
 trap:
   wrong: "Run each microservice as another container in the same Pod."
-  right: "Share a Pod only when containers must share a node, network and lifecycle. Separate services get separate Pods."
-sayIt: "Init containers do setup, like waiting for the database, and must finish before the app starts. A sidecar, like a log shipper, is an init container with restartPolicy Always: it starts first and stops last."
-confusedWith: []
+  right: "Share a Pod only when containers must share a node, the network and a lifecycle. Separate services get separate Pods so they scale on their own."
+  why: "A Pod can hold several containers, and Docker Compose habits group a whole app in one file, so one Pod per app feels natural."
+sayIt: "Init containers do one-time setup, like waiting for the database, and must finish before the app starts. A native sidecar, like a log shipper, is an init container with restartPolicy Always: it starts before the app, runs beside it and stops after it."
+cheat:
+  idea: "Helper containers share the app's Pod. An init container runs once and must finish before the app starts; a sidecar starts first and runs beside the app."
+  flow: "init containers → sidecars start → app runs → app stops → sidecars stop"
+  remember: "A sidecar is an init container with restartPolicy: Always, stable since Kubernetes 1.33."
+buildsOn: [pods]
+scenarios:
+  - q: "The payment-service Pod shows Init:0/1 for five minutes. Its init container waits until the name payments-db resolves. What is the likely cause?"
+    a: "The init container is still looping, because payments-db does not resolve yet: the database Service is missing or in another namespace. The app container does not start until every init container exits with success, so check the init container's logs and the Service."
+  - q: "You add a log shipper to a Job's Pod as a regular container. The main container finishes, but the Job never completes. Why, and what is the fix?"
+    a: "The Pod ends only when all its regular containers end, and the log shipper never exits. Define it as a native sidecar, under initContainers with restartPolicy: Always. A sidecar does not stop the Job from completing."
+confusedWith: [init-container-vs-sidecar]
 tags: [init-container, sidecar, ambassador, adapter]
 visual: table
 sources:
   - title: "Init Containers (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/pods/init-containers/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Sidecar Containers (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Kubernetes Multicontainer Pods: An Overview (Kubernetes blog, 22-04-2025)"
     url: "https://kubernetes.io/blog/2025/04/22/multi-container-pods-overview/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A [Pod](card:pods) can hold helper containers next to the app container. An init container runs once, before the app starts, and must exit with success, for example to wait until the database's address can be found. A sidecar is a helper that keeps running beside the app for the Pod's whole life, such as a log shipper. A native sidecar, stable since Kubernetes 1.33, is written as an init container with `restartPolicy: Always`.
+
 ## Why it exists
 
-Some work must finish before the app starts; some helpers must run beside it all the time. Extra containers keep that work out of the app image.
+Without init containers, payment-service would need its own retry code for "wait until the database exists", and setup tools would be baked into the app image. Without native sidecars, a log shipper written as a normal container starts in no fixed order, may stop before the app has written its last lines, and never exits, so a Job using it never finishes. Init containers give a fixed setup order; sidecars give a fixed start and stop order around the app.
 
 ## How it works
 
 <Compare id="init-container-vs-sidecar" />
 
-- Helper patterns: sidecar (log shipper), ambassador (proxies the app's outbound calls), adapter (converts output, such as metrics, to a standard format).
-- If an init container fails, the kubelet retries it; with restartPolicy Never the whole Pod fails.
+1. The kubelet starts the entries in `initContainers` one by one, in the order you list them.
+2. A plain init container must exit with code 0 before the next entry starts. If it fails, the kubelet retries it; with the Pod's `restartPolicy: Never`, the whole Pod fails instead.
+3. An entry with `restartPolicy: Always` is a sidecar. Once it has started, the kubelet moves on to the next entry and leaves the sidecar running.
+4. After all init entries are done, the app containers start.
+5. On shutdown, the app containers stop first. Then the sidecars stop, in reverse order.
+
+So the order is fixed: setup, helpers, app; and the helpers outlive the app.
 
 ## Example
+
+The payment-service Pod waits for its database, then starts with a log shipper beside it:
 
 ```yaml
 spec:
   initContainers:
-    - name: wait-for-db              # runs first, must exit 0
+    - name: wait-for-db                # plain init container: must exit 0
       image: busybox:1.37
-      command: ["sh", "-c", "until nslookup payments-db; do sleep 2; done"]
-    - name: log-shipper              # native sidecar: keeps running
+      command: ["sh", "-c", "until nslookup payments-db.payments.svc.cluster.local; do sleep 2; done"]
+    - name: log-shipper                # native sidecar: keeps running
       image: log-agent:2.0
       restartPolicy: Always
   containers:
@@ -58,12 +81,33 @@ spec:
       image: payment-service:1.4.0
 ```
 
+What to notice:
+
+- `wait-for-db` loops until the database Service's DNS name resolves, then exits 0. While it loops, `kubectl get pod` shows the status `Init:0/2`.
+- `log-shipper` sits in `initContainers` but has `restartPolicy: Always`, so it starts before the app and keeps running. Remove that line and the Pod would wait for the log shipper to exit, so the app would never start.
+- The app container starts only after `wait-for-db` succeeded and `log-shipper` has started.
+
+## Rules and defaults
+
+- **Not allowed on plain init containers:** `lifecycle`, `livenessProbe`, `readinessProbe` and `startupProbe`. Sidecars may use all of them.
+- **Idempotent setup:** an init container can run again, for example after the Pod restarts, so its work must be safe to repeat.
+- **Secrets for setup only:** an init container can use tools or Secrets that the app container cannot see.
+- **Other helper patterns:** an ambassador proxies the app's outgoing calls; an adapter converts the app's output, such as metrics, into a standard format.
+
+## Not to be confused with
+
+A regular second container in `containers` starts in no fixed order and runs as an equal part of the Pod. A native sidecar is declared in `initContainers` with `restartPolicy: Always`, so it starts before the app and stops after it. Rule: helper that must be up first and down last = native sidecar.
+
 ## Interview Qs
 
 ### What is the difference between an init container and a sidecar?
 
-Init containers run one by one to completion before the app starts. A native sidecar is an init container with restartPolicy Always: it starts before the app, runs beside it, supports probes and stops after it.
+An init container runs to completion before the app starts, one after another, and supports no probes. A native sidecar is an init container with `restartPolicy: Always`: it starts before the app, runs beside it for the Pod's life, supports probes and stops after the app.
 
 ### When do two containers belong in one Pod instead of two Pods?
 
-Only when they are tightly coupled: they share files or localhost and must live and die together, like the app and its log shipper. Anything that scales on its own gets its own Pod.
+Only when they are tightly coupled: they share files or localhost and must live and die together, like the app and its log shipper. Anything that scales on its own, such as another microservice or a database, gets its own Pod.
+
+### What happens if an init container keeps failing?
+
+The app container never starts. The kubelet keeps restarting the init container with a growing delay, and the Pod status shows `Init:Error` or `Init:CrashLoopBackOff`. If the Pod's `restartPolicy` is `Never`, the Pod is marked Failed instead.

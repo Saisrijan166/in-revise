@@ -5,87 +5,149 @@ title: Ingress and Gateway API
 topic: networking
 level: intermediate
 heat: 3
-hook: "Ingress and Gateway API route outside HTTP traffic to Services by host and path; a controller does the work."
+hook: "Ingress and Gateway API are routing rules for outside HTTP traffic: this host and path go to that Service. An installed controller does the actual routing."
 points:
-  - { k: "Ingress", v: "host and path rules for HTTP(S); GA since 1.19, now frozen" }
-  - { k: "Controller needed", v: "the object alone routes nothing; a controller runs the proxy", kind: minus }
-  - { k: "Gateway API", v: "add-on CRDs: GatewayClass → Gateway → HTTPRoute (v1.6)" }
-  - { k: "Recommended", v: "Kubernetes advises Gateway API for new work", kind: plus }
-  - { k: "Ingress NGINX", v: "community controller retired; no fixes after March 2026", kind: minus }
+  - { k: "Ingress", v: "one object of HTTP and HTTPS host and path rules; stable since Kubernetes 1.19 and now frozen" }
+  - { k: "Controller needed", v: "an Ingress or Gateway object alone routes nothing; an installed controller runs the proxy", kind: minus }
+  - { k: "Gateway API", v: "add-on objects GatewayClass, Gateway and HTTPRoute, split by role; current release v1.6" }
+  - { k: "Recommended", v: "the Kubernetes project recommends Gateway API instead of Ingress for new work", kind: plus }
+  - { k: "One entry point", v: "many Services share one address, one load balancer and one TLS setup" }
+  - { k: "Ingress NGINX", v: "the community controller is retired: no releases or security fixes since March 2026", kind: minus }
 trap:
-  wrong: "Creating an Ingress object exposes the app."
-  right: "Nothing is routed until an Ingress controller is installed; it reads the rules and runs the proxy."
-sayIt: "Ingress gives host and path rules for HTTP(S), run by an Ingress controller. Gateway API is its successor: GatewayClass, Gateway and HTTPRoute split the work by role and add weights."
+  wrong: "Creating an Ingress object exposes the app to the internet."
+  right: "Nothing is routed until an Ingress controller is installed. The controller reads the rules and runs the proxy that receives the traffic."
+  why: "Managed clusters and tutorials often ship with a controller already installed, so creating the Ingress looks like the only step."
+sayIt: "Ingress holds host and path rules for HTTP(S), and an Ingress controller carries them out. Gateway API is its successor: GatewayClass, Gateway and HTTPRoute split the work between platform and app teams, and add header matching and traffic weights."
+cheat:
+  idea: "Ingress and Gateway API put many Services behind one public entry point and route each HTTP request by host and path. A controller you install does the routing."
+  flow: "Client → Gateway :443 (TLS ends) → HTTPRoute /payments → Service → Pod"
+  remember: "No controller, no routing. Use Gateway API for new work; Ingress is frozen."
+buildsOn: [services]
+scenarios:
+  - q: "You apply an Ingress for /payments on a new self-managed cluster. kubectl shows the Ingress, but it has no address and requests time out. Why?"
+    a: "No Ingress controller is installed, or none handles this Ingress's class. The Ingress object only stores rules; a controller must read them, run the proxy and publish an address."
+  - q: "Your company exposes eight HTTP microservices. Should each get a LoadBalancer Service?"
+    a: "No. That means eight cloud load balancers and eight addresses, each with its own TLS setup. One Gateway or Ingress behind a single load balancer can route api.example.com/payments, /orders and the rest by path, with TLS handled once."
+  - q: "The payments team creates an HTTPRoute in namespace payments that points at the shared Gateway in namespace infra. The route is not accepted. What is missing?"
+    a: "By default a Gateway accepts routes only from its own namespace. The platform team must set allowedRoutes on the listener to allow the payments namespace, for example with a namespace label selector."
 confusedWith: [loadbalancer-vs-ingress]
 tags: [ingress, gateway-api, httproute]
 visual: flow
 sources:
-  - title: "Ingress (Kubernetes 1.37 documentation)"
+  - title: "Ingress: frozen API, controller required, path types, TLS (Kubernetes 1.37 documentation)"
     url: "https://kubernetes.io/docs/concepts/services-networking/ingress/"
-    verifiedOn: "2026-10-20"
-  - title: "Gateway API (Kubernetes 1.37 documentation)"
+    verifiedOn: "2026-10-21"
+  - title: "Gateway API: roles, resource model, allowedRoutes default, migrating from Ingress (Kubernetes 1.37 documentation)"
     url: "https://kubernetes.io/docs/concepts/services-networking/gateway/"
-    verifiedOn: "2026-10-20"
-  - title: "Ingress NGINX Retirement (Kubernetes blog, 11-11-2025)"
+    verifiedOn: "2026-10-21"
+  - title: "Ingress Controllers: one must run for an Ingress to work (Kubernetes 1.37 documentation)"
+    url: "https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/"
+    verifiedOn: "2026-10-21"
+  - title: "Ingress NGINX Retirement: What You Need to Know (Kubernetes blog, 11-11-2025)"
     url: "https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/"
-    verifiedOn: "2026-10-20"
-  - title: "Gateway API releases (v1.6)"
+    verifiedOn: "2026-10-21"
+  - title: "Gateway API releases (v1.6.3, 06-10-2026)"
     url: "https://github.com/kubernetes-sigs/gateway-api/releases"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Ingress is a Kubernetes object that holds routing rules for HTTP and HTTPS traffic coming from outside the cluster, such as "requests for `api.example.com/payments` go to the Service `payment-service`". The rules do nothing alone. An Ingress controller reads them and routes the traffic. It is a proxy, a program that receives requests and passes them on, which you install in the cluster. Gateway API is the newer set of objects for the same job, split into a GatewayClass, a Gateway and routes such as HTTPRoute.
 
 ## Why it exists
 
-A LoadBalancer Service exposes one Service and knows nothing about HTTP paths. One entry point should send `/api/payments` and `/api/orders` to different Services, with HTTPS handled once.
+A [Service](card:services) of type LoadBalancer exposes one Service and sees only ports, not URLs. With eight public microservices you would pay for eight load balancers, hand out eight addresses and set up HTTPS eight times. Ingress and Gateway API put all of them behind one entry point. It reads the host and path of each request, sends `/payments` and `/orders` to different Services, and decrypts HTTPS in one place.
 
 ## How it works
 
 <Mermaid
-  alt="Gateway API roles: the infrastructure provider's GatewayClass names the controller; the platform team's Gateway listens on 443; the app team's HTTPRoute for /api/payments attaches to it and sends traffic to payment-service and its Pods."
+  alt="Gateway API roles: the infrastructure provider's GatewayClass names the controller. The platform team's Gateway listens on port 443. The app team's HTTPRoute for /payments attaches to that Gateway and sends traffic to the payment-service Service, which forwards to its Pods on port 8080."
   chart={`flowchart LR
   GC["GatewayClass (infra provider)"] --> G["Gateway :443 (platform team)"]
-  R["HTTPRoute /api/payments (app team)"] -- attaches to --> G
+  R["HTTPRoute /payments (app team)"] -- attaches to --> G
   G --> S[Service payment-service]
   S --> P[Pods :8080]`}
 />
 
+1. The infrastructure provider or cluster admin installs a controller and a GatewayClass that names it.
+2. The platform team creates a Gateway: a listener on port 443 for `api.example.com`, with the TLS certificate stored in a Secret (you will see Secrets in [ConfigMaps and Secrets](card:configmaps-and-secrets)). The controller gives it an address, for example by creating a cloud load balancer.
+3. The payments team creates an HTTPRoute in its own namespace that attaches to the Gateway and maps `/payments` to `payment-service`.
+4. A request for `https://api.example.com/payments/42` arrives. The Gateway decrypts it, finds the matching route and sends it to the Service, which forwards it to a ready Pod.
+
+With Ingress the flow is the same, but one Ingress object holds the host, path and TLS settings together.
+
 <Compare id="ingress-vs-gateway-api" />
 
-- HTTPS is decrypted at the Gateway or Ingress; the certificate sits in a Secret.
-- `backendRefs` weights split traffic 90/10 for a [canary](card:release-strategies).
-
 ## Example
+
+The same `/payments` route, first as an Ingress, then as a Gateway API HTTPRoute:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: payments, namespace: payments }
+spec:
+  ingressClassName: nginx            # which controller handles it
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /payments
+            pathType: Prefix         # required on every path
+            backend:
+              service: { name: payment-service, port: { number: 80 } }
+```
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
-metadata:
-  name: payments-route
-  namespace: payments
+metadata: { name: payments, namespace: payments }
 spec:
-  parentRefs: [{ name: public-gateway, namespace: infra }] # Gateway must allow payments
+  parentRefs: [{ name: public-gateway, namespace: infra }]  # the shared Gateway
+  hostnames: [api.example.com]
   rules:
-    - matches: [{ path: { type: PathPrefix, value: /api/payments } }]
+    - matches: [{ path: { type: PathPrefix, value: /payments } }]
       backendRefs: [{ name: payment-service, port: 80 }]
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Routes a Gateway accepts | only from its own namespace (`allowedRoutes`) | Gateway API v1.6 |
-| Ingress without `ingressClassName` | the IngressClass marked default | Kubernetes 1.37 |
+- Both send traffic to the Service on port 80, not to Pods. The Service still picks the ready Pod.
+- `pathType: Prefix` matches `/payments` and `/payments/42`, but not `/paymentsx`, because matching works on whole path parts.
+- The HTTPRoute names a Gateway owned by another team in another namespace. The app team never touches the listener or the certificate.
+- Without an installed controller for `nginx`, or for the Gateway's class, both objects are stored but nothing routes.
+
+## Rules and defaults
+
+- **Controller:** required for both; you choose one and set it up in the cluster. Gateway API's objects are add-on custom resources, also installed by you or your provider.
+- **Ingress is frozen:** it stays stable and supported, with no plans to remove it, but it gets no new features.
+- **Ingress protocols:** HTTP and HTTPS only. Other protocols use a NodePort or LoadBalancer Service, or Gateway API's TCPRoute and UDPRoute, stable since v1.6.
+- **IngressClass:** an Ingress without `ingressClassName` uses the IngressClass marked as default, if there is one.
+- **Path matching:** the longest matching path wins; on a tie, `Exact` beats `Prefix`.
+- **TLS:** the certificate and key live in a Secret. HTTPS ends at the entry point; traffic to the Service and Pods is plain HTTP unless something else encrypts it.
+- **Gateway routes (Gateway API v1.6):** a Gateway accepts routes only from its own namespace unless `allowedRoutes` allows others.
+- **Weights:** an HTTPRoute can split traffic between Services by weight, which you will see in [canary releases](card:release-strategies).
+
+## Not to be confused with
+
+A LoadBalancer Service is a Service type: it gives one Service its own external load balancer for any TCP or UDP port. Ingress and Gateway API are routing objects that put many HTTP Services behind one entry point. Rule: LoadBalancer for one Service or a non-HTTP port; Gateway or Ingress for many HTTP routes. The controller's proxy itself is often exposed through one LoadBalancer.
+
+## Common mistakes
+
+- **"Ingress is deprecated."** It is frozen, not deprecated. Existing Ingresses keep working; new features go into Gateway API.
+- **Staying on Ingress NGINX.** Existing installations still run, but they get no security fixes. Move to a maintained Gateway API implementation or another maintained controller.
 
 ## Interview Qs
 
 ### Why use Ingress or a Gateway when a LoadBalancer Service already exposes the app?
 
-A LoadBalancer gives one Service its own load balancer and sees only ports. Ingress or a Gateway puts many Services behind one address, routes by host and path, and terminates TLS once.
+A LoadBalancer gives one Service its own load balancer and sees only ports. Ingress or a Gateway puts many Services behind one address, routes by host and path, and handles TLS once. That means fewer load balancers, one certificate setup and one place for HTTP rules.
 
-### Is Ingress deprecated?
+### How is Gateway API better than Ingress?
 
-No. Ingress is GA and stays, but it is frozen: no new features. New work should use Gateway API.
+It splits the work by role: the platform team owns the Gateway, and app teams own their routes in their own namespaces. Header matching, traffic weights and gRPC, TCP and UDP routes are part of the API, where Ingress needed controller-specific annotations. The Kubernetes project recommends it for new work.
 
 ### Ingress NGINX is retired. What do you do?
 
-It still runs but gets no security fixes after March 2026. Migrate to a Gateway API implementation, as Kubernetes suggests, or another maintained controller.
+Its maintenance ended in March 2026: no new releases and no security fixes. Running installations keep working, so the risk grows over time. Plan a migration to a Gateway API implementation, as the Kubernetes project suggests, and convert each Ingress to a Gateway and HTTPRoutes.

@@ -5,27 +5,41 @@ title: Pod Lifecycle and Graceful Shutdown
 topic: workloads
 level: intermediate
 heat: 2
-hook: "A Pod goes Pending, Running, then Succeeded or Failed; on delete it gets SIGTERM, then SIGKILL when the grace period ends."
+hook: "A Pod goes from Pending to Running, then to Succeeded or Failed. When it is deleted, the app gets SIGTERM first and SIGKILL only when the grace period ends."
 points:
-  - { k: "Phases", v: "Pending, Running, Succeeded, Failed; Unknown if the node cannot be reached" }
-  - { k: "Container states", v: "Waiting (with a reason), Running, Terminated (reason and exit code)" }
-  - { k: "restartPolicy", v: "Always, OnFailure or Never; a Deployment allows only Always" }
-  - { k: "Restart back-off", v: "10 s, 20 s, 40 s … capped at 5 min; reset after 10 min running", kind: default }
-  - { k: "preStop counts", v: "the grace clock starts before preStop, so a long hook eats app time", kind: minus }
+  - { k: "Running is not ready", v: "Running means the containers were created and one is running; it says nothing about serving traffic", kind: minus }
+  - { k: "restartPolicy (1.37)", v: "Always by default; OnFailure and Never also exist; a Deployment allows only Always", kind: default }
+  - { k: "Restart back-off (1.37)", v: "waits 10 s, 20 s, 40 s and so on, up to 5 minutes; reset after 10 minutes of running", kind: default }
+  - { k: "Grace period (1.37)", v: "terminationGracePeriodSeconds is 30 s by default; SIGKILL follows when it runs out", kind: default }
+  - { k: "preStop counts", v: "the grace clock starts before the preStop hook, so a long hook leaves less time for the app", kind: minus }
 trap:
   wrong: "Running means the Pod is ready to serve traffic."
-  right: "Running only means the containers were created and one is running. Whether traffic arrives depends on the readiness probe."
-sayIt: "Pod phases are Pending, Running, then Succeeded or Failed. On delete the Pod leaves Service endpoints, preStop runs, SIGTERM is sent, and SIGKILL follows when the 30-second grace period ends."
+  right: "Running only means the containers were created and at least one is running. Whether a Service sends it traffic depends on its readiness probe."
+  why: "kubectl get pods shows Running in the STATUS column, and in a quick demo with a tiny image the app is ready almost at once, so the two look the same."
+sayIt: "A Pod moves from Pending to Running to Succeeded or Failed; crashed containers restart in place with a growing back-off. On delete, the Pod leaves Service endpoints, preStop runs, the app gets SIGTERM, and SIGKILL follows when the 30-second grace period ends."
+cheat:
+  idea: "A Pod's phase is a one-word summary of its life. Deleting a Pod follows a fixed order so the app can finish its work."
+  flow: "delete → leave endpoints + preStop → SIGTERM → grace ends → SIGKILL"
+  remember: "The 30 s grace period includes preStop. Running does not mean ready to serve traffic."
+buildsOn: [pods]
+scenarios:
+  - q: "payment-service needs up to 30 s to finish in-flight payments, and you add a preStop sleep of 10 s. The grace period is still the default. What can go wrong?"
+    a: "The 30 s grace clock starts before preStop. After the 10 s sleep, the app has only 20 s left after SIGTERM, so a slow payment is cut off by SIGKILL. Raise terminationGracePeriodSeconds to about 45 s."
+  - q: "A container exits with an error every few seconds. After the fifth crash, how long does the kubelet wait before the next restart?"
+    a: "The delay doubles from 10 s: 10, 20, 40, 80, 160 s, so about 160 s, and it never goes above 300 s. While it waits, kubectl shows CrashLoopBackOff. The delay resets once the container runs for 10 minutes."
 confusedWith: []
 tags: [pod-phase, restart-policy, sigterm, graceful-shutdown]
 visual: flow
 sources:
   - title: "Pod Lifecycle: phases, restart policy, termination (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/"
-    verifiedOn: "2026-10-20"
-  - title: "Container Lifecycle Hooks: PreStop (Kubernetes 1.37 docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Container Lifecycle Hooks: PreStop and the grace period (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/containers/container-lifecycle-hooks/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Deployments: Pod template restartPolicy (Kubernetes 1.37 docs)"
+    url: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
+    verifiedOn: "2026-10-21"
   - title: "Graceful Shutdown (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html"
     verifiedOn: "2026-10-20"
@@ -34,50 +48,85 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The Pod lifecycle is the path a [Pod](card:pods) takes from creation to deletion. Its phase is a one-word summary in the Pod's status: Pending, Running, Succeeded, Failed or Unknown. Each container inside also has a state: Waiting, Running or Terminated. Graceful shutdown is the fixed order Kubernetes follows when it stops a Pod, so the app can finish its work before it is killed.
+
 ## Why it exists
 
-Rollouts, scale-in and node drains stop Pods all the time. A fixed shutdown order lets the app finish in-flight payments first.
+Pods are stopped all the time: during a new release, when a Deployment scales down, or when a node is drained for maintenance. If Kubernetes killed the process at once, payment-service would drop payments it was halfway through. The fixed order gives the app a warning signal (SIGTERM), time to finish, and only then a hard kill (SIGKILL). The phases tell you, at a glance, whether a Pod is waiting, working or finished.
 
 ## How it works
 
-<Steps label="What happens when a Pod is deleted">
-  <Step title="Terminating">The API server records the deletion and the grace period.</Step>
-  <Step title="Out of endpoints">In parallel, the Pod's endpoints turn not ready, so Services stop sending new requests.</Step>
-  <Step title="preStop hook">If set, it runs inside the container first.</Step>
-  <Step title="SIGTERM">Sent to process 1 in each container; the app drains and exits.</Step>
-  <Step title="SIGKILL">Anything still running when the grace period ends is killed.</Step>
-</Steps>
+<Mermaid
+  alt="Pod phases. Pending: accepted, waiting for a node or pulling images. Running: bound to a node, containers created. From Running it ends as Succeeded when all containers exit with success, or Failed when one fails and is not restarted. Unknown when the node cannot be reached."
+  chart={`flowchart LR
+  P([Pending]) --> R([Running])
+  R -- "all exit 0" --> S([Succeeded])
+  R -- "a container fails, no restart" --> F([Failed])
+  R -. "node unreachable" .-> U([Unknown])`}
+/>
 
-- Endpoint removal and SIGTERM race, so a short preStop sleep keeps late requests from hitting a closing app.
-- Error reasons such as CrashLoopBackOff: [Pod Errors](card:pod-errors).
+Follow one payment-service Pod through its life:
+
+1. **Pending:** the API server accepted the Pod. It waits for the scheduler to pick a node, then for the node to pull the image.
+2. **Running:** the Pod is bound to a node and its containers are created. If a container crashes, the kubelet restarts it in place, waiting 10 s, then 20 s, 40 s and so on, up to 5 minutes.
+3. **Delete:** you delete the Pod, or a rollout replaces it. The Pod is marked Terminating, and in parallel Services stop sending it new requests (you will see [Services](card:services) in the next topic).
+4. **preStop:** if the container has a preStop hook, the kubelet runs it first. The grace period clock is already running.
+5. **SIGTERM:** the kubelet sends SIGTERM to process 1 in each container. The app stops taking new work, finishes what it has, and exits.
+6. **SIGKILL:** if a container is still running when the grace period (30 s by default) ends, it is killed. The Pod ends as Succeeded or Failed.
+
+So the key is: SIGTERM is the polite request, and the grace period is your deadline.
 
 ## Example
 
+payment-service gets 45 s to stop, with a short preStop pause first:
+
 ```yaml
 spec:
-  terminationGracePeriodSeconds: 45   # preStop 10 s + Spring Boot 30 s + margin
+  terminationGracePeriodSeconds: 45   # preStop 10 s + Spring Boot 30 s + 5 s margin
   containers:
     - name: payment-service
       image: payment-service:1.4.0
       lifecycle:
         preStop:
-          sleep: { seconds: 10 }      # let endpoint removal catch up
+          sleep: { seconds: 10 }      # keep serving while endpoint removal spreads
 ```
 
-## Defaults
+What to notice:
+
+- Removing the Pod from Services and sending signals happen at the same time. The 10 s preStop sleep keeps the app serving requests that are still on their way, instead of refusing them.
+- Spring Boot's graceful shutdown waits up to 30 s for in-flight requests after SIGTERM. 10 + 30 = 40 s, so the default grace period of 30 s would cut it off; 45 s leaves a margin.
+- Delete the `terminationGracePeriodSeconds` line and the default 30 s applies: preStop takes 10 s, and SIGKILL may arrive while payments are still being saved.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Grace period | 30 seconds | Kubernetes 1.37, terminationGracePeriodSeconds |
+| Grace period | 30 seconds | Kubernetes 1.37, `terminationGracePeriodSeconds` |
 | restartPolicy | Always | Kubernetes 1.37 Pod spec |
-| Web server shutdown | graceful, 30 s per phase | Spring Boot 4.1, server.shutdown and spring.lifecycle.timeout-per-shutdown-phase |
+| Restart back-off | 10 s, doubling, capped at 300 s; reset after 10 min running | Kubernetes 1.37 kubelet |
+| Web server shutdown | graceful, up to 30 s | Spring Boot 4.1, `server.shutdown`, `spring.lifecycle.timeout-per-shutdown-phase` |
+
+- **Allowed values:** a Deployment's Pod template allows only `Always`; a Job allows only `OnFailure` or `Never`.
+- **preStop must end:** SIGTERM is sent only after the preStop hook finishes. If the hook outlives the grace period, the kubelet gives one extra 2 s, then kills the container.
+- **Force delete:** `kubectl delete pod --grace-period=0 --force` removes the Pod object at once, without waiting for the node to confirm the container stopped.
+
+## Common mistakes
+
+- **"CrashLoopBackOff is a Pod phase."** It is a status kubectl shows while the kubelet waits before the next restart; the phase is still Running. The causes and fixes are in [Common Pod Errors](card:pod-errors).
+- **"My app does not handle SIGTERM, but the grace period protects it."** An app that ignores SIGTERM just runs until SIGKILL and stops mid-request. The app itself must drain on SIGTERM, as Spring Boot's graceful shutdown does.
 
 ## Interview Qs
 
 ### How does Kubernetes stop a Pod gracefully?
 
-It marks the Pod Terminating and takes it out of Service endpoints, runs any preStop hook, sends SIGTERM, waits up to terminationGracePeriodSeconds, then sends SIGKILL.
+It marks the Pod Terminating and, in parallel, removes it from Service endpoints. The kubelet runs any preStop hook, then sends SIGTERM to each container's main process and waits up to `terminationGracePeriodSeconds`, 30 s by default. Anything still running then gets SIGKILL. The grace period includes the preStop time.
 
 ### A Pod shows Running but users get errors. Why?
 
-Running only means the containers started. The app may still be warming up or broken; a readiness probe keeps such Pods out of traffic. See [Probes](card:probes).
+Running only means the containers were created and one is running. The app may still be starting, or be broken. A readiness probe keeps such Pods out of Service traffic until they answer correctly; see [Probes](card:probes).
+
+### Why add a preStop sleep if the app already handles SIGTERM?
+
+Endpoint removal and SIGTERM happen at the same time, and other nodes may route traffic to the Pod for a few more seconds. A short preStop sleep keeps the app serving those late requests before shutdown starts. Raise the grace period to cover the sleep.

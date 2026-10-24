@@ -5,59 +5,124 @@ title: "GitOps and CI/CD for Kubernetes"
 topic: scaling-releases
 level: intermediate
 heat: 2
-hook: "CI builds an image with a new tag; Git holds the manifests; an agent, usually in the cluster, pulls Git and keeps the cluster matching it."
+hook: "CI builds and tests a new image; the manifests live in Git; an agent in the cluster pulls Git and keeps the cluster matching it."
 points:
-  - { k: "Source of truth", v: "Git holds the desired state; the cluster follows it" }
-  - { k: "Pull, not push", v: "an agent, Argo CD or Flux, pulls from Git and reconciles" }
-  - { k: "Drift", v: "Argo CD 3.5 marks it OutOfSync; selfHeal, off by default, reverts it", kind: default }
-  - { k: "Rollback", v: "git revert; Argo CD blocks its own rollback while auto-sync is on" }
-  - { k: "Image tags", v: "one unique tag per build (1.5.0 or a commit SHA), never :latest", kind: minus }
+  - { k: "Git is the source of truth", v: "the desired state of the cluster is the manifests in Git; a change is a commit, reviewed in a pull request" }
+  - { k: "Pull, not push", v: "an agent such as Argo CD or Flux pulls the manifests from Git and applies them; CI needs no cluster login" }
+  - { k: "Drift", v: "a manual change in the cluster shows as OutOfSync; selfHeal (off by default) reverts it (Argo CD 3.5)", kind: default }
+  - { k: "Rollback", v: "revert the commit in Git; Argo CD refuses its own rollback button while automated sync is on" }
+  - { k: "Unique image tags", v: "one tag per build, such as 1.5.0 or a commit SHA, never :latest, so Git says exactly what runs", kind: minus }
 trap:
-  wrong: "GitOps means the CI pipeline runs kubectl apply."
-  right: "That is push-based CD. In GitOps an agent, usually in the cluster, pulls the desired state from Git and keeps reconciling it."
-sayIt: "CI tests and pushes payment-service:1.5.0, then changes the tag in the Git manifests. Argo CD or Flux sees the commit and syncs the cluster. Rollback is a git revert."
+  wrong: "GitOps means the CI pipeline runs kubectl apply at the end of the build."
+  right: "That is push-based CD. In GitOps an agent, usually in the cluster, pulls the desired state from Git and keeps reconciling it, so later drift is fixed too."
+  why: "Both keep the manifests in Git and both end with kubectl-style changes in the cluster, so from far away they look the same. The difference is who applies them and whether anyone keeps checking."
+sayIt: "CI tests and pushes payment-service:1.5.0, then changes the tag in the Git manifests. Argo CD or Flux syncs the cluster and keeps comparing it with Git. Rollback is a git revert."
+cheat:
+  idea: "Git holds the cluster's manifests. An agent such as Argo CD or Flux pulls them and keeps the cluster matching, so every change is a reviewed commit."
+  flow: "CI pushes 1.5.0 → PR changes the tag → agent syncs → rollout"
+  remember: "Roll back with git revert; a manual kubectl change is drift."
+buildsOn: [kubectl-and-manifests, rolling-updates-rollbacks]
+scenarios:
+  - q: "During an incident someone runs kubectl scale to 6 replicas. Argo CD has automated sync with selfHeal on. What happens next?"
+    a: "Argo CD sees the live Deployment differs from Git and marks it OutOfSync. Because selfHeal is on, it applies the Git version again and the count returns to Git's value. The lasting fix is a commit that changes the replicas in Git."
+  - q: "1.5.0 is bad. You run kubectl rollout undo. Is the incident over?"
+    a: "Only for a moment. The cluster now differs from Git, so the agent reports drift, and with selfHeal it puts 1.5.0 back. The GitOps way is to revert the tag commit in Git; the agent then rolls back the Deployment."
 confusedWith: []
 tags: [gitops, argo-cd, flux, ci-cd]
 visual: flow
 sources:
   - title: "OpenGitOps Principles v1.0.0 (CNCF OpenGitOps project)"
     url: "https://opengitops.dev/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Automated Sync Policy (Argo CD 3.5 docs)"
     url: "https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Webhook Configuration (Argo CD 3.5 docs)"
+    url: "https://argo-cd.readthedocs.io/en/stable/operator-manual/webhook/"
+    verifiedOn: "2026-10-21"
   - title: "Images: avoid the latest tag (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/containers/images/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+GitOps is a way to run deployments where Git holds the desired state of the cluster: the [manifests](card:kubectl-and-manifests) for every Deployment, Service and ConfigMap. An agent, usually running inside the cluster, pulls those manifests and applies them, then keeps comparing the cluster with Git. The two common agents are Argo CD and Flux. CI (continuous integration) still builds and tests the image; GitOps changes how that image reaches the cluster.
 
 ## Why it exists
 
-kubectl changes from laptops and pipelines leave no record and drift apart. Keeping the desired state in Git gives review, history and an easy way back.
+Without it, people deploy with `kubectl apply` from laptops, or the pipeline holds admin access to the cluster and pushes changes. Nobody can easily say what is running or who changed it, and a quick `kubectl edit` during an incident is never written down, so environments slowly drift apart. With GitOps every change is a reviewed commit, the history is `git log`, and the agent notices any difference between the cluster and Git.
 
 ## How it works
 
-<Steps label="Releasing payment-service 1.5.0 with GitOps">
-  <Step title="Test">A merge to main runs the tests.</Step>
-  <Step title="Build">CI builds the image and pushes payment-service:1.5.0; the tag is never reused.</Step>
-  <Step title="Change Git">A pull request changes the image tag in the config repo.</Step>
-  <Step title="Sync">Argo CD or Flux sees the commit and applies it; the Deployment rolls out.</Step>
-  <Step title="Watch">The tool shows Synced and Healthy, or OutOfSync if someone edits the cluster.</Step>
-</Steps>
+<Mermaid
+  alt="GitOps flow for payment-service. CI builds and pushes the image payment-service:1.5.0 to the registry. A pull request changes the image tag in the config repository. The Argo CD or Flux agent in the cluster pulls the repository, applies the change, and the Deployment rolls out. The agent keeps comparing the cluster with Git and reports drift."
+  chart={`flowchart LR
+  CI[CI: test and build] -- "push 1.5.0" --> REG[(Registry)]
+  CI -- "PR: tag 1.5.0" --> GIT[(Config repo)]
+  A[Agent in cluster] -- pulls --> GIT
+  A -- applies --> K[Deployment rolls out]
+  K -- "pulls image" --> REG
+  A -. "compares again and again" .-> K`}
+/>
 
-- Manifests can be plain YAML, [Helm or Kustomize](card:helm-and-kustomize).
-- Never commit plain Secrets to Git: see [Secrets](card:configmaps-and-secrets).
+1. A merge to main runs the tests, and CI builds the image and pushes `payment-service:1.5.0`. The tag is never reused.
+2. CI, or a person, opens a pull request that changes the image tag in the config repository. A reviewer approves it.
+3. The agent sees the new commit, either by polling or through a webhook, and applies the changed manifest to the cluster.
+4. The Deployment starts a [rolling update](card:rolling-updates-rollbacks) to 1.5.0.
+5. The agent keeps comparing the live objects with Git. Argo CD shows Synced and Healthy, or OutOfSync when someone changed the cluster by hand.
+
+So the pipeline never touches the cluster; Git is the only way in.
+
+## Example
+
+An Argo CD Application tells the agent which Git folder to keep in sync with the payments namespace.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: { name: payment-service, namespace: argocd }
+spec:
+  project: default
+  source:
+    repoURL: https://git.example.com/platform/payments-config.git
+    targetRevision: main
+    path: payment-service/prod
+  destination: { server: https://kubernetes.default.svc, namespace: payments }
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+```
+
+What to notice:
+
+- `source` is the Git folder that holds the manifests; `destination` is the cluster and namespace they go to. `kubernetes.default.svc` means the cluster Argo CD itself runs in.
+- `automated` makes Argo CD apply new commits without anyone pressing Sync.
+- `selfHeal: true` makes it undo manual changes in the cluster. Without it, drift is only reported.
+- `prune: true` deletes objects that were removed from Git. It is off by default, so a deleted manifest would otherwise leave the object running.
+
+## Rules and defaults
+
+- **Four principles (OpenGitOps 1.0):** the desired state is declarative, versioned and immutable, pulled automatically, and continuously reconciled.
+- **Argo CD polling:** it checks Git about every 3 minutes by default (120 s plus up to 60 s jitter); a Git webhook makes it react at once (Argo CD 3.5).
+- **Argo CD safety defaults:** automated sync does not prune and does not self-heal unless you turn them on (Argo CD 3.5).
+- **Secrets:** never commit plain Secrets to Git; use one of the tools in [ConfigMaps and Secrets](card:configmaps-and-secrets).
+- **Image tags:** the Kubernetes docs advise against `:latest` in production; use a unique tag or pin the image digest.
+- **Manifest format:** plain YAML, Helm charts or Kustomize overlays all work; you will meet them in [Helm and Kustomize](card:helm-and-kustomize).
+
+## Not to be confused with
+
+In push-based CD the pipeline runs `kubectl` or `helm` against the cluster at the end of a build, and nobody checks the cluster afterwards. In pull-based GitOps an agent in the cluster fetches the desired state from Git and keeps reconciling it. Rule: push deploys once; pull deploys and keeps checking.
 
 ## Interview Qs
 
-### Push-based vs pull-based deployment?
+### Push-based vs pull-based deployment: what is the difference?
 
-Push: the pipeline runs kubectl or helm against the cluster at the end of a build. Pull: an agent, usually in the cluster, watches Git, applies changes and keeps checking, so drift is caught.
+In push-based CD the pipeline holds cluster credentials and runs `kubectl` or `helm` at the end of a build. In pull-based GitOps an agent inside the cluster watches Git, applies changes and keeps comparing, so drift is caught and the pipeline never needs cluster access.
 
 ### Why not deploy the latest tag?
 
-A moving tag hides which build runs and makes rollback unreliable; the Kubernetes docs advise against `:latest` in production. Use a unique tag per build, or pin the image digest.
+A moving tag hides which build is running, and two Pods started at different times may run different code. Git would say `latest` for both versions, so rollback by commit does not work. The Kubernetes docs advise against `:latest` in production: use a unique tag per build, or pin the digest.
 
 ### How do you roll back with GitOps?
 
-Revert the commit that changed the tag; the agent syncs the old manifest back. A `kubectl rollout undo` alone leaves the cluster out of sync with Git.
+Revert the commit that changed the image tag. The agent syncs the old manifest and the Deployment rolls back. A `kubectl rollout undo` alone leaves the cluster different from Git, so the agent reports drift, and with self-heal on it puts the bad version back. Argo CD also blocks its own rollback while automated sync is on.

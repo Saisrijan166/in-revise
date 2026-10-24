@@ -5,17 +5,27 @@ title: Smaller Images
 topic: security
 level: intermediate
 heat: 2
-hook: "Ship only what runs the app: a JRE, not a JDK, on a small base, with build tools left in an earlier stage."
+hook: "Ship only what runs the app: a JRE instead of a JDK, on a small base, with build tools left behind in an earlier build stage."
 points:
-  - { k: "JRE, not JDK", v: "the run stage needs no compiler or build tools" }
-  - { k: "Small base", v: "slim, distroless or Alpine instead of a full distro" }
-  - { k: "Fewer packages", v: "smaller downloads and fewer CVEs for scanners to flag", kind: plus }
-  - { k: "Alpine", v: "musl libc: software built for glibc may break", kind: minus }
-  - { k: "Distroless", v: "no shell: docker exec sh fails; :debug tags add one", kind: minus }
+  - { k: "JRE, not JDK", v: "the running app needs no compiler, Maven or source code, so the final image should not contain them" }
+  - { k: "Small base", v: "a slim, distroless or Alpine base instead of a full Linux distribution" }
+  - { k: "Fewer packages", v: "a smaller image downloads faster and gives scanners fewer CVEs to report", kind: plus }
+  - { k: "Alpine", v: "uses musl instead of glibc, so a JDK or native library built for glibc may fail on it", kind: minus }
+  - { k: "Distroless", v: "has no shell, so docker exec sh fails; the :debug tags add a busybox shell", kind: minus }
 trap:
   wrong: "Always pick Alpine, because the smallest base is the best base."
-  right: "Alpine uses musl, not glibc, so the JDK and native libraries must be built for it. Slim and distroless are small too and keep glibc."
-sayIt: "I build with a JDK in one stage and run on a JRE in a small base, slim or distroless. I clean package caches in the same RUN and check each step's size with docker image history."
+  right: "Alpine uses musl, not glibc, so the JDK and native libraries must be built for it. Slim and distroless images are small too and keep glibc."
+  why: "Alpine is famous for being tiny, and size is the one thing people compare when choosing a base."
+sayIt: "I build with a JDK in one stage and run on a JRE in a small base, slim or distroless, so the final image has no compiler or Maven. I install and clean packages in the same RUN, keep the build context small with .dockerignore, and check layer sizes with docker image history."
+cheat:
+  idea: "A smaller image holds only what runs the app: a JRE on a small base, with the JDK and Maven left in the build stage. It pulls faster and has fewer packages that can carry CVEs."
+  remember: "Distroless has no shell; Alpine has musl, not glibc. Check what the app needs."
+buildsOn: [images-and-layers, multi-stage-builds, java-in-containers]
+scenarios:
+  - q: "You run docker exec -it payment-service sh on a distroless container and get \"executable file not found\". How do you debug it?"
+    a: "Distroless images contain no shell. Run the same app on the image's :debug tag, which adds a busybox shell, with --entrypoint=sh, or check logs and docker inspect from outside."
+  - q: "A Dockerfile runs apt-get install in one RUN and rm -rf /var/lib/apt/lists/* in the next RUN. Does the image get smaller?"
+    a: "No. The package lists were saved in the first RUN's layer, and a later layer only hides them. Install and clean up in the same RUN, so the files never reach a layer."
 confusedWith: []
 tags: [image-size, alpine, distroless, slim]
 visual: table
@@ -23,49 +33,82 @@ sources:
   - title: "eclipse-temurin official image: Alpine and musl, JRE images, jlink (Docker Hub)"
     url: "https://hub.docker.com/_/eclipse-temurin"
     verifiedOn: "2026-10-20"
-  - title: "Distroless container images (GoogleContainerTools)"
+  - title: "Distroless container images: image tags and debug images (GoogleContainerTools)"
     url: "https://github.com/GoogleContainerTools/distroless"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Building best practices: base image, multi-stage, apt cleanup (Docker docs)"
     url: "https://docs.docker.com/build/building/best-practices/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "debian official image: slim variants (Docker Hub)"
     url: "https://hub.docker.com/_/debian"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Image size optimisation means removing everything from the final image that the running app does not use. For the payment service that means the JDK, Maven, the source code and most of a Linux distribution. What remains is a **base image** (the starting layers from `FROM`) that is as small as the app allows, a Java runtime (JRE), and the jar.
+
 ## Why it exists
 
-A full JDK on a full distro is large, slow to pull and full of packages the app never uses, and each of them can carry a CVE.
+A full JDK on a full Linux distribution adds hundreds of megabytes. Every server and CI runner must download that before the container can start, and every extra package is one more thing a scanner can flag with a CVE. Most of it, such as the compiler, a package manager or a text editor, is never used at run time.
 
 ## How it works
 
 <Compare id="alpine-vs-slim-vs-distroless" />
 
-- Leave Maven and the JDK in the build stage with [multi-stage builds](card:multi-stage-builds); trim the runtime further with [jlink](card:java-in-containers).
-- Install and clean package caches in one `RUN`: [a later delete does not shrink the image](card:images-and-layers).
-- Keep `.git` and `.env` out with `.dockerignore` ([build cache](card:build-cache)); check sizes with `docker image history` or dive.
+1. Build in a first stage with the JDK and Maven, then copy only the jar into the final stage ([multi-stage builds](card:multi-stage-builds)).
+2. Choose a small final base: a JRE image, a slim Debian base, a distroless Java image or an Alpine-based JRE, compared above. [jlink](card:java-in-containers) can shrink the Java runtime further.
+3. When you must install packages, install and clean the package cache in the same `RUN`, because a file deleted in a later step [stays in the earlier layer](card:images-and-layers).
+4. Keep `.git`, `.env` and IDE folders out of the build with `.dockerignore` ([build cache](card:build-cache)).
+5. Check the result with `docker image history`, which lists each layer and its size.
+
+So the key is: the final stage decides the size, so put only the runtime and the jar there.
 
 ## Example
 
+The final image of the payment service on a distroless Java 25 base, which runs as user `nonroot`.
+
 ```dockerfile
-# final stage only; the build stage made target/payment-service.jar
 FROM gcr.io/distroless/java25-debian13:nonroot
-COPY --from=build /app/target/payment-service.jar /app/app.jar
-# the image's entrypoint is already "java -jar"
+COPY target/payment-service.jar /app/app.jar
+# the base image's entrypoint is already "java -jar"
 CMD ["/app/app.jar"]
 ```
+
+```bash
+docker run -d --name payment-service payment-service:distroless
+docker logs payment-service
+docker exec payment-service sh
+```
+
+```text output
+payment-service 1.4.0 running as nonroot
+OCI runtime exec failed: exec failed: unable to start container process: exec: "sh": executable file not found in $PATH
+```
+
+What to notice:
+
+- `CMD` holds only the jar path, because the distroless image's `ENTRYPOINT` is already `/usr/bin/java -jar`. Writing `CMD ["java", "-jar", ...]` would pass `java` as the jar name.
+- The `:nonroot` tag runs the app as UID 65532, so you get a non-root user without writing a `USER` line.
+- `docker exec ... sh` fails because there is no shell. That also means an attacker who gets in has no shell to use.
+
+## Rules and defaults
+
+- **Distroless tags:** `latest`, `nonroot`, `debug` and `debug-nonroot`; the debug tags add a busybox shell.
+- **Temurin images:** JRE and JDK images exist for each Java version; the `-alpine` variants are built for musl.
+- **Slim images:** Debian slim tags remove docs, man pages and similar files from the full Debian image.
+- **Layer rule:** deleting a file in a later `RUN` hides it but does not make the image smaller.
 
 ## Interview Qs
 
 ### How do you make a Docker image smaller?
 
-Use a multi-stage build, run on a JRE in a small base, install only needed packages and clean caches in the same `RUN`, and exclude junk with `.dockerignore`. Then check with `docker image history`.
+Use a multi-stage build so the JDK and Maven stay in the build stage, run on a JRE in a small base, install only needed packages and clean caches in the same `RUN`, and exclude junk with `.dockerignore`. Then check each layer with `docker image history`.
 
 ### Why can Alpine cause problems for a Java app?
 
-Alpine uses musl libc instead of glibc. A JDK or native library built for glibc may fail. Use a JDK built for Alpine, such as the Temurin Alpine tags, or a glibc base.
+Alpine uses musl libc instead of glibc. A JDK or a native library built for glibc may crash or fail to load on it. Use a JDK built for Alpine, such as the Temurin `-alpine` tags, or choose a glibc base such as slim or distroless.
 
-### How do you debug a distroless container without a shell?
+### Does a smaller image also make the app faster?
 
-Switch to the image's `:debug` tag, which adds a busybox shell, and run it with `--entrypoint=sh`.
+Not the running app: the JVM does the same work. It makes pulls, deploys and scale-outs faster, uses less disk on each host, and leaves fewer packages that can carry CVEs.

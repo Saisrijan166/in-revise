@@ -1,5 +1,5 @@
 # Coverage: Kubernetes
-Reference: reference/kubernetes.md  ·  Last updated: 20-10-2026
+Reference: reference/kubernetes.md  ·  Last updated: 21-10-2026
 
 Every reference item (key list: the numbered sections, plus each question, pattern and "X vs Y" row inside them) appears in exactly
 one of Mapped, Corrected or Dropped. A section whose parts went to different places has one row here (Corrected wins over
@@ -242,3 +242,233 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | K26 (part: "get all is not literally every resource") | also: concept kubectl-commands (trap, Interview Q); glossary kubectl-get-all |
 | S28 (rows "Networking" and "Configuration") | cut: duplicate: Pod networking is owned by cluster-networking-dns, manifests by kubectl-and-manifests; cut to keep the comparison at 6 rows |
 | S30.8 (part: the -n flag) | also: concept kubectl-and-manifests (How bullet) |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass checked about 890 claims and fixed 1.
+
+### Unit basics
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| K12 cluster, node, Pod in plain words | what-is-kubernetes (What it is, points "Cluster"); glossary `cluster-term`, `node-term` |
+| K12 declarative configuration, reconciliation | what-is-kubernetes (How it works steps, thermostat Analogy from the Controllers docs) |
+| K12 self-healing "according to the relevant configuration" | what-is-kubernetes (Interview Q on limits: only Pods managed by a controller are replaced; app bugs are not fixed) |
+| K13 relationships: kubelet works on its node, not cluster-wide scheduler | kubernetes-architecture (Common mistakes) |
+| K13 whole control flow | kubernetes-architecture (Mermaid and 5 time-ordered steps for creating payment-service Pods) |
+| K12.Q1 Why Kubernetes when Docker exists | kubernetes-and-docker (Interview Q, moved up as the first question) |
+| K24 rule: Deployment selector must match template labels | namespaces-labels-selectors (Example, scenario with the real rejection message) |
+| K24 controllers' selectors must not overlap (docs) | namespaces-labels-selectors (Common mistakes) |
+| K24 "how does a Service/Deployment find its Pods" | namespaces-labels-selectors (Interview Q "How does a Deployment know which Pods are its own?") |
+| S28 table, Compose vs Kubernetes | docker-vs-compose-vs-kubernetes (explain, example, sayIt); what-is-kubernetes (Not to be confused with) |
+| K26 kubectl talks to the API server; apply and delete -f | kubectl-and-manifests (What it is, Rules "Deleting") |
+| Docs: what Kubernetes provides (service discovery, rollouts, Secrets, batch, scaling) | what-is-kubernetes (Interview Q "What does Kubernetes give you, and what does it not do?") |
+| S30 "kubectl apply does not guarantee healthy" | kubectl-and-manifests (trap with why, How it works step 5) |
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| Draft "Why can you not change a Deployment's selector" | Docs: immutable to apply, edit, patch and helm upgrade; delete and recreate (orphan cascade keeps Pods) | https://kubernetes.io/docs/concepts/workloads/controllers/deployment/ |
+
+### Unit config-storage
+
+**Added from the reference**
+
+| Reference item | Concept (part) |
+|---|---|
+| K18 ConfigMap example (SPRING_PROFILES_ACTIVE, LOG_LEVEL) | configmaps-and-secrets (Example, scenario 1, payment-config keys) |
+| K18 "Pods consume them as env vars or mounted files" | configmaps-and-secrets (How it works steps 2-5) |
+| K18 "Base64 is not encryption" | configmaps-and-secrets (point, real kubectl output in Example, Common mistakes) |
+| K18 "Restrict access with RBAC, encryption at rest" | configmaps-and-secrets (Interview Q "How do you protect Secrets", now with list/watch and Pod-creation angle) |
+| K18 "Do not commit real credentials to Git" | configmaps-and-secrets (What to notice, Common mistakes) |
+| K18 / S30.11 env vars not refreshed; mounted files refresh eventually, app must reload | configmaps-and-secrets (point, How it works step 5, scenario 1, Interview Q) |
+| S29.2 Secret vs environment variable | configmaps-and-secrets ("Not to be confused with", Interview Q 1) |
+| S29.7 / S31.18 ConfigMap vs Secret | comparison configmap-vs-secret (explain, example, sayIt); now in configmaps-and-secrets confusedWith |
+| K24 ServiceAccount = identity used by workloads to talk to the API | service-accounts (What it is, point 1) |
+Also: configmaps-and-secrets previously embedded `<Compare id="configmap-vs-secret">`; the How it works picture is now a Mermaid flow, and the comparison is listed in `confusedWith` instead (so it shows under "Not to be confused with"). `visual` changed from `table` to `flow` in configmaps-and-secrets, volumes and persistent-storage to match the new pictures.
+
+**Corrections**
+
+| What | Source |
+|---|---|
+| Missing ConfigMap or Secret: the container does not start unless the reference is `optional: true` (new fact, stated in How it works step 4 and What to notice) | https://kubernetes.io/docs/tasks/configure-pod-container/configure-pod-configmap/ (Restrictions); https://kubernetes.io/docs/concepts/configuration/secret/ (Optional Secrets) |
+| `list`/`watch` on Secrets reveal every Secret in the namespace; creating a Pod is enough to read a Secret (moved from a bullet into an Interview Q and scenario 2) | https://kubernetes.io/docs/concepts/configuration/secret/ ; https://kubernetes.io/docs/concepts/security/secrets-good-practices/ |
+| A Secret is sent only to nodes that run a Pod using it; mounted copy is kept in tmpfs | https://kubernetes.io/docs/concepts/configuration/secret/ (Information security for Secrets) |
+| `stringData` takes plain text and is merged into `data` | https://kubernetes.io/docs/concepts/configuration/secret/ |
+| Immutable ConfigMaps/Secrets stable since 1.21; cannot be reverted; delete and recreate, then recreate Pods | https://kubernetes.io/docs/concepts/configuration/configmap/ |
+| emptyDir is created when the Pod is assigned to a node; memory-backed emptyDir without sizeLimit is sized to node allocatable memory; sizeLimit comes from node ephemeral storage | https://kubernetes.io/docs/concepts/storage/volumes/ |
+| configMap and secret volumes are always mounted read-only; downwardAPI subPath mounts also get no updates; volumes cannot nest | https://kubernetes.io/docs/concepts/storage/volumes/ |
+| Access modes do not enforce write protection after mounting (except RWOP); one access mode at a time | https://kubernetes.io/docs/concepts/storage/persistent-volumes/ |
+| Storage Object in Use Protection: an in-use PVC / bound PV is not removed until free | https://kubernetes.io/docs/concepts/storage/persistent-volumes/ |
+| `storageClassName: ""` disables dynamic provisioning for that claim | https://kubernetes.io/docs/concepts/storage/persistent-volumes/ |
+| EBS CSI driver provisioner `ebs.csi.aws.com`, gp3 is its default volume type | https://github.com/kubernetes-sigs/aws-ebs-csi-driver/blob/master/docs/parameters.md |
+| Projected token: since 1.22, rotated by the kubelet at 80% of TTL or 24 hours; app must reload it | https://kubernetes.io/docs/concepts/security/service-accounts/ ; https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/ |
+| `serviceAccountName` can be set only at Pod creation | https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/ |
+| Human users are not API objects; they authenticate with X.509 client certificates, OIDC and similar (trap.right) | https://kubernetes.io/docs/reference/access-authn-authz/authentication/ |
+No reference statement was wrong in this unit; the reference's "Automatically encrypted? Not necessarily" was already corrected earlier (coverage file, Corrected table).
+
+### Unit health-resources
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| K19 trap "poorly designed probes cause unnecessary restarts or remove healthy apps from traffic" | probes: scenario 1 (database in liveness), Common mistakes (database in readiness), Interview Q 2 |
+| K19 tiny example uses initialDelaySeconds for a slow start | probes: Common mistakes (startup probe instead), scenario 2 |
+| K19 "the app must expose these endpoints" | probes: Rules and defaults (Spring Boot 4.1 groups on by default, property to turn them off) |
+| K22 rule 5 / K15 "Running does not mean ready" (readiness gates rollouts) | probes: scenario 3, Interview Q 4 (links rolling-updates-rollbacks) |
+| K20 "250m = 0.25 core", "Mi is binary" | resource-requests-limits: What it is, points (Units) |
+| K20 "if requests are omitted, behaviour depends on cluster defaults" | resource-requests-limits: Rules and defaults (exact rules: limit copied, LimitRange, neither set) |
+| K20 / docs: lower-case m on memory means milli (400m = 0.4 bytes) | resource-requests-limits: Rules and defaults, scenario 2 |
+| S30.12 CPU request is not a limit | resource-requests-limits: trap |
+| K20 QoS "used in resource-pressure handling" | qos-and-eviction: How it works (class table, ranking steps) |
+| K21 anti-affinity / topology spread | scheduling: Example, Interview Q 3, scenario 1 |
+Beyond the reference (from the docs, verified): kernel OOM killer bias by QoS (qos-and-eviction, Rules); hard vs soft thresholds; scheduler does not move running Pods (scheduling, Common mistakes); nodeName bypasses NoSchedule but not NoExecute; empty-key Exists toleration; how to remove a taint (trailing minus).
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Probes concept page moved | Source URL now https://kubernetes.io/docs/concepts/workloads/pods/probes/ (old URL redirects) | kubernetes.io |
+| Draft hook for probes and requests (fragments) | Full sentences; draft facts unchanged | — |
+| Spring Boot probe groups: "enabled automatically" (draft) could read as "only on Kubernetes" | Spring Boot 4.1: `management.endpoint.health.probes.enabled` defaults to true in every environment; set false to turn off | spring-boot-health-4.1.1.jar configuration metadata; Spring Boot 4.1 Actuator reference |
+| qos-and-eviction trap "OOMKilled: over its memory limit" | "usually over its memory limit": a node-level OOM can also kill a container within its limit | Node-pressure Eviction, "Node out of memory behaviour" |
+| Draft said "the request copies the limit" | "Kubernetes copies the limit as the request unless an admission step such as a LimitRange set a default request" | Resource Management for Pods and Containers |
+
+### Unit networking
+
+**Added from the reference**
+
+| Reference item | Concept (part) |
+|---|---|
+| K16 Service as stable access to Pods; selector, port, targetPort, type | services (What it is, How it works, Example, Rules and defaults) |
+| K16 port vs containerPort trap (80 -> 8080) | services (trap with why; Interview Q on port, targetPort, nodePort) |
+| K16 headless Service (clusterIP: None) | services (Rules and defaults); cluster-networking-dns (Rules, Interview Q) |
+| K17 Ingress, controller, Gateway API, TLS termination, path- and host-based routing | ingress-and-gateway-api (What it is, How it works steps, Example with host and path, Rules) |
+| K17 "Ingress alone does not route" | ingress-and-gateway-api (trap with why, scenario 1) |
+| K17 LoadBalancer vs Ingress | comparison loadbalancer-vs-ingress (explain, example, sayIt); ingress-and-gateway-api (Not to be confused with, Interview Q 1) |
+| K25 Pod-to-Pod networking, CNI, CoreDNS, Service DNS name | cluster-networking-dns (What it is, Why, How it works, Example) |
+| K25 rule: Pod IPs are not stable endpoints | cluster-networking-dns (trap with why); services (Interview Q 3) |
+| K25 rule: no ready endpoints, no traffic | services (point "Ready Pods only", Rules and defaults) |
+| K25 NetworkPolicy, enforcement depends on the networking | network-policies (How it works step 5, point "Needs the CNI", Interview Q 3) |
+| S29.5 ClusterIP vs NodePort vs LoadBalancer vs Ingress | comparisons clusterip-vs-nodeport-vs-loadbalancer (explain, example, diagrams) and loadbalancer-vs-ingress |
+New teaching points (verified, not in the reference or the draft):
+- services: load balancing is per connection; long-lived HTTP/2 or gRPC connections stay on one Pod (point, Common mistakes, scenario 3).
+- services: a Service selects Pods only in its own namespace; empty EndpointSlice = selector mismatch, listed-but-not-ready = readiness (scenario 2, Interview Q 1).
+- services: targetPort can be a named container port.
+- ingress-and-gateway-api: Prefix matches whole path parts (/payments/42 yes, /paymentsx no); longest path wins, then Exact over Prefix; TLS ends at the entry point and backend traffic is plain; allowedRoutes scenario for cross-namespace HTTPRoutes; Ingress example next to the HTTPRoute.
+- cluster-networking-dns: the Pod's resolv.conf (search list, ndots:5) explained line by line; dnsPolicy "Default" is not the default (scenario 3); IPVS off by default from 1.40; nftables needs kernel 5.13+; set the kube-proxy mode explicitly; Pod IP vs ClusterIP; CNI vs kube-proxy.
+- network-policies: default-deny manifest; selecting a namespace by the automatic kubernetes.io/metadata.name label; replies to allowed connections pass; node and self traffic always allowed; no Service-name targeting, no logging, no cluster-wide default (default deny is per namespace).
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| services draft Interview Q: "Empty [EndpointSlices] means the selector matches no Pod labels or no Pod is ready" | Not-ready Pods are still listed, with ready=false; no addresses at all means a selector (or namespace) mismatch | https://kubernetes.io/docs/concepts/services-networking/endpoint-slices/ |
+| Gateway API version | v1.6.3 is the current stable release (06-10-2026); v1.7.0-rc.1 exists, not used | https://github.com/kubernetes-sigs/gateway-api/releases |
+
+### Unit scaling-releases
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| K21 horizontal vs vertical scaling (S29.6) | autoscaling (What it is, Interview Q, comparison explain) |
+| K21 rule 1: CPU HPA needs requests | autoscaling (point, cheat remember, Interview Q, Example notice) |
+| K21 rule 2/3: HPA scales replicas, not machines; CA handles nodes | autoscaling (How it works steps, Common mistakes, scenario) |
+| K21 rule 4: 3 replicas on one node are not resilient | high-availability (Why, point, Interview Q) |
+| K21 rule 5: PDB only limits voluntary disruptions | high-availability (trap with why, steps 1-5, scenario) |
+| K22 revision, maxSurge, maxUnavailable, defaults 25%/25% | rolling-updates-rollbacks (step 2 explains both terms, Rules and defaults, scenario) |
+| K22 rule 3: rollout fails if new Pods never become ready | rolling-updates-rollbacks (point, scenario, Interview Q) |
+| K22 rule 4: rollback does not reverse DB migrations | rolling-updates-rollbacks (trap + why) |
+| K22 rule 5: readiness keeps traffic off unready Pods | rolling-updates-rollbacks (step 3, "readiness is the brake") |
+New verified facts added beyond the earlier draft:
+- HPA: remove `spec.replicas` from the Deployment manifest once an HPA manages it (Kubernetes 1.37 HPA docs). autoscaling: Rules, scenario 3.
+- HPA: per-HPA `tolerance` under `behavior.scaleUp/scaleDown` is stable in 1.37 (feature gate HPAConfigurableTolerance GA 1.37). autoscaling: Rules.
+- HPA: `minReplicas: 0` (scale to zero) beta and on by default in 1.37, only with object or external metrics (feature gate HPAScaleToZero beta 1.37). autoscaling: Rules.
+- HPA: scale-down window uses the highest recommendation in the window. autoscaling: Rules, Interview Q.
+- VPA 1.8: modes Recreate (default), InPlaceOrRecreate, InPlace, Initial, Off; Auto deprecated. autoscaling: Rules.
+- Deployment: `rollout status` exits non-zero after the progress deadline; rollback gets a new revision number; maxSurge and maxUnavailable cannot both be 0; revisionHistoryLimit 0 means no undo. rolling-updates-rollbacks.
+- PDB: set only one of minAvailable / maxUnavailable; maxUnavailable is recommended because it follows the replica count; a PDB that allows zero evictions makes a drain never complete. high-availability.
+- Drain cordons first; cordon vs drain. high-availability: steps, Not to be confused with.
+- Gateway API: weight default 1, one backend gets all traffic. release-strategies: Rules.
+- Feature flag vs canary. release-strategies: Not to be confused with.
+- Argo CD 3.5: polling every ~3 min (120 s + 60 s jitter), webhooks remove the delay; prune and selfHeal off by default; rollback blocked with automated sync. gitops.
+- OpenGitOps four principles. gitops: Rules.
+
+**Corrections**
+
+- Draft tree note for `vertical-pod-autoscaler` lists modes "Off, Initial, Recreate (default), InPlaceOrRecreate". VPA 1.8.1 also has `InPlace` (never evicts) and the deprecated `Auto`. Source: https://github.com/kubernetes/autoscaler/blob/vertical-pod-autoscaler-1.8.1/vertical-pod-autoscaler/docs/quickstart.md
+- Draft autoscaling Defaults said tolerance is 10% with no way to change it per HPA; since Kubernetes 1.37 it is settable per HPA (`behavior.*.tolerance`). Source: HPA docs + feature-gates/HPAConfigurableTolerance.
+- No reference item was wrong; K21/K22 were vague ("usually requires requests", "primarily constrains"); already recorded in coverage "Corrected" and kept precise here.
+
+### Unit security-ops
+
+**Added from the reference**
+
+| Item | Concept |
+|---|---|
+| K24 rule 4: RBAC controls API permissions, not network isolation | rbac (trap with `why`, Not to be confused with: NetworkPolicy line) |
+| K24 part: RBAC definition | rbac (What it is, hook) |
+| K18 part: restrict Secret access with RBAC | rbac (Rules: hidden reach of list/watch and Pod creation; link to configmaps-and-secrets, which owns the get/list/watch advice) |
+
+**Added beyond the draft (all verified 21-10-2026)**
+
+| Fact | Concept | Source |
+|---|---|---|
+| 401 (authentication) vs 403 (authorisation) as an Interview Q | rbac | controlling-access |
+| get vs list are separate verbs; `list` and `watch` return full objects | rbac (Example notes, scenario) | authorization (request verbs) |
+| Core group is `""`; Deployments are in `apps` | rbac (Example) | rbac, authorization |
+| Privilege-escalation prevention: create a Role only with rights you hold; `escalate` and `bind` verbs | rbac (Rules) | rbac |
+| `view` cannot read Secrets; `edit` can and can run Pods as any ServiceAccount | rbac (Rules, scenario) | rbac (user-facing roles) |
+| Wildcards also cover resources and verbs added later | rbac (Common mistakes) | rbac-good-practices |
+| warn and audit apply to workload resources; enforce only to Pods | pod-security (How it works, scenario) | pod-security-admission |
+| Restricted allows adding back only NET_BIND_SERVICE; seccomp RuntimeDefault or Localhost | pod-security (Example notes, Rules table) | pod-security-standards |
+| Baseline blocks privileged, hostNetwork, hostPID, hostPath | pod-security (Rules) | pod-security-standards |
+| Container securityContext overrides the Pod value | pod-security (Example notes) | security-context task |
+| `-version` label, value can be `latest` | pod-security (Rules) | pod-security-admission |
+| Value precedence: values.yaml < -f files (rightmost wins) < --set | helm-and-kustomize (point, scenario, Example) | using_helm |
+| Kustomize `images` and `replicas` fields; `kubectl kustomize` renders without applying | helm-and-kustomize (Example) | kustomization task; run locally |
+| helm rollback vs kubectl rollout undo | helm-and-kustomize (Not to be confused with) | helm_rollback; rolling-updates concept |
+| CRD name `<plural>.<group>`, scope, OpenAPI schema validation; deleting a CRD deletes its objects | crds-and-operators (Rules) | custom-resource-definitions task |
+| CloudNativePG manages Pods and PVCs directly, not through a StatefulSet; automated failover promotes a replica | crds-and-operators (Example notes, How it works) | cloudnative-pg.io docs (main features, Custom Pod Controller) |
+| Operator usually runs outside the control plane as a Deployment; same control loop | crds-and-operators (Interview Q) | operator pattern |
+| kubelet keeps one terminated container's logs; eviction removes logs; no native log storage | observability-in-k8s (Example notes, Rules, scenario) | logging architecture |
+| Events filtered by `type=Warning`; events gone after 1 hour (scenario) | observability-in-k8s | kube-apiserver --event-ttl |
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| Draft rbac example gave the payment-service ServiceAccount ConfigMap read rights, which conflicts with the rewritten service-accounts concept (payment-service never calls the API, token not mounted) | Example now uses a CI ServiceAccount `payments-deployer` with rights on Deployments only | service-accounts concept (same tech) |
+| Draft crds-and-operators implied an operator "creates Pods, volumes" through standard workloads | CloudNativePG creates Pods and PVCs itself, without a StatefulSet; stated in the Example | https://cloudnative-pg.io/docs/devel/controller |
+| Draft pod-security mentioned imagePullSecrets in the Pod security concept | Removed: not a Pod security control; owned by configmaps-and-secrets and the glossary term `image-pull-secret` | — |
+
+### Unit workloads
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| K14 "Why not deploy containers directly?" | pods (Why it exists, Interview Q) |
+| K14 rule: containerPort documents the port, does not expose the Pod | pods (Example "What to notice", Rules) |
+| K14 rule: Pods share networking; separate Pods have separate IPs | pods (points, How it works, new Interview Q "two containers on 8080") |
+| K14 rule: deleting a standalone Pod does not recreate it | pods (trap, scenario, Interview Q) |
+| K15 rules: controller keeps the count; update creates a new ReplicaSet; scaling changes the count; 3 replicas are not 3 machines | deployments-and-replicasets (How it works steps, points, Rules, scenarios) |
+| K15 rule: Running does not guarantee ready | pod-lifecycle (point "Running is not ready", trap, Interview Q) |
+| K23 rules: Deployment for continuous work, Job for finite work; CronJob does not serve traffic; retries need care | jobs-and-cronjobs (What it is, Why, Rules "Retries need care", trap, new Interview Q "Why must a CronJob's task be idempotent?") |
+| K27 rows Pending, Running, Succeeded | pod-lifecycle (How it works steps, Mermaid) |
+| S29.1 Deployment vs StatefulSet vs DaemonSet; S29.9 Container vs Pod | comparisons (explain, example, sayIt) |
+| S30 Pod restart policy default Always | pod-lifecycle (Rules table) |
+New teaching points beyond the draft (verified): CrashLoopBackOff is a kubectl status, not a phase (pod-lifecycle Common mistakes); an app must handle SIGTERM itself (pod-lifecycle Common mistakes); preStop gets a one-off 2 s extension if it outlives the grace period; force delete does not wait for the node; init container failure shows Init:Error / Init:CrashLoopBackOff; a regular helper container keeps a Job from completing while a native sidecar does not (scenario); Job Pods can start twice even with parallelism 1; completions and parallelism default to 1; ttlSecondsAfterFinished recommended; DaemonSet automatic tolerations keep agents on not-ready and unschedulable nodes; DaemonSet rolling update maxSurge 0; StatefulSet grace period 0 is discouraged; Deployment selector must match template labels or the API rejects it.
+
+**Corrections**
+
+| What | Fix | Source |
+|---|---|---|
+| Draft jobs-and-cronjobs said the schedule without timeZone uses "the controller manager's time zone" (kept) | Example note no longer guesses it is UTC | https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/ |
+| A draft idea "with Forbid, the skipped run happens at the next tick" was considered and dropped | The docs say startingDeadlineSeconds can still allow a new run when the previous one finishes, so the simple rule is not safe | same |
+No reference statement in this unit contradicted the docs.

@@ -5,79 +5,130 @@ title: Persistent Volumes and Claims
 topic: config-storage
 level: intermediate
 heat: 2
-hook: "A PVC asks for storage, a PV is the storage, and a StorageClass creates PVs on demand; the data outlives every Pod."
+hook: "A PersistentVolumeClaim asks for storage, a PersistentVolume is the storage, and a StorageClass creates volumes on demand, so a database's data outlives every Pod."
 points:
-  - { k: "Dynamic provisioning", v: "the StorageClass's provisioner creates a PV for each new PVC", kind: plus }
-  - { k: "Binding", v: "one PVC to one PV, exclusive; no match means it stays unbound" }
-  - { k: "Access modes", v: "RWO one node, ROX read-only many, RWX read-write many, RWOP one Pod" }
-  - { k: "ReadWriteOncePod", v: "one Pod in the whole cluster; CSI volumes only, stable since 1.29" }
-  - { k: "Expansion", v: "grow a PVC if allowVolumeExpansion is true; shrinking is not supported", kind: minus }
+  - { k: "PVC = the request", v: "a namespaced request for a size and an access mode; the Pod mounts the claim, not the disk" }
+  - { k: "PV = the storage", v: "a cluster-wide object for a real disk or share; it exists apart from any Pod" }
+  - { k: "StorageClass = the recipe", v: "names a provisioner that creates a new PV when a claim asks for that class", kind: plus }
+  - { k: "One-to-one binding", v: "a bound PVC and PV belong only to each other; with no match, the claim waits unbound" }
+  - { k: "ReadWriteOnce", v: "read-write from one node, so several Pods on that node can share it; ReadWriteOncePod allows one Pod", kind: minus }
+  - { k: "Reclaim policy (1.37)", v: "dynamic PVs default to Delete: deleting the claim deletes the disk; set Retain to keep it", kind: default }
 trap:
   wrong: "ReadWriteOnce means only one Pod can use the volume."
-  right: "It means one node: several Pods on that node can share it. Use ReadWriteOncePod for exactly one Pod."
-sayIt: "The app asks with a PVC: size, access mode, class. The StorageClass provisions a PV and binds it one-to-one. The PV outlives Pods, and its reclaim policy decides if the disk goes when the claim is deleted."
+  right: "It means one node: several Pods on that node can share it. Use ReadWriteOncePod when exactly one Pod may use it."
+  why: "The name says Once, and most apps run one Pod per volume, so people read it as one Pod rather than one node."
+sayIt: "The app asks for storage with a PVC. The StorageClass provisions a PV, bound to the claim one-to-one. The PV outlives Pods, and its reclaim policy decides whether the disk is deleted with the claim."
+cheat:
+  idea: "A PersistentVolumeClaim asks for storage, a StorageClass creates a matching PersistentVolume, and the Pod mounts the claim. The data outlives every Pod."
+  flow: "Pod → PVC → StorageClass → new PV → cloud disk"
+  remember: "Dynamic PVs default to reclaim policy Delete: delete the PVC and the disk goes too, unless you set Retain."
+buildsOn: [volumes, statefulsets]
+scenarios:
+  - q: "You delete the payments-db-data PVC by mistake. Its StorageClass uses the default reclaim policy. Is the database data gone?"
+    a: "Yes, once the claim is really removed. Dynamic PVs inherit Delete, so Kubernetes deletes the PV and the cloud disk. While a Pod still uses the claim, removal waits until no Pod uses it. For databases, use a class with reclaimPolicy Retain."
+  - q: "Two payment-service replicas on different nodes must write to the same upload folder. Which access mode do you ask for?"
+    a: "ReadWriteMany, which needs storage that supports it, such as NFS. ReadWriteOnce allows read-write from one node only, so a replica on a second node could not mount it."
+  - q: "A zonal cloud disk was created in zone A, but the PostgreSQL Pod can only be scheduled in zone B, so it stays Pending. What setting avoids this?"
+    a: "volumeBindingMode: WaitForFirstConsumer on the StorageClass. The default, Immediate, creates the disk as soon as the claim exists, without knowing where the Pod will run. WaitForFirstConsumer waits for the Pod and creates the disk where it can run."
 confusedWith: [emptydir-vs-persistent-volume]
 tags: [persistent-volume, pvc, storageclass, storage]
-visual: table
+visual: flow
 sources:
-  - title: "Persistent Volumes (Kubernetes documentation)"
+  - title: "Persistent Volumes: provisioning, binding, reclaiming, access modes, expansion (Kubernetes documentation)"
     url: "https://kubernetes.io/docs/concepts/storage/persistent-volumes/"
-    verifiedOn: "2026-10-20"
-  - title: "Storage Classes (Kubernetes documentation)"
+    verifiedOn: "2026-10-21"
+  - title: "Storage Classes: default class, reclaimPolicy, volumeBindingMode, allowVolumeExpansion (Kubernetes documentation)"
     url: "https://kubernetes.io/docs/concepts/storage/storage-classes/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "PersistentVolume API reference (Kubernetes 1.37)"
     url: "https://kubernetes.io/docs/reference/kubernetes-api/config-and-storage-resources/persistent-volume-v1/"
     verifiedOn: "2026-10-20"
+  - title: "Amazon EBS CSI driver: StorageClass parameters"
+    url: "https://github.com/kubernetes-sigs/aws-ebs-csi-driver/blob/master/docs/parameters.md"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A PersistentVolume (PV) is a piece of storage in the cluster, such as a cloud disk or an NFS share, that exists on its own, outside any Pod. A PersistentVolumeClaim (PVC) is a request for storage made inside a namespace: "I need 20 GiB that one node can read and write". A StorageClass describes a kind of storage, such as fast SSD, and how to create it. The Pod never names the disk; it mounts the claim through a [persistentVolumeClaim volume](card:volumes).
 
 ## Why it exists
 
-Databases need data that survives Pod restarts and moves. Apps should ask for storage without knowing whether it is a cloud disk or NFS.
+The PostgreSQL Pod behind the payment service must keep its data when the Pod restarts, moves to another node or is replaced in an update. An emptyDir dies with the Pod. Writing a cloud disk's ID into the Pod spec would tie every manifest to one cloud and one disk. With a PVC, the app team asks only for size and access mode; the cluster finds or creates matching storage, and the same manifest works on any cluster.
 
 ## How it works
 
-<Compare id="pv-vs-pvc-vs-storageclass" />
+<Mermaid
+  alt="The PostgreSQL Pod mounts the claim payments-db-data. The claim names the StorageClass fast-ssd. The class's provisioner, a CSI driver, creates a new PersistentVolume backed by a cloud disk, and the control plane binds the claim to that PersistentVolume one-to-one."
+  chart={`flowchart LR
+  P[PostgreSQL Pod] -- mounts --> C[PVC payments-db-data]
+  C -- "asks class fast-ssd" --> SC[StorageClass]
+  SC -- "provisioner creates" --> PV[(PV 20Gi)]
+  PV --> D[(Cloud disk)]
+  C -. "bound one-to-one" .- PV`}
+/>
 
-- A PVC with no `storageClassName` gets the default StorageClass, if one is set; `storageClassName: ""` binds only to a PV with no class.
-- Access modes mainly match claims to volumes; ReadOnlyMany does not make a mount read-only.
+1. The app team applies a PVC with a size, an access mode and, optionally, a `storageClassName`. With no class name, the cluster's default StorageClass is used, if there is one.
+2. With dynamic provisioning, the class's provisioner, usually a CSI driver, creates a new disk and a PV for it. With static provisioning, an admin created PVs in advance, and a matching one is chosen.
+3. A control loop binds the PVC to the PV, one to one; no other claim can use that PV. If nothing matches, the claim stays unbound until a match appears.
+4. The Pod lists a `persistentVolumeClaim` volume with the claim's name, and the kubelet mounts the disk on the Pod's node.
+5. When the Pod is deleted, the PVC and PV stay. When the PVC is deleted, the PV's reclaim policy decides: `Delete` removes the PV and the disk, and `Retain` keeps both as `Released` for an admin.
+
+So the key is: Pods come and go, the claim keeps the data.
 
 ## Example
 
+An admin defines a storage tier once, and the payments database claims 20 GiB of it:
+
 ```yaml
-# PostgreSQL data for the payments database
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata: { name: fast-ssd }
+provisioner: ebs.csi.aws.com            # AWS EBS CSI driver, gp3 disks by default
+reclaimPolicy: Retain                   # keep the disk if the claim is deleted
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata:
-  name: payments-db-data
-  namespace: payments
+metadata: { name: payments-db-data, namespace: payments }
 spec:
+  storageClassName: fast-ssd
   accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 20Gi
+  resources: { requests: { storage: 20Gi } }
 ```
 
-See [StatefulSets](card:statefulsets) for one claim per replica.
+What to notice:
 
-## Defaults
+- `reclaimPolicy: Retain` protects the payments data. Leave it out and the class uses `Delete`, so deleting the claim also deletes the disk.
+- `WaitForFirstConsumer` creates the disk only when a Pod uses the claim, in the zone where that Pod can run. With the default `Immediate`, a zonal disk can land where the Pod cannot be scheduled.
+- `allowVolumeExpansion: true` lets you raise `storage` later, for example to `50Gi`. You can never shrink a claim.
+- A [StatefulSet](card:statefulsets) does not need this PVC written by hand: its `volumeClaimTemplates` create one claim per replica.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Reclaim policy, dynamic PV | Delete | StorageClass `reclaimPolicy`, Kubernetes 1.37 |
-| Reclaim policy, manual PV | Retain | PersistentVolume API, Kubernetes 1.37 |
-| `volumeBindingMode` | Immediate | StorageClass, Kubernetes 1.37 |
+| Reclaim policy, dynamic PV | `Delete` (inherited from the StorageClass) | Kubernetes 1.37 |
+| Reclaim policy, manually created PV | `Retain` | Kubernetes 1.37 |
+| `volumeBindingMode` | `Immediate` | StorageClass, Kubernetes 1.37 |
+
+- **Access modes:** ReadWriteOnce (RWO, one node), ReadOnlyMany (ROX), ReadWriteMany (RWX) and ReadWriteOncePod (RWOP, one Pod; CSI volumes only, stable since 1.29). A volume is mounted with one mode at a time.
+- **Modes are for matching:** apart from RWOP, access modes do not enforce anything after mounting; a ReadOnlyMany volume is not guaranteed to be read-only.
+- **No dynamic provisioning:** `storageClassName: ""` turns it off for that claim, which then binds only to a PV with no class.
+- **Protection while in use:** a PVC that a Pod uses, and a PV bound to a PVC, are not removed until they are no longer in use.
+- **Recycle:** this old reclaim policy is deprecated; use dynamic provisioning instead.
 
 ## Interview Qs
 
 ### What happens to the data when you delete the PVC?
 
-The PV's reclaim policy decides. Delete removes the PV and the backing disk. Retain keeps both as Released; an admin cleans up or reuses the disk by hand. Recycle is deprecated.
-
-### Why use WaitForFirstConsumer?
-
-With Immediate, a zonal disk may be created where the Pod cannot be scheduled. WaitForFirstConsumer waits for a Pod using the claim, then provisions the disk to fit that Pod's node.
+The PV's reclaim policy decides. With `Delete`, Kubernetes removes the PV and the backing disk. With `Retain`, the PV and the disk stay, marked `Released`; an admin cleans up or reuses the disk by hand. Dynamically provisioned PVs take their policy from the StorageClass, which defaults to `Delete`.
 
 ### Static or dynamic provisioning?
 
-Static: an admin creates PVs in advance and claims bind to them. Dynamic: the StorageClass's provisioner, usually a CSI driver, creates a PV when a claim appears.
+Static: an admin creates PVs in advance, and claims bind to a matching one. Dynamic: the StorageClass's provisioner, usually a CSI driver, creates a PV when a claim appears. Dynamic is the normal choice on clouds, because nobody has to guess sizes or pre-create disks.
+
+### Why use WaitForFirstConsumer?
+
+With `Immediate`, the disk is created as soon as the claim exists, without knowing where the Pod will run, so a zonal disk can end up in a zone the Pod cannot use. `WaitForFirstConsumer` waits until a Pod uses the claim, then creates the disk where that Pod can be scheduled.

@@ -5,76 +5,125 @@ title: Docker Networks and Name Lookup
 topic: networking-storage
 level: intermediate
 heat: 3
-hook: "Put containers on one user-defined network and they call each other by name; localhost is always the container itself."
+hook: "Put the app and the database on one network you created, and the app reaches the database by its container name. Inside a container, localhost is that container itself."
 points:
-  - { k: "No --network given", v: "the container joins the default bridge (Docker Engine 29)", kind: default }
-  - { k: "User-defined network", v: "embedded DNS at 127.0.0.11 resolves container names and aliases", kind: plus }
-  - { k: "localhost", v: "means this container, not the host and not another container", kind: minus }
-  - { k: "Listen address", v: "bind the app to 0.0.0.0; 127.0.0.1 works only inside the container", kind: minus }
-  - { k: "Reach the host", v: "host.docker.internal (Linux: --add-host host.docker.internal=host-gateway)" }
+  - { k: "No --network given", v: "the container joins the default network called bridge (Docker Engine 29)", kind: default }
+  - { k: "Your own network", v: "on a network made with docker network create, containers find each other by name", kind: plus }
+  - { k: "localhost", v: "inside a container, localhost is that container only, never the host or another container", kind: minus }
+  - { k: "Listen address", v: "the app must listen on 0.0.0.0; an app on 127.0.0.1 cannot be reached from outside its container", kind: minus }
+  - { k: "Separate networks", v: "containers on two different networks you created cannot talk unless one joins both networks" }
+  - { k: "Reach the host", v: "use host.docker.internal; on Linux add --add-host host.docker.internal=host-gateway" }
 trap:
   wrong: "Two containers on the same machine can always reach each other by name."
-  right: "Only on a user-defined network (Compose makes one). On the default bridge they reach each other by IP only."
-sayIt: "Each container has its own network stack. I create a user-defined network, attach the app and the database, and the app connects to postgres:5432 by name through Docker's embedded DNS."
+  right: "Only on a network you created (Compose creates one for you). On the default bridge network they can reach each other by IP address only."
+  why: "Both containers run on the same machine and are attached to some network, so name lookup seems automatic. The default network simply has no name lookup."
+sayIt: "Each container has its own network stack, so localhost means the container itself. I create a network, attach the app and the database to it, and the app connects to postgres:5432 by name through Docker's built-in DNS server."
+cheat:
+  idea: "A Docker network connects containers. On a network you create, Docker's built-in DNS lets a container reach another by its name, such as postgres:5432."
+  flow: "docker network create → run both with --network → app calls postgres:5432"
+  remember: "localhost inside a container is that container; the default bridge network has no name lookup."
+buildsOn: [namespaces-and-cgroups]
+scenarios:
+  - q: "The payment service has SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/payments, and PostgreSQL runs in another container. The app fails to connect. Why, and what is the fix?"
+    a: "localhost inside the app's container is the app container itself, and nothing listens on 5432 there. Put both containers on one network you created and use the database container's name: jdbc:postgresql://postgres:5432/payments."
+  - q: "Both containers were started with plain docker run and no --network flag. The app cannot resolve the name postgres. Why?"
+    a: "Both joined the default bridge network, which has no name lookup; containers there reach each other only by IP address. Create a network and start both with --network so Docker's DNS can resolve the name."
+  - q: "Your app inside a container must call a mock server running directly on your Linux laptop at port 9000. What address do you use?"
+    a: "Start the container with --add-host host.docker.internal=host-gateway and call http://host.docker.internal:9000. host-gateway resolves to the host's internal IP address. Docker Desktop provides this name without the flag."
 confusedWith: [default-bridge-vs-user-defined-bridge]
 tags: [networking, dns, bridge]
-visual: table
+visual: flow
 sources:
   - title: "Networking overview (Docker Engine docs)"
     url: "https://docs.docker.com/engine/network/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Bridge network driver (Docker Engine docs)"
     url: "https://docs.docker.com/engine/network/drivers/bridge/"
-    verifiedOn: "2026-10-20"
-  - title: "docker container run: --add-host (Docker CLI reference)"
+    verifiedOn: "2026-10-21"
+  - title: "docker container run: --add-host and host-gateway (Docker CLI reference)"
     url: "https://docs.docker.com/reference/cli/docker/container/run/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Host network driver (Docker Engine docs)"
     url: "https://docs.docker.com/engine/network/drivers/host/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+A Docker network is a private virtual network that containers attach to, like computers plugged into one switch. Each container gets its own network stack, thanks to the network [namespace](card:namespaces-and-cgroups): its own IP address, its own ports and its own localhost. On a network you create yourself, Docker also runs a small DNS server, which turns a container's name into its current IP address.
 
 ## Why it exists
 
-Each container has its own network stack and a dynamically assigned IP. payment-service needs a stable way to find postgres.
+The payment service must talk to PostgreSQL in another container. Without networks you would look up the database container's IP address and paste it into the app's settings. That address changes every time the container is recreated, so the app breaks after each restart. A network with name lookup lets the app use a fixed name, `postgres`, and Docker finds the current address on every connection.
 
 ## How it works
 
-| Driver | What it gives | Use it for |
-|---|---|---|
-| bridge (default) | Private network on one host | Single containers, quick tests |
-| User-defined bridge | Same, plus name lookup and isolation | Every multi-container app |
-| host | Shares the host's network; no own IP | Speed or many ports: no NAT |
-| none | No network at all | Fully isolated jobs |
-| overlay | One network across many Docker hosts | Swarm services |
+<Mermaid
+  alt="On the network payments-net, the payment-service container asks Docker's DNS server at 127.0.0.11 for the name postgres. The DNS server answers with the postgres container's current IP address, and the app connects to that address on port 5432."
+  chart={`flowchart LR
+  subgraph N["network payments-net"]
+    A[payment-service] -- "1. who is postgres?" --> D[DNS server 127.0.0.11]
+    D -- "2. 172.22.0.2" --> A
+    A -- "3. connect :5432" --> P[(postgres)]
+  end`}
+/>
 
-- A container can join several networks: `docker network connect`.
-- Compose creates one network per project for you: see [Docker Compose](card:docker-compose).
-- Opening a port to the outside world is a separate step: [Publishing Ports](card:port-mapping).
+1. You create a network with `docker network create payments-net`. Docker uses the bridge driver: a private network on this one host.
+2. You start each container with `--network payments-net`. Docker gives each one an IP address on that network.
+3. When the app connects to `postgres`, it asks Docker's DNS server, which answers with the database container's current IP address.
+4. The app connects directly to port 5432 of that container. Containers on the same network reach all of each other's ports; no publishing is needed.
+
+So the key is: same network you created, then use the container name.
 
 ## Example
 
+The payment service's database starts on its own network, and two short-lived containers test whether the name `postgres` can be reached.
+
 ```bash
 docker network create payments-net
-docker run -d --name postgres --network payments-net --env-file pg.env postgres:18
-docker run -d --name payment-service --network payments-net -p 8080:8080 \
-  -e SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/payments \
-  payment-service:1.4.0
+docker run -d --name postgres --network payments-net \
+  -e POSTGRES_PASSWORD=dev-only postgres:18
+
+docker run --rm --network payments-net postgres:18 pg_isready -h postgres
+# postgres:5432 - accepting connections
+docker run --rm postgres:18 pg_isready -h postgres
+# postgres:5432 - no response
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Network when `--network` is not given | Default bridge (named `bridge`) | Docker Engine 29 on Linux |
-| DNS server on user-defined networks | 127.0.0.11, forwards other names to the host's DNS | Docker Engine 29 |
+- The first check runs on `payments-net`, so Docker's DNS resolves `postgres` and the database answers.
+- The second check has no `--network`, so it lands on the default bridge network. That network has no name lookup, and the same command fails.
+- `pg_isready -h localhost` on `payments-net` also fails: localhost is the checking container itself, and no database runs there.
+- In the real setup the app gets `SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/payments`.
+
+## Rules and defaults
+
+- **No `--network` flag:** the container joins the default network named `bridge` (Docker Engine 29 on Linux). Docker calls it a legacy detail, not for production.
+- **DNS server:** containers on a network you created use `127.0.0.11`; it answers container names and `--network-alias` names, and forwards other names to the host's DNS servers.
+- **Drivers:** `bridge` (one host), `host` (share the host's network: no own IP, and `-p` is ignored with a warning), `none` (no network), `overlay` (across several Docker hosts, used by Swarm), `macvlan` and `ipvlan` (connect the container directly to the physical network).
+- **More than one network:** `docker network connect` adds a running container to another network you created. Names do not resolve across networks.
+- **Listen address:** an app inside a container must listen on `0.0.0.0` (all interfaces). An app listening on `127.0.0.1` cannot be reached from any other container or from the host.
+
+## Not to be confused with
+
+The default bridge network is the one every container joins when you give no `--network`; containers there reach each other only by IP address. A network you create with `docker network create` (Docker calls it a user-defined bridge) adds name lookup and keeps unrelated containers apart. Rule: for any app with more than one container, create a network.
+
+## Common mistakes
+
+- **"Containers need -p to talk to each other."** Not on the same network. `-p` opens a port on the host for clients outside Docker; see [Publishing Ports](card:port-mapping).
+- **Hardcoding a container's IP address.** It changes when the container is recreated. Use the container name or a `--network-alias`.
 
 ## Interview Qs
 
-### The app calls localhost:5432 and cannot reach Postgres in another container. Why?
+### The app calls localhost:5432 and cannot reach PostgreSQL in another container. Why?
 
-Inside a container, localhost is that container's own loopback. Put both on one user-defined network and use the container or service name: `postgres:5432`.
+Each container has its own network stack, so localhost is the app container itself. Put both containers on one network you created and connect to the database by its container name, `postgres:5432`. Docker's DNS server resolves that name to the current IP address.
+
+### Why prefer a user-defined network over the default bridge?
+
+Containers on it find each other by name through Docker's DNS server, only the containers you attach can reach each other, and you can connect or disconnect a running container. On the default bridge, every container without `--network` shares one network and reaches others by IP address only.
 
 ### How does a container reach a service running on the host?
 
-Use `host.docker.internal`. Docker Desktop resolves it; on Linux add `--add-host host.docker.internal=host-gateway`.
+Use the name `host.docker.internal`. Docker Desktop provides it; on Linux start the container with `--add-host host.docker.internal=host-gateway`, which maps the name to the host's internal IP address. localhost would point to the container itself.

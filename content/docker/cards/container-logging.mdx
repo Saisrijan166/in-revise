@@ -5,16 +5,28 @@ title: Container Logs and Logging Drivers
 topic: runtime
 level: intermediate
 heat: 2
-hook: "Log to stdout and stderr; a logging driver, json-file by default, keeps each line and docker logs reads it back."
+hook: "The app writes its logs to the console (stdout and stderr); a logging driver, json-file by default, stores each line, and docker logs reads them back."
 points:
-  - { k: "docker logs", v: "shows only what the container wrote to stdout and stderr" }
-  - { k: "json-file", v: "the default driver; never rotates unless you set max-size", kind: minus }
-  - { k: "local driver", v: "rotates and compresses by default", kind: plus }
-  - { k: "Remote drivers", v: "fluentd, awslogs, gcplogs; docker logs still works via a cache" }
+  - { k: "docker logs", v: "shows only what the main process wrote to stdout and stderr, not log files inside the container" }
+  - { k: "json-file driver", v: "the default driver; its files grow without limit until you set max-size", kind: default }
+  - { k: "Rotation", v: "set max-size and max-file per container with --log-opt, or for new containers in daemon.json" }
+  - { k: "local driver", v: "rotates and compresses by default: 5 files of 20 MB per container", kind: plus }
+  - { k: "Remote drivers", v: "fluentd, awslogs or gcplogs ship logs off the host; docker logs still works through a local cache" }
 trap:
-  wrong: "Docker rotates container logs on its own."
-  right: "The default json-file driver grows until you set max-size and max-file, or use the local driver."
-sayIt: "The app logs to stdout and stderr; the logging driver stores or ships it. The default json-file driver does not rotate, so I set max-size and max-file, or ship logs to a central store."
+  wrong: "Docker rotates container logs by itself."
+  right: "The default json-file driver keeps one file that grows until the disk is full, unless you set max-size and max-file, or use the local driver."
+  why: "Docker creates and manages the log files itself, so people assume it also cleans them up. Nothing warns you until the disk is full."
+sayIt: "The app logs to stdout and stderr, and the logging driver stores or ships the lines. The default json-file driver does not rotate, so I set max-size and max-file, or use the local driver, and in production I ship logs to a central store."
+cheat:
+  idea: "A container's app writes logs to stdout and stderr. Docker's logging driver catches every line and stores it on the host or sends it to a log service."
+  flow: "app → stdout / stderr → logging driver → file or log service → docker logs"
+  remember: "json-file is the default and never rotates unless you set max-size and max-file."
+buildsOn: [container-lifecycle, docker-cli-essentials]
+scenarios:
+  - q: "The payment service runs fine, but docker logs pay prints nothing. Its logback config writes to /var/log/pay/app.log. Why is docker logs empty?"
+    a: "docker logs shows only what the main process writes to stdout and stderr. The app writes to a file inside the container instead. Log to the console, the Spring Boot default, so the driver can capture it."
+  - q: "A host's disk filled up after a month, mostly under /var/lib/docker/containers. Nobody changed the logging settings. What is the cause and the fix?"
+    a: "The default json-file driver never rotates, so each container's log file grew without limit. Set max-size and max-file (in daemon.json as strings) and recreate the containers, or switch to the local driver, which rotates by default."
 confusedWith: []
 tags: [logging, json-file]
 visual: flow
@@ -27,23 +39,33 @@ sources:
     verifiedOn: "2026-10-20"
   - title: "JSON File logging driver (Docker docs)"
     url: "https://docs.docker.com/engine/logging/drivers/json-file/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Local file logging driver (Docker docs)"
+    url: "https://docs.docker.com/engine/logging/drivers/local/"
+    verifiedOn: "2026-10-21"
   - title: "Dual logging (Docker docs)"
     url: "https://docs.docker.com/engine/logging/dual-logging/"
     verifiedOn: "2026-10-20"
   - title: "Read the daemon logs (Docker docs)"
     url: "https://docs.docker.com/engine/daemon/logs/"
     verifiedOn: "2026-10-20"
+  - title: "Logging: console output by default (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/reference/features/logging.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Every process has two standard output streams: stdout for normal output and stderr for errors. When you run `java -jar` in a terminal, both appear on your screen. In a container there is no screen, so Docker captures both streams of the main process. A logging driver is the part of Docker that decides where those lines go: into files on the host (the default) or to an external log service.
 
 ## Why it exists
 
-Containers come and go, so log files inside them are hard to reach. Writing to stdout lets Docker decide where logs go.
+Containers are created and deleted all the time, and a log file written inside a container is hard to reach and disappears with it. If every app instead writes to stdout and stderr, Docker can collect logs the same way for every container, whatever language it is written in. You can then read them with one command, or send all of them to a central place where they survive the container.
 
 ## How it works
 
 <Mermaid
-  alt="The service writes to stdout and stderr; the logging driver stores lines in host files (json-file, local) that docker logs reads, or sends them to a central store (fluentd, awslogs) while a dual logging cache keeps docker logs working."
+  alt="The payment service writes to stdout and stderr. The logging driver either stores the lines in files on the host, with the json-file or local driver, which docker logs reads, or sends them to a central log store with drivers such as fluentd or awslogs, while a dual logging cache on the host keeps docker logs working."
   chart={`flowchart LR
   A[payment-service] -- "stdout / stderr" --> D{Logging driver}
   D -- "json-file or local" --> F[(Files on the host)]
@@ -52,36 +74,64 @@ Containers come and go, so log files inside them are hard to reach. Writing to s
   F --> L[docker logs]`}
 />
 
-- Set the driver in `daemon.json` (new containers only) or per container with `--log-driver` and `--log-opt`.
-- The engine's own logs are separate: `journalctl -xu docker.service` on Linux.
+1. The app writes a line to stdout or stderr. Spring Boot logs to the console by default, so it needs no change.
+2. The Docker daemon reads the line from the container's output stream and hands it to the container's logging driver.
+3. With `json-file`, the default, the driver appends the line, with a timestamp and the stream name, to a file on the host.
+4. `docker logs pay` reads those lines back; `-f` keeps following new ones, and `--since 10m` limits the time range.
+5. With a remote driver such as `fluentd` or `awslogs`, the line is sent away instead, and a local copy, the dual logging cache, lets `docker logs` still show it.
 
 ## Example
 
-```json
-{
-  "log-driver": "json-file",
-  "log-opts": { "max-size": "10m", "max-file": "3" }
-}
+The payment service is started with log rotation turned on for this one container:
+
+```bash
+docker run -d --name pay --log-opt max-size=10m --log-opt max-file=3 payment-service:1.4.0
+docker logs pay
+docker inspect -f '{{json .HostConfig.LogConfig}}' pay
+docker info -f '{{.LoggingDriver}}'
 ```
 
-## Defaults
+```text output
+fba92bdb78007e4d3f3c45bbdc30b34222db146d5ca0ada94d2866078e11a346
+payment-service started on 8080
+{"Type":"json-file","Config":{"max-file":"3","max-size":"10m"}}
+json-file
+```
+
+What to notice:
+
+- `docker logs` printed the line the app wrote to stdout. A line written to a file inside the container would not appear.
+- The container uses the `json-file` driver, the daemon's default, with at most 3 files of 10 MB each, so its logs can never take more than about 30 MB.
+- Remove the two `--log-opt` flags and the file grows without limit, until you remove the container or the disk is full.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
 | Logging driver | `json-file` | Docker Engine 29 |
-| json-file `max-size` / `max-file` | -1 (no limit) / 1 | Docker Engine 29 |
-| local driver, dual-logging cache | 5 files × 20 MB, compressed | Docker Engine 29 |
+| json-file `max-size` / `max-file` | unlimited / 1, so no rotation | Docker Engine 29 |
+| local driver | 5 files of 20 MB, compressed, about 100 MB per container | Docker Engine 29 |
+
+- **Daemon-wide setting:** set `"log-driver"` and `"log-opts"` in `daemon.json`. Values in `log-opts` must be strings, for example `"max-file": "3"`.
+- **Only new containers:** a changed `daemon.json` applies after a daemon restart, and only to containers created after it. Existing containers keep their old settings until you recreate them.
+- **`max-file` needs `max-size`:** without a size limit there is nothing to rotate.
+- **Engine logs are separate:** the Docker daemon's own logs are in the system journal on Linux, for example `journalctl -xu docker.service`.
+
+## Common mistakes
+
+- **Logging to a file inside the container.** `docker logs` stays empty, and the file is lost when the container is removed. Log to the console instead; official images such as nginx link their log files to `/dev/stdout` and `/dev/stderr` for this reason.
+- **Keeping production logs only on the host.** If the host dies, the logs go with it. Ship them to a central store with a remote driver or a log agent.
 
 ## Interview Qs
 
-### docker logs is empty, but the app runs. Why?
+### docker logs is empty, but the app is running. Why?
 
-The app writes to a file instead of stdout and stderr, or the driver is `none`, or a remote driver runs with the dual-logging cache off. Log to the console; the nginx image links its log files to `/dev/stdout`.
+The app writes to a file instead of stdout and stderr, or the container uses the `none` driver, or a remote driver runs with the dual logging cache turned off. Make the app log to the console, which is the Spring Boot default.
 
-### Container logs filled the host disk. Fix?
+### Container logs filled the host's disk. How do you fix it?
 
-json-file does not rotate by default. Set `max-size` and `max-file` in `daemon.json` (as strings) and recreate the containers, or use the `local` driver.
+The default `json-file` driver does not rotate. Set `max-size` and `max-file` in `daemon.json`, as strings, restart the daemon and recreate the containers, or set them per container with `--log-opt`. The `local` driver rotates and compresses by default.
 
 ### Where should production logs go?
 
-Off the host, to a central store: a driver such as fluentd, awslogs or gcplogs. `docker logs` still works through the dual-logging cache.
+Off the host, to a central log store, so they survive the container and the host and can be searched across all instances. Use a driver such as `fluentd`, `awslogs` or `gcplogs`, or an agent that reads the log files. `docker logs` keeps working through the dual logging cache.

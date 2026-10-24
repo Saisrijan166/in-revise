@@ -5,23 +5,34 @@ title: DaemonSets
 topic: workloads
 level: intermediate
 heat: 2
-hook: "A DaemonSet runs one copy of a Pod on every matching node, and adds it automatically when a node joins."
+hook: "A DaemonSet runs one copy of a Pod on every matching node, and adds that Pod by itself when a new node joins."
 points:
-  - { k: "No replicas field", v: "the Pod count follows the number of eligible nodes" }
-  - { k: "Node joins or leaves", v: "its Pod is added, or garbage collected", kind: plus }
-  - { k: "Some nodes only", v: "nodeSelector or node affinity in the Pod template" }
-  - { k: "Update", v: "RollingUpdate by default, maxUnavailable 1; or OnDelete", kind: default }
+  - { k: "No replicas field", v: "the number of Pods follows the number of eligible nodes, one Pod per node" }
+  - { k: "Nodes come and go", v: "a new node gets the Pod automatically; a removed node's Pod is cleaned up", kind: plus }
+  - { k: "Some nodes only", v: "a nodeSelector or node affinity in the Pod template limits which nodes get a Pod" }
+  - { k: "Update (1.37)", v: "RollingUpdate by default, one node at a time (maxUnavailable 1); OnDelete is the other choice", kind: default }
+  - { k: "Tolerations added", v: "DaemonSet Pods get tolerations so they still run on not-ready or unschedulable nodes", kind: plus }
 trap:
   wrong: "Run a log agent as a Deployment with replicas equal to the node count."
-  right: "A Deployment neither pins replicas one per node nor follows new nodes. A DaemonSet keeps exactly one Pod per eligible node."
-sayIt: "A DaemonSet keeps one Pod on each eligible node, so it fits node agents: log collectors, node monitoring, network and storage plugins. New nodes get the Pod automatically."
+  right: "A Deployment neither pins one Pod per node nor follows new nodes. A DaemonSet keeps exactly one Pod on each eligible node."
+  why: "With 3 nodes and 3 replicas it often looks right at first, because the scheduler prefers to spread replicas; it breaks when nodes are added or two replicas share a node."
+sayIt: "A DaemonSet keeps one Pod on each eligible node, so it fits node agents: log collectors, node monitoring, network and storage plugins. New nodes get the Pod automatically, and a nodeSelector limits it to some nodes."
+cheat:
+  idea: "A DaemonSet runs one copy of a Pod on every node, or every node that matches a selector. It suits agents that must see each machine, such as log collectors."
+  remember: "No replicas field: the Pod count follows the nodes, and a new node gets its Pod automatically."
+buildsOn: [deployments-and-replicasets]
+scenarios:
+  - q: "The cluster grows from 3 to 5 nodes. How many log-agent Pods run afterwards, and did anyone have to change the DaemonSet?"
+    a: "Five, one per node, and nobody changed anything. The DaemonSet controller notices the two new nodes and creates a log-agent Pod on each."
+  - q: "You want a disk-monitoring agent only on nodes with SSDs, which carry the label disk=ssd. How?"
+    a: "Add nodeSelector: { disk: ssd } to the DaemonSet's Pod template. The controller then creates Pods only on nodes with that label, and adds one when a node gets the label later."
 confusedWith: [deployment-vs-statefulset-vs-daemonset]
 tags: [daemonset, node-agent, logging]
 visual: flow
 sources:
   - title: "DaemonSet (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Perform a Rolling Update on a DaemonSet (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/"
     verifiedOn: "2026-10-20"
@@ -30,9 +41,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A DaemonSet is a workload that runs one copy of a Pod on every node in the cluster, or on every node that matches a selector. It has no replica count: the number of Pods is the number of eligible nodes. It is used for node agents, programs that must run on each machine, such as a log collector that reads that node's log files.
+
 ## Why it exists
 
-Some agents must run on every machine, such as a log collector reading that node's files. A replica count cannot follow nodes as they come and go.
+A log collector must read `/var/log` on every node, so it needs exactly one copy per node. A [Deployment](card:deployments-and-replicasets) with 3 replicas cannot promise that: two copies can share a node, and when a fourth node joins, nothing runs there. You would have to edit the replica count by hand each time the cluster changes. A DaemonSet follows the nodes instead of a number.
 
 ## How it works
 
@@ -44,10 +59,17 @@ Some agents must run on every machine, such as a log collector reading that node
   DS -. "node 3 joins" .-> C[Node 3: Pod added]`}
 />
 
-- Typical agents: log collectors, node monitoring, storage daemons; kubeadm runs kube-proxy as a DaemonSet.
-- Tainted nodes, such as control-plane nodes, need a matching toleration: [Taints and Tolerations](card:taints-and-tolerations).
+1. You apply the DaemonSet with a Pod template, and optionally a nodeSelector.
+2. The DaemonSet controller lists the nodes that match and creates one Pod for each, aimed at that node.
+3. The scheduler binds each Pod to its node, and the node's kubelet starts it.
+4. When a node joins, the controller adds a Pod there. When a node is removed, its Pod is garbage collected.
+5. When you change the template, the Pods are replaced node by node, one at a time by default.
+
+So the key is: one Pod per eligible node, kept in step with the node list.
 
 ## Example
+
+A log agent that reads every node's log files:
 
 ```yaml
 apiVersion: apps/v1
@@ -65,12 +87,30 @@ spec:
       volumes: [{ name: varlog, hostPath: { path: /var/log } }]
 ```
 
+What to notice:
+
+- There is no `replicas` line. On a 3-node cluster you get 3 Pods; add a node and you get 4.
+- The `hostPath` volume mounts the node's own `/var/log` into the Pod, read-only. That is why each node needs its own agent: each Pod reads only its node's files.
+- Add `nodeSelector` under the template's `spec` and only matching nodes get an agent.
+
+## Rules and defaults
+
+- **Update strategy (Kubernetes 1.37):** `RollingUpdate` by default, with `maxUnavailable: 1` and `maxSurge: 0`, so one node at a time loses its agent briefly. `OnDelete` replaces a Pod only when you delete it.
+- **restartPolicy:** must be `Always`, the default.
+- **Automatic tolerations:** DaemonSet Pods tolerate taints such as `node.kubernetes.io/not-ready` and `node.kubernetes.io/unschedulable`, so agents keep running on nodes that are unhealthy or being drained.
+- **Tainted nodes:** for other taints, such as on control-plane nodes, add a matching toleration yourself; see [Taints and Tolerations](card:taints-and-tolerations).
+- **Typical users:** log collectors, node monitoring agents, network and storage plugins. kubeadm runs kube-proxy as a DaemonSet.
+
 ## Interview Qs
 
 ### When do you use a DaemonSet?
 
-For an agent that must run on every node, or every node of a kind: log shipping, node metrics, network or storage plugins. It adds the Pod to new nodes and removes it from nodes that leave.
+For an agent that must run on every node, or on every node of a kind: log shipping, node metrics, network or storage plugins. It adds the Pod to new nodes and removes it from nodes that leave, with no replica count to maintain.
 
 ### How do you run a DaemonSet on only some nodes?
 
-Set a nodeSelector or node affinity in the Pod template; the controller creates Pods only on matching nodes. To include tainted nodes, add matching tolerations.
+Set a nodeSelector or node affinity in the Pod template; the controller creates Pods only on matching nodes. To include tainted nodes, such as control-plane nodes, add matching tolerations.
+
+### Why not use a Deployment with replicas equal to the number of nodes?
+
+A Deployment does not guarantee one Pod per node: two replicas can share a node and leave another empty. It also does not react when nodes join or leave, so the count drifts. A DaemonSet ties each Pod to a node.

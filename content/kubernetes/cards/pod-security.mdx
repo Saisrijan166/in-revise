@@ -5,30 +5,44 @@ title: "Pod Security: securityContext and Admission"
 topic: security-ops
 level: intermediate
 heat: 2
-hook: "Harden each Pod with securityContext; let a namespace label reject Pods that break the baseline or restricted level."
+hook: "Each Pod limits its own powers with securityContext, and a namespace label makes the API server reject Pods that break the baseline or restricted level."
 points:
-  - { k: "Three levels", v: "privileged (open), baseline (no known escalations), restricted (hardened)" }
-  - { k: "Namespace label", v: "pod-security.kubernetes.io/enforce: restricted" }
-  - { k: "Modes", v: "enforce rejects the Pod; audit logs it; warn warns the user" }
-  - { k: "Workloads", v: "enforce checks Pods only; a bad Deployment is accepted, its Pods fail", kind: minus }
-  - { k: "Pod Security Admission", v: "built in, stable since 1.25; PodSecurityPolicy removed in 1.25", kind: default }
+  - { k: "securityContext", v: "Pod or container settings that limit a process: its user ID, privilege escalation, Linux capabilities" }
+  - { k: "Three levels", v: "privileged has no limits; baseline blocks known escalations; restricted adds hardening such as non-root" }
+  - { k: "Namespace label", v: "pod-security.kubernetes.io/enforce: restricted makes the API server check every new Pod there" }
+  - { k: "Three modes", v: "enforce rejects the Pod; audit writes a note in the audit log; warn shows a warning to the user" }
+  - { k: "Pods only", v: "enforce checks Pods, not Deployments: a bad Deployment is accepted, but its Pods are rejected", kind: minus }
+  - { k: "PodSecurityPolicy", v: "removed in Kubernetes 1.25; Pod Security Admission, built in, replaced it", kind: default }
 trap:
   wrong: "Use a PodSecurityPolicy to stop containers running as root."
-  right: "PodSecurityPolicy was removed in 1.25. Label the namespace for Pod Security Admission, and set runAsNonRoot in securityContext."
-sayIt: "I set securityContext on every Pod: non-root, no privilege escalation, drop ALL capabilities, RuntimeDefault seccomp. Then I label the namespace to enforce the restricted Pod Security Standard."
+  right: "PodSecurityPolicy was removed in Kubernetes 1.25. Label the namespace for Pod Security Admission, and set runAsNonRoot: true in securityContext."
+  why: "For years PodSecurityPolicy was the standard answer, and many books, blog posts and old cluster setups still show it."
+sayIt: "I set securityContext on every Pod: non-root, no privilege escalation, drop ALL capabilities, RuntimeDefault seccomp. Then I label the namespace so Pod Security Admission enforces the restricted level and rejects Pods that do not follow it."
+cheat:
+  idea: "securityContext limits what a container's processes may do on the node. Pod Security Admission, set by a namespace label, rejects Pods that break the baseline or restricted level."
+  code: |
+    metadata:
+      labels: { pod-security.kubernetes.io/enforce: restricted }
+  remember: "Enforce checks Pods, not Deployments: a bad Deployment is accepted, then its Pods are rejected. PodSecurityPolicy is gone since 1.25."
+buildsOn: [pods, namespaces-labels-selectors, rbac]
+scenarios:
+  - q: "The payments namespace enforces restricted. You apply a Deployment without securityContext. kubectl prints a warning but says the Deployment was created. Yet no Pods appear. Why?"
+    a: "Enforce mode checks Pods, not Deployments, so the Deployment is accepted with only a warning. When the ReplicaSet tries to create each Pod, the API server rejects it. The ReplicaSet events show the reason; add the required securityContext fields."
+  - q: "Your image's Dockerfile has no USER line, so it runs as root. The Pod sets runAsNonRoot: true but no runAsUser. What happens?"
+    a: "The kubelet checks the image user when it starts the container, sees UID 0 and refuses to start it with a configuration error. Add a USER with a numeric ID to the image, or set runAsUser to a non-zero ID."
 confusedWith: []
 tags: [security, securitycontext, pod-security-admission, non-root]
-visual: table
+visual: flow
 sources:
   - title: "Pod Security Standards (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/security/pod-security-standards/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Pod Security Admission (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/security/pod-security-admission/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Configure a Security Context for a Pod or Container (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/tasks/configure-pod-container/security-context/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Enforce Pod Security Standards with Namespace Labels (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/tasks/configure-pod-container/enforce-standards-namespace-labels/"
     verifiedOn: "2026-10-20"
@@ -37,34 +51,45 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Pod security has two parts. The first is `securityContext`, a set of fields in the [Pod](card:pods) spec that limit what the container's processes may do on the node: which user ID they run as, whether they can gain more rights, and which Linux capabilities they keep. A capability is one slice of root's power, such as opening raw network sockets. The second part is Pod Security Admission, a check inside the API server that rejects Pods that break one of three levels, chosen per [namespace](card:namespaces-labels-selectors) by a label.
+
 ## Why it exists
 
-A root container with extra kernel powers can break out to the node. Pods need safe settings, and the cluster must refuse unsafe ones.
+A container is a process that shares the node's kernel. If it runs as root with extra capabilities, or with `privileged: true`, a bug in the app can let an attacker break out to the node and reach every Pod on it. Each developer could forget a setting, so the cluster cannot trust every manifest. securityContext makes each Pod safe, and admission makes unsafe Pods impossible to create.
 
 ## How it works
 
-| securityContext field | Set to | Stops |
-|---|---|---|
-| `runAsNonRoot` | `true` | Starting a container whose user is root (UID 0) |
-| `allowPrivilegeEscalation` | `false` | A process gaining more rights than its parent |
-| `capabilities.drop` | `[ALL]` | Extra kernel powers such as `NET_RAW` |
-| `seccompProfile.type` | `RuntimeDefault` | Unneeded system calls |
-| `readOnlyRootFilesystem` | `true` | Writes to the container's own files |
+<Mermaid
+  alt="You apply a Deployment. Pod Security Admission checks its Pod template in warn and audit modes and accepts it. The ReplicaSet creates Pods. Admission checks each Pod in enforce mode: a Pod that breaks the namespace level is rejected; an accepted Pod is scheduled, and the kubelet starts the container with its securityContext."
+  chart={`flowchart LR
+  D[Apply Deployment] -- "warn and audit only" --> A[Deployment accepted]
+  A --> RS[ReplicaSet creates a Pod]
+  RS --> E{Pod meets the namespace level?}
+  E -- no --> X[Rejected: 403]
+  E -- yes --> K[kubelet starts it with securityContext]`}
+/>
 
-- Restricted needs the first four; read-only root is extra. Container values override Pod values.
-- Custom rules (allowed registries, required labels): ValidatingAdmissionPolicy (CEL, stable since 1.30), Kyverno or OPA Gatekeeper.
-- Private images: pull with `imagePullSecrets`; see [Secrets](card:configmaps-and-secrets).
+1. You label the `payments` namespace with the level to enforce, for example `restricted`, and optionally a level for `warn` and `audit`.
+2. When you apply a Deployment, admission checks its Pod template in warn and audit modes only. You may see a warning, but the Deployment is created.
+3. When the ReplicaSet creates each Pod, enforce mode checks that Pod. A Pod that breaks the level is rejected, and the reason appears in the ReplicaSet's events.
+4. An accepted Pod is scheduled, and the kubelet starts the container with the securityContext settings. With `runAsNonRoot: true`, it refuses to start a container whose image would run as root (UID 0).
+
+So the key is: securityContext makes a Pod safe, and the namespace label makes the safe settings compulsory.
 
 ## Example
 
-payment-service under the restricted level:
+The payment-service Pod template meets the restricted level, and its namespace enforces it.
 
 ```yaml
-# Namespace payments
+apiVersion: v1
+kind: Namespace
 metadata:
+  name: payments
   labels: { pod-security.kubernetes.io/enforce: restricted }
 ---
-# Pod template of the payment-service Deployment
+# Pod template of the payment-service Deployment (part)
 spec:
   securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
   containers:
@@ -73,16 +98,44 @@ spec:
       securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
 ```
 
+What to notice:
+
+- The Pod-level `securityContext` applies to every container; a value set on a container overrides the Pod value for that container.
+- `runAsUser: 1000` gives a non-root user, so `runAsNonRoot` passes even if the image has no `USER` line.
+- `drop: [ALL]` removes every capability. Restricted lets you add back only `NET_BIND_SERVICE`, needed to listen on ports below 1024.
+- Remove `allowPrivilegeEscalation: false` and the namespace rejects every new payment-service Pod.
+
+## Rules and defaults
+
+What the restricted level requires (Kubernetes 1.37):
+
+| Field | Required value | What it stops |
+|---|---|---|
+| `runAsNonRoot` | `true` | Starting a container whose user is root (UID 0) |
+| `allowPrivilegeEscalation` | `false` | A process gaining more rights than its parent |
+| `capabilities.drop` | `[ALL]` | Extra kernel powers such as `NET_RAW` |
+| `seccompProfile.type` | `RuntimeDefault` or `Localhost` | Unneeded system calls |
+
+- **Levels add up:** baseline already blocks privileged containers, `hostNetwork`, `hostPID` and `hostPath` volumes; restricted adds the table above.
+- **Extra hardening:** `readOnlyRootFilesystem: true` stops writes to the container's own files. Restricted does not require it.
+- **Modes:** a namespace can set any of `enforce`, `audit` and `warn`, each with its own level. An optional `-version` label pins a level to one Kubernetes version; its value can also be `latest`.
+- **Custom rules:** for rules the three levels do not cover, such as allowed image registries, use ValidatingAdmissionPolicy (built in, rules written in CEL, stable since 1.30), Kyverno or OPA Gatekeeper.
+
+## Common mistakes
+
+- **"The Deployment was accepted, so it is compliant."** Enforce checks only Pods. Read the warning and the ReplicaSet events, or the rollout stalls with zero Pods.
+- **Switching a busy namespace straight to enforce restricted.** Existing Pods keep running, but replacements fail. Use warn and audit first.
+
 ## Interview Qs
 
 ### How do you stop containers running as root?
 
-Set `runAsNonRoot: true`; the kubelet then refuses a container whose image runs as UID 0. Enforce `restricted` on the namespace to reject Pods without it.
+Set `runAsNonRoot: true` in securityContext; the kubelet then refuses any container whose user would be UID 0. Build images with a non-root `USER` or set `runAsUser`. Then enforce the restricted level on the namespace, so a Pod without these settings is rejected.
 
 ### What replaced PodSecurityPolicy?
 
-Pod Security Admission (stable since 1.25): three fixed levels set by namespace labels. Custom rules go to ValidatingAdmissionPolicy, Kyverno or OPA Gatekeeper.
+Pod Security Admission, stable since Kubernetes 1.25, the release that removed PodSecurityPolicy. It applies three fixed levels, privileged, baseline and restricted, set by namespace labels. Rules beyond those levels go to ValidatingAdmissionPolicy, Kyverno or OPA Gatekeeper.
 
 ### How do you move an existing namespace to restricted safely?
 
-Keep enforce at baseline; set audit and warn to restricted. Preview with `kubectl label --dry-run=server`, fix the reported Pods, then enforce restricted.
+Keep enforce at baseline, and set audit and warn to restricted. Preview with `kubectl label --dry-run=server --overwrite ns payments pod-security.kubernetes.io/enforce=restricted`, which lists the running Pods that would fail. Fix those workloads, then switch enforce to restricted.

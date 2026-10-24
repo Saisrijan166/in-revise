@@ -5,26 +5,38 @@ title: QoS Classes and Eviction
 topic: health-resources
 level: intermediate
 heat: 2
-hook: "Requests and limits give every Pod a QoS class; when a node runs short, Pods using more than they requested are evicted first."
+hook: "Requests and limits give every Pod a QoS class. When a node runs short of memory or disk, the kubelet evicts Pods that use more than they requested first."
 points:
-  - { k: "Guaranteed", v: "every container: CPU and memory requests equal limits", kind: plus }
-  - { k: "Burstable", v: "some request or limit set, but not Guaranteed" }
-  - { k: "BestEffort", v: "no requests or limits anywhere: evicted first", kind: minus }
-  - { k: "Hard threshold", v: "memory.available<100Mi on Linux nodes (kubelet, Kubernetes 1.37)", kind: default }
+  - { k: "Guaranteed", v: "every container sets CPU and memory requests and limits, and each request equals its limit", kind: plus }
+  - { k: "Burstable", v: "not Guaranteed, but at least one container sets a CPU or memory request or limit" }
+  - { k: "BestEffort", v: "no container sets any CPU or memory request or limit; the kubelet evicts these first", kind: minus }
+  - { k: "Eviction order", v: "first Pods using more than their requests, by priority, then by how far over; the rest go last" }
+  - { k: "Hard threshold (1.37)", v: "the kubelet evicts at once when free memory drops below 100Mi on a Linux node", kind: default }
+  - { k: "Evicted Pod", v: "its phase becomes Failed and it never restarts; a Deployment creates a new Pod to replace it", kind: minus }
 trap:
   wrong: "OOMKilled and Evicted are the same thing."
-  right: "OOMKilled: the kernel killed one container over its memory limit, and it restarts. Evicted: the kubelet failed the whole Pod to save the node."
-sayIt: "QoS comes from requests and limits: Guaranteed, Burstable, BestEffort. Under node memory pressure the kubelet evicts Pods using more than they requested first, so Guaranteed Pods are the safest."
+  right: "OOMKilled: the kernel killed one container, usually over its memory limit, and it restarts. Evicted: the kubelet failed the whole Pod to save the node."
+  why: "Both happen when memory runs short and both stop the app, so in kubectl get pods they look like one event with two names."
+sayIt: "QoS comes from requests and limits: Guaranteed, Burstable, BestEffort. Under node pressure the kubelet evicts Pods using more than they requested first, by priority, so requests equal to limits plus a high PriorityClass is the safest setup."
+cheat:
+  idea: "Kubernetes gives each Pod a QoS class from its requests and limits: Guaranteed, Burstable or BestEffort. When a node runs short of memory or disk, the kubelet evicts Pods to save the node."
+  remember: "Pods using more than their requests go first. Requests equal to limits (Guaranteed) is the safest class."
+buildsOn: [resource-requests-limits, pod-lifecycle]
+scenarios:
+  - q: "A Pod with one container sets only limits, cpu 500m and memory 512Mi, and no requests. Which QoS class does it get?"
+    a: "Guaranteed. With no requests, Kubernetes copies each limit as the request, so requests equal limits for both CPU and memory, which is the Guaranteed rule."
+  - q: "kubectl get pods shows a payment Pod with status Evicted, and a new payment Pod running on another node. What happened? Will the evicted Pod restart?"
+    a: "Its node ran short of memory or disk, so the kubelet failed the Pod to save the node. An evicted Pod never restarts. The Deployment saw a missing replica and created a new Pod, which the scheduler placed on another node."
 confusedWith: [requests-vs-limits]
 tags: [qos, eviction, priority, preemption]
-visual: flow
+visual: table
 sources:
   - title: "Pod Quality of Service Classes (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-qos/"
-    verifiedOn: "2026-10-20"
-  - title: "Node-pressure Eviction (Kubernetes 1.37 docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Node-pressure Eviction: ranking, hard thresholds, OOM behaviour (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Pod Priority and Preemption (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/"
     verifiedOn: "2026-10-20"
@@ -36,33 +48,73 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Kubernetes puts every Pod into a Quality of Service (QoS) class, worked out from its containers' [requests and limits](card:resource-requests-limits): Guaranteed, Burstable or BestEffort. You do not set the class; it appears in the Pod's `status.qosClass`. Eviction is the kubelet stopping some Pods on its node to free memory or disk when the node runs short. The QoS class tells you which Pods are likely to be evicted first.
+
 ## Why it exists
 
-When a node runs out of memory or disk, something must go. QoS classes and priorities decide which Pods are given up to keep the node alive.
+Requests can be lower than limits, so the Pods on a node can together try to use more memory than the node has. If nothing stops them, the node itself fails and every Pod on it dies. Eviction gives up a few Pods, in a known order, to keep the node and the rest alive. QoS classes let you choose where the payment service sits in that order.
 
 ## How it works
 
-<Steps label="Node-pressure eviction on one node">
-  <Step title="Detect">The kubelet sees a signal cross a threshold, such as free memory below 100Mi.</Step>
-  <Step title="Reclaim">It frees what it can first; for disk, dead containers and unused images.</Step>
-  <Step title="Rank">Pods using more than their requests go first, by priority, then by how far over they are.</Step>
-  <Step title="Evict">The Pod's phase becomes Failed (reason Evicted); its controller creates a replacement Pod.</Step>
-</Steps>
+| Class | Rule (CPU and memory) | When the node runs short of memory |
+| --- | --- | --- |
+| Guaranteed | Every container sets requests and limits, and each request equals its limit | Evicted last |
+| Burstable | Not Guaranteed, but some container sets a request or limit | Evicted if it uses more than it requested |
+| BestEffort | No container sets any request or limit | Evicted first: any usage is above its zero request |
 
-- The kubelet does not rank by QoS class; the class only predicts this order for memory.
-- A [PriorityClass](card:priorityclass) gives Pods a number; the scheduler preempts lower-priority Pods to fit a higher one.
-- Debugging a killed or evicted Pod: [Pod errors](card:pod-errors).
+1. The kubelet watches eviction signals on its node, such as `memory.available` (free memory) and `nodefs.available` (free disk).
+2. When a signal crosses a threshold, for example free memory below 100Mi, it first tries to free resources without touching Pods. For disk, it deletes dead containers and unused images.
+3. If that is not enough, it ranks the Pods. First come Pods using more than their requests, ordered by [priority](card:priorityclass) and then by how far above their requests they are. Pods within their requests come last.
+4. It evicts the Pod at the top: it stops its containers and sets the Pod's phase to Failed, with reason Evicted. It repeats until the signal is back under the threshold.
+5. The Deployment or other controller sees a missing replica and creates a new Pod, which the scheduler places on a node with room.
+
+So the safest place is a Pod that stays within its requests, which a Guaranteed Pod always does for memory.
+
+## Example
+
+The payment service sets requests equal to limits, so its Pods are Guaranteed. You can check the class Kubernetes gave them:
+
+```yaml
+resources:
+  requests: { cpu: 500m, memory: 512Mi }
+  limits: { cpu: 500m, memory: 512Mi }
+```
+
+```bash
+kubectl get pods -l app=payment-service -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass
+```
+
+What to notice:
+
+- Both CPU and memory have requests equal to limits, in every container. Set the memory limit to 1Gi, and the Pod becomes Burstable.
+- A Guaranteed Pod can never use more memory than it requested, so under memory pressure it is ranked after every Pod that is over its requests.
+- The class is read from `status.qosClass`; you cannot write it. Change the resources, and Kubernetes works out the class again for the new Pods.
+
+## Rules and defaults
+
+- **Default hard thresholds (kubelet, Kubernetes 1.37):** `memory.available<100Mi` (Linux), `nodefs.available<10%`, `imagefs.available<15%`, `nodefs.inodesFree<5%` (Linux).
+- **Hard vs soft threshold:** a hard threshold evicts at once, with no graceful shutdown. A soft threshold waits for a grace period you configure.
+- **What node-pressure eviction ignores:** your PodDisruptionBudgets and the Pod's `terminationGracePeriodSeconds`. API-initiated eviction, as `kubectl drain` uses, respects both; you will see PodDisruptionBudgets in [high availability](card:high-availability).
+- **QoS and disk:** the kubelet does not rank by QoS class; the class only predicts the order for memory. It does not apply under disk pressure.
+- **Kernel out of memory first:** if the node runs out of memory before the kubelet acts, the kernel kills a container. Kubernetes biases that choice so BestEffort containers die first and Guaranteed ones last. A container killed this way restarts; an evicted Pod does not.
+- **Priority:** a PriorityClass maps a name to a number. A higher number ranks later for eviction, and the scheduler may preempt, that is evict, lower-priority Pods to fit a pending higher-priority Pod.
+
+## Not to be confused with
+
+OOMKilled is about one container: the kernel killed it, usually for going over its own memory limit, and the kubelet restarts it in the same Pod. Evicted is about the whole Pod: the kubelet failed it because the node was short, and a controller must create a new Pod. Rule: OOMKilled = container over its limit, restarted; Evicted = node short, Pod replaced. Debugging both is in [Pod errors](card:pod-errors).
 
 ## Interview Qs
 
 ### Which Pods go first when a node runs low on memory?
 
-BestEffort and Burstable Pods using more than their requests, ordered by priority and then by how far over they are. Guaranteed Pods and Pods within their requests go last.
+Pods using more than their memory requests: all BestEffort Pods and Burstable Pods that are over. Among them, lower priority goes first, then the Pod furthest above its request. Guaranteed Pods and Pods within their requests go last.
 
-### How do you protect a critical Pod?
+### How do you protect a critical Pod from eviction?
 
-Make it Guaranteed (requests equal limits for CPU and memory in every container), keep its usage within requests, and give it a high PriorityClass.
+Make it Guaranteed, with requests equal to limits for CPU and memory in every container, so it never uses more than it reserved. Give it a high PriorityClass. Run several replicas spread over nodes, because no setting makes one Pod safe from a node failure.
 
 ### Does a PodDisruptionBudget stop evictions?
 
-Only API-initiated ones, such as `kubectl drain`. Node-pressure eviction ignores PDBs and the grace period, and preemption respects PDBs only on a best-effort basis. See [high availability](card:high-availability).
+Only API-initiated ones, such as `kubectl drain`, which ask before evicting. Node-pressure eviction by the kubelet ignores PodDisruptionBudgets and the grace period. Preemption by the scheduler respects them only on a best-effort basis.

@@ -5,24 +5,37 @@ title: Resource Requests and Limits
 topic: health-resources
 level: beginner
 heat: 3
-hook: "Requests are what the scheduler reserves; limits are the ceiling: extra CPU is throttled, extra memory is OOM-killed."
+hook: "A request is the CPU and memory reserved for a container on a node; a limit is the most it may use while it runs."
 points:
-  - { k: "Request", v: "the scheduler places a Pod only where its requests fit" }
-  - { k: "Over the CPU limit", v: "throttled, never killed for it", kind: minus }
-  - { k: "Over the memory limit", v: "the kernel may kill it: OOMKilled, exit code 137", kind: minus }
-  - { k: "Units", v: "250m = 0.25 CPU; Mi = 2^20 bytes, M = 10^6 bytes" }
-  - { k: "Limit without request", v: "the request is set equal to the limit", kind: default }
+  - { k: "Request", v: "the amount reserved on a node; the scheduler places a Pod only where its requests fit" }
+  - { k: "Limit", v: "the most the container may use; the Linux kernel enforces it while the container runs" }
+  - { k: "Over the CPU limit", v: "the kernel throttles the container, so it runs slower, but it is not killed for it", kind: minus }
+  - { k: "Over the memory limit", v: "the kernel may kill the container: status OOMKilled, exit code 137, then a restart", kind: minus }
+  - { k: "Units", v: "250m is a quarter of one CPU core; 512Mi is 512 × 2^20 bytes, while 512M is 512 × 10^6 bytes" }
+  - { k: "Limit, no request (1.37)", v: "Kubernetes copies the limit as the request, unless a LimitRange sets a default request", kind: default }
 trap:
-  wrong: "Requests cap how much CPU and memory a container can use."
-  right: "Requests only reserve room; a container may use more if the node has spare. Limits are the cap."
-sayIt: "Requests are the reservation the scheduler uses to place a Pod; limits are the hard cap. Over the CPU limit the container is throttled; over the memory limit it is OOM-killed."
+  wrong: "The CPU request caps how much CPU the container can use."
+  right: "The request only reserves CPU on the node; the container may use more when the node has spare. The limit is the cap."
+  why: "Both values sit side by side under resources with the same keys, and on a busy node usage often stays near the request, so it looks like a cap."
+sayIt: "Requests are the reservation the scheduler uses to place a Pod; limits are the hard cap at run time. Over the CPU limit the container is throttled; over the memory limit it is OOM-killed with exit code 137 and restarted."
+cheat:
+  idea: "Requests are the CPU and memory reserved for a container, and the scheduler places Pods by them. Limits are the most a container may use while it runs."
+  remember: "Over the CPU limit: throttled, slower. Over the memory limit: OOMKilled, exit code 137, restarted."
+buildsOn: [pods, kubernetes-architecture]
+scenarios:
+  - q: "Each node has 4 CPUs allocatable and runs nothing else. Every payment-service Pod requests 1500m CPU but really uses 200m. How many Pods fit on one node?"
+    a: "Two. The scheduler adds up requests, not real usage: two Pods reserve 3000m, and a third would need 4500m, more than 4000m. Requests set far above real usage waste nodes."
+  - q: "A manifest sets memory: 400m as a container's request. What did the author get?"
+    a: "A request of 0.4 bytes, because lower-case m means milli. Memory needs Mi or M, for example 400Mi. The API accepts the value, so the mistake is silent."
+  - q: "The payment service has a 512Mi memory limit and is OOMKilled under load, but the heap never goes above 300Mi. Why?"
+    a: "The limit covers all memory of the container, not only the heap. Metaspace, thread stacks, direct buffers and the JIT also use memory. Lower -XX:MaxRAMPercentage or raise the limit."
 confusedWith: []
 tags: [resources, cpu, memory, oomkilled, jvm]
 visual: table
 sources:
   - title: "Resource Management for Pods and Containers (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Limit Ranges (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/policy/limit-range/"
     verifiedOn: "2026-10-20"
@@ -34,19 +47,29 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Each container can declare two amounts of CPU and memory under `resources`. The request is the amount reserved for it on a node; the limit is the most it may use. CPU is counted in cores, where `250m` (250 millicores) is a quarter of a core. Memory is counted in bytes, where `512Mi` means 512 mebibytes.
+
 ## Why it exists
 
-Many Pods share one node. Without declared needs the scheduler cannot pack nodes safely, and one greedy container can starve the rest.
+A node has fixed CPU and memory, shared by all its Pods. Without requests, the [scheduler](card:kubernetes-architecture) cannot tell whether a new payment Pod fits on a node, so it may pack too many Pods onto one machine. Without limits, one container with a memory leak can use all of the node's memory and hurt every other Pod there. Requests make placement safe; limits contain a container that misbehaves.
 
 ## How it works
 
 <Compare id="requests-vs-limits" />
 
-- With neither set, a container is unbounded unless a namespace [LimitRange](card:limitrange) injects defaults.
-- They also decide the [QoS class and eviction order](card:qos-and-eviction); the [HPA](card:autoscaling) needs CPU requests.
-- [In-place resize](card:in-place-resize) (stable since 1.35) changes a running Pod's CPU and memory without recreating it.
+1. You set requests and limits per container. A Pod's request is the sum of its containers' requests.
+2. The scheduler places the Pod only on a node where this Pod's requests, added to the requests of the Pods already there, fit within the node's allocatable capacity. It does not look at real usage.
+3. When the Pod starts, the kubelet passes the numbers to the container runtime, which sets them in the Linux kernel's cgroups, the feature that controls how much CPU and memory a group of processes gets.
+4. While the container runs, it may use more than its request whenever the node has spare. If it reaches its CPU limit, the kernel makes it wait, so it runs slower.
+5. If it goes over its memory limit, the kernel may kill it when it detects memory pressure. The status shows OOMKilled with exit code 137, and the kubelet restarts the container.
+
+So requests decide where a Pod runs, and limits decide how far it may grow there.
 
 ## Example
+
+The payment service container reserves a quarter core and 512Mi, and sizes the Java heap to the limit:
 
 ```yaml
 containers:
@@ -60,16 +83,37 @@ containers:
         value: "-XX:MaxRAMPercentage=75"   # heap up to 75% of 512Mi
 ```
 
+What to notice:
+
+- The scheduler reserves 250m CPU on the chosen node. The app may use up to 500m when the node has spare CPU; above that it is throttled.
+- The memory request equals the limit, so the Pod never uses more memory than it reserved. [QoS and eviction](card:qos-and-eviction) shows why that protects it when a node runs short.
+- Java 25 reads the container's memory limit and, by default, caps the heap at 25% of it, here 128Mi. `MaxRAMPercentage=75` raises that to 384Mi and leaves 128Mi for memory outside the heap.
+- Remove the memory limit, and a leak can grow until the whole node runs short of memory.
+
+## Rules and defaults
+
+- **Limit without request:** Kubernetes copies the limit and uses it as the request, unless a LimitRange in the namespace already set a default request.
+- **Neither set:** no reservation and no cap, unless the namespace has a [LimitRange](card:limitrange) that adds defaults.
+- **Unit case matters:** `m` means milli, so `400m` of memory is 0.4 bytes. Use `Mi` (2^20 bytes) or `M` (10^6 bytes) for memory.
+- **CPU request when the node is busy:** it works as a weight, so a container with a larger request gets more CPU time.
+- **Namespace guard rails:** a LimitRange sets defaults and minimum and maximum values per container; a [ResourceQuota](card:resourcequota) caps the total requests and limits of a namespace.
+- **In-place resize (stable since Kubernetes 1.35):** you can change the CPU and memory of a running Pod without recreating it, through the Pod's `resize` subresource.
+
+## Common mistakes
+
+- **"The Pod ran fine on my laptop, so it needs no requests."** Without requests, the scheduler treats the Pod as needing nothing, so it can land on a node that is already full. Set requests from measured usage.
+- **"The memory limit is only for the Java heap."** It covers every byte the container uses, including metaspace, thread stacks and native buffers, so the heap must stay well below it.
+
 ## Interview Qs
 
 ### What happens when a container goes over its CPU limit, and over its memory limit?
 
-Over CPU, the kernel throttles it, so it only gets slower. Over memory, the kernel's OOM killer may stop it when memory runs short; the status shows OOMKilled, exit code 137, and the kubelet restarts it.
+Over the CPU limit, the kernel throttles it, so it only gets slower. Over the memory limit, the kernel may kill it when it detects memory pressure; the status shows OOMKilled with exit code 137, and the kubelet restarts the container.
 
 ### What happens if a container sets no requests?
 
-If it sets only a limit, the request copies the limit. If it sets neither and no LimitRange adds defaults, it gets no reservation and no cap; a Pod with none at all is BestEffort.
+If it sets only a limit, Kubernetes copies the limit as the request. If it sets neither and no LimitRange adds defaults, it gets no reservation and no cap. A Pod in which no container sets any CPU or memory value is BestEffort, the first to be evicted.
 
 ### How do you size memory for a Spring Boot container?
 
-Java 25 reads the container's memory limit by default and caps the heap at 25% of it. Raise that with `-XX:MaxRAMPercentage`, but leave room for memory outside the heap, or the container is OOM-killed.
+Measure real usage, set the memory request and limit from it, and size the heap below the limit. Java 25 reads the container limit and caps the heap at 25% of it by default; raise that with `-XX:MaxRAMPercentage`, leaving room for metaspace, threads and native memory, or the container is OOM-killed.

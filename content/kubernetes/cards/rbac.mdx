@@ -5,81 +5,144 @@ title: "RBAC: Who Can Do What"
 topic: security-ops
 level: intermediate
 heat: 3
-hook: "RBAC answers one question: may this subject use this verb on this resource? A Role lists the rules; a binding grants them."
+hook: "RBAC decides whether a caller may do an action through the Kubernetes API. A Role lists the allowed actions; a RoleBinding gives that Role to a caller."
 points:
-  - { k: "Rule", v: "apiGroups + resources + verbs (get, list, watch, create…)" }
-  - { k: "Subjects", v: "a User, a Group or a ServiceAccount" }
-  - { k: "Additive only", v: "rules only allow; there are no deny rules", kind: minus }
-  - { k: "roleRef", v: "fixed once bound: delete and recreate the binding to change it", kind: minus }
-  - { k: "Least privilege", v: "RoleBindings per namespace, no wildcards", kind: plus }
+  - { k: "Rule", v: "a rule names API groups, resources and verbs, such as get, list and update on deployments in the apps group" }
+  - { k: "Subject", v: "the caller a binding names: a user, a group or a ServiceAccount" }
+  - { k: "No deny rules", v: "rules only add permissions; anything no rule allows is refused with 403 Forbidden", kind: minus }
+  - { k: "roleRef is fixed", v: "you cannot change which Role a binding points to; delete the binding and create a new one", kind: minus }
+  - { k: "Least privilege", v: "give each caller a RoleBinding in its own namespace, with only the verbs it needs and no wildcards", kind: plus }
+  - { k: "Check access", v: "kubectl auth can-i VERB RESOURCE --as=SUBJECT asks the API server for a yes or no answer" }
 trap:
   wrong: "RBAC also stops Pods from talking to each other."
-  right: "RBAC controls only calls to the Kubernetes API. Limit Pod-to-Pod traffic with NetworkPolicies."
-sayIt: "RBAC controls API permissions: a Role or ClusterRole lists allowed verbs on resources; a RoleBinding or ClusterRoleBinding grants it to users, groups or ServiceAccounts. Rights only add up; the rest is refused."
-confusedWith: []
+  right: "RBAC controls only calls to the Kubernetes API, such as reading a Secret. Pod-to-Pod network traffic is limited with NetworkPolicies."
+  why: "The name \"access control\" sounds as if it covers every kind of access, and RBAC is often set up per namespace, so it looks like a wall between apps."
+sayIt: "RBAC controls API permissions: a Role or ClusterRole lists allowed verbs on resources, and a RoleBinding or ClusterRoleBinding grants it to users, groups or ServiceAccounts. Rules only add up; anything not allowed is refused."
+cheat:
+  idea: "RBAC decides whether a caller may act through the Kubernetes API. A Role lists allowed verbs on resources; a RoleBinding gives it to a user, group or ServiceAccount."
+  flow: "caller → its bindings → matching rule? → allowed, else 403"
+  remember: "Rules only add rights; there is no deny. RBAC guards API calls, not Pod-to-Pod traffic."
+buildsOn: [kubernetes-architecture, namespaces-labels-selectors, service-accounts]
+scenarios:
+  - q: "A Role gives the CI ServiceAccount the verb get on deployments. The pipeline runs kubectl get deployments and gets 403 Forbidden. Why?"
+    a: "Listing all Deployments uses the verb list, not get. get reads one named object only. Add list (and watch if the tool streams changes) to the rule, or the request has no matching rule and RBAC refuses it."
+  - q: "A developer has the built-in view ClusterRole through a RoleBinding in payments. Can they read the payment-service database password Secret?"
+    a: "No. The view role leaves out Secrets on purpose, because a Secret can hold ServiceAccount credentials and reading it would give more access. The edit role, by contrast, can read Secrets."
+  - q: "You edit a RoleBinding to point roleRef at a different Role and run kubectl apply. What happens?"
+    a: "The API server rejects the change with a validation error, because roleRef cannot change after the binding is created. Delete the binding and create a new one that points to the new Role."
+confusedWith: [role-vs-clusterrole]
 tags: [rbac, security, authorisation, serviceaccount]
 visual: flow
 sources:
   - title: "Using RBAC Authorization (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/reference/access-authn-authz/rbac/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Controlling Access to the Kubernetes API (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/security/controlling-access/"
     verifiedOn: "2026-10-20"
   - title: "Role Based Access Control Good Practices (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/security/rbac-good-practices/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "kubectl auth can-i (Kubernetes 1.37 reference)"
     url: "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_auth/kubectl_auth_can-i/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+RBAC (role-based access control) is how the [API server](card:kubernetes-architecture) decides whether a caller may do an action. Every `kubectl` command and every program that manages the cluster sends its request to the API server. The caller is called a subject: a user, a group or a [ServiceAccount](card:service-accounts). A Role lists allowed actions, such as "update Deployments", in one [namespace](card:namespaces-labels-selectors), and a RoleBinding gives that Role to subjects.
+
 ## Why it exists
 
-Many people and programs call the same API server. Without rules, any of them could read Secrets or delete Deployments.
+Many people and programs use the same cluster. The CI pipeline only needs to update the payment-service Deployment; a developer only needs to read Pods and logs. Without RBAC, any of them could read every Secret or delete any Deployment, and one leaked CI token would give an attacker the whole cluster. RBAC gives each caller only the actions it needs, so a mistake or a leak stays small.
 
 ## How it works
 
 <Steps label="One request to the API server">
-  <Step title="Authenticate">Who is calling? Certificate, token or ServiceAccount token. No match: 401.</Step>
-  <Step title="Authorise">RBAC checks the bindings. No rule allows it: 403.</Step>
-  <Step title="Admission">Admission controllers may change or reject writes. One rejection is final.</Step>
-  <Step title="Store">The object is validated and saved.</Step>
+  <Step title="Authenticate">Who is calling? A client certificate or a token says so. Unknown caller: 401 Unauthorized.</Step>
+  <Step title="Authorise">RBAC looks for a rule that allows this verb on this resource. None found: 403 Forbidden.</Step>
+  <Step title="Admission">Admission controllers may change or reject a write. One rejection is final.</Step>
+  <Step title="Store">The object is validated and saved in etcd.</Step>
 </Steps>
 
-<Compare id="role-vs-clusterrole" />
+1. The CI pipeline runs `kubectl set image` on the payment-service Deployment. The API server first checks the token and learns the caller is `system:serviceaccount:payments:payments-deployer`.
+2. RBAC collects every RoleBinding in the `payments` namespace and every ClusterRoleBinding that names this subject.
+3. It looks through the rules of those roles for one that matches the API group (`apps`), the resource (`deployments`) and the verb (`patch`). One matching rule is enough.
+4. If no rule matches, the request stops with 403 Forbidden. If one matches, it goes on to admission and is saved.
 
-- A RoleBinding may point to a ClusterRole: the common rules are reused, but rights stay in that namespace.
-- Who the Pod is comes from its [ServiceAccount](card:service-accounts); RBAC decides what it may do.
+So the key is: no matching rule means no access.
 
 ## Example
 
-payment-service may only read ConfigMaps in `payments`:
+The CI pipeline gets its own ServiceAccount that may update Deployments in `payments` and nothing else.
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
-metadata: { name: config-reader, namespace: payments }
+metadata: { name: deployer, namespace: payments }
 rules:
-  - { apiGroups: [""], resources: [configmaps], verbs: [get, list, watch] }
+  - apiGroups: ["apps"]                       # Deployments live in the apps group
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
-metadata: { name: payment-service-config-reader, namespace: payments }
-subjects: [{ kind: ServiceAccount, name: payment-service, namespace: payments }]
-roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: config-reader }
+metadata: { name: payments-deployer, namespace: payments }
+subjects: [{ kind: ServiceAccount, name: payments-deployer, namespace: payments }]
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: deployer }
 ```
+
+What to notice:
+
+- `apiGroups: ["apps"]` is needed because Deployments belong to the `apps` group. Pods, ConfigMaps and Secrets belong to the core group, written as `""`.
+- `get` reads one named object and `list` reads all of them. Leave out `list` and `kubectl get deployments` fails with 403.
+- The Role has no `delete` and no `secrets`, so a leaked CI token cannot remove the app or read its passwords.
+- Both objects live in `payments`, so the rights end at that namespace.
+
+```bash
+kubectl auth can-i patch deployments -n payments --as=system:serviceaccount:payments:payments-deployer
+kubectl auth can-i get secrets -n payments --as=system:serviceaccount:payments:payments-deployer
+```
+
+```text output
+yes
+no
+```
+
+What to notice:
+
+- `--as` makes the API server answer for the CI ServiceAccount instead of for you, using the real bindings.
+- `patch` is allowed by the Role; `secrets` appears in no rule, so the answer is `no` and a real request would get 403.
+
+## Rules and defaults
+
+- **Additive only:** there are no deny rules. To take a right away, remove the rule or the binding.
+- **roleRef is fixed:** changing it fails validation; delete the binding and create a new one.
+- **No privilege escalation:** you can create a Role only with permissions you already hold, and bind a Role only if you hold all its permissions, unless you are granted the `escalate` or `bind` verb.
+- **Built-in roles:** `cluster-admin` (everything), `admin`, `edit` and `view`. `edit` can read Secrets and run Pods as any ServiceAccount in the namespace; `view` cannot see Secrets.
+- **Hidden reach:** `list` and `watch` on Secrets also return their contents, and anyone who may create Pods in a namespace can mount its Secrets ([Secrets](card:configmaps-and-secrets)).
+
+## Not to be confused with
+
+A Role belongs to one namespace. A ClusterRole has no namespace, so it can cover cluster-wide resources such as nodes, or be reused in many namespaces. A RoleBinding grants rights inside its own namespace, even when it points to a ClusterRole; a ClusterRoleBinding grants them in every namespace. Rule: the binding decides how far the rights reach.
+
+RBAC also differs from a [NetworkPolicy](card:network-policies): RBAC controls API calls, a NetworkPolicy controls Pod network traffic.
+
+## Common mistakes
+
+- **"Give the CI ServiceAccount cluster-admin so the pipeline never fails."** A leaked CI token then controls the whole cluster. Grant a Role per namespace with the exact verbs.
+- **Using `*` in verbs or resources.** A wildcard also covers resources and verbs added later, so rights grow without anyone noticing.
 
 ## Interview Qs
 
 ### How do you check what a ServiceAccount is allowed to do?
 
-Ask the API server: `kubectl auth can-i list configmaps -n payments --as=system:serviceaccount:payments:payment-service`. It answers yes or no. Add `--list` to see every allowed action in the namespace.
+Ask the API server: `kubectl auth can-i list configmaps -n payments --as=system:serviceaccount:payments:payment-service` answers yes or no. Add `--list` to print every allowed action in that namespace. This checks the real bindings, so it is safer than reading YAML by hand.
 
-### How do you protect Secrets with RBAC?
+### What is the difference between 401 and 403 from the API server?
 
-Grant `get` on named Secrets only to the ServiceAccount that needs them. `list` and `watch` also reveal contents. Anyone who can create Pods in a namespace can mount its Secrets, so limit that too.
+401 means authentication failed: the server does not know who you are, for example because the token expired. 403 means you are known, but no RBAC rule allows that verb on that resource. Fix a 403 with a Role and binding, not with a new token.
 
 ### Why use a ClusterRole in a RoleBinding?
 
-To write a rule set once, like the built-in `view` or `edit`, and grant it namespace by namespace. The binding keeps the rights inside its own namespace.
+To write a rule set once, like the built-in `view` or `edit`, and grant it namespace by namespace. The RoleBinding keeps the rights inside its own namespace, so the same ClusterRole can give a team read access in `payments` only.

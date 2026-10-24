@@ -671,3 +671,29 @@ The owner approved the Spring Boot pilot, both the concept rewrite (section Q) a
   - Whether a hash shrinks back to listpack.
   - Which Java clients besides Jedis support client-side caching.
 - **Run-dependent numbers:** SCAN cursors, stream ids, `evicted_keys`, MEMORY USAGE and TTLs come from one real run and differ on re-runs. The "What to notice" text says so.
+
+### R7. Docker
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 32 | 16 | ~260 | ~475 / 0 / 0 | ~8 min |
+
+- **Order:** containers vs VMs, then images and layers, then registries, then Docker's architecture, then namespaces and cgroups.
+- **Running example:** packaging the Spring Boot payment service (Dockerfile, multi-stage build, Compose with PostgreSQL and Redis, CI). Every command and Dockerfile ran on Docker Engine 29.1.3; output panels are real runs, all `inrv-`-prefixed artifacts removed.
+- **Verification:** both passes found 0 factual errors. The content was accurate.
+- **For the owner / to watch:**
+  - "Tens of MB" for container size is Docker's own wording.
+  - This host has no buildx plugin (legacy builder is the default here), but the BuildKit panel is the documented default; BuildKit was run with a verified-checksum buildx binary in a scratch config.
+  - cgroup v1 support ends ~May 2029.
+
+### R8. Kubernetes
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 39 | 23 | ~300 | ~890 / 1 / 0 | ~9.5 min |
+
+- **Order:** what Kubernetes is, the architecture, Kubernetes and Docker (CRI), kubectl and manifests, then labels; the cluster and Pods before controllers, Services, probes, scaling and traffic.
+- **Running example:** deploying the payment-service image from the Docker tech (Deployment, Service, Ingress/Gateway, ConfigMap/Secret, probes, HPA, a PostgreSQL StatefulSet). Baseline Kubernetes 1.37.
+- **Correction:** a Gateway API HTTPRoute backend with weight > 0 takes all traffic when it is the only non-zero weight; weight 0 forwards none. The draft was wrong.
+- **Runs:** outputs come from throwaway kind clusters (unique `inrv-` names, deleted after). Some behaviour rests on docs only where a cluster could not start (the host's inotify limit blocks a 4th concurrent cluster).
+- **To watch:** Gateway API v1.7 is at rc.1; Helm 3 reaches end of life 10-02-2027; IPVS proxy mode is off by default from 1.40.

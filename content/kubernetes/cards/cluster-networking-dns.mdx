@@ -5,88 +5,130 @@ title: Pod Networking and DNS
 topic: networking
 level: intermediate
 heat: 2
-hook: "Every Pod gets its own IP and reaches any Pod without NAT; apps still call Service names, because Pod IPs change."
+hook: "Every Pod gets its own IP and can reach any other Pod directly; apps still call Service names from the cluster DNS, because Pod IPs change."
 points:
-  - { k: "Network model", v: "one IP per Pod; all Pods reach all Pods, no NAT" }
-  - { k: "CNI plugin", v: "gives Pods IPs and connects nodes: Calico, Cilium, Flannel" }
-  - { k: "Service name", v: "payment-service.payments.svc.cluster.local → its ClusterIP" }
-  - { k: "Short names", v: "same namespace: payment-service; other: payment-service.payments" }
-  - { k: "kube-proxy modes", v: "iptables, nftables (stable 1.33), IPVS (deprecated 1.35)" }
+  - { k: "One IP per Pod", v: "every Pod gets its own cluster-wide IP, shared by all the containers in that Pod" }
+  - { k: "No NAT between Pods", v: "a Pod reaches any other Pod, on any node, directly at its Pod IP unless a policy blocks it" }
+  - { k: "CNI plugin", v: "a network add-on, such as Calico, Cilium or Flannel, that gives Pods their IPs and links the nodes" }
+  - { k: "Service DNS name", v: "payment-service.payments.svc.cluster.local resolves to the ClusterIP of that Service" }
+  - { k: "Short names", v: "payment-service resolves only in the caller's own namespace; from elsewhere use payment-service.payments" }
+  - { k: "kube-proxy mode (1.37)", v: "iptables is the default on Linux; nftables is stable since 1.33; IPVS is deprecated since 1.35", kind: default }
 trap:
-  wrong: "Save a Pod's IP in config and call it directly."
-  right: "A replaced Pod gets a new IP. Call the Service DNS name; DNS and the Service track the Pods."
-sayIt: "Each Pod has its own IP and Pods talk without NAT, over a network built by a CNI plugin. CoreDNS names each Service, like payment-service.payments.svc.cluster.local; apps call names, not Pod IPs."
+  wrong: "Store a Pod's IP in the configuration; it is a real, reachable address."
+  right: "The IP works only until that Pod is replaced. Call the Service DNS name; Kubernetes keeps the name pointing at the current Pods."
+  why: "Pod IPs really are reachable from every Pod, so a quick test with a stored IP succeeds. The failure shows up only at the next rollout or crash."
+sayIt: "Each Pod has its own IP, and Pods reach each other without NAT over a network built by a CNI plugin. CoreDNS names every Service, like payment-service.payments.svc.cluster.local, so apps call names, not Pod IPs."
+cheat:
+  idea: "Every Pod has its own IP and can reach any other Pod directly. The cluster DNS gives each Service a name, so apps call payment-service.payments instead of an IP."
+  flow: "DNS name → ClusterIP → kube-proxy rule → one Pod IP"
+  remember: "A short name resolves only in the caller's namespace; add .payments to reach another namespace."
+buildsOn: [pods, services]
+scenarios:
+  - q: "order-service in namespace orders calls http://payment-service and gets an unknown-host error. The Service exists in namespace payments. Why?"
+    a: "A short name is completed with the caller's own namespace first, so the lookup becomes payment-service.orders.svc.cluster.local, which does not exist. Call payment-service.payments, or the full name payment-service.payments.svc.cluster.local."
+  - q: "Two payment Pods run on the same node and both listen on port 8080. Is there a port clash?"
+    a: "No. Each Pod has its own IP and its own network, so both can use 8080. A clash happens only between containers inside one Pod, because they share one IP."
+  - q: "Someone sets dnsPolicy: Default on a Pod, and it can no longer resolve payment-service. Why?"
+    a: "The policy named Default makes the Pod use the node's DNS settings, which know nothing about cluster names. The real default, used when the field is left out, is ClusterFirst, which sends lookups to the cluster DNS."
 confusedWith: []
-tags: [cni, coredns, kube-proxy]
+tags: [cni, coredns, kube-proxy, dns]
 visual: flow
 sources:
-  - title: "The Kubernetes network model (Kubernetes 1.37 documentation)"
+  - title: "The Kubernetes network model: Pod IPs, no NAT, CNI, service proxy (Kubernetes 1.37 documentation)"
     url: "https://kubernetes.io/docs/concepts/services-networking/"
-    verifiedOn: "2026-10-20"
-  - title: "DNS for Services and Pods (Kubernetes 1.37 documentation)"
+    verifiedOn: "2026-10-21"
+  - title: "DNS for Services and Pods: search list, namespaces, headless records, dnsPolicy (Kubernetes 1.37 documentation)"
     url: "https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/"
-    verifiedOn: "2026-10-20"
-  - title: "Virtual IPs and Service Proxies (Kubernetes 1.37 documentation)"
+    verifiedOn: "2026-10-21"
+  - title: "Virtual IPs and Service Proxies: proxy modes, IPVS deprecation (Kubernetes 1.37 documentation)"
     url: "https://kubernetes.io/docs/reference/networking/virtual-ips/"
+    verifiedOn: "2026-10-21"
+  - title: "KEP-3866: nftables kube-proxy backend, stable in v1.33 (Kubernetes enhancements)"
+    url: "https://www.kubernetes.dev/resources/keps/3866/"
+    verifiedOn: "2026-10-21"
+  - title: "resolv.conf(5): search list, ndots and absolute names (Linux manual page)"
+    url: "https://man7.org/linux/man-pages/man5/resolv.conf.5.html"
+    verifiedOn: "2026-10-21"
+  - title: "Using CoreDNS for Service Discovery (Kubernetes documentation)"
+    url: "https://kubernetes.io/docs/tasks/administer-cluster/coredns/"
     verifiedOn: "2026-10-20"
   - title: "Installing Addons (Kubernetes documentation)"
     url: "https://kubernetes.io/docs/concepts/cluster-administration/addons/"
     verifiedOn: "2026-10-20"
-  - title: "Using CoreDNS (Kubernetes documentation)"
-    url: "https://kubernetes.io/docs/tasks/administer-cluster/coredns/"
-    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+Pod networking is the set of rules for how Pods talk to each other. Every Pod gets its own IP address in the cluster, and any Pod can reach any other Pod at that IP, on any node, without address translation (NAT). A CNI plugin builds this network. CNI (Container Network Interface) is the standard through which the container runtime plugs in a network add-on, such as Calico, Cilium or Flannel. On top of it, the cluster DNS server, usually CoreDNS, gives every [Service](card:services) a name.
 
 ## Why it exists
 
-Apps on different nodes must find and reach each other, though Pods move and change IPs.
+With plain Docker on several machines, containers on different hosts cannot reach each other directly. You publish container ports on host ports and track which host port belongs to which app, and two apps cannot both take host port 8080. Kubernetes gives each Pod its own IP instead, so every app listens on its normal port and is reachable as it is. DNS then removes the last address from the configuration: the app calls `http://payment-service.payments`, and the name always points at the current Service.
 
 ## How it works
 
 <Mermaid
-  alt="order-service asks CoreDNS for payment-service.payments and gets the ClusterIP. kube-proxy rules on its node turn that into one Pod IP, and the CNI network carries the packet to that Pod on another node."
+  alt="order-service asks CoreDNS for payment-service.payments and gets the ClusterIP. kube-proxy rules on its node turn that ClusterIP into one Pod IP, and the CNI network carries the packet to that Pod on another node."
   chart={`flowchart LR
-  A[order-service Pod] -- "1 lookup payment-service.payments" --> D[CoreDNS]
-  D -- "2 ClusterIP" --> A
-  A -- "3 connect" --> K[kube-proxy rules]
-  K -- "4 one Pod IP" --> N[CNI Pod network]
+  A[order-service Pod] -- "1. look up payment-service.payments" --> D[CoreDNS]
+  D -- "2. ClusterIP" --> A
+  A -- "3. connect" --> K[kube-proxy rules]
+  K -- "4. one Pod IP" --> N[CNI Pod network]
   N --> P[payment-service Pod, other node]`}
 />
 
-- Some CNI plugins replace kube-proxy with their own proxy.
-- A [headless Service](card:headless-service) name returns the Pod IPs, not one ClusterIP.
-- Who may talk to whom is set by [NetworkPolicies](card:network-policies).
+1. When a Pod starts, the CNI plugin gives it an IP and connects it to the Pod network. The kubelet writes the Pod's DNS settings: the cluster DNS server, and a search list that starts with the Pod's own namespace.
+2. order-service looks up `payment-service.payments`. CoreDNS answers with the Service's ClusterIP.
+3. order-service connects to that ClusterIP. Forwarding rules from [kube-proxy](card:kubernetes-architecture) on its own node change the destination to the IP of one ready payment Pod.
+4. The Pod network carries the packet straight to that Pod IP, even when the Pod runs on another node.
+
+So DNS turns a name into a ClusterIP, kube-proxy turns the ClusterIP into a Pod IP, and the CNI network delivers it.
 
 ## Example
 
-```text
-# from namespace payments
-payment-service                             -> 10.96.12.34 (example ClusterIP)
-payment-service.payments                    -> 10.96.12.34
-payment-service.payments.svc.cluster.local  -> 10.96.12.34 (full name)
+The DNS settings that the kubelet writes into an order-service Pod in namespace `orders` (10.96.0.10 is an example address of the cluster DNS Service):
 
-# from namespace orders
-payment-service                             -> not found (searches orders)
-payment-service.payments                    -> 10.96.12.34
+```text
+# /etc/resolv.conf inside the order-service Pod
+nameserver 10.96.0.10
+search orders.svc.cluster.local svc.cluster.local cluster.local
+options ndots:5
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| kube-proxy mode on Linux | iptables | Kubernetes 1.37 |
-| Pod `dnsPolicy` | ClusterFirst (use cluster DNS) | Kubernetes 1.37 |
+- `search` starts with `orders.svc.cluster.local`. The short name `payment-service` therefore becomes `payment-service.orders.svc.cluster.local`, which does not exist, because the Service lives in `payments`.
+- `payment-service.payments` is completed by the second entry to `payment-service.payments.svc.cluster.local`, which resolves to the ClusterIP.
+- `ndots:5` means a name with fewer than five dots is tried with each search entry first, before it is tried as it is. That is why `payment-service.payments` works, and why one short name can cost several DNS lookups.
+
+## Rules and defaults
+
+- **Name format:** `<service>.<namespace>.svc.<cluster domain>`; the cluster domain is usually `cluster.local`.
+- **dnsPolicy:** `ClusterFirst` by default (Kubernetes 1.37): cluster names go to the cluster DNS, other names are forwarded upstream. The policy named `Default` is not the default; it uses the node's DNS settings.
+- **Cluster DNS:** CoreDNS is the usual server; its Service keeps the old name `kube-dns` in `kube-system`.
+- **Headless Service:** its name returns the Pod IPs, not one ClusterIP. A [StatefulSet](card:statefulsets) uses this to give each Pod its own name.
+- **kube-proxy modes on Linux (1.37):** `iptables` is the default; `nftables` is stable since 1.33, needs kernel 5.13 or later and is planned as the future default; `ipvs` is deprecated since 1.35 and will be off by default from 1.40. Set the mode explicitly so an upgrade does not change it.
+- **Without kube-proxy:** some CNI plugins handle Service traffic themselves, and those nodes run no kube-proxy.
+- **Open by default:** every Pod can reach every Pod until a [NetworkPolicy](card:network-policies), the next concept, limits it.
+
+## Not to be confused with
+
+A Pod IP belongs to one real Pod and changes when that Pod is replaced. A ClusterIP is the Service's virtual IP: no machine owns it, it exists only in the forwarding rules on each node, and it stays fixed. Rule: Pod IP = one Pod, temporary; ClusterIP = the Service, stable.
+
+## Common mistakes
+
+- **Mixing up CNI and kube-proxy.** The CNI plugin connects Pods and carries packets between nodes. kube-proxy only turns Service IPs into Pod IPs. A broken CNI breaks all Pod traffic; a broken kube-proxy breaks only calls through Services.
 
 ## Interview Qs
 
 ### How does a Pod on one node reach a Pod on another node?
 
-Directly by Pod IP: the CNI plugin links nodes without NAT. Via a Service, kube-proxy (or the CNI's proxy) first turns the ClusterIP into one Pod IP.
+Directly by Pod IP: the CNI plugin connects the nodes so that Pod IPs are reachable everywhere, without NAT. When the call goes through a Service, kube-proxy, or the CNI's own proxy, first changes the ClusterIP into one Pod IP.
 
-### Why does `payment-service` resolve in one namespace but not in another?
+### Why does payment-service resolve in one namespace but not in another?
 
-A short name is looked up only in the caller's namespace. From elsewhere, add the namespace: `payment-service.payments`.
+A short name is completed with the caller's own namespace first, through the search list in the Pod's DNS settings. From another namespace, add the namespace: `payment-service.payments`, or use the full name.
 
-### What does a headless Service return in DNS?
+### What does DNS return for a headless Service?
 
-The IPs of its Pods, not a ClusterIP. A StatefulSet's Pods also get their own names: `payments-db-0.payments-db.payments.svc.cluster.local`.
+The IPs of the Pods it selects instead of one ClusterIP, so the client chooses a Pod itself. Combined with a StatefulSet, each Pod also gets a stable name, such as `payments-db-0.payments-db.payments.svc.cluster.local`.

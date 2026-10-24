@@ -5,47 +5,84 @@ title: "Autoscaling: HPA, VPA and Cluster Autoscaler"
 topic: scaling-releases
 level: intermediate
 heat: 3
-hook: "HPA adds Pods, VPA resizes Pods, a node autoscaler adds nodes. HPA on CPU works only if Pods set CPU requests."
+hook: "Kubernetes resizes an app by itself: the HPA changes the Pod count, the VPA each Pod's requests, and a node autoscaler the node count."
 points:
-  - { k: "HPA formula", v: "desired = ceil(current replicas × current metric ÷ target)" }
-  - { k: "CPU utilisation", v: "a % of the request; no request, no CPU scaling", kind: minus }
-  - { k: "Metrics", v: "CPU and memory from metrics-server; others via custom or external metrics" }
-  - { k: "VPA", v: "an add-on, not built in; by default it evicts Pods to apply new requests", kind: minus }
-  - { k: "Node autoscalers", v: "add nodes for Pending Pods' requests, not for real CPU use" }
+  - { k: "HPA formula", v: "desired replicas = ceil(current replicas × current metric ÷ target); 3 Pods at 105% of a 70% target gives 5" }
+  - { k: "CPU % needs requests", v: "CPU utilisation is a % of the container's CPU request; with no request, the HPA ignores that metric", kind: minus }
+  - { k: "Scale-down is slow", v: "scale-up acts at once; scale-down waits 300 s, so a short dip does not remove Pods (Kubernetes 1.37)", kind: default }
+  - { k: "VPA is an add-on", v: "installed separately; in its default Recreate mode it evicts Pods to give them new requests", kind: minus }
+  - { k: "Node autoscalers", v: "add nodes when Pods are Pending because no node has room for their requests, not for high CPU use" }
 trap:
-  wrong: "Run HPA and VPA together on CPU, so Pods grow in number and in size."
-  right: "They fight over one signal. The VPA docs say not on the same CPU or memory metric; split them, or run HPA on custom metrics."
-sayIt: "HPA changes the replica count from a metric such as CPU against the request. VPA right-sizes requests. When Pods stay Pending, Cluster Autoscaler or Karpenter adds nodes."
-confusedWith: []
+  wrong: "Run the HPA and the VPA together on CPU, so Pods grow in number and in size."
+  right: "They fight over one signal. The VPA docs say not on the same CPU or memory metric: split the metrics, or run the HPA on custom metrics."
+  why: "Each alone sounds good, so both on CPU seems twice as good. The conflict shows only when the VPA raises requests and the HPA's utilisation % drops."
+sayIt: "The built-in HPA sets the replica count from a metric, such as CPU as a % of the request. The VPA add-on right-sizes requests. When new Pods stay Pending, Cluster Autoscaler or Karpenter adds nodes."
+cheat:
+  idea: "The HPA changes how many Pods run, the VPA changes each Pod's requests, and a node autoscaler adds nodes for Pods that cannot fit."
+  flow: "Load rises → HPA adds Pods → Pods Pending → node added"
+  remember: "CPU-based HPA needs CPU requests on the containers: utilisation is a % of the request."
+buildsOn: [deployments-and-replicasets, resource-requests-limits]
+scenarios:
+  - q: "payment-service runs 3 Pods, each with a 250m CPU request. The HPA targets 70% CPU, and the Pods average 262m. How many Pods does the HPA ask for?"
+    a: "5. 262m is about 105% of the 250m request, so ceil(3 × 105 ÷ 70) = ceil(4.5) = 5. The HPA compares use with the request, not with the limit or the node's CPU."
+  - q: "The HPA wants 10 Pods for a sale, but 4 stay Pending. What is missing?"
+    a: "Node capacity. The HPA only sets the replica count; the scheduler cannot place Pods whose requests fit on no node. A node autoscaler, Cluster Autoscaler or Karpenter, sees the Pending Pods and adds nodes. Without one, the Pods wait."
+  - q: "You apply deployment.yaml with replicas: 3 while the HPA has scaled payment-service to 8. What happens?"
+    a: "The apply sets the Deployment back to 3 Pods, then the HPA scales it up again, so Pods are removed and re-added. The Kubernetes docs advise removing spec.replicas from the manifest once an HPA manages the Deployment."
+confusedWith: [hpa-vs-vpa-vs-cluster-autoscaler]
 tags: [hpa, vpa, cluster-autoscaler, karpenter, scaling]
-visual: table
+visual: flow
 sources:
   - title: "Horizontal Pod Autoscaling (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/"
-    verifiedOn: "2026-10-20"
-  - title: "Vertical Pod Autoscaler known limitations (VPA 1.8)"
+    verifiedOn: "2026-10-21"
+  - title: "Feature gates: HPAConfigurableTolerance and HPAScaleToZero (Kubernetes 1.37 reference)"
+    url: "https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/"
+    verifiedOn: "2026-10-21"
+  - title: "Vertical Pod Autoscaler: quick start and known limitations (VPA 1.8)"
     url: "https://github.com/kubernetes/autoscaler/blob/master/vertical-pod-autoscaler/docs/known-limitations.md"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Node Autoscaling (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/cluster-administration/node-autoscaling/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Kubernetes Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/kubernetes-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Autoscaling means Kubernetes changes the size of an app by itself, from live numbers such as CPU use. There are three kinds. The HorizontalPodAutoscaler (HPA) changes how many Pods a [Deployment](card:deployments-and-replicasets) runs. The VerticalPodAutoscaler (VPA) changes the CPU and memory [requests](card:resource-requests-limits) of each Pod. A node autoscaler, such as Cluster Autoscaler or Karpenter, adds or removes whole nodes.
+
 ## Why it exists
 
-Load changes through the day. Fixed counts waste money at night and fail at the peak, so Kubernetes resizes from metrics.
+Load on payment-service changes through the day. If you fix the replica count for the evening peak, you pay for idle Pods all night; if you fix it for the night, the peak overloads the Pods and payments time out. Changing `replicas` by hand means someone must watch graphs all day. An autoscaler watches the metric for you, adds Pods when load rises and removes them when it falls.
 
 ## How it works
 
-<Compare id="hpa-vs-vpa-vs-cluster-autoscaler" />
+<Mermaid
+  alt="Autoscaling loop for payment-service. metrics-server collects CPU use from the Pods. Every 15 seconds the HPA compares the average with its target and sets the Deployment's replica count. If new Pods do not fit on any node they stay Pending, and the node autoscaler adds a node so the scheduler can place them."
+  chart={`flowchart LR
+  P[payment-service Pods] -- CPU use --> M[metrics-server]
+  M -- "every 15 s" --> H[HPA]
+  H -- "sets replicas" --> D[Deployment]
+  D -- "new Pods" --> S{Room on a node?}
+  S -- yes --> R[Pods run]
+  S -- no --> PE[Pods Pending]
+  PE --> N[Node autoscaler adds a node]`}
+/>
 
-- Scale-up acts at once; scale-down waits for the stabilisation window, so replicas do not flap.
-- The `behavior` field tunes both directions per HPA: windows, step size and tolerance.
+1. metrics-server, a small add-on, collects the CPU and memory use of every Pod.
+2. Every 15 seconds the HPA reads the average use of the Deployment's Pods and divides it by the request, which gives the utilisation %.
+3. It works out `ceil(current replicas × current ÷ target)` and writes that count to the Deployment, within `minReplicas` and `maxReplicas`.
+4. The Deployment creates the extra Pods, and the scheduler places them on nodes with enough CPU and memory not yet reserved by other requests.
+5. If no node has room, the Pods stay Pending; a node autoscaler sees them and adds a node.
+
+So the HPA decides **how many Pods**; only a node autoscaler decides **how many machines**.
 
 ## Example
+
+The HPA for payment-service keeps 3 to 10 Pods and aims for 70% of the CPU request.
 
 ```yaml
 apiVersion: autoscaling/v2
@@ -62,26 +99,42 @@ spec:
         target: { type: Utilization, averageUtilization: 70 }
 ```
 
-At 105% average CPU of the 250m request: ceil(3 × 105 ÷ 70) = ceil(4.5) = 5 Pods.
+What to notice:
 
-## Defaults
+- `scaleTargetRef` names the Deployment; the HPA changes its replica count and nothing else.
+- `averageUtilization: 70` means 70% of each container's CPU request. With a 250m request, the target is 175m per Pod. Remove the request and this metric does nothing.
+- At an average of 105%, the HPA asks for ceil(3 × 105 ÷ 70) = ceil(4.5) = 5 Pods.
+- `minReplicas: 3` keeps three Pods even at night, so one Pod crashing never leaves the service without a copy.
 
-| What | Default | Where |
-|---|---|---|
-| HPA check interval | 15 s | kube-controller-manager, Kubernetes 1.37 |
-| Scale-down stabilisation window | 300 s (scale-up: 0 s) | HPA behaviour, Kubernetes 1.37 |
-| Tolerance (no action this close to target) | 10% | HPA, Kubernetes 1.37 |
+## Rules and defaults
+
+- **Built in or not:** the HPA API and controller come with Kubernetes; metrics-server, the VPA and node autoscalers are add-ons you install.
+- **Check interval:** 15 s, set by kube-controller-manager (Kubernetes 1.37).
+- **Tolerance:** no scaling while the ratio is within 10% of the target. Since Kubernetes 1.37 you can also set `tolerance` per HPA under `behavior.scaleUp` or `behavior.scaleDown`.
+- **Stabilisation:** scale-down waits 300 s and uses the highest recommendation in that window; scale-up has no window. You can change both under `behavior` (Kubernetes 1.37).
+- **Your manifest:** once an HPA manages a Deployment, remove `spec.replicas` from the Deployment's manifest, or every `kubectl apply` resets the count.
+- **Scale to zero:** `minReplicas: 0` works only with object or external metrics, never with CPU or memory (beta and on by default in Kubernetes 1.37).
+- **VPA modes (VPA 1.8):** `Recreate` (default) evicts Pods to apply new requests; `InPlaceOrRecreate` and `InPlace` resize running Pods; `Initial` sets requests only at creation; `Off` only shows recommendations.
+
+## Not to be confused with
+
+The HPA changes the **number** of Pods, the VPA changes the **size** of each Pod, and a node autoscaler changes the **number of nodes**. Rule: HPA for stateless services with changing load, VPA to find the right requests, a node autoscaler so new Pods have somewhere to run.
+
+## Common mistakes
+
+- **"The HPA adds machines when the cluster is full."** It only sets a replica count. Extra Pods stay Pending until a node autoscaler adds a node.
+- **"Node autoscalers react to high CPU on a node."** They react to Pending Pods and to unused requests. They look at what Pods request, not what they really use.
 
 ## Interview Qs
 
 ### The HPA is set but never scales. What do you check?
 
-Does `kubectl top pods` work (metrics-server)? Do containers set CPU requests? Then `kubectl describe hpa`: its ScalingActive condition and events say why.
+First, does `kubectl top pods` work? If not, metrics-server is missing. Second, do the containers set CPU requests? Utilisation is a % of the request, so without one the HPA takes no action. Then run `kubectl describe hpa`: its conditions, such as ScalingActive, and its events say why it is not scaling.
 
-### Horizontal or vertical scaling: which, and when?
+### Horizontal or vertical scaling: which one, and when?
 
-Horizontal adds replicas: best for stateless services like payment-service, and it adds availability. Vertical gives each Pod more CPU or memory: for apps that cannot run many copies.
+Horizontal scaling adds replicas. It suits stateless services like payment-service, and more copies also mean more availability. Vertical scaling gives each Pod more CPU or memory. It suits apps that cannot run as many copies, and the VPA is mostly used to find good requests.
 
-### The HPA wants 10 Pods, but 4 stay Pending. Why?
+### Why does the HPA scale down slowly?
 
-HPA only sets the replica count. A node autoscaler, Cluster Autoscaler or Karpenter, must add nodes; without one the Pods wait.
+To avoid flapping. Load often dips for a moment, and removing Pods then adding them back wastes work and risks errors. The default 300-second scale-down window makes the HPA use the highest recommendation of the last five minutes, while scale-up acts at once.

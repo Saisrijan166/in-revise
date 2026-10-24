@@ -5,24 +5,39 @@ title: Multi-Stage Builds
 topic: dockerfile
 level: intermediate
 heat: 3
-hook: "Build in a stage with the JDK and Maven; copy only the jar into a small JRE stage that ships."
+hook: "One stage with the JDK and Maven builds the jar. A final, small Java runtime stage copies only the jar, and only that stage is shipped."
 points:
-  - { k: "Each FROM", v: "starts a new stage; the final stage is the image you ship" }
-  - { k: "FROM ... AS build", v: "names a stage; unnamed stages are numbered from 0" }
-  - { k: "COPY --from=build", v: "takes files from an earlier stage or any image" }
-  - { k: "--target", v: "stops at one stage, for example a test stage" }
-  - { k: "Left behind", v: "JDK, Maven, sources and ~/.m2 never reach the final image", kind: plus }
+  - { k: "Each FROM", v: "starts a new stage with its own base image; only the last stage becomes the image you ship" }
+  - { k: "FROM ... AS build", v: "gives a stage a name; stages without a name are numbered from 0" }
+  - { k: "COPY --from=build", v: "copies files out of an earlier stage, or out of any other image" }
+  - { k: "--target", v: "docker build --target build stops at that stage, for example to run a test stage" }
+  - { k: "Unused stages", v: "BuildKit builds only the stages the target needs; a stage nobody copies from is skipped" }
+  - { k: "Left behind", v: "the JDK, Maven, the sources and the downloaded libraries never reach the shipped image", kind: plus }
 trap:
   wrong: "A multi-stage build produces several images that I must push."
-  right: "You get one image from the target stage, the last one by default; earlier stages are only build steps."
-sayIt: "One stage with the JDK and Maven builds the jar; a final JRE stage copies just the jar with COPY --from. The shipped image has no compiler or sources, so it is smaller with less to patch."
+  right: "It produces one image, from the target stage (the last one by default). The earlier stages are only build steps."
+  why: "The file has several FROM lines, and each FROM looks like the start of a separate image."
+sayIt: "A multi-stage build has a JDK and Maven stage that builds the jar, and a final JRE stage that copies only the jar with COPY --from. The shipped image has no compiler or sources, so it is smaller and has less to patch."
+cheat:
+  idea: "A multi-stage build has several FROM stages in one Dockerfile. A JDK stage builds the jar, and the final JRE stage copies in only the jar."
+  flow: "JDK stage builds the jar → COPY --from=build → JRE stage is shipped"
+  remember: "Only the last stage becomes the image; the JDK, Maven and sources stay behind."
+buildsOn: [build-cache]
+scenarios:
+  - q: "You build the two-stage Dockerfile in this concept and push payment-service:1.4.0. How many images reach the registry, and does it contain Maven?"
+    a: "One image, from the last stage. It holds the Java runtime and the jar; Maven and the JDK stayed in the build stage, which is never tagged or pushed."
+  - q: "You add a stage FROM build AS test that runs ./mvnw test, but docker build . never runs the tests. Why?"
+    a: "BuildKit builds only the stages the target needs, and the target is the last stage by default. The last stage copies from build, not from test, so test is skipped. Run docker build --target test . in CI to run it."
 confusedWith: []
 tags: [multi-stage, copy-from, target, image-size]
 visual: flow
 sources:
   - title: "Multi-stage builds (Docker Docs)"
     url: "https://docs.docker.com/build/building/multi-stage/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Dockerfile reference: FROM, COPY --from (Docker Docs)"
+    url: "https://docs.docker.com/reference/dockerfile/"
+    verifiedOn: "2026-10-21"
   - title: "eclipse-temurin official image (Docker Hub)"
     url: "https://hub.docker.com/_/eclipse-temurin"
     verifiedOn: "2026-10-20"
@@ -31,25 +46,34 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A multi-stage build is a Dockerfile with more than one `FROM` line. Each `FROM` starts a new stage: a separate build with its own base image and none of the earlier stage's files. A later stage can copy files out of an earlier one with `COPY --from`. Only the last stage becomes the image you ship; the earlier stages are scaffolding.
+
 ## Why it exists
 
-The JDK, Maven and source code are needed to build a Java app, not to run it. Shipping them makes the image bigger and adds software to patch.
+The [cache-friendly Dockerfile](card:build-cache) builds the jar, but the image it ships still holds the JDK, Maven, the source code and every downloaded library. None of them is needed to run the jar. They make the image larger, slow down every pull, and add software that must be patched when a vulnerability is found. A multi-stage build keeps the building in one stage and ships only the result.
 
 ## How it works
 
 <Mermaid
-  alt="Two stages. The build stage on eclipse-temurin 25 JDK holds Maven, sources and the Maven cache and produces the jar. COPY --from=build moves only the jar into the final stage on eclipse-temurin 25 JRE, which becomes payment-service:1.4.0. The JDK, sources and Maven cache stay behind."
+  alt="Two stages. The build stage, on eclipse-temurin 25 JDK, holds Maven, the sources and the Maven cache, and produces the jar. COPY --from=build moves only the jar into the final stage on eclipse-temurin 25 JRE, which becomes payment-service:1.4.0. The JDK, sources and Maven cache stay behind."
   chart={`flowchart LR
   B["Stage build: 25-jdk, Maven, src, ~/.m2"] -- "COPY --from=build: jar only" --> F["Final stage: 25-jre + jar"]
   F --> I(["payment-service:1.4.0"])
   B -. stays behind .-> X["JDK, sources, ~/.m2"]`}
 />
 
-- BuildKit builds only the stages the target needs.
-- Naming stages keeps `COPY --from` working when stages are reordered.
-- Base image choice: [image size](card:image-size-optimization); jar layers: [Java in containers](card:java-in-containers).
+1. Docker runs the first stage, named `build`, from the JDK image. Maven downloads libraries and produces the jar inside it.
+2. The second `FROM` starts a new stage from the JRE image, a Java runtime without a compiler. None of the build stage's files are there.
+3. `COPY --from=build` copies one file, the jar, out of the build stage into the new stage.
+4. The last stage becomes the image. The build stage is not tagged or pushed; its layers stay only in the builder's cache, which speeds up the next build.
+
+So the key is that you choose, file by file, what crosses into the shipped image.
 
 ## Example
+
+The payment service is built and packaged in one Dockerfile, with no Maven needed on the build machine.
 
 ```dockerfile
 FROM eclipse-temurin:25-jdk AS build
@@ -65,12 +89,36 @@ COPY --from=build /src/target/payment-service-1.4.0.jar /app/app.jar
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 ```
 
+What to notice:
+
+- The first seven lines are the cache-friendly build from the previous concept, now named `build` with `AS build`.
+- The final stage starts from `25-jre`, so the shipped image has a Java runtime but no compiler, Maven or source code.
+- `COPY --from=build` names the stage, not a number, so it keeps working if someone adds a stage above it.
+- Delete the last three lines and you ship the build stage itself. With a small Spring Boot web app, that stage takes about 840 MB on disk, against about 500 MB for the two-stage image.
+
+## Rules and defaults
+
+- **Stage names:** `FROM image AS name`. Stages without a name are numbered from 0, so `COPY --from=0` also works but breaks when stages move.
+- **Any image as a source:** `COPY --from=` can also name an image, such as `COPY --from=nginx:1.30-alpine /etc/nginx/nginx.conf /nginx.conf`.
+- **Target stage:** the last stage by default; `docker build --target <name>` stops at another one.
+- **Skipped stages:** BuildKit builds only the stages the target depends on. The legacy builder built every stage up to the target.
+- **Environment:** a stage inherits `ENV` values only from the stage it starts `FROM`, not from other stages it copies from.
+
+## Common mistakes
+
+- **Copying a whole folder across:** `COPY --from=build /src /app` brings the sources and the build output back into the final image. Copy only the jar.
+- **"The tests ran because the image built."** `-DskipTests` skips them, and a separate test stage runs only when it is the target or the final stage depends on it.
+
 ## Interview Qs
 
 ### What is a multi-stage build, and why use it?
 
-A Dockerfile with several FROM stages. Early stages compile; the final stage copies only the result. The image ships without build tools, so it is smaller and has fewer packages to patch.
+A Dockerfile with several `FROM` stages. Early stages compile and package; the final stage copies only the result with `COPY --from`. The shipped image has no build tools or sources, so it is smaller, pulls faster and has fewer packages to patch.
 
 ### How do you run tests or debug a single stage?
 
-Build with `--target`, for example `docker build --target build .`. The build stops at that stage, which is useful for a test or debug stage.
+Build with `--target`, for example `docker build --target test .`. The build stops at that stage, so CI can run a test stage, or you can open a shell in the build stage to see why a step fails.
+
+### Does the final image contain the build stage's layers?
+
+No. The final image has its own base image's layers plus the files you copied in. The build stage's layers stay in the build cache, where they speed up the next build, but they are never part of the shipped image.

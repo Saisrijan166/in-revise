@@ -5,23 +5,36 @@ title: "Resource Limits: Memory and CPU"
 topic: runtime
 level: intermediate
 heat: 2
-hook: "Without flags a container may use all host memory and CPU. Over --memory it is OOM-killed; over --cpus it is only slowed down."
+hook: "By default a container may use all of the host's memory and CPU. With --memory it is killed when it goes over; with --cpus it is only slowed down."
 points:
-  - { k: "Memory over limit", v: "the kernel OOM-kills a process in the container", kind: minus }
-  - { k: "CPU over limit", v: "throttled until the next period; never killed" }
-  - { k: "Limit vs reservation", v: "hard cap vs soft limit applied only under contention" }
-  - { k: "JVM", v: "the heap must fit inside the memory limit", kind: minus }
+  - { k: "No limit by default", v: "a container without flags can use as much memory and CPU as the host kernel allows", kind: default }
+  - { k: "Over --memory", v: "the kernel's OOM killer kills a process in the container; if that is PID 1, the container exits", kind: minus }
+  - { k: "Over --cpus", v: "the container is throttled, made to wait for the next 100 ms period, but never killed" }
+  - { k: "Limit vs reservation", v: "a limit is a hard cap; --memory-reservation and --cpu-shares act only when the host runs short" }
+  - { k: "Java", v: "the whole JVM, heap plus non-heap memory, must fit under the container's memory limit", kind: minus }
 trap:
   wrong: "--cpus=1.5 reserves one and a half CPUs for the container."
-  right: "It is a cap (a CFS quota), not a reservation. --cpu-shares and --memory-reservation are soft and act only under contention."
-sayIt: "I set --memory and --cpus on every service and watch docker stats. Over the memory limit the kernel OOM-kills it; over the CPU limit it is only throttled. The JVM heap must fit inside."
+  right: "It is a cap, not a reservation: the container may use at most 1.5 CPUs and is guaranteed nothing. Soft settings such as --cpu-shares act only under contention."
+  why: "In Kubernetes, a CPU request does reserve capacity, so people carry that meaning over to Docker's --cpus flag."
+sayIt: "I set --memory and --cpus on every service and watch docker stats. Over the memory limit the kernel OOM-kills it; over the CPU limit it is only throttled. For Java, the heap plus non-heap memory must fit inside the limit."
+cheat:
+  idea: "Resource limits cap how much memory and CPU one container may use, so one leaking or busy container cannot starve the others on the host."
+  code: |
+    docker run -d --memory 1g --cpus 1.5 payment-service:1.4.0
+  remember: "Over the memory limit the container is OOM-killed (exit 137); over the CPU limit it is only throttled."
+buildsOn: [namespaces-and-cgroups, java-in-containers]
+scenarios:
+  - q: "The payment service runs with --memory 256m and JAVA_TOOL_OPTIONS=-Xmx1g. Under load it disappears with exit code 137 and no Java error in the logs. What happened?"
+    a: "The heap was allowed to grow past the container's limit, so the kernel's OOM killer ended the JVM. docker inspect shows OOMKilled=true. Without -Xmx the JVM sizes its heap from the limit and throws a Java OutOfMemoryError instead."
+  - q: "A batch container uses 100% of one CPU and the API next to it slows down. Would --cpus 0.5 on the batch container kill it when it needs more?"
+    a: "No. A CPU limit only throttles: the batch job runs slower, at most half a CPU, and keeps running. Only memory over the limit leads to a kill."
 confusedWith: []
 tags: [resources, oom]
-visual: table
+visual: code
 sources:
   - title: "Resource constraints (Docker docs)"
     url: "https://docs.docker.com/engine/containers/resource_constraints/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "docker container run (Docker CLI)"
     url: "https://docs.docker.com/reference/cli/docker/container/run/"
     verifiedOn: "2026-10-20"
@@ -31,52 +44,86 @@ sources:
   - title: "Deploy (Compose Specification)"
     url: "https://docs.docker.com/reference/compose-file/deploy/"
     verifiedOn: "2026-10-20"
+  - title: "Resource Management for Pods and Containers: requests (Kubernetes docs)"
+    url: "https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/"
+    verifiedOn: "2026-10-21"
   - title: "Control Group v2 (Linux kernel docs)"
     url: "https://docs.kernel.org/admin-guide/cgroup-v2.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A resource limit is a cap on how much memory, CPU or how many processes one container may use. You set it with flags on `docker run`, and Docker turns them into [cgroup](card:namespaces-and-cgroups) settings, which the Linux kernel enforces. A limit is a hard ceiling. A reservation or a share is softer: it only decides who gets what when the host is short.
+
 ## Why it exists
 
-One leaking container can starve the host, and a host out of memory may kill any process, even the Docker daemon. Limits keep the damage inside one container.
+Without limits, every container on a host competes for the same memory and CPU. One payment-service instance with a memory leak can eat all the host's RAM; then the kernel starts killing processes to survive, and any of them can go, including the database next to it. A limit keeps the damage inside the container that caused it, and makes its usage predictable when you plan how many containers fit on a host.
 
 ## How it works
 
 | Flag | What it does |
 |---|---|
-| `--memory` (`-m`) | Hard cap, at least 6 MB; over it, an OOM kill |
-| `--memory-reservation` | Soft limit, used only when the host runs short |
-| `--memory-swap` | Memory plus swap; unset means swap as large again |
-| `--cpus` | Hard cap (CFS quota); over it, throttled |
-| `--cpu-shares` | Relative weight; counts only when CPUs are busy |
-| `--pids-limit` | Maximum processes; then `fork()` fails |
+| `--memory` (`-m`) | Hard memory cap, at least 6 MB; going over it means an OOM kill |
+| `--memory-swap` | Memory plus swap; set it equal to `--memory` for no swap |
+| `--memory-reservation` | Soft memory limit, applied only when the host runs low |
+| `--cpus` | Hard CPU cap, for example `1.5` CPUs; going over it means throttling |
+| `--cpu-shares` | Relative CPU weight, default 1024; counts only when CPUs are busy |
+| `--pids-limit` | Maximum number of processes; after that, creating a new one fails |
 
-- Compose: `deploy.resources.limits` (`cpus`, `memory`, `pids`), or `mem_limit` and `cpus` on the service.
-- How the JVM sizes its heap from the limit: [Java in containers](card:java-in-containers).
+1. You start the container with `--memory 1g --cpus 1.5`. Docker writes these values into the container's cgroup.
+2. While the app runs below the limits, nothing happens; the limits cost nothing.
+3. When the app wants more CPU than 1.5 CPUs, the kernel lets it run for 150 ms in each 100 ms period, summed over all CPUs, and then makes it wait. The app gets slower, not killed.
+4. When the app's memory reaches 1 GB and cannot be reclaimed, the kernel's OOM (out of memory) killer kills a process in the container. If that is PID 1, the container exits with code 137 and `docker inspect` shows `OOMKilled: true`.
+
+So the key is: memory over the limit kills, CPU over the limit only slows down.
 
 ## Example
 
+Two runs of a stand-in payment app that keeps allocating memory, both with a 256 MB limit and no swap. The first also forces a 1 GB heap:
+
 ```bash
-# --memory-swap = --memory: no swap
-docker run -d --name pay --memory 1g --memory-swap 1g --cpus 1.5 \
-  --pids-limit 200 payment-service:1.4.0
-docker inspect -f '{{.State.OOMKilled}}' pay
+docker run -d --name pay-oom -e MODE=hog -e JAVA_TOOL_OPTIONS=-Xmx1g \
+  --memory 256m --memory-swap 256m payment-service:1.4.0
+docker run -d --name pay-heap -e MODE=hog --memory 256m --memory-swap 256m payment-service:1.4.0
+docker inspect -f '{{.Name}} exit={{.State.ExitCode}} OOMKilled={{.State.OOMKilled}}' pay-oom pay-heap
 ```
 
-## Defaults
+```text output
+3ecd477cc830c3a5570187433944ecfa5cf5faf7426c9b0f56587f33c19fc92e
+b2dcba41a4b143f13ee2e9967fe0deac585319ad31563241827e7a361b564343
+/pay-oom exit=137 OOMKilled=true
+/pay-heap exit=1 OOMKilled=false
+```
 
-| What | Default | Where |
-|---|---|---|
-| Memory and CPU | No limit | Docker Engine 29 |
-| `--cpu-shares` | 1024 | Docker Engine 29 |
-| `--cpu-period` | 100 ms (`--cpus 1.5` = quota 150 ms per period) | Docker Engine 29 |
+What to notice:
+
+- `pay-oom`: the heap could grow to 1 GB, past the 256 MB limit, so the kernel killed the JVM. Its logs show no Java error at all, only the end.
+- `pay-heap`: with no `-Xmx`, the JVM read the limit and kept its heap to a quarter of it, so it threw `java.lang.OutOfMemoryError: Java heap space` and exited with 1. That is a Java error you can see and fix, not a kernel kill.
+- `--memory-swap` equal to `--memory` turns swap off, so the limit is reached at once instead of the app slowly swapping. How to size the heap is in [Java in containers](card:java-in-containers).
+
+## Rules and defaults
+
+- **No limits by default:** a container gets no memory, CPU or process limit unless you set one (Docker Engine 29).
+- **`--memory-swap` unset:** if only `--memory` is set and the host has swap, the container may use as much swap as its memory limit.
+- **CPU period:** `--cpus 1.5` equals a quota of 150 ms per 100 ms period (`--cpu-period` default 100 ms).
+- **Compose:** use `deploy.resources.limits` (`cpus`, `memory`, `pids`), or `mem_limit` and `cpus` on the service.
+- **Check usage:** `docker stats` shows live memory and CPU use against each limit.
+
+## Not to be confused with
+
+A limit (`--memory`, `--cpus`) is a ceiling the container cannot pass. A reservation (`--memory-reservation`) or a share (`--cpu-shares`) does not reserve anything up front; it only decides who is squeezed first when the host is short. Rule: limits protect the host, shares settle contention.
 
 ## Interview Qs
 
-### What happens when a container goes over its memory limit? Its CPU limit?
+### What happens when a container goes over its memory limit? And its CPU limit?
 
-Memory: the kernel's OOM killer kills a process in it; if that is PID 1 the container exits and `docker inspect` shows `OOMKilled: true`. CPU: it is throttled to its quota and runs slower, but keeps running.
+Memory: the kernel's OOM killer kills a process in the container; if it is PID 1, the container exits with code 137 and `docker inspect` shows `OOMKilled: true`. CPU: the container is throttled to its quota and runs slower, but keeps running.
 
-### Limit vs reservation?
+### What is the difference between a limit and a reservation?
 
-A limit is a ceiling the container cannot pass. `--memory-reservation` is a soft limit and `--cpu-shares` a relative weight; both act only when the host is short of memory or CPU.
+A limit is a hard cap the container can never pass. `--memory-reservation` is a soft limit and `--cpu-shares` a relative weight; both act only when the host runs short of memory or CPU, and neither guarantees the container any capacity.
+
+### Why should every production container have a memory limit?
+
+Without one, a single leaking container can use all the host's memory. The kernel then kills processes to recover, and any of them can go: other containers, or even the Docker daemon, although Docker lowers the daemon's chance of being picked. A limit makes the leaking container the one that is killed.

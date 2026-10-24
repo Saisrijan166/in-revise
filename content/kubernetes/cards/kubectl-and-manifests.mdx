@@ -5,82 +5,145 @@ title: kubectl and YAML Manifests
 topic: basics
 level: beginner
 heat: 2
-hook: "A manifest names apiVersion, kind, metadata and spec; kubectl apply sends it to the API server; the cluster writes status."
+hook: "A manifest is a YAML file that describes the objects you want. kubectl apply sends it to the API server, which creates them or updates them to match."
 points:
-  - { k: "apiVersion + kind", v: "which API and object type: apps/v1 Deployment" }
-  - { k: "metadata", v: "name, namespace, labels, annotations" }
-  - { k: "spec vs status", v: "spec is what you want; status is written by the cluster" }
-  - { k: "One way per object", v: "mixing apply with create or replace gives undefined results", kind: minus }
-  - { k: "Version skew", v: "kubectl works within one minor of the API server: 1.36 to 1.38 for 1.37", kind: default }
+  - { k: "kubectl", v: "the command-line tool; every command becomes an HTTPS request to the API server" }
+  - { k: "Required fields", v: "apiVersion and kind say which object type, metadata names it, and spec holds the desired state" }
+  - { k: "spec vs status", v: "you write spec; Kubernetes components write status to report what really runs" }
+  - { k: "apply is repeatable", v: "applying an unchanged file again changes nothing, so the same file is safe to apply many times", kind: plus }
+  - { k: "One technique per object", v: "mixing apply with create or replace on one object gives undefined behaviour", kind: minus }
+  - { k: "Version skew", v: "kubectl is supported within one minor version of the API server: 1.36 to 1.38 for 1.37", kind: default }
 trap:
   wrong: "kubectl apply succeeded, so the new version is live and healthy."
-  right: "apply only stored the desired state. Pods may still fail to pull, start or pass probes; check kubectl rollout status."
-sayIt: "A manifest declares apiVersion, kind, metadata and spec. kubectl apply sends it to the API server, creating or patching the object. I run kubectl diff before and kubectl rollout status after."
-confusedWith: []
+  right: "apply only stored the desired state. Pods can still fail to pull, start or pass probes; check with kubectl rollout status."
+  why: "apply prints a short success line within a second, which reads like the release is done. The real work happens later, in controllers and kubelets."
+sayIt: "A manifest declares apiVersion, kind, metadata and spec. kubectl apply sends it to the API server, which creates the object or patches it to match. I run kubectl diff before applying and kubectl rollout status after, because apply only records intent."
+cheat:
+  idea: "kubectl is the command-line tool that sends requests to the API server. A manifest is a YAML file with apiVersion, kind, metadata and spec that states what you want."
+  remember: "apply only stores the desired state; it does not prove the Pods started. Check with kubectl rollout status."
+buildsOn: [kubernetes-architecture]
+scenarios:
+  - q: "You run kubectl apply -f payment-service.yaml twice without changing the file. What does the second run print, and what does it change?"
+    a: "It prints deployment.apps/payment-service unchanged and changes nothing. apply compares the file with the live object and sends only the differences, so applying the same file again is safe."
+  - q: "You created the Deployment with kubectl create -f payment-service.yaml. Now you change replicas to 5 in the file and run kubectl create -f again. What happens?"
+    a: "It fails with an AlreadyExists error, because create only makes new objects. Use kubectl apply for files you keep changing: it creates the object the first time and updates it afterwards."
+confusedWith: [kubectl-apply-vs-create]
 tags: [kubectl, manifest, apply, kubeconfig, yaml]
-visual: table
+visual: code
 sources:
-  - title: "Objects In Kubernetes (Kubernetes docs)"
+  - title: "Objects In Kubernetes: required fields, spec and status (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/overview/working-with-objects/"
-    verifiedOn: "2026-10-20"
-  - title: "Kubernetes Object Management (Kubernetes docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Kubernetes Object Management: one technique per object (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/overview/working-with-objects/object-management/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "kubectl apply (Kubernetes 1.37 reference)"
     url: "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_apply/"
     verifiedOn: "2026-10-20"
+  - title: "Server-Side Apply (Kubernetes docs)"
+    url: "https://kubernetes.io/docs/reference/using-api/server-side-apply/"
+    verifiedOn: "2026-10-21"
   - title: "Version Skew Policy: kubectl (Kubernetes)"
     url: "https://kubernetes.io/releases/version-skew-policy/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Organizing Cluster Access Using kubeconfig Files (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+kubectl is the command-line tool you use to work with a cluster: every kubectl command becomes an HTTPS request to the [API server](card:kubernetes-architecture). A manifest is a YAML file that describes one or more Kubernetes objects, such as the Deployment that runs the payment service. Each object in it states its type, its name and its desired state. You keep manifests in Git and send them to the cluster with `kubectl apply`.
 
 ## Why it exists
 
-Commands typed against a live cluster leave no record. Manifests in Git can be reviewed and repeated, and describe the end state, not the steps.
+You could create everything with typed commands, such as `kubectl create deployment`. But typed commands leave no record: nobody reviews them, and building the same setup in another cluster means remembering every step. A manifest is the desired state written down. It is reviewed in a pull request, can be applied again safely, and creates the same objects in test and in production.
 
 ## How it works
 
-<Compare id="kubectl-apply-vs-create" />
+<Mermaid
+  alt="kubectl apply flow. kubectl reads the kubeconfig file to find the cluster and credentials, then sends the manifest to the API server. The API server creates the object if it is new or patches it if it exists, and stores it in etcd. kubectl prints created, configured or unchanged. Controllers later write the object's status."
+  chart={`flowchart LR
+  F["payment-service.yaml"] --> K[kubectl]
+  C["kubeconfig: cluster, user, namespace"] --> K
+  K -- "create or patch" --> A[API server]
+  A --> E[(etcd)]
+  K -. "prints created / configured / unchanged" .-> F`}
+/>
 
-- kubectl calls the API server named in the current kubeconfig context; `-n payments` sets the namespace for one command.
-- Server-side apply (`--server-side`, stable since 1.22) lets the API server track which tool owns each field.
-- `kubectl delete -f` removes what the file describes. After apply, follow the rollout: [debugging with kubectl](card:kubectl-debugging).
+1. kubectl reads your kubeconfig file to learn the cluster address, your credentials and your default namespace. This group of settings is called a context.
+2. `kubectl apply -f` reads the manifest and checks, for each object, whether it already exists.
+3. A new object is created. For an existing one, kubectl sends a patch with only the fields that differ.
+4. The API server validates the object and stores it in etcd. kubectl prints `created`, `configured`, or `unchanged` when nothing differed.
+5. Controllers then act on the new spec and write the object's status. apply has already returned by then.
+
+So apply records what you want; whether it works shows up only later, in status.
 
 ## Example
 
+The payment service's Deployment as a manifest:
+
 ```yaml
-apiVersion: apps/v1
+apiVersion: apps/v1                  # API group and version for Deployments
 kind: Deployment
 metadata:
   name: payment-service
   namespace: payments
-spec:                          # desired state; status is added by the cluster
+spec:                                # desired state; the cluster adds status
   replicas: 3
   selector: { matchLabels: { app: payment-service } }
-  template:
+  template:                          # the Pod to make 3 copies of
     metadata: { labels: { app: payment-service } }
-    spec: { containers: [{ name: payment-service, image: "payment-service:1.4.0" }] }
+    spec:
+      containers:
+        - { name: payment-service, image: "registry.example.com/payments/payment-service:1.4.0" }
 ```
 
-## Defaults
+Apply it twice:
 
-| What | Default | Where |
-|---|---|---|
-| kubeconfig file | `$HOME/.kube/config`, unless `KUBECONFIG` or `--kubeconfig` is set | kubectl 1.37 |
+```bash
+kubectl apply -f payment-service.yaml
+kubectl apply -f payment-service.yaml
+```
+
+```text output
+deployment.apps/payment-service created
+deployment.apps/payment-service unchanged
+```
+
+What to notice:
+
+- `apiVersion: apps/v1` and `kind: Deployment` together pick the object type. With `apiVersion: v1` instead, apply fails with `no matches for kind "Deployment" in version "v1"`.
+- You never write `status`. Kubernetes fills it in, and `kubectl get deployment payment-service -n payments -o yaml` shows both halves.
+- The second apply printed `unchanged` and did nothing. Change `replicas` to 5 and apply again, and it prints `configured`.
+
+## Rules and defaults
+
+- **kubeconfig:** kubectl reads `$HOME/.kube/config` unless the `KUBECONFIG` variable or the `--kubeconfig` flag names another file.
+- **Version skew:** kubectl is supported within one minor version, older or newer, of the API server.
+- **One technique per object:** manage each object with typed commands, with create and replace on files, or with apply. Mixing them on one object gives undefined behaviour.
+- **Server-side apply:** `kubectl apply --server-side` (stable since 1.22) runs the merge in the API server, which records which tool owns each field and reports conflicts.
+- **Deleting:** `kubectl delete -f payment-service.yaml` removes the objects the file describes.
+- **Looking up a field:** `kubectl explain deployment.spec.replicas` prints the API documentation for that field.
+
+## Not to be confused with
+
+`kubectl apply` sends the desired state and creates or patches to match. `kubectl create` makes a new object and fails if it exists. `kubectl replace` swaps the whole live object for your file. Rule: apply for files you keep in Git; create for one-off experiments; replace almost never.
+
+## Common mistakes
+
+- **Testing a change by applying it to production.** `kubectl diff -f` shows what would change. `--dry-run=server` runs every server check without saving anything, while `--dry-run=client` only prints the object kubectl would send.
 
 ## Interview Qs
 
+### Why do we write YAML manifests instead of running commands?
+
+The file is the desired state: it lives in Git, is reviewed like code, and builds the same objects in every cluster. Applying it again is safe. Typed commands leave no record beyond the live objects, so nobody can tell later how the cluster got its shape.
+
 ### How is kubectl replace different from apply?
 
-replace overwrites the whole live object, so fields missing from your file, even ones the cluster set, are lost. apply sends a patch and keeps changes made by other writers.
+replace overwrites the whole live object with your file, so any field missing from the file is lost, even fields another tool set. apply sends a patch of the fields you manage and keeps changes made by other writers.
 
-### How do you check a manifest before applying it?
+### What are spec and status?
 
-`kubectl diff -f` shows what would change. `--dry-run=server` lets the API server check it but saves nothing; `--dry-run=client` only prints it. `kubectl explain deployment.spec` documents any field.
-
-### Why do we write YAML instead of running commands?
-
-The file is the desired state: it lives in Git, gets reviewed, and builds the same objects everywhere. Typed commands leave no record beyond the live objects.
+spec is the desired state you write, such as `replicas: 3`. status is the current state, written by Kubernetes components, such as how many replicas are ready. Controllers keep working to make status match spec.

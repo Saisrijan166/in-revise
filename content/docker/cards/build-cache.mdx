@@ -5,72 +5,128 @@ title: Build Context and Layer Cache
 topic: dockerfile
 level: intermediate
 heat: 2
-hook: "Docker reuses a cached step until its inputs change; then that step and every step after it run again."
+hook: "Docker saves the result of every build step. The next build reuses a step while its inputs are unchanged; after the first changed step, every later step runs again."
 points:
-  - { k: "Build context", v: "the files the builder can read: the path in docker build" }
-  - { k: "COPY, ADD", v: "miss when the files' content or metadata change; mtime is ignored" }
-  - { k: "RUN", v: "matched by its command text, not by what it downloads", kind: minus }
-  - { k: "Order", v: "rarely changed steps first, source code last", kind: plus }
-  - { k: "--no-cache, --pull", v: "rebuild every step; pull fresh base images" }
+  - { k: "Build context", v: "the folder given to docker build; COPY and ADD can read only the files inside it" }
+  - { k: "COPY and ADD", v: "reused only if the copied files' content and metadata are unchanged; modification time alone is ignored" }
+  - { k: "RUN", v: "reused when the command text is the same, even if newer packages now exist online", kind: minus }
+  - { k: "One miss, all rerun", v: "once a step misses the cache, every step after it runs again, changed or not" }
+  - { k: "Order matters", v: "put rarely changed steps first and the source code last, so most layers stay cached", kind: plus }
+  - { k: ".dockerignore", v: "lists files to leave out of the context, such as .git and .env, so builds start faster", kind: plus }
 trap:
   wrong: "RUN apt-get update runs on every build, so packages stay fresh."
-  right: "The cache matches RUN by its text, so the old result is reused. Rebuild with --no-cache to refresh."
-sayIt: "Each step is cached. A changed step and all steps after it rebuild, so I copy pom.xml and fetch dependencies before copying the source, and keep the context small with .dockerignore."
+  right: "The cache matches RUN by its text, so the old result is reused. Rebuild with --no-cache to fetch new packages."
+  why: "People read a Dockerfile as a script that runs top to bottom each time. The cache skips unchanged steps silently, so it looks as if they ran."
+sayIt: "Each build step is cached, and a changed step reruns along with every step after it. So I copy pom.xml and download dependencies before copying the source, and keep the context small with .dockerignore."
+cheat:
+  idea: "Docker caches each build step. A step is reused while its instruction and copied files are unchanged; after the first changed step, every later step runs again."
+  remember: "Copy pom.xml and download dependencies before COPY src, so a code change reruns only the compile."
+buildsOn: [dockerfile-instructions, images-and-layers]
+scenarios:
+  - q: "With the Dockerfile in this concept, you change one line in PaymentController.java and rebuild. Which steps run again?"
+    a: "Only COPY src src and the RUN ./mvnw package after it. The base image, mvnw, pom.xml and .mvn did not change, so those layers come from the cache, including the slow dependency download."
+  - q: "A security fix came out for a package your Dockerfile installs with RUN apt-get install. You rebuild, but the scanner still reports the old version. Why?"
+    a: "The RUN line's text did not change, so Docker reused the cached layer with the old package. Rebuild with --no-cache to run it again; add --pull if the fix is in the base image."
 confusedWith: []
 tags: [build-cache, dockerignore, build-context, layers]
 visual: flow
 sources:
   - title: "Build cache invalidation (Docker Docs)"
     url: "https://docs.docker.com/build/cache/invalidation/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Optimize cache usage in builds (Docker Docs)"
     url: "https://docs.docker.com/build/cache/optimize/"
-    verifiedOn: "2026-10-20"
-  - title: "Containerize a Java application (Docker Docs)"
-    url: "https://docs.docker.com/guides/java/containerize/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Build context and .dockerignore files (Docker Docs)"
+    url: "https://docs.docker.com/build/concepts/context/"
+    verifiedOn: "2026-10-21"
+  - title: "Building best practices: --pull and --no-cache (Docker Docs)"
+    url: "https://docs.docker.com/build/building/best-practices/"
+    verifiedOn: "2026-10-21"
+  - title: "Dockerfile reference: COPY source paths, RUN --mount=type=cache (Docker Docs)"
+    url: "https://docs.docker.com/reference/dockerfile/"
+    verifiedOn: "2026-10-21"
   - title: "Docker interview questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/docker-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Two ideas decide how fast a build is. The build context is the set of files that `docker build` sends to the builder, the part of Docker that runs the steps. It is the folder named by the last argument of `docker build`, usually `.`. The layer cache is the builder's store of earlier step results: when a step and its inputs have not changed, the builder reuses the saved [layer](card:images-and-layers) instead of running the step again.
+
 ## Why it exists
 
-Rebuilding everything after a one-line code change is slow. The cache skips steps whose inputs did not change, if the Dockerfile puts them in the right order.
+Downloading the payment service's Maven dependencies takes minutes. If every one-line code change ran that download again, every build would take minutes. The cache skips it, but only when the Dockerfile copies `pom.xml` and downloads dependencies before it copies the source. A large context costs time too: sending `.git` and IDE folders slows every build, and a stray `.env` file can end up inside the image.
 
 ## How it works
 
-<Steps label="Cache-friendly order for the payment service">
-  <Step title="COPY pom.xml">Changes rarely, so this layer stays cached.</Step>
-  <Step title="RUN ./mvnw dependency:go-offline">Downloads libraries; reused while pom.xml is unchanged.</Step>
-  <Step title="COPY src">Changes on every commit: the cache misses from here.</Step>
-  <Step title="RUN ./mvnw package">Compiles only; the libraries are already in the layer above.</Step>
-</Steps>
+<Mermaid
+  alt="Cache check per step after a code change. Steps 1 to 4, FROM, WORKDIR, COPY pom.xml and COPY .mvn, are reused from the cache. Step 5, the dependency download, is reused too. Step 6, COPY src, misses because a .java file changed. Step 7, the Maven package step, runs again because a step before it missed."
+  chart={`flowchart LR
+  A["1-4: FROM, WORKDIR, COPY pom.xml, .mvn: cached"] --> B["5: RUN dependency:go-offline: cached"]
+  B --> C["6: COPY src: miss, a .java file changed"]
+  C --> D["7: RUN ./mvnw package: runs again"]`}
+/>
 
-- `.dockerignore` keeps `.git`, `.env` and IDE files out of the context: smaller uploads, fewer misses, no leaked secrets.
-- `RUN --mount=type=cache,target=/root/.m2` (BuildKit) keeps Maven downloads even after a miss.
-- If the Dockerfile copies `target/*.jar`, do not ignore `target/`; a [multi-stage build](card:multi-stage-builds) avoids the problem.
+1. `docker build` collects the context, drops every file matched by `.dockerignore`, and sends the rest to the builder.
+2. For each instruction, the builder looks for a cached result built on the same previous layer with the same instruction.
+3. For `COPY` and `ADD`, it also compares a checksum of the copied files' content and metadata. A changed file is a miss; a new modification time alone is not.
+4. For `RUN`, it compares only the command text. It never checks whether newer packages exist online.
+5. After the first miss, every later step runs again, even if its own line did not change.
+
+So the key is to put the steps that change rarely first and the source code last.
 
 ## Example
 
+A cache-friendly order for the payment service, plus the `.dockerignore` next to it.
+
+```dockerfile
+FROM eclipse-temurin:25-jdk
+WORKDIR /src
+COPY mvnw pom.xml ./
+COPY .mvn .mvn
+RUN ./mvnw dependency:go-offline
+COPY src src
+RUN ./mvnw package -DskipTests
+```
+
 ```text
-# .dockerignore
 .git
 .env
 .idea
 target/
 ```
 
+What to notice:
+
+- `pom.xml` is copied alone, so the slow `dependency:go-offline` layer depends only on it. A change to a `.java` file leaves that layer cached.
+- Adding a dependency to `pom.xml` is a miss from line 3, so the download runs again, as it should.
+- Write `COPY . .` before the download instead, and any change to any file, even a README, re-downloads every dependency.
+- `target/` is ignored because Maven builds the jar inside the image. This image still ships the JDK and Maven; [multi-stage builds](card:multi-stage-builds), next, leave them behind.
+
+## Rules and defaults
+
+- **Inside the context only:** `COPY` sources are relative to the context root. A path such as `../config` does not escape it; Docker strips the `../`.
+- **.dockerignore:** read from the root of the context. If the Dockerfile copies `target/*.jar` from the host, do not ignore `target/`.
+- **`--no-cache` and `--pull`:** `--no-cache` runs every step again; `--pull` checks the registry for a newer base image. Use both for a fully fresh build.
+- **Cache mounts (BuildKit):** `RUN --mount=type=cache,target=/root/.m2 ./mvnw package` keeps Maven's download folder between builds, so even after a miss only new or changed packages are downloaded.
+
+## Common mistakes
+
+- **".gitignore keeps files out of the image."** Docker reads only `.dockerignore`. A `.env` file that Git ignores is still in the context, and `COPY . .` puts it into the image.
+- **"--pull fixes stale packages."** It refreshes only the base image. If the base has not changed, your own `RUN apt-get` steps stay cached; add `--no-cache`.
+
 ## Interview Qs
 
 ### How does the Docker build cache work?
 
-Each instruction's result is cached. If the instruction and its input files are unchanged, Docker reuses it. Once one step misses, every later step runs again.
+Each instruction's result is stored as a layer. On the next build, Docker reuses it if the instruction text and, for `COPY` and `ADD`, the copied files are unchanged. Once one step misses, every later step runs again, so step order decides how much is reused.
 
 ### Why copy pom.xml before the source code?
 
-Dependencies change less often than code. Copying pom.xml and downloading them first keeps that slow step cached; a code change only reruns the compile.
+Dependencies change less often than code. Copying `pom.xml` alone and downloading dependencies first keeps that slow step cached; a code change then reruns only the compile and package steps.
 
 ### What is the build context, and why use .dockerignore?
 
-The context is the set of files the build can read, usually the folder passed to docker build. .dockerignore removes files the image does not need, such as .git and .env.
+The context is the set of files the build can read, usually the folder passed to `docker build`. `.dockerignore` removes files the image does not need, such as `.git`, `.env` and IDE folders, so the context is sent faster and secrets cannot be copied in by accident.

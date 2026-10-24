@@ -5,56 +5,80 @@ title: "Scheduling: Where Pods Run"
 topic: health-resources
 level: intermediate
 heat: 2
-hook: "The scheduler filters out nodes that cannot run the Pod, scores the rest, and binds the Pod to the best one."
+hook: "The scheduler picks a node for every new Pod: it drops nodes that cannot run it, scores the rest, and writes the best node into the Pod."
 points:
-  - { k: "nodeSelector", v: "the node must carry every listed label" }
-  - { k: "Node affinity", v: "required (hard) or preferred (soft, weighted) node-label rules" }
-  - { k: "Pod anti-affinity", v: "keep matching Pods apart, per node or per zone" }
-  - { k: "Topology spread", v: "maxSkew caps the Pod-count gap between zones or nodes" }
-  - { k: "No node fits", v: "the Pod stays Pending until one does", kind: minus }
+  - { k: "kube-scheduler", v: "places each new Pod in two phases: filter out nodes that cannot run it, then score the rest" }
+  - { k: "Requests, not usage", v: "a node fits only if its unreserved capacity covers the Pod's requests; real usage does not count" }
+  - { k: "nodeSelector", v: "the Pod may run only on nodes that carry every label listed" }
+  - { k: "Node affinity", v: "node-label rules that are either required (hard) or preferred (soft, with a weight)" }
+  - { k: "Topology spread", v: "maxSkew caps the gap in matching Pod counts between zones or between nodes" }
+  - { k: "No node fits", v: "the Pod stays Pending, with a FailedScheduling event that names the reason", kind: minus }
 trap:
   wrong: "Three replicas always run on three different machines."
-  right: "Not unless you ask: the built-in spreading is only a preference. Add topology spread or anti-affinity to enforce it."
-sayIt: "kube-scheduler filters nodes by free requests, labels, affinity and taints, then scores the rest. To spread payment-service across zones I add a topology spread constraint with maxSkew 1 on the zone label."
+  right: "Not unless you ask. The built-in spreading is only a preference; add a topology spread constraint or Pod anti-affinity to enforce it."
+  why: "The scheduler does spread replicas by default when there is room, so on a quiet test cluster it looks guaranteed."
+sayIt: "kube-scheduler filters nodes by free requests, node labels, affinity and taints, scores the rest and binds the Pod; the kubelet then starts it. To spread payment-service across zones I add a topology spread constraint with maxSkew 1 on the zone label."
+cheat:
+  idea: "kube-scheduler picks a node for every new Pod, using its requests and your placement rules. The kubelet on that node then starts it."
+  flow: "New Pod → filter nodes → score the rest → bind → kubelet starts it"
+  remember: "No node passes the filter: the Pod stays Pending with a FailedScheduling event."
+buildsOn: [kubernetes-architecture, namespaces-labels-selectors, resource-requests-limits]
+scenarios:
+  - q: "payment-service has 3 replicas and a required Pod anti-affinity rule of one Pod per node. The cluster has 2 worker nodes. What happens?"
+    a: "Two Pods run, one on each node, and the third stays Pending, because every node already holds a matching Pod and the rule is required. A topology spread constraint with maxSkew 1 per node would place the third Pod and keep the counts 2 and 1."
+  - q: "A Pod requests 6 CPUs, and every node has 4 allocatable. What does kubectl describe pod show?"
+    a: "The Pod is Pending, with a FailedScheduling event saying no node is available because of insufficient cpu. No node passes the filter, and Kubernetes never splits one Pod across nodes."
 confusedWith: [taints-vs-node-affinity]
 tags: [scheduler, affinity, anti-affinity, topology-spread]
 visual: flow
 sources:
   - title: "Kubernetes Scheduler (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/scheduling-eviction/kube-scheduler/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Assigning Pods to Nodes (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/"
-    verifiedOn: "2026-10-20"
-  - title: "Pod Topology Spread Constraints (Kubernetes 1.37 docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Pod Topology Spread Constraints: built-in default constraints (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Kubernetes Interview Questions: scheduling and affinity (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/kubernetes-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Scheduling is choosing a node for each new Pod. The [kube-scheduler](card:kubernetes-architecture), a control-plane component, does it: it watches for Pods that have no node yet, picks one, and records the choice in the Pod. You steer its choice with rules in the Pod spec, such as [labels](card:namespaces-labels-selectors) the node must carry, or other Pods to stay away from.
+
 ## Why it exists
 
-A Pod needs a node with enough room, the right hardware and safe neighbours. Picking by hand does not scale, so the scheduler places every new Pod.
+A cluster can have hundreds of nodes with different free capacity, hardware and zones. Picking a node by hand for every payment Pod would be slow, and would break as soon as a node fails. Worse, all three replicas could land on one node, and one failure would take the whole service down. The scheduler places every Pod automatically, and your rules tell it what a good node means for this app.
 
 ## How it works
 
-<Steps label="How kube-scheduler places a Pod">
-  <Step title="Watch">A new Pod has no node yet.</Step>
-  <Step title="Filter">Drop nodes without room for its requests, matching labels or affinity, or with an untolerated taint.</Step>
-  <Step title="Score">Rank the feasible nodes, for example by spread and preferred-affinity weights.</Step>
-  <Step title="Bind">Tell the API server the winner; that node's kubelet starts the Pod.</Step>
-</Steps>
+<Mermaid
+  alt="Scheduling flow. A new Pod with no node is picked up by kube-scheduler. Filter: nodes that cannot run the Pod are dropped. Score: the remaining nodes are ranked. Bind: the best node's name is written into the Pod. The kubelet on that node starts the containers. If no node passes the filter, the Pod stays Pending."
+  chart={`flowchart LR
+  P[New Pod, no node] --> F{1. Filter}
+  F -- "nodes left" --> S[2. Score]
+  F -- "none left" --> PE[Pending]
+  S --> B[3. Bind to best node]
+  B --> K[kubelet starts it]`}
+/>
 
-- `IgnoredDuringExecution`: rules apply only at placement; a running Pod stays if node labels change.
-- `nodeName` skips the scheduler; it is meant for custom schedulers.
-- Keeping Pods off nodes: [taints](card:taints-and-tolerations). Why spreading matters: [high availability](card:high-availability).
+1. A new Pod is created, for example by the payment Deployment, and it has no node yet.
+2. Filter: the scheduler drops every node that cannot run the Pod: too little unreserved CPU or memory for its requests, a missing required label, or a taint the Pod does not tolerate (you will see taints in [Taints and Tolerations](card:taints-and-tolerations)). If no node is left, the Pod stays Pending.
+3. Score: it ranks the remaining nodes, for example higher for nodes that match preferred rules or that keep replicas spread apart.
+4. Bind: it writes the best node's name into the Pod through the API server. The kubelet on that node sees the Pod and starts its containers.
+
+So the scheduler only chooses; the kubelet runs.
 
 ## Example
 
+The payment service asks for its 3 replicas to be spread evenly over zones, one per zone when there are three:
+
 ```yaml
-# payment-service Pod template: 3 replicas, one per zone
+# payment-service Pod template
 topologySpreadConstraints:
   - maxSkew: 1
     topologyKey: topology.kubernetes.io/zone
@@ -63,23 +87,41 @@ topologySpreadConstraints:
       matchLabels: { app: payment-service }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| `whenUnsatisfiable` | `DoNotSchedule` | Kubernetes 1.37 |
-| Built-in spreading | soft: maxSkew 3 per node, 5 per zone | kube-scheduler, Kubernetes 1.37 |
+- `maxSkew: 1` means the number of payment Pods in any two zones may differ by at most 1.
+- `topologyKey` is the node label that defines a group, here the zone. Use `kubernetes.io/hostname` to spread over nodes instead.
+- `DoNotSchedule` makes the rule hard: a Pod that would break it stays Pending. `ScheduleAnyway` turns it into a preference.
+- `labelSelector` decides which Pods are counted, here only payment-service Pods.
+
+## Rules and defaults
+
+- **nodeSelector:** the simplest rule; the node must carry every listed label.
+- **Node affinity:** `requiredDuringSchedulingIgnoredDuringExecution` is hard; `preferredDuringSchedulingIgnoredDuringExecution` is soft, with a weight from 1 to 100. Operators include `In`, `NotIn`, `Exists` and `DoesNotExist`.
+- **IgnoredDuringExecution:** rules are checked only at placement. If a node's labels change later, Pods already running there stay.
+- **Pod affinity and anti-affinity:** place a Pod near, or away from, Pods with given labels, within a group set by `topologyKey`, such as one node or one zone.
+- **Built-in spreading (Kubernetes 1.37):** with no constraints of your own, the scheduler uses soft defaults of maxSkew 3 per node and 5 per zone, with `ScheduleAnyway`.
+- **whenUnsatisfiable:** defaults to `DoNotSchedule` in a constraint you write.
+- **nodeName:** setting it skips the scheduler, and the named node's kubelet runs the Pod; it is meant for custom schedulers.
+
+## Not to be confused with
+
+A [taint](card:taints-and-tolerations) is set on a node and keeps away every Pod that does not tolerate it. Node affinity is set on a Pod and draws that Pod to nodes with certain labels. Rule: affinity attracts this Pod; a taint repels all other Pods.
+
+## Common mistakes
+
+- **"The scheduler moves running Pods to better nodes."** It places only Pods that have no node. A running Pod stays on its node until it is deleted or evicted; only its replacement is scheduled again.
 
 ## Interview Qs
 
 ### Why is a Pod stuck in Pending?
 
-No node passed the filter: too little free CPU or memory for its requests, no node with the required labels, or an untolerated taint. `kubectl describe pod` shows a FailedScheduling event with the reason.
+No node passed the filter: not enough free CPU or memory for its requests, no node with the required labels or affinity, or an untolerated taint. `kubectl describe pod` shows a FailedScheduling event that says how many nodes failed and why.
 
 ### nodeSelector or node affinity?
 
-nodeSelector is the simplest: the node needs all listed labels. Node affinity adds operators such as In and NotIn, and soft preferred rules with weights.
+nodeSelector is the simplest: the node needs all listed labels. Node affinity can do the same and more: operators such as `In` and `NotIn`, and soft preferred rules with weights. Use nodeSelector for one fixed label, affinity for anything richer.
 
-### Anti-affinity or topology spread for replicas?
+### Pod anti-affinity or topology spread for replicas?
 
-Required anti-affinity allows at most one matching Pod per domain, so extra replicas stay Pending. Topology spread allows several per domain and keeps the counts even.
+Required anti-affinity allows at most one matching Pod per group, so replicas beyond the number of nodes or zones stay Pending. Topology spread allows several Pods per group and keeps the counts even, so it scales with the replica count.

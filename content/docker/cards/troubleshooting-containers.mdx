@@ -5,24 +5,37 @@ title: Troubleshooting Containers
 topic: playbook
 level: interview
 heat: 2
-hook: "Exit code, then logs, then inspect: most failures are an ended main process, a wrong network, or memory."
+hook: "Debug a container in a fixed order: status and exit code, then logs, then inspect. Most failures are a main process that ended, a wrong network, or memory."
 points:
-  - { k: "1. docker ps -a", v: "status and exit code, stopped containers included" }
-  - { k: "2. docker logs", v: "what the app wrote to stdout and stderr before it died" }
-  - { k: "3. docker inspect", v: "State.ExitCode, State.OOMKilled, mounts, networks, env" }
-  - { k: "4. docker exec", v: "while running: check DNS, ports and files inside" }
-  - { k: "5. stats, events", v: "live memory and CPU; die, oom and kill events" }
+  - { k: "1. docker ps -a", v: "shows every container, stopped ones included, with its status and exit code" }
+  - { k: "2. docker logs", v: "shows what the app wrote to stdout and stderr, even after the container stopped" }
+  - { k: "3. docker inspect", v: "shows State.ExitCode and State.OOMKilled, plus the mounts, networks and environment" }
+  - { k: "4. docker exec", v: "runs a command inside a running container, to check DNS, ports and files from its side" }
+  - { k: "Exit code 128 + N", v: "the process was ended by signal N: 137 is SIGKILL (9), 143 is SIGTERM (15)", kind: default }
 trap:
   wrong: "Exit code 137 always means the container ran out of memory."
-  right: "137 is SIGKILL. Check State.OOMKilled: true means the memory limit; false points to another SIGKILL, such as docker kill or a stop timeout."
-sayIt: "I check docker ps -a for the exit code, then the logs, then docker inspect for OOMKilled, networks and mounts. 128 plus N means signal N: 137 SIGKILL, 143 SIGTERM."
+  right: "137 means the process got SIGKILL. Check State.OOMKilled: true means the memory limit; false points to another kill, such as docker kill or a stop timeout."
+  why: "The most common cause of 137 in production is the OOM killer, so the two get treated as the same thing."
+sayIt: "I check docker ps -a for the exit code, then docker logs, then docker inspect for OOMKilled, networks and mounts, and exec in if it still runs. An exit code above 128 is 128 plus a signal: 137 is SIGKILL, from the OOM killer or a kill, and 143 is SIGTERM."
+cheat:
+  idea: "Troubleshooting follows one order: read the exit code, read the logs, inspect the container's state and settings, then test from inside. The exit code usually tells you where to look."
+  flow: "docker ps -a → docker logs → docker inspect → docker exec"
+  remember: "137 = SIGKILL; State.OOMKilled true means the memory limit, false means another kill."
+buildsOn: [docker-cli-essentials, container-lifecycle, resource-limits]
+scenarios:
+  - q: "docker run -d payment-service:1.4.0 prints an ID, but docker ps shows nothing. What do you check first?"
+    a: "docker ps -a, to see the stopped container and its exit code, then docker logs for the error. The main process ended, so the container stopped: usually a crash at startup, such as a missing database, or a command that ran and returned."
+  - q: "The container is Up, but curl localhost:8080 from the host is refused. What are the two usual causes?"
+    a: "The port is not published (no -p 8080:8080), or the app listens only on 127.0.0.1 inside the container, which the host cannot reach. Check docker ps for the port mapping, and make the app listen on 0.0.0.0."
+  - q: "A container keeps exiting with code 127 right after it starts. What does that tell you?"
+    a: "127 means the command was not found. The image's CMD or ENTRYPOINT names a program that does not exist in the image, often a missing shell or a typo in the path."
 confusedWith: [docker-stop-vs-docker-kill]
 tags: [debugging, exit-codes, operations]
 visual: table
 sources:
   - title: "Running containers: exit status (Docker Engine docs)"
     url: "https://docs.docker.com/engine/containers/run/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "bash(1): exit status (man7.org)"
     url: "https://man7.org/linux/man-pages/man1/bash.1.html"
     verifiedOn: "2026-10-20"
@@ -37,43 +50,81 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Troubleshooting a container means finding out why it stopped, restarts, or does not answer, by reading the evidence Docker keeps. A stopped container is not deleted until you run `docker rm`, so its **exit code**, its logs and its final state are still there. An exit code is the number a process returns when it ends: 0 means success, and anything else is an error or a signal.
+
 ## Why it exists
 
-A dead container leaves an exit code, logs and its final state. Read them in a fixed order.
+"The container died" has many causes: a crash at startup, memory, a wrong command, a network mistake. Guessing and restarting wastes time and hides the evidence. A fixed order of commands turns the symptom into a cause in a few minutes, and the same order works for every container.
 
 ## How it works
 
-| Symptom | First check | Fix |
+| Symptom | First check | Usual fix |
 |---|---|---|
-| Exits at once | Exit code and logs | Run the server in the foreground ([lifecycle](card:container-lifecycle)) |
-| Exit 137 | `State.OOMKilled` | Heap plus overhead must fit the limit ([Java](card:java-in-containers)) |
-| `docker stop` hangs, then 137 | Is java PID 1 and given SIGTERM? | [Exec form, graceful shutdown](card:signals-and-graceful-shutdown) |
-| Refused from the host | Port published? App on 127.0.0.1? | [Publish](card:port-mapping); [listen on 0.0.0.0](card:docker-networking) |
+| Exits at once | Exit code and logs | Fix the crash; run the server in the foreground ([lifecycle](card:container-lifecycle)) |
+| Exit 137 | `State.OOMKilled` | Make heap plus overhead fit the limit ([Java](card:java-in-containers)) |
+| `docker stop` waits 10 s, then 137 | Is java PID 1 and given SIGTERM? | [Exec form, graceful shutdown](card:signals-and-graceful-shutdown) |
+| Refused from the host | Port published? App on 127.0.0.1? | [Publish](card:port-mapping); listen on 0.0.0.0 |
 | Unknown host `postgres` | Same user-defined network? | [Networks](card:docker-networking) |
-| `exec format error` | Image CPU vs host CPU | [Build for both](card:buildkit-and-multi-platform) |
-| Permission denied on a mount | Container UID vs file owner | Run as a matching [USER](card:image-security) |
+| `exec format error` | Image CPU type vs host CPU type | [Build for both](card:buildkit-and-multi-platform) |
+| Permission denied on a mount | Container UID vs file owner | Match the [USER](card:image-security) and the owner |
 | Old code still runs | Container's image ID vs the new build | Recreate the container; [unique tags](card:registries) |
+
+1. Run `docker ps -a` to see the container's status and exit code, including stopped containers.
+2. Run `docker logs` to read what the app printed before it stopped.
+3. Run `docker inspect` to read the state, such as `OOMKilled`, and the settings: mounts, networks, environment.
+4. If it is still running, use `docker exec` to test from inside: resolve names, call ports, list files.
+5. Use `docker stats` for live memory and CPU, and `docker events` for the history of kills, OOMs and restarts.
+
+So the key is: read the evidence in order before you change anything.
 
 ## Example
 
+The payment service was started with `--memory 256m` but a JVM heap of 1 GB, set through `JAVA_TOOL_OPTIONS`. It stopped a few seconds later.
+
 ```bash
-docker ps -a --filter name=payment-service
-# STATUS  Exited (137) 2 minutes ago
-docker inspect -f '{{.State.OOMKilled}}' payment-service
-# true -> JVM memory went over --memory
-docker events --filter container=payment-service --since 1h
+docker ps -a --filter name=payment-service --format '{{.Names}}: {{.Status}}'
+docker inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' payment-service
+docker events --filter container=payment-service --since 1m --until 0s --format '{{.Action}}'
 ```
+
+```text output
+payment-service: Exited (137) 4 seconds ago
+137 true
+create
+start
+oom
+die
+```
+
+What to notice:
+
+- 137 is 128 + 9, so the JVM got SIGKILL; it had no chance to log anything or shut down cleanly.
+- `OOMKilled` is `true` and the events show `oom`, so the kernel killed it for going over the 256 MB limit. The fix is a smaller heap or a larger limit.
+- After `docker kill`, the same container shows 137 with `OOMKilled` false and no `oom` event. That is why you check, not guess.
+
+## Rules and defaults
+
+- **Exit codes from Docker:** 125 means `docker run` itself failed, such as an unknown flag; 126 means the command cannot be run; 127 means it was not found.
+- **Signal exit codes:** 128 + N means signal N: 137 SIGKILL, 139 SIGSEGV (a crash from an invalid memory access), 143 SIGTERM.
+- **Stopped is not removed:** logs and state stay until `docker rm`. Starting with `--rm` deletes them on exit, so avoid it while debugging.
+- **`docker compose up --exit-code-from <service>`:** returns that service's exit code, which helps CI fail on the right container.
+
+## Not to be confused with
+
+`docker stop` sends SIGTERM and, after the grace period, SIGKILL; a clean Java shutdown then gives exit code 143. `docker kill` sends SIGKILL at once, giving 137. Rule: 143 = asked to stop; 137 = killed, by you, a timeout or the OOM killer. [Graceful shutdown](card:signals-and-graceful-shutdown) explains the grace period.
 
 ## Interview Qs
 
-### A container exits right after `docker run -d`. Why?
+### A container exits right after docker run -d. How do you find out why?
 
-Check `docker ps -a` and `docker logs`: usually a crash, or a command that backgrounds the server and returns ([lifecycle](card:container-lifecycle)).
+`docker ps -a` shows it with its exit code, and `docker logs` shows the error. A container lives only as long as its main process, so it stopped because that process ended: usually a startup crash, or a command that starts the server in the background and returns.
 
 ### What do exit codes 137 and 143 mean?
 
-128 plus the signal number. 137 = SIGKILL: an OOM kill, `docker kill`, or a stop timeout. 143 = SIGTERM, usually from `docker stop`.
+Both are 128 plus a signal number. 137 is SIGKILL: an OOM kill, `docker kill`, or a stop that ran past its timeout; `State.OOMKilled` tells them apart. 143 is SIGTERM, usually a normal `docker stop` that the app handled.
 
-### The container is running but the API is unreachable. What do you check?
+### The container is running, but the API is unreachable. What do you check?
 
-Is the port published? Does the app listen on 0.0.0.0, not 127.0.0.1? Then test from inside with `docker exec`.
+From the host: is the port published, as shown in `docker ps`? From inside with `docker exec`: does the app answer on its port, and does it listen on 0.0.0.0 rather than 127.0.0.1? For another container: are both on the same user-defined network, using the service name?

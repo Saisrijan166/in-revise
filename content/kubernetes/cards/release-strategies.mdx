@@ -5,48 +5,89 @@ title: "Blue-Green and Canary on Kubernetes"
 topic: scaling-releases
 level: interview
 heat: 2
-hook: "Blue-green flips all traffic from the old copy to a full new copy; canary gives the new version a small share first."
+hook: "Blue-green runs a full new copy and switches all traffic to it at once; canary gives the new version a small share of real traffic first."
 points:
-  - { k: "Blue-green switch", v: "change the Service selector's version label, or the route's backend" }
-  - { k: "Blue-green cost", v: "two full sets of Pods during the release", kind: minus }
-  - { k: "Canary by replicas", v: "share follows Pod counts: 3 stable + 1 canary is about 25%", kind: minus }
-  - { k: "Canary by weight", v: "HTTPRoute backendRefs weights give an exact split, such as 90/10", kind: plus }
-  - { k: "Tools", v: "Argo Rollouts and Flagger shift traffic in steps and check metrics" }
+  - { k: "Two Deployments", v: "both run the old and new versions as separate Deployments, told apart by a label" }
+  - { k: "Blue-green switch", v: "change the Service selector's version label, or the route's backend, and all traffic moves at once", kind: plus }
+  - { k: "Blue-green cost", v: "two full sets of Pods run during the release, so you need double the capacity for a while", kind: minus }
+  - { k: "Canary by Pod count", v: "one Service over both sets splits by Pod count: 3 stable Pods and 1 canary give the canary about 25%", kind: minus }
+  - { k: "Canary by weight", v: "HTTPRoute backend weights give an exact split, such as 90 and 10, whatever the Pod counts", kind: plus }
 trap:
-  wrong: "A Deployment can do blue-green or canary by itself."
-  right: "A Deployment only knows RollingUpdate and Recreate. Blue-green and canary need two Deployments plus a selector or route switch, or a tool."
-sayIt: "Blue-green runs two full versions and flips the Service selector or route at once. Canary sends a small share, say 10% by HTTPRoute weights, and grows it while metrics stay healthy."
-confusedWith: []
+  wrong: "A Deployment can do blue-green or canary by itself if you pick that strategy."
+  right: "A Deployment only knows RollingUpdate and Recreate. Blue-green and canary need two Deployments and a selector or route switch, or a tool such as Argo Rollouts."
+  why: "Blogs often describe blue-green and canary as Kubernetes deployment strategies, next to rolling updates, so people assume they are options in the Deployment spec."
+sayIt: "Blue-green runs two full versions and flips the Service selector or route at once, so rollback is flipping it back. Canary sends a small share, say 10% by HTTPRoute weights, and raises it while errors and latency stay healthy."
+cheat:
+  idea: "Both run the old and new versions as two Deployments. Blue-green switches all traffic at once; canary sends a small share to the new version first and grows it."
+  flow: "Canary: 10% → check errors and latency → 50% → 100%"
+  remember: "A Deployment only does RollingUpdate or Recreate; these need a traffic switch or a tool."
+buildsOn: [rolling-updates-rollbacks, services, ingress-and-gateway-api]
+scenarios:
+  - q: "You must send exactly 5% of payment traffic to version 1.5.0. Stable runs 3 Pods. Why not just add one 1.5.0 Pod behind the same Service?"
+    a: "The Service spreads requests over all ready Pods, so 1 canary among 4 Pods gets about 25%, not 5%. For 5% by Pod count you would need 19 stable Pods. Use HTTPRoute weights 95 and 5 instead: the split follows the weights, not the Pod counts."
+  - q: "Green (1.5.0) has errors right after you switched the payment-service Service selector to it. What is the fastest way back?"
+    a: "Point the selector back at version: blue. The blue Pods are still running, so traffic returns in seconds with no Pods to start. That is why you keep blue until green has proved itself."
+confusedWith: [rolling-vs-blue-green-vs-canary]
 tags: [blue-green, canary, gateway-api, progressive-delivery]
-visual: table
+visual: flow
 sources:
   - title: "Managing Workloads: canary deployments (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/management/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "HTTP traffic splitting (Gateway API v1.6 docs)"
     url: "https://gateway-api.sigs.k8s.io/guides/traffic-splitting/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "BlueGreen Deployment Strategy (Argo Rollouts docs)"
     url: "https://argoproj.github.io/argo-rollouts/features/bluegreen/"
     verifiedOn: "2026-10-20"
+  - title: "Argo Rollouts: Kubernetes Progressive Delivery Controller (README)"
+    url: "https://github.com/argoproj/argo-rollouts"
+    verifiedOn: "2026-10-21"
+  - title: "Flagger: progressive delivery operator (README)"
+    url: "https://github.com/fluxcd/flagger"
+    verifiedOn: "2026-10-21"
+  - title: "Feature Toggles (aka Feature Flags), Pete Hodgson (martinfowler.com)"
+    url: "https://martinfowler.com/articles/feature-toggles.html"
+    verifiedOn: "2026-10-21"
   - title: "Kubernetes Interview Questions: deployment strategies (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/kubernetes-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Blue-green and canary are two ways to release a new version by moving traffic, not by replacing Pods in place. In both, the old and the new version run at the same time as two separate [Deployments](card:deployments-and-replicasets). Blue-green keeps the new copy (green) idle until you switch all traffic from the old one (blue) at once. Canary sends a small share of real traffic to the new version first, and grows it step by step.
+
 ## Why it exists
 
-A [rolling update](card:rolling-updates-rollbacks) mixes versions and rolls back slowly. Risky releases need a fast way back, or a test on a few real users first.
+A [rolling update](card:rolling-updates-rollbacks) mixes versions while it runs, and going back means replacing the Pods again. For a risky payment release you may want a way back that takes seconds, or proof from a few real users before everyone gets it. Blue-green gives the fast switch back, because the old Pods keep running. Canary limits the damage, because a bug in 1.5.0 hits only the small share that reaches it.
 
 ## How it works
 
-<Compare id="rolling-vs-blue-green-vs-canary" />
+<Mermaid
+  alt="Two release patterns for payment-service. Blue-green: the Service selector points at the blue Pods running 1.4.0; switching it to green moves all traffic to the 1.5.0 Pods. Canary: an HTTPRoute sends 90% of requests to the stable 1.4.0 Service and 10% to the canary 1.5.0 Service."
+  chart={`flowchart LR
+  subgraph BG[Blue-green]
+    S[Service selector version] -- "blue: 100%" --> B[1.4.0 Pods]
+    S -. "switch to green" .-> G[1.5.0 Pods]
+  end
+  subgraph CA[Canary]
+    R[HTTPRoute] -- "weight 90" --> ST[stable 1.4.0]
+    R -- "weight 10" --> CN[canary 1.5.0]
+  end`}
+/>
 
-- Blue-green: Pods carry `version: blue` or `version: green`; the Service selector picks one set.
-- Canary by replicas: both sets share `app: payment-service`; a `track` label tells them apart.
-- Weights live on an [HTTPRoute](card:ingress-and-gateway-api); a weight is a share of the rule's total.
+1. You deploy 1.5.0 as a second Deployment next to 1.4.0. Its Pods carry a label that tells them apart, such as `version: green` or `track: canary`.
+2. **Blue-green:** you test green directly, then change the [Service](card:services) selector from `version: blue` to `version: green`. All new requests go to green at once.
+3. **Canary:** you send a small share to 1.5.0. Either both Deployments share the Service's label, so the share follows the Pod counts, or an [HTTPRoute](card:ingress-and-gateway-api) splits traffic by weight.
+4. You watch error rate and latency for the new version. If they stay healthy, you raise the canary share, or keep green; if not, you switch back or set the canary weight to 0.
+5. When the new version has proved itself, you remove the old Deployment.
+
+So both strategies are a traffic switch in front of two Deployments; Kubernetes gives you the pieces, not the procedure.
 
 ## Example
+
+The payment route sends 10% of `/api/payments` traffic to the 1.5.0 canary.
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
@@ -61,16 +102,34 @@ spec:
         - { name: payment-service-v2, port: 80, weight: 10 }
 ```
 
+What to notice:
+
+- Each `backendRefs` entry is a separate Service, one per version, each over its own Deployment.
+- A weight is a share of the total in this rule, not a %: 90 and 10 out of 100 means 10%. Weights 9 and 1 give the same split.
+- To promote, raise `v2`'s weight step by step; to roll back, set it to 0. Pod counts do not change the split.
+
+## Rules and defaults
+
+- **Deployment strategies:** only `RollingUpdate` and `Recreate` exist in the Deployment spec (Kubernetes 1.37).
+- **Weights:** a backend's weight defaults to 1; a single backend with weight above 0 takes all the traffic, and weight 0 forwards none (Gateway API v1.6).
+- **Blue-green keeps blue:** do not delete the blue Deployment until green has run well for a while; it is your rollback.
+- **Tools:** Argo Rollouts and Flagger add a Rollout or Canary resource that shifts traffic in steps, checks metrics and rolls back by itself when a check fails.
+- **Data:** both versions run at once and share the database, so schema changes must work with both.
+
+## Not to be confused with
+
+A canary release sends real traffic to a new version of the **code**. A feature flag ships the code to everyone but keeps a feature switched off until you turn it on in configuration. Rule: canary chooses which Pods serve a request; a feature flag chooses which code path runs inside one Pod.
+
 ## Interview Qs
 
 ### How do you do blue-green on plain Kubernetes?
 
-Run two Deployments, payment-service-blue and payment-service-green, with a version label. Test green, then point the Service selector (or the HTTPRoute backend) at green. Rollback is switching it back; remove blue later.
+Run two Deployments, payment-service-blue and payment-service-green, each with its own version label. Test green through a separate Service or port-forward. Then change the main Service selector, or the HTTPRoute backend, to green. Rollback is switching it back. Remove blue only once green has run well.
 
 ### Why is canary by replica count coarse?
 
-The Service spreads requests over all ready Pods, so the share follows Pod counts: 1 canary among 4 Pods gets about a quarter. A 5% share needs 19 stable Pods. Route weights split by ratio instead.
+The Service spreads requests over all ready Pods, so the share follows Pod counts: 1 canary among 4 Pods gets about a quarter. A 5% share would need 19 stable Pods. Route weights, such as HTTPRoute `backendRefs` weights, split by ratio instead, whatever the Pod counts.
 
 ### How do you decide to promote a canary?
 
-Compare its error rate and latency with the stable version for a fixed time. Argo Rollouts and Flagger automate this: they raise the weight in steps and roll back when a metric check fails.
+Compare its error rate and latency with the stable version over a fixed time, with enough traffic to be meaningful. Argo Rollouts and Flagger automate this: they raise the weight in steps, run metric checks after each step, and roll back by themselves when a check fails.

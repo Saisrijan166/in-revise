@@ -5,78 +5,138 @@ title: PID 1, Signals and Graceful Shutdown
 topic: runtime
 level: interview
 heat: 2
-hook: "docker stop sends SIGTERM to PID 1; the app must catch it, finish in-flight work and exit before SIGKILL comes."
+hook: "docker stop sends SIGTERM to the container's first process and waits; the app must catch it, finish its work and exit before Docker sends SIGKILL."
 points:
-  - { k: "PID 1", v: "ignores signals it has no handler for, except host SIGKILL" }
-  - { k: "Shell form", v: "sh -c is PID 1 and does not pass SIGTERM to java", kind: minus }
-  - { k: "Fix", v: "exec-form ENTRYPOINT, or exec java in a start script" }
-  - { k: "--init", v: "a tiny init (tini) as PID 1 forwards signals, reaps zombies", kind: plus }
-  - { k: "Timeouts", v: "Docker's grace period must be longer than Spring's", kind: minus }
+  - { k: "docker stop", v: "sends SIGTERM to PID 1, waits the grace period (10 s on Linux), then sends SIGKILL", kind: default }
+  - { k: "PID 1 is special", v: "the kernel drops a signal sent to PID 1 unless that process installed a handler for it" }
+  - { k: "Shell form", v: "/bin/sh -c becomes PID 1, the signal never reaches java, and the app is killed after 10 s", kind: minus }
+  - { k: "The fix", v: "use the exec form of ENTRYPOINT, or exec java in a start script, so the JVM itself is PID 1", kind: plus }
+  - { k: "Two timeouts", v: "Docker's grace period must be longer than the app's own shutdown timeout, or SIGKILL cuts it off", kind: minus }
 trap:
   wrong: "docker stop always shuts the app down cleanly."
-  right: "Only if PID 1 handles SIGTERM and finishes within the grace period; otherwise SIGKILL cuts it off."
-sayIt: "docker stop sends SIGTERM to PID 1. I run java in exec form so the JVM is PID 1, let Spring Boot finish in-flight requests, and set the stop timeout above Spring's."
+  right: "Only if PID 1 handles SIGTERM and finishes within the grace period. Otherwise Docker sends SIGKILL and the app dies mid-work."
+  why: "The container does stop and the command returns without an error, so the lost requests and the missing shutdown logs go unnoticed."
+sayIt: "docker stop sends SIGTERM to PID 1 and SIGKILL after 10 seconds. I start java in exec form so the JVM is PID 1 and gets the signal, Spring Boot's graceful shutdown lets in-flight requests finish, and I set the stop timeout above Spring's 30 seconds."
+cheat:
+  idea: "docker stop sends SIGTERM to the container's first process, PID 1, and waits. Only PID 1 hears it and can shut down cleanly."
+  flow: "SIGTERM → app finishes → exits, or SIGKILL after 10 s"
+  remember: "Use exec-form ENTRYPOINT so java is PID 1; shell form makes sh PID 1 and the app gets killed."
+buildsOn: [container-lifecycle, run-cmd-entrypoint, namespaces-and-cgroups]
+scenarios:
+  - q: "docker stop on the payment service always takes exactly 10 seconds, and the logs never show Spring's shutdown messages. What is wrong?"
+    a: "The JVM never got SIGTERM. Most likely the Dockerfile uses the shell form, so /bin/sh -c is PID 1; the kernel drops the signal and sh does not forward it. After 10 s Docker sends SIGKILL. Switch to the exec form."
+  - q: "Spring Boot needs up to 30 seconds to finish in-flight payments, and you run the container with default settings. What happens on docker stop under load?"
+    a: "Docker waits only 10 seconds, then sends SIGKILL, so payments still running after 10 s are cut off. Raise the grace period above 30 s with --stop-timeout, or stop_grace_period in Compose."
 confusedWith: [exec-form-vs-shell-form, docker-stop-vs-docker-kill]
 tags: [signals, graceful-shutdown]
 visual: flow
 sources:
-  - title: "Dockerfile reference (Docker docs)"
+  - title: "Dockerfile reference: ENTRYPOINT shell form, STOPSIGNAL (Docker docs)"
     url: "https://docs.docker.com/reference/dockerfile/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "pid_namespaces(7) (Linux manual page)"
     url: "https://man7.org/linux/man-pages/man7/pid_namespaces.7.html"
     verifiedOn: "2026-10-20"
-  - title: "docker container run (Docker CLI)"
+  - title: "docker container run: --stop-timeout, --stop-signal, --init (Docker CLI)"
     url: "https://docs.docker.com/reference/cli/docker/container/run/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Common application properties (Spring Boot 4.1)"
     url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
     verifiedOn: "2026-10-20"
-  - title: "Graceful Shutdown (Spring Boot 4.1 reference)"
+  - title: "Graceful Shutdown (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/web/graceful-shutdown.html"
+    verifiedOn: "2026-10-21"
+  - title: "Services: stop_grace_period (Compose Specification)"
+    url: "https://docs.docker.com/reference/compose-file/services/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A signal is a short message the operating system delivers to a process, such as "please stop" (`SIGTERM`) or "die now" (`SIGKILL`, which cannot be caught). Inside a container, the first process gets process ID 1 in its own PID namespace (see [namespaces](card:namespaces-and-cgroups)), and Docker sends its stop signal to that process only. Graceful shutdown means the app reacts to `SIGTERM` by refusing new work, finishing what is in progress and exiting on its own.
+
 ## Why it exists
 
-A payment cut off halfway can charge a customer with no record of it. The app needs the stop signal, and time, to finish cleanly.
+Every deploy, scale-down or host reboot stops containers. If the payment service is killed halfway through a payment, the customer may be charged with no record saved. Docker gives the app a warning and some time, but only the process that is PID 1 hears the warning. So the app must be PID 1, must handle `SIGTERM`, and must finish before Docker's patience runs out.
 
 ## How it works
 
 <Steps label="docker stop on the payment service">
-  <Step title="Signal">Docker sends SIGTERM (or STOPSIGNAL) to PID 1.</Step>
+  <Step title="Signal">Docker sends SIGTERM, or the image's STOPSIGNAL, to PID 1.</Step>
   <Step title="Stop taking work">Spring Boot stops accepting new requests.</Step>
-  <Step title="Finish and exit">The in-flight ₹500 UPI payment completes; the JVM exits within the grace period.</Step>
-  <Step title="Or killed">Still running at the deadline: Docker sends SIGKILL.</Step>
+  <Step title="Finish and exit">A payment in progress completes, and the JVM exits within the grace period.</Step>
+  <Step title="Or killed">If the process still runs at the deadline, Docker sends SIGKILL.</Step>
 </Steps>
 
-- Use `--init` when the app spawns child processes.
-- Exit codes after a kill: [troubleshooting](card:troubleshooting-containers).
+1. You run `docker stop pay`. Docker sends `SIGTERM` to PID 1 in the container and starts a timer, 10 seconds by default on Linux.
+2. The kernel delivers the signal only if PID 1 has a handler for it. The JVM installs one, so `java` as PID 1 receives it. `/bin/sh` as PID 1 has none, so the signal is dropped.
+3. The JVM runs its shutdown hooks. Spring Boot's graceful shutdown stops taking new requests and waits for running ones, up to its own timeout.
+4. The process exits, and the container becomes exited with code 143 (128 + 15, the number of `SIGTERM`).
+5. If the timer runs out first, Docker sends `SIGKILL`. The process dies at once, with no cleanup, and the exit code is 137 (128 + 9).
+
+So the key is: the right process must be PID 1, and it must finish inside the grace period.
 
 ## Example
 
-```bash
-# tini as PID 1; 40 s > Spring's 30 s per phase
-docker run -d --name pay --init --stop-timeout 40 payment-service:1.4.0
+The same stand-in payment app was built twice and run as two containers. `pay-shell` uses the shell form, `ENTRYPOINT java -cp /app Pay`; `pay-exec` uses the exec form below. Both were then stopped:
+
+```dockerfile
+ENTRYPOINT ["java", "-cp", "/app", "Pay"]
 ```
 
-## Defaults
+```bash
+docker exec pay-shell ps -o pid=,args= -p 1
+docker stop pay-shell && docker logs pay-shell
+docker stop pay-exec && docker logs pay-exec
+```
+
+```text output
+      1 /bin/sh -c java -cp /app Pay
+pay-shell
+payment-service started on 8080
+pay-exec
+payment-service started on 8080
+SIGTERM received: finishing in-flight payment
+Shutdown complete
+```
+
+What to notice:
+
+- In `pay-shell`, PID 1 is `/bin/sh -c`, and `java` is only its child. Its stop took about 11 seconds, the logs show no shutdown, and the exit code was 137: Docker had to send `SIGKILL`.
+- In `pay-exec`, `java` is PID 1. Its shutdown hook ran, the stop took about 3 seconds, and the exit code was 143.
+- If a start script must run first, end it with `exec java ...`; `exec` replaces the shell with java, so java becomes PID 1.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| `server.shutdown` | `graceful` | Spring Boot 4.1 |
+| Stop signal | `SIGTERM`; change with `STOPSIGNAL` or `--stop-signal` | Docker Engine 29 |
+| Grace period | 10 s for Linux containers, 30 s for Windows; change with `docker stop -t`, `--stop-timeout` or Compose `stop_grace_period` | Docker Engine 29 |
+| `server.shutdown` | `graceful`; set `immediate` to turn it off | Spring Boot 4.1 |
 | `spring.lifecycle.timeout-per-shutdown-phase` | 30 s | Spring Boot 4.1 |
+
+- **Make the timeouts agree:** with Spring's 30 s, use a Docker grace period of about 40 s, or the default 10 s will cut it short.
+- **`--init`:** puts a tiny init process (Docker ships tini) at PID 1. It forwards signals to your app and reaps zombie processes, finished child processes that nobody collected. Use it when the app starts child processes.
+
+## Not to be confused with
+
+The exec form `["java", ...]` runs the program directly, so it is PID 1. The shell form `java ...` runs it through `/bin/sh -c`, so the shell is PID 1. Rule: exec form for the main process, always. The full comparison is in [RUN vs CMD vs ENTRYPOINT](card:run-cmd-entrypoint).
+
+## Common mistakes
+
+- **"My app handles SIGTERM, so shutdown is fine."** It still depends on the app being PID 1. A shell or wrapper script in front of it swallows the signal.
+- **Testing shutdown with Ctrl+C in the IDE.** Some IDEs end the process at once. Test with `docker stop` and check the logs for the shutdown messages.
 
 ## Interview Qs
 
 ### Why does my container take 10 seconds to stop?
 
-PID 1 ignored SIGTERM. Usually a shell-form ENTRYPOINT makes `sh` PID 1, which does not pass the signal to java; after the grace period comes SIGKILL. Use exec form, or `exec java ...` in the start script.
+PID 1 ignored `SIGTERM`, so Docker waited the full grace period and sent `SIGKILL`. The usual cause is a shell-form `ENTRYPOINT`: `sh` is PID 1, has no handler and does not pass the signal to java. Use the exec form, or `exec java ...` at the end of the start script.
 
 ### Why is PID 1 special in a container?
 
-The kernel ignores a signal sent to a namespace's init unless it has a handler; only SIGKILL and SIGSTOP from the host get through. PID 1 also adopts orphans and must reap zombies. `--init` puts a tini-based init there to do both.
+The kernel delivers a signal to a namespace's PID 1 only if it installed a handler for that signal; from the host, only `SIGKILL` and `SIGSTOP` are forced through. PID 1 also adopts orphaned processes and must reap them. `--init` puts a small init there to forward signals and reap zombies.
 
 ### How do you stop a Spring Boot container without losing requests?
 
-Exec-form ENTRYPOINT so the JVM gets SIGTERM. Graceful shutdown, on by default, lets in-flight requests finish within 30 s per phase. Set `--stop-timeout` above that.
+Start java in exec form so the JVM gets `SIGTERM`. Spring Boot's graceful shutdown, on by default, stops new requests and lets running ones finish, up to 30 s per phase. Set Docker's grace period above that, for example `--stop-timeout 40`.

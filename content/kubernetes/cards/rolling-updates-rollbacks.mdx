@@ -5,24 +5,37 @@ title: "Rolling Updates and Rollbacks"
 topic: scaling-releases
 level: intermediate
 heat: 3
-hook: "A Deployment swaps old Pods for new ones in steps, within maxSurge and maxUnavailable; rollout undo goes back a revision."
+hook: "A Deployment upgrades Pods a few at a time, so the app keeps serving, and keeps the old version on hand so one command can go back."
 points:
-  - { k: "New revision", v: "only when the Pod template changes; scaling is not a rollout" }
-  - { k: "Revision", v: "kept as an old ReplicaSet at 0 replicas; undo scales it back up" }
-  - { k: "When a Pod counts", v: "once Ready, and Ready for minReadySeconds" }
-  - { k: "Stuck rollout", v: "reports ProgressDeadlineExceeded; Kubernetes does not undo it", kind: minus }
-  - { k: "Recreate", v: "stops all old Pods first: a short outage, never two versions", kind: minus }
+  - { k: "What starts a rollout", v: "only a change to the Pod template, such as a new image; changing replicas is scaling, not a rollout" }
+  - { k: "maxSurge / maxUnavailable", v: "how many extra Pods may exist, and how many may be down, during the update; both 25% by default", kind: default }
+  - { k: "Readiness gates it", v: "a new Pod counts only once Ready for minReadySeconds, so a version that never gets Ready stops the rollout" }
+  - { k: "Rollback", v: "rollout undo scales the previous ReplicaSet back up; it is kept at 0 replicas, 10 old ones by default", kind: plus }
+  - { k: "Stuck rollout", v: "after 600 s without progress the Deployment reports ProgressDeadlineExceeded; it does not roll back by itself", kind: minus }
 trap:
-  wrong: "kubectl rollout undo also rolls back the database change."
-  right: "Undo restores only the old Pod template. Schema changes stay, so make them backward compatible: expand first, contract later."
-sayIt: "A Deployment makes a new ReplicaSet and moves Pods to it within maxSurge and maxUnavailable, gated by readiness. If it goes wrong, rollout undo scales the old ReplicaSet back up."
+  wrong: "kubectl rollout undo also rolls back the database change that came with the release."
+  right: "Undo restores only the old Pod template. Schema changes and other side effects stay, so make them backward compatible: expand first, contract later."
+  why: "Rollback sounds like the whole release goes back, and in Kubernetes it is one command. But Kubernetes only knows about the Pods, not your database."
+sayIt: "On a template change the Deployment creates a new ReplicaSet and moves Pods over in steps, within maxSurge and maxUnavailable, counting a new Pod only once Ready. If the release is bad, rollout undo scales the old ReplicaSet back up."
+cheat:
+  idea: "A rolling update replaces old Pods with new ones a few at a time, so the service never stops. The old ReplicaSet is kept at 0 Pods, so a rollback is one command."
+  code: |
+    kubectl set image deployment/payment-service payment-service=payment-service:1.5.0
+    kubectl rollout undo deployment/payment-service
+  remember: "Rollback restores Pods only, never the database; a stuck rollout is reported, not undone."
+buildsOn: [deployments-and-replicasets, probes]
+scenarios:
+  - q: "payment-service has 3 replicas and the default 25% settings. During an update, how many Pods can exist, and how many must be available?"
+    a: "At most 4 and at least 3. maxSurge 25% of 3 is 0.75, rounded up to 1 extra Pod. maxUnavailable 25% of 3 is 0.75, rounded down to 0. So Kubernetes adds one new Pod, waits until it is Ready, then removes one old Pod."
+  - q: "Version 1.5.0 crashes on start. You run set image and go to lunch. What do you find when you come back?"
+    a: "Old Pods still serving, because new Pods never became Ready, so the old ones were not removed. After 600 s the Deployment shows ProgressDeadlineExceeded. Nothing rolled back by itself; you run rollout undo or fix forward."
 confusedWith: [rolling-vs-blue-green-vs-canary]
 tags: [rolling-update, rollback, maxsurge, maxunavailable, deployment]
 visual: flow
 sources:
   - title: "Deployments (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "kubectl rollout restart (Kubernetes 1.37 reference)"
     url: "https://kubernetes.io/docs/reference/kubectl/generated/kubectl_rollout/kubectl_rollout_restart/"
     verifiedOn: "2026-10-20"
@@ -31,51 +44,80 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A rolling update is how a [Deployment](card:deployments-and-replicasets) moves to a new version: it replaces old Pods with new ones a few at a time instead of all at once. Each version of the Pod template is a revision, kept as its own ReplicaSet. A rollback is going back to an earlier revision, by scaling its ReplicaSet up again.
+
 ## Why it exists
 
-Stopping every Pod to upgrade means downtime. Replacing a few at a time keeps payment-service serving; old ReplicaSets make going back quick.
+To upgrade payment-service without this, you would stop every 1.4.0 Pod and then start the 1.5.0 Pods. Customers get errors for the whole gap, and if 1.5.0 is broken, nothing serves at all. A rolling update keeps most Pods serving during the change and stops when new Pods do not become Ready. Keeping old ReplicaSets means a bad release is undone in seconds, without rebuilding anything.
 
 ## How it works
 
-<Steps label="payment-service 1.4.0 to 1.5.0, 3 replicas, default 25% settings">
-  <Step title="Work out limits">25% of 3: maxSurge rounds up to 1, maxUnavailable down to 0. At most 4 Pods, at least 3 available.</Step>
-  <Step title="Surge">The new ReplicaSet starts one 1.5.0 Pod.</Step>
-  <Step title="Swap">When it is Ready, the old ReplicaSet stops one 1.4.0 Pod.</Step>
-  <Step title="Repeat">Until 3 new Pods run; the old ReplicaSet stays at 0 as the previous revision.</Step>
-</Steps>
+<Mermaid
+  alt="Rolling update of payment-service from 1.4.0 to 1.5.0 with 3 replicas. The old ReplicaSet goes from 3 Pods to 2, 1 and 0; the new ReplicaSet goes from 1 Pod to 2 and 3. Each step waits until the new Pod is Ready. The old ReplicaSet stays at 0 replicas for rollback."
+  chart={`flowchart LR
+  A["old 3 · new 0"] -- "add 1 new" --> B["old 3 · new 1"]
+  B -- "new Ready: remove 1 old" --> C["old 2 · new 1"]
+  C -- "repeat" --> D["old 0 · new 3"]
+  D -. "rollout undo" .-> A`}
+/>
 
-- Readiness decides when a new Pod counts: see [probes](card:probes).
-- Blue-green and canary need more than a Deployment: see [release strategies](card:release-strategies).
+1. You change the Pod template, for example the image from 1.4.0 to 1.5.0. The Deployment creates a new ReplicaSet with 0 Pods.
+2. It works out its limits. `maxSurge` is how many Pods may run above the replica count; `maxUnavailable` is how many may be missing. With 3 replicas and the 25% defaults they round to 1 and 0: at most 4 Pods, at least 3 available.
+3. The new ReplicaSet starts one 1.5.0 Pod. The Deployment waits until the Pod passes its [readiness probe](card:probes).
+4. The old ReplicaSet then stops one 1.4.0 Pod, and steps 3 and 4 repeat until 3 new Pods run.
+5. The old ReplicaSet stays at 0 replicas as the previous revision. `kubectl rollout undo` scales it back up the same rolling way.
+
+So readiness is the brake: a version that never becomes Ready never replaces the old Pods.
 
 ## Example
+
+You release payment-service 1.5.0, record why, and check the history.
 
 ```bash
 kubectl -n payments set image deployment/payment-service payment-service=payment-service:1.5.0
 kubectl -n payments annotate deployment/payment-service kubernetes.io/change-cause="1.5.0: UPI retry fix"
 kubectl -n payments rollout status deployment/payment-service
 kubectl -n payments rollout history deployment/payment-service
-kubectl -n payments rollout undo deployment/payment-service      # or --to-revision=2
-kubectl -n payments rollout restart deployment/payment-service
+kubectl -n payments rollout undo deployment/payment-service    # or --to-revision=1
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| strategy | RollingUpdate | Deployment, Kubernetes 1.37 |
-| maxSurge / maxUnavailable | 25% / 25% | Deployment, Kubernetes 1.37 |
-| progressDeadlineSeconds / revisionHistoryLimit / minReadySeconds | 600 / 10 / 0 | Deployment, Kubernetes 1.37 |
+- `set image` changes the Pod template, so it starts a new revision. `kubectl scale` would not.
+- The `kubernetes.io/change-cause` annotation is what `rollout history` shows in its CHANGE-CAUSE column. The old `--record` flag for this is deprecated.
+- `rollout status` waits and fails if the rollout passes its progress deadline, so a CI job can stop on a bad release.
+- `rollout undo` does not delete the new ReplicaSet. It makes the old template current again, which gets a new revision number.
+
+## Rules and defaults
+
+- **Strategy:** `RollingUpdate` by default; the other choice is `Recreate`, which stops all old Pods before any new one starts (Kubernetes 1.37).
+- **Surge and unavailable:** both 25% by default. A % `maxSurge` rounds up, a % `maxUnavailable` rounds down, and the two cannot both be 0.
+- **minReadySeconds:** 0 by default. Set it, for example to 10, so a Pod must stay Ready that long before it counts as available.
+- **progressDeadlineSeconds:** 600 by default. When it passes, the Deployment reports `ProgressDeadlineExceeded` and keeps trying; it never rolls back by itself.
+- **revisionHistoryLimit:** 10 old ReplicaSets kept by default. Set it to 0 and you cannot undo.
+- **Restart without a change:** `kubectl rollout restart` rolls all Pods with the same version, for example to reload a changed Secret.
+
+## Not to be confused with
+
+A rolling update mixes old and new Pods behind one Service for a short time. [Blue-green and canary](card:release-strategies) run two separate sets of Pods and move traffic between them. Rule: a rolling update is built into the Deployment; blue-green and canary need a second Deployment and a traffic switch.
+
+## Common mistakes
+
+- **"Scaling the Deployment creates a revision I can roll back."** Only Pod template changes create revisions. Changing `replicas` does not.
+- **"maxUnavailable 0 is always safest."** It never loses capacity, but each step needs room for a surge Pod. On a full cluster the new Pod stays Pending and the rollout stalls.
 
 ## Interview Qs
 
 ### What do maxSurge and maxUnavailable mean with 4 replicas?
 
-With the 25% defaults both become 1: up to 5 Pods, at least 3 available. maxSurge 1 with maxUnavailable 0 never loses capacity, but needs room for one extra Pod.
+With the 25% defaults both become 1: up to 5 Pods may run and at least 3 must be available. `maxSurge: 1` with `maxUnavailable: 0` never drops below 4 available Pods, but needs room for one extra Pod. `maxSurge: 0` with `maxUnavailable: 1` needs no extra room but runs one Pod short.
 
 ### A rollout is stuck. What happens, and what do you do?
 
-After progressDeadlineSeconds it reports ProgressDeadlineExceeded; nothing is rolled back. Check the new Pods' events, then fix forward or run `kubectl rollout undo`.
+The old Pods keep serving, because unready new Pods do not replace them. After `progressDeadlineSeconds` the Deployment reports ProgressDeadlineExceeded, but nothing is rolled back. Check the new Pods' events and logs, then fix forward or run `kubectl rollout undo`.
 
-### When would you choose Recreate?
+### When would you choose Recreate over RollingUpdate?
 
-When two versions must never run together, such as an incompatible schema change. It costs a short outage.
+When two versions must never run at the same time, for example when the new version needs an incompatible schema change, or the app holds a lock only one version may take. The price is a short outage between stopping the old Pods and starting the new ones.

@@ -5,23 +5,35 @@ title: Dockerfile Instructions
 topic: dockerfile
 level: beginner
 heat: 3
-hook: "A Dockerfile is a recipe: some instructions build the image, others store how its containers start."
+hook: "A Dockerfile is a text recipe for one image. docker build runs its steps in order: some add files to the image, others only store how containers start."
 points:
-  - { k: "Build time", v: "FROM, RUN, COPY, ADD and ARG make or prepare the image" }
-  - { k: "Stored for run time", v: "CMD, ENTRYPOINT, EXPOSE, HEALTHCHECK, STOPSIGNAL, VOLUME" }
-  - { k: "Both", v: "ENV, USER and WORKDIR apply to later steps and to containers" }
-  - { k: "FROM first", v: "only ARG (and parser directives) may come before it" }
+  - { k: "FROM comes first", v: "FROM picks the base image; only ARG lines and comments, such as # syntax=, may come before it" }
+  - { k: "Steps that add layers", v: "RUN, COPY and ADD change files in the image, and each one is saved as a new layer" }
+  - { k: "Stored settings", v: "CMD, ENTRYPOINT, EXPOSE, HEALTHCHECK and STOPSIGNAL do nothing during the build; containers use them" }
+  - { k: "Build and run time", v: "ENV, USER and WORKDIR apply to the later build steps and also to every container from the image" }
+  - { k: "No tag on FROM", v: "FROM eclipse-temurin with no tag means latest, which can point to a different image later", kind: minus }
+  - { k: "Not a compiler", v: "docker build only runs your steps; it compiles Java only if a RUN step calls Maven", kind: minus }
 trap:
   wrong: "docker build compiles my Java code."
-  right: "It only runs the Dockerfile steps. COPY target/*.jar needs mvn package first, or a build stage that runs it."
-sayIt: "A Dockerfile lists the steps to build an image: FROM a base, COPY the jar, RUN setup, then ENTRYPOINT and CMD for start-up. docker build -t name:tag . runs it, with the folder as the context."
+  right: "It runs only your steps. COPY target/*.jar needs mvn package first, or a build stage that runs Maven."
+  why: "Maven and Gradle compile, test and package in one command, so people expect docker build to do the same. A Dockerfile copies only files that already exist."
+sayIt: "A Dockerfile lists the steps to build one image: FROM a base, COPY the jar, RUN any setup, then ENTRYPOINT and CMD for start-up. docker build -t payment-service:1.4.0 . runs it; the dot is the build context."
+cheat:
+  idea: "A Dockerfile is a text recipe for one image. docker build runs it top to bottom: FROM picks a base, COPY and RUN add layers, and ENTRYPOINT or CMD store what containers run."
+  remember: "docker build does not compile: build the jar first, or let a RUN step call Maven."
+buildsOn: [images-and-layers]
+scenarios:
+  - q: "You add ENV SPRING_PROFILES_ACTIVE=prod to the payment-service Dockerfile. Does the running container see this variable?"
+    a: "Yes. ENV is saved in the image's configuration, so every container from the image has it, and docker run --env can override it. An ARG would not reach the container: it exists only during the build."
+  - q: "CI clones the repo and runs docker build at once. The Dockerfile has COPY target/payment-service-1.4.0.jar app.jar. What happens?"
+    a: "The build fails at the COPY step, because target/ is empty: nobody ran Maven. Run ./mvnw package before docker build, or move the Maven build into the Dockerfile with a build stage."
 confusedWith: [copy-vs-add, arg-vs-env, dockerfile-vs-compose-file]
 tags: [dockerfile, instructions, docker-build]
 visual: table
 sources:
   - title: "Dockerfile reference (Docker Docs)"
     url: "https://docs.docker.com/reference/dockerfile/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Building best practices (Docker Docs)"
     url: "https://docs.docker.com/build/building/best-practices/"
     verifiedOn: "2026-10-20"
@@ -30,31 +42,42 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A Dockerfile is a plain text file that lists, in order, the steps to build an [image](card:images-and-layers). Each line starts with an instruction, a keyword such as `FROM` or `COPY`, followed by its arguments. `docker build` reads the file from top to bottom. Some instructions add files, and each of those becomes a layer; the others are saved as settings that a container reads when it starts.
+
 ## Why it exists
 
-An image built by hand cannot be repeated or reviewed. A Dockerfile writes the steps down, so anyone can rebuild the same image with one command.
+Without a Dockerfile you would start a container, install Java by hand, copy the jar in and save the result with `docker commit`. Nobody could see how that image was made, and the next build would differ. A Dockerfile writes every step down, so the image can be rebuilt with one command, reviewed like code and kept in Git.
 
 ## How it works
 
-| Instruction | What it does |
-|---|---|
-| `FROM` | Picks the base image and starts a stage |
-| `WORKDIR` | Sets the folder for later steps; created if missing |
-| `COPY`, `ADD` | Put files in the image: [COPY vs ADD](compare:copy-vs-add) |
-| `RUN` | Runs a command; the result becomes a layer |
-| `ARG`, `ENV` | Variables: [ARG vs ENV](compare:arg-vs-env) |
-| `LABEL` | Adds key-value metadata |
-| `EXPOSE` | Documents a port: [port mapping](card:port-mapping) |
-| `USER` | User for later steps and the container: [image security](card:image-security) |
-| `VOLUME` | Marks a mount point: [volumes](card:volumes-and-mounts) |
-| `HEALTHCHECK` | A command that tests health: [health checks](card:container-health-checks) |
-| `STOPSIGNAL` | The signal docker stop sends: [shutdown](card:signals-and-graceful-shutdown) |
-| `CMD`, `ENTRYPOINT` | What the container runs: [RUN vs CMD vs ENTRYPOINT](card:run-cmd-entrypoint) |
+| Instruction | When it acts | What it does |
+|---|---|---|
+| `FROM` | Build | Picks the base image to start from |
+| `RUN` | Build | Runs a command; the changed files become a layer |
+| `COPY`, `ADD` | Build | Put files into the image as a layer |
+| `ARG` | Build | A variable that exists only during the build |
+| `WORKDIR` | Build and run | Sets the folder for later steps and for the container; created if missing |
+| `ENV` | Build and run | Sets an environment variable that later steps and containers see |
+| `USER` | Build and run | Sets the user for later `RUN` steps and for the container's program |
+| `LABEL` | Stored | Adds key-value metadata, such as a version |
+| `EXPOSE` | Stored | Documents the port the app listens on; it does not open it |
+| `VOLUME` | Stored | Marks a folder whose data should live outside the container |
+| `CMD`, `ENTRYPOINT` | Stored | The program and arguments a container runs |
+| `HEALTHCHECK`, `STOPSIGNAL` | Stored | How Docker checks health and which signal stops the container |
 
-- `# syntax=docker/dockerfile:1` on line 1 makes BuildKit use the latest stable Dockerfile syntax.
-- The final `.` in `docker build` is the [build context](card:docker-build-context).
+1. You run `docker build -t payment-service:1.4.0 .`. The `-t` flag names the image, and the final `.` is the build context, the folder whose files the build may read (more in [build context and cache](card:build-cache)).
+2. `FROM` loads the layers of the base image, here a Java runtime.
+3. Each `RUN`, `COPY` or `ADD` runs in order and saves its file changes as a new layer on top.
+4. Settings such as `ENV`, `EXPOSE` and `ENTRYPOINT` are written into the image's configuration. Nothing runs for them.
+5. Later, `docker run` reads that configuration to decide which program to start, as which user and in which folder.
+
+You will meet `EXPOSE` again in [publishing ports](card:port-mapping), `VOLUME` in [volumes and mounts](card:volumes-and-mounts), `HEALTHCHECK` in [health checks](card:container-health-checks) and `USER` in [secure images](card:image-security).
 
 ## Example
+
+The payment service is already packaged by Maven. This Dockerfile wraps its jar in a Java 25 runtime image.
 
 ```dockerfile
 # syntax=docker/dockerfile:1
@@ -71,16 +94,35 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 docker build -t payment-service:1.4.0 .
 ```
 
+What to notice:
+
+- `eclipse-temurin:25-jre` has a Java runtime but no compiler. That is enough, because the jar was built before `docker build` ran.
+- `COPY` writes to `app.jar` inside `/app`, because a relative destination is taken from `WORKDIR`. Remove `WORKDIR` and the jar lands in the base image's folder, which is `/` for `eclipse-temurin`.
+- `EXPOSE 8080` and `ENTRYPOINT` add no files. They are notes in the image that `docker run` reads later.
+- If you skip `./mvnw package`, the build stops at `COPY` because `target/` has no jar.
+
+## Rules and defaults
+
+- **FROM first:** a Dockerfile must start with `FROM`. Only `ARG` lines, comments and parser directives, such as the syntax line below, may come before it.
+- **Missing tag:** with no tag or digest, `FROM` uses `latest`. Pin a version such as `25-jre`; [registries](card:registries) explains tags and digests.
+- **WORKDIR:** created if it does not exist. Without one, the folder is `/` or whatever the base image set.
+- **Syntax line:** `# syntax=docker/dockerfile:1` on the first line makes BuildKit use the latest stable 1.x Dockerfile syntax.
+- **USER:** applies to the rest of the stage, so put it after the steps that need root, such as installing packages.
+
+## Not to be confused with
+
+`COPY` copies files from the build context; `ADD` can also download URLs, clone Git repositories and unpack local tar archives. Rule: use `COPY` unless you need one of `ADD`'s extras. `ARG` is a variable only during the build; `ENV` is stored in the image and every container sees it. Rule: `ARG` for build choices, `ENV` for app settings. A Dockerfile builds one image; a `compose.yaml` runs several containers together, as you will see in [Docker Compose](card:docker-compose).
+
 ## Interview Qs
 
-### What is a Dockerfile, and how do you build it?
+### What is a Dockerfile, and how do you build an image from it?
 
-A text file of instructions that produces an image. `docker build -t payment-service:1.4.0 .` runs it, sending the current folder as the build context.
+A text file of instructions that produces an image: a base with `FROM`, files with `COPY` and `RUN`, and start-up settings with `ENTRYPOINT` and `CMD`. `docker build -t payment-service:1.4.0 .` runs it, sending the current folder as the build context.
 
-### Which instructions run at build time?
+### Which instructions run at build time, and which only matter at start?
 
-FROM, RUN, COPY, ADD and ARG work during the build. CMD, ENTRYPOINT, EXPOSE and HEALTHCHECK are only stored as settings for containers. ENV and USER affect both.
+`FROM`, `RUN`, `COPY`, `ADD` and `ARG` act during the build. `CMD`, `ENTRYPOINT`, `EXPOSE` and `HEALTHCHECK` are only stored for containers. `ENV`, `USER` and `WORKDIR` affect both.
 
-### Why should WORKDIR be set explicitly?
+### Your COPY of target/app.jar fails during docker build. What do you check?
 
-Without it, the default is `/` or whatever the base image chose. Setting it avoids running steps in an unknown folder.
+First, that the jar exists: `docker build` does not run Maven, so run `./mvnw package` first. Second, that the file sits inside the build context and is not excluded by `.dockerignore`. A [multi-stage build](card:multi-stage-builds), later in this topic, removes the problem by building the jar inside the Dockerfile.

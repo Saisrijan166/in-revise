@@ -5,54 +5,75 @@ title: Deployments and ReplicaSets
 topic: workloads
 level: beginner
 heat: 3
-hook: "A Deployment owns ReplicaSets, and a ReplicaSet keeps N identical Pods running. You only ever edit the Deployment."
+hook: "A Deployment says \"keep 3 copies of this Pod and update them safely\". It creates a ReplicaSet, and the ReplicaSet keeps exactly 3 matching Pods alive."
 points:
-  - { k: "replicas", v: "the desired Pod count; 1 if unset", kind: default }
-  - { k: "Self-healing", v: "a Pod dies, the ReplicaSet creates a new one to match the count", kind: plus }
-  - { k: "Template change", v: "new ReplicaSet and new revision; old Pods replaced gradually" }
-  - { k: "Scaling", v: "changes only the count: no new ReplicaSet, no new revision" }
-  - { k: "Selector", v: "must match the template labels; fixed after creation", kind: minus }
+  - { k: "replicas (1.37)", v: "the number of Pods you want; it is 1 if you leave it out", kind: default }
+  - { k: "Self-healing", v: "when a Pod dies, its ReplicaSet sees one too few and creates a new Pod to match the count", kind: plus }
+  - { k: "Template change", v: "a new image or setting in the Pod template creates a new ReplicaSet and replaces Pods gradually" }
+  - { k: "Scaling", v: "changing only replicas resizes the current ReplicaSet; no new ReplicaSet, no new revision" }
+  - { k: "Old ReplicaSets (1.37)", v: "kept at 0 Pods for rollback; revisionHistoryLimit keeps 10 by default", kind: default }
+  - { k: "Selector", v: "must match the Pod template's labels and cannot be changed after the Deployment is created", kind: minus }
 trap:
   wrong: "Scale or edit the ReplicaSet to change the app."
-  right: "Edit the Deployment. It owns its ReplicaSets and sets their size; the docs say not to manage them directly."
-sayIt: "A Deployment manages ReplicaSets, and each ReplicaSet keeps the desired number of identical Pods. Changing the Pod template creates a new ReplicaSet and rolls Pods over; scaling just changes the count."
-confusedWith: [deployment-vs-service]
+  right: "Edit the Deployment. It owns its ReplicaSets and sets their size, so it undoes your change; the docs say not to manage them directly."
+  why: "kubectl get rs lists the ReplicaSet next to the Pods, and it has a replicas field of its own, so editing it looks like the direct route."
+sayIt: "A Deployment manages ReplicaSets, and each ReplicaSet keeps the desired number of identical Pods running. Changing the Pod template creates a new ReplicaSet and rolls Pods over to it; scaling only changes the count. Old ReplicaSets stay at zero for rollback."
+cheat:
+  idea: "A Deployment runs N identical copies of a stateless app. Its ReplicaSet keeps exactly N matching Pods alive and replaces any that die."
+  flow: "Deployment → ReplicaSet (one per template version) → Pods"
+  remember: "A template change makes a new ReplicaSet and a rollout; changing only replicas just resizes."
+buildsOn: [pods, namespaces-labels-selectors]
+scenarios:
+  - q: "You run kubectl scale deployment payment-service --replicas=5 -n payments. Then you change the image from 1.4.0 to 1.5.0. How many ReplicaSets does the Deployment have afterwards, and how many Pods does each run?"
+    a: "Two. Scaling only resized the first ReplicaSet to 5. The image change created a second ReplicaSet, which ends with 5 Pods, while the old one is scaled to 0 and kept for rollback."
+  - q: "Someone deletes one of the three payment-service Pods by hand. What happens, and who does it?"
+    a: "The ReplicaSet controller sees 2 Pods where 3 are wanted and creates a new Pod from the template. It gets a new random name and usually a new IP. The Deployment itself does nothing here; keeping the count is the ReplicaSet's job."
+confusedWith: [deployment-vs-replicaset, deployment-vs-service]
 tags: [deployment, replicaset, replicas, self-healing]
 visual: flow
 sources:
   - title: "Deployments (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "ReplicaSet (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/replicaset/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Pod Topology Spread Constraints: built-in defaults (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A Deployment is the object you use to run a stateless app, such as payment-service, as several identical Pods. It holds a Pod template (the Pod spec to copy) and a replica count. A ReplicaSet is the [controller](card:what-is-kubernetes) object underneath: it keeps exactly that many Pods matching its label selector alive. You write the Deployment; the Deployment creates and resizes the ReplicaSets for you.
+
 ## Why it exists
 
-Stateless apps need N identical copies that come back when one dies and can be upgraded without downtime. ReplicaSets keep the count; Deployments add versioned updates.
+A bare [Pod](card:pods) that dies stays dead, and changing its image means deleting it and creating a new one, with downtime. You want three copies that come back on their own, and upgrades that swap old Pods for new ones a few at a time. The ReplicaSet solves the first problem by counting Pods. The Deployment solves the second by creating a new ReplicaSet for each new version and moving Pods across gradually, keeping the old one for rollback.
 
 ## How it works
 
 <Mermaid
   alt="The payment-service Deployment owns two ReplicaSets. The new ReplicaSet, for image 1.4.0, runs three Pods. The old ReplicaSet, for image 1.3.0, is scaled to zero and kept for rollback."
   chart={`flowchart LR
-  D[Deployment payment-service] --> N[ReplicaSet 1.4.0]
-  D -. "kept, scaled to 0" .-> O[ReplicaSet 1.3.0]
+  D[Deployment payment-service] --> N[ReplicaSet for 1.4.0]
+  D -. "kept, scaled to 0" .-> O[ReplicaSet for 1.3.0]
   N --> P1[Pod]
   N --> P2[Pod]
   N --> P3[Pod]`}
 />
 
-<Compare id="deployment-vs-replicaset" />
+1. You apply the Deployment with `replicas: 3` and a Pod template.
+2. The Deployment controller creates a ReplicaSet named after the Deployment plus a hash of the template, such as `payment-service-56d69c59b6`.
+3. The ReplicaSet creates 3 Pods from the template. It finds its Pods by their labels.
+4. A Pod dies. The ReplicaSet counts 2 of 3 and creates a new Pod.
+5. You change the image in the template. The Deployment creates a second ReplicaSet, scales it up while it scales the old one down, and leaves the old one at 0 Pods for rollback.
 
-- Rollout settings and undo: [Rolling Updates and Rollbacks](card:rolling-updates-rollbacks).
-- 3 replicas are not 3 nodes: by default the scheduler only prefers to spread them. See [Scheduling](card:scheduling).
+So the key is: the ReplicaSet keeps the count, and the Deployment manages versions.
 
 ## Example
+
+The payment-service Deployment in the `payments` namespace:
 
 ```yaml
 apiVersion: apps/v1
@@ -62,7 +83,7 @@ spec:
   replicas: 3
   selector:
     matchLabels: { app: payment-service }
-  template:                                # Pod template: change it to roll out
+  template:                                # Pod template: a change here starts a rollout
     metadata:
       labels: { app: payment-service }     # must match the selector
     spec:
@@ -72,16 +93,52 @@ spec:
           ports: [{ containerPort: 8080 }]
 ```
 
+After `kubectl apply`, list what the Deployment created:
+
+```bash
+kubectl get rs,pods -n payments
+```
+
+```text output
+NAME                                         DESIRED   CURRENT   READY   AGE
+replicaset.apps/payment-service-56d69c59b6   3         3         3       3s
+
+NAME                                   READY   STATUS    RESTARTS   AGE
+pod/payment-service-56d69c59b6-6zkbg   1/1     Running   0          3s
+pod/payment-service-56d69c59b6-8tkt5   1/1     Running   0          3s
+pod/payment-service-56d69c59b6-lk9lx   1/1     Running   0          3s
+```
+
+What to notice:
+
+- `selector.matchLabels` and the template's `labels` must agree; if they do not, the API server rejects the Deployment.
+- The ReplicaSet is named after the Deployment plus a hash of the template (`56d69c59b6`), and each Pod adds a random suffix. Change anything in `template`, such as the image tag, and a second ReplicaSet with a new hash appears.
+- `replicas: 3` is the only number you manage. Change it with `kubectl scale` and the current ReplicaSet just adds or removes Pods.
+
+## Rules and defaults
+
+- **replicas:** 1 if you leave it out (Kubernetes 1.37). An autoscaler can change it for you; see [Autoscaling](card:autoscaling).
+- **Selector:** required in `apps/v1`, must match the template labels, and is immutable after creation. To change it, create a new Deployment.
+- **What starts a rollout:** only a change to `.spec.template`. Scaling never creates a revision.
+- **History:** `revisionHistoryLimit` keeps 10 old ReplicaSets by default. Delete one and you can no longer roll back to that revision.
+- **restartPolicy:** a Deployment's Pod template allows only `Always`.
+- **Do not edit owned ReplicaSets:** the Deployment controller resets them. How the swap happens and how to undo it is in [Rolling Updates and Rollbacks](card:rolling-updates-rollbacks).
+- **Replicas are not machines:** 3 replicas can land on one node; the scheduler only prefers to spread them unless you add rules (see [Scheduling](card:scheduling)).
+
+## Not to be confused with
+
+A ReplicaSet only keeps N matching Pods running; it does not update Pods that already exist when its template changes. A Deployment sits on top and adds versions: a new ReplicaSet per template change, a gradual swap, and rollback. A [Service](card:services), which you will meet next, does not run anything; it gives the Pods one stable address. Rule: Deployment = what runs and how it updates; ReplicaSet = how many; Service = how to reach them.
+
 ## Interview Qs
 
 ### Which resource keeps a desired number of replicas running?
 
-A ReplicaSet does the counting, but you create a Deployment, which manages the ReplicaSet and adds rolling updates and rollbacks.
+A ReplicaSet does the counting: it compares running Pods with the wanted number and creates or deletes Pods. In practice you create a Deployment, which manages the ReplicaSet and adds rolling updates and rollbacks.
 
 ### Why use a Deployment instead of a ReplicaSet directly?
 
-A ReplicaSet does not update existing Pods when its template changes. A Deployment makes a new ReplicaSet per template change, moves Pods over gradually and keeps old ReplicaSets for rollback.
+A ReplicaSet does not update Pods that already exist when its template changes, and it keeps no history. A Deployment creates a new ReplicaSet per template change, moves Pods over gradually and keeps old ReplicaSets so you can roll back.
 
-### What does `kubectl scale deployment payment-service --replicas=5` change?
+### What does kubectl scale deployment payment-service --replicas=5 change?
 
-Only the desired count: the current ReplicaSet adds two Pods. No new ReplicaSet or revision is made, because the Pod template did not change.
+Only the desired count. The current ReplicaSet creates two more Pods from the same template. No new ReplicaSet or revision is made, because the Pod template did not change.

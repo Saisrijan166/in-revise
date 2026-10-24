@@ -5,79 +5,133 @@ title: Volumes, Bind Mounts and tmpfs
 topic: networking-storage
 level: beginner
 heat: 3
-hook: "Container files die with docker rm: keep data in a volume, share host files with a bind mount, keep temp data in tmpfs."
+hook: "Files written inside a container are deleted with docker rm. Keep data in a volume, share host files with a bind mount, and keep throwaway data in tmpfs."
 points:
-  - { k: "Writable layer", v: "deleted together with the container on docker rm", kind: minus }
-  - { k: "Named volume", v: "outlives the container; reuse it by name, delete it on purpose" }
-  - { k: "docker rm -v or --rm", v: "remove anonymous volumes only, never named ones" }
-  - { k: "docker volume prune", v: "unused anonymous volumes only; -a adds named ones (since Engine 23.0)", kind: default }
-  - { k: "VOLUME in a Dockerfile", v: "run with no mount there and Docker makes an anonymous volume" }
+  - { k: "Writable layer", v: "files a container writes there are deleted together with the container on docker rm", kind: minus }
+  - { k: "Named volume", v: "storage that Docker manages; it outlives the container and you reuse it by its name" }
+  - { k: "docker rm -v or --rm", v: "they delete the container's anonymous volumes only; named volumes are never removed this way" }
+  - { k: "docker volume prune", v: "removes unused anonymous volumes only; add -a for unused named ones (Docker Engine 23.0+)", kind: default }
+  - { k: "Mounting over a folder", v: "hides the image's files at that path; an empty volume is first filled with them" }
+  - { k: "VOLUME in the image", v: "run with no mount at that path and Docker creates an anonymous volume there" }
 trap:
   wrong: "The database files live safely in the container, so I can remove it and run the new image."
-  right: "docker rm deletes the writable layer. Put the data directory on a named volume; then replace the container freely."
-sayIt: "Containers are disposable, so I keep state in a named volume managed by Docker. Bind mounts are for sharing host files like source code; tmpfs keeps temporary data in memory only."
-confusedWith: []
+  right: "docker rm deletes the container's writable layer. Put the data directory on a named volume; then you can replace the container freely."
+  why: "Data survives docker stop and docker start, so the container feels like a small server. Only removal deletes the writable layer, and an upgrade needs a removal."
+sayIt: "Containers are disposable, so I keep state in a named volume that Docker manages. Bind mounts are for sharing host files such as source code in development, and tmpfs keeps temporary data in memory only."
+cheat:
+  idea: "A mount puts outside storage at a path inside a container. A volume is managed by Docker, a bind mount is a host folder, and tmpfs lives in memory."
+  remember: "docker rm deletes the writable layer but keeps named volumes: put database data on a named volume."
+buildsOn: [images-and-layers, container-lifecycle]
+scenarios:
+  - q: "You run postgres:18 without any -v, create tables, then docker rm -f the container and start a new one. Are the tables there?"
+    a: "No. The image declares a VOLUME, so Docker created an anonymous volume with a random name. The new container gets a new anonymous volume, so it starts empty. The old one is left unattached unless --rm or -v removed it."
+  - q: "Which mount do you use for the payment database, for application.yaml you edit on your laptop, and for scratch files you never want on disk?"
+    a: "A named volume for the database, because Docker manages it and it outlives containers. A bind mount for the config, because the host's file appears inside directly. tmpfs for scratch files, because it lives in memory and is gone when the container stops."
+  - q: "You bind-mount an empty host folder onto /app in a container whose image has the app's jar in /app. The app fails to start. Why?"
+    a: "A mount hides whatever the image had at that path. The container now sees the empty host folder at /app, so the jar is gone. Mount a different path."
+confusedWith: [volume-vs-bind-mount-vs-tmpfs]
 tags: [volumes, storage]
-visual: table
+visual: flow
 sources:
   - title: "Volumes (Docker Engine docs)"
     url: "https://docs.docker.com/engine/storage/volumes/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Bind mounts (Docker Engine docs)"
+    url: "https://docs.docker.com/engine/storage/bind-mounts/"
+    verifiedOn: "2026-10-21"
+  - title: "tmpfs mounts (Docker Engine docs)"
+    url: "https://docs.docker.com/engine/storage/tmpfs/"
+    verifiedOn: "2026-10-21"
   - title: "docker volume prune (Docker CLI reference)"
     url: "https://docs.docker.com/reference/cli/docker/volume/prune/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "docker container run: --rm, --mount and -v (Docker CLI reference)"
+    url: "https://docs.docker.com/reference/cli/docker/container/run/"
+    verifiedOn: "2026-10-21"
   - title: "postgres official image (Docker Hub)"
     url: "https://hub.docker.com/_/postgres"
     verifiedOn: "2026-10-20"
-  - title: "docker container rm (Docker CLI reference)"
-    url: "https://docs.docker.com/reference/cli/docker/container/rm/"
-    verifiedOn: "2026-10-20"
-  - title: "Bind mounts (Docker Engine docs)"
-    url: "https://docs.docker.com/engine/storage/bind-mounts/"
-    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+A mount puts storage from outside the container at a folder inside it. Docker has three kinds. A volume is storage that Docker creates and manages on the host. A bind mount is an existing host file or folder that appears inside the container as it is. A tmpfs mount is a folder kept only in the host's memory.
 
 ## Why it exists
 
-A container's files sit in a writable layer deleted with the container. Databases and uploads need storage that outlives it.
+As [images and layers](card:images-and-layers) showed, a container writes its files into its own writable layer, and `docker rm` deletes that layer. A PostgreSQL container for the payment service would lose every payment when you replace it with a newer image. Mounting a volume on the database's data folder sends those writes outside the container. The container becomes disposable, and the data stays.
 
 ## How it works
 
-<Compare id="volume-vs-bind-mount-vs-tmpfs" />
+<Mermaid
+  alt="Upgrading the database. Container 1 writes to the named volume pgdata. You remove container 1; pgdata stays. Container 2, from a newer image, mounts the same pgdata and sees all the data."
+  chart={`flowchart LR
+  C1[postgres container 1] -- "1. writes data" --> V[(volume pgdata)]
+  C1 -. "2. docker rm: layer deleted" .-> X[gone]
+  C2[postgres container 2] -- "3. mounts the same volume" --> V`}
+/>
 
-- An empty volume mounted on a non-empty image folder is first filled with the image's files.
-- A bind mount, or a non-empty volume, hides the image's files at that path.
-- `--mount type=volume,src=pgdata,dst=/data` is preferred: explicit, every option; `-v` is shorter.
+1. You create a named volume, `pgdata`. Docker keeps it in its own storage area on the host.
+2. You start PostgreSQL with `-v pgdata:/var/lib/postgresql`. Writes to that folder go into the volume, not into the writable layer.
+3. You remove the container with `docker rm`. Its writable layer is deleted; the volume is untouched.
+4. A new container mounts the same volume and sees all the data.
+
+So the key is: what lives in a mount survives the container; what lives in the writable layer does not.
 
 ## Example
 
+The payment database keeps a table after its container is removed and recreated.
+
 ```bash
 docker volume create pgdata
-# postgres 18+: mount the parent folder, not /var/lib/postgresql/data
-docker run -d --name postgres --network payments-net --env-file pg.env \
+docker run -d --name postgres -e POSTGRES_PASSWORD=dev-only \
   -v pgdata:/var/lib/postgresql postgres:18
-docker rm -f postgres            # pgdata is kept
-docker volume inspect pgdata     # Mountpoint: /var/lib/docker/volumes/pgdata/_data
+sleep 5                                # let PostgreSQL start
+docker exec postgres psql -U postgres -c "CREATE TABLE payments(id int)"
+
+docker rm -f postgres                  # container and writable layer gone
+docker run -d --name postgres -e POSTGRES_PASSWORD=dev-only \
+  -v pgdata:/var/lib/postgresql postgres:18
+sleep 5
+docker exec postgres psql -U postgres -c "\dt"   # payments is still listed
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| `docker volume prune` | Removes unused anonymous volumes; `-a` for named | Since Engine 23.0 |
-| Empty volume over image files | Files are copied in; `volume-nocopy` stops it | Docker Engine 29 |
-| postgres data mount | `/var/lib/postgresql` (18+); `/var/lib/postgresql/data` (17 and below) | postgres official image |
+- `-v pgdata:/var/lib/postgresql` means "volume name : path in the container". The second container uses the same name, so it gets the same data.
+- `postgres:18` keeps its data under `/var/lib/postgresql`; images up to 17 used `/var/lib/postgresql/data`. Mount the path your image version uses.
+- Without `-v`, the image's VOLUME instruction makes Docker create an anonymous volume with a random name, and the second container would start empty.
+- `docker volume inspect pgdata` shows where the data lives: `/var/lib/docker/volumes/pgdata/_data` on Linux.
+
+## Rules and defaults
+
+- **Survives removal:** `docker rm` never removes a named volume, and removing an image does not touch volumes. You delete a named volume on purpose with `docker volume rm`.
+- **Anonymous volumes:** `docker rm -v` and containers started with `--rm` remove their anonymous volumes. Otherwise anonymous volumes stay behind, unattached.
+- **Prune:** `docker volume prune` removes unused anonymous volumes; `-a` also removes unused named ones (API 1.42+, Docker Engine 23.0).
+- **Hiding:** a mount hides the image's files at that path while it is mounted. An empty volume is first filled with those files; `volume-nocopy` stops that. A bind mount always hides them.
+- **Syntax:** `-v` is short; `--mount type=volume,src=pgdata,dst=/var/lib/postgresql` is more explicit and is the form Docker recommends. Add `ro` (or `readonly`) to make a mount read-only.
+- **Bind mount writes:** by default the container can change the host's files through a bind mount.
+- **tmpfs:** Linux only, cannot be shared between containers, removed when the container stops. Its size limit is half of the host's RAM unless you set one, and its data can be swapped to disk.
+
+## Not to be confused with
+
+A volume lives in Docker's own storage area and is managed with `docker volume` commands. A bind mount is a host path you choose, so it depends on that host's folder layout. A tmpfs mount is memory that disappears when the container stops. Rule: volume for data, bind mount for host files in development, tmpfs for scratch data.
+
+## Common mistakes
+
+- **Running `docker volume prune -a` casually.** It deletes every named volume that no container uses, such as the database volume while its container is removed for an upgrade, and the data with it.
+- **Editing files under `/var/lib/docker/volumes` by hand.** Work with volume data through a container, or back it up with a container that mounts the volume.
 
 ## Interview Qs
 
 ### How do you upgrade a database container without losing data?
 
-Keep the data directory on a named volume. Remove the old container and run the new image with the same volume.
-
-### Where are Docker volumes stored?
-
-On Linux under `/var/lib/docker/volumes/<name>/_data`. Use them through containers, not by editing those files.
+Keep the database's data folder on a named volume. Remove the old container and start the new image with the same volume at the same path. The writable layer is thrown away, but the data was never in it.
 
 ### Volume or bind mount for a Spring Boot app in development?
 
-Bind-mount the source or config you edit on the host; use a named volume for the database. Bind mounts tie the container to the host's folder layout.
+A bind mount for the source code or configuration you edit on the host, so changes appear inside at once. A named volume for the database, because Docker manages it and it does not depend on any host folder. Bind mounts tie the container to one machine's folder layout.
+
+### What happens to the image's files when you mount over a folder?
+
+They are hidden while the mount is active. A bind mount or a non-empty volume shows only its own content. An empty volume is first filled with the image's files, which is how a fresh volume gets defaults from the image.

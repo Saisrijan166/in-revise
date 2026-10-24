@@ -5,26 +5,38 @@ title: "Kubernetes and Docker: CRI and Runtimes"
 topic: basics
 level: beginner
 heat: 2
-hook: "Docker builds images and runs containers on one host; Kubernetes runs them across a cluster through any CRI runtime."
+hook: "Docker builds the image; Kubernetes runs it across the cluster. On each node the kubelet asks a runtime such as containerd to run it, through a standard API called CRI."
 points:
-  - { k: "CRI", v: "the gRPC API the kubelet uses to drive a container runtime" }
-  - { k: "Runtimes", v: "containerd and CRI-O; each calls an OCI runtime such as runc" }
-  - { k: "dockershim", v: "removed in Kubernetes 1.24; Docker Engine needs cri-dockerd", kind: minus }
-  - { k: "Images", v: "anything docker build makes runs on every CRI runtime", kind: plus }
+  - { k: "CRI", v: "the standard gRPC API the kubelet uses to tell a container runtime to pull images and run containers" }
+  - { k: "Common runtimes", v: "containerd and CRI-O; each hands the actual start to a low-level OCI runtime such as runc" }
+  - { k: "dockershim", v: "the old built-in Docker adapter, removed in Kubernetes 1.24", kind: minus }
+  - { k: "Docker Engine on nodes", v: "still possible, but only through the separate cri-dockerd adapter", kind: minus }
+  - { k: "Images", v: "an image made by docker build is a standard OCI image, so every CRI runtime can run it", kind: plus }
 trap:
-  wrong: "Kubernetes dropped Docker, so images built with Docker no longer work."
-  right: "Only dockershim, the runtime adapter, went in 1.24. Docker-built images follow the OCI format and run on containerd or CRI-O."
-sayIt: "Docker packages and runs containers; Kubernetes orchestrates them across nodes. Since 1.24 the kubelet talks to a CRI runtime such as containerd, and images built with Docker still run unchanged."
+  wrong: "Kubernetes dropped Docker, so images built with Docker no longer run on it."
+  right: "Only dockershim, the adapter for running Docker Engine on nodes, went in 1.24. Docker-built images are OCI images and run on containerd or CRI-O."
+  why: "News in 2020 said Kubernetes was deprecating Docker. Most people use one word, Docker, for both the build tool and the engine, so it sounded like their images were affected."
+sayIt: "Docker packages and runs containers on one host; Kubernetes orchestrates them across nodes. Since 1.24 the kubelet talks only to CRI runtimes such as containerd or CRI-O, and images built with Docker still run unchanged because they are OCI images."
+cheat:
+  idea: "Docker builds images and runs containers on one host. Kubernetes runs them across nodes, asking each node's runtime, containerd or CRI-O, through the CRI API."
+  flow: "kubelet → CRI → containerd or CRI-O → runc → container"
+  remember: "dockershim left in 1.24, but Docker-built images still run: they are standard OCI images."
+buildsOn: [kubernetes-architecture]
+scenarios:
+  - q: "Your team upgrades a self-managed cluster to 1.24 while the nodes still use Docker Engine as their runtime. What breaks, and what are the two ways out?"
+    a: "The kubelet can no longer use Docker Engine, because its built-in adapter, dockershim, was removed in 1.24. Either move the nodes to containerd or CRI-O, or install the cri-dockerd adapter to keep Docker Engine."
+  - q: "Developers build with Docker on their laptops; production nodes run containerd. Must you rebuild the payment-service image for production?"
+    a: "No. docker build produces an OCI image, and containerd pulls and runs OCI images. The same image, with the same tag, runs in both places."
 confusedWith: []
 tags: [docker, cri, containerd, cri-o, dockershim, compose]
-visual: table
+visual: flow
 sources:
-  - title: "Container Runtime Interface (Kubernetes docs)"
+  - title: "Container Runtime Interface: gRPC, stable since 1.23, v1 required since 1.26 (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/architecture/cri/"
-    verifiedOn: "2026-10-20"
-  - title: "Container Runtimes (Kubernetes 1.37 docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Container Runtimes: containerd, CRI-O, Docker Engine with cri-dockerd (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/setup/production-environment/container-runtimes/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Updated: Dockershim Removal FAQ (Kubernetes blog)"
     url: "https://kubernetes.io/blog/2022/02/17/dockershim-faq/"
     verifiedOn: "2026-10-20"
@@ -36,37 +48,79 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The Container Runtime Interface (CRI) is the standard API through which Kubernetes runs the containers you build with Docker. Docker is a tool that builds images and runs containers on one machine, but Kubernetes never builds images. On each node, the [kubelet](card:kubernetes-architecture) asks a container runtime, the program that actually runs containers, to pull the image and start it. Because the request goes through CRI, any runtime that implements CRI works.
+
 ## Why it exists
 
-People mix up the tool that builds containers with the system that runs them at scale. Kubernetes needs only a runtime that speaks CRI on each node.
+Early Kubernetes talked to Docker Engine through a built-in adapter called dockershim. That tied Kubernetes to one product and added a needless layer, because Docker Engine itself runs containers through containerd. With CRI, the kubelet speaks one API to any runtime, so Kubernetes removed dockershim in version 1.24. Your images did not change: Docker builds them in the standard OCI image format, which every runtime can run.
 
 ## How it works
 
-<Compare id="docker-vs-compose-vs-kubernetes" />
+<Mermaid
+  alt="From build to running container. On a laptop or CI server, docker build makes the image and docker push stores it in a registry. On a node, the kubelet calls the container runtime, containerd or CRI-O, through CRI. The runtime pulls the image from the registry and asks runc to start the container."
+  chart={`flowchart LR
+  B["docker build + push"] --> REG[(Registry)]
+  KL[kubelet] -- CRI --> RT["containerd or CRI-O"]
+  REG -- "pull image" --> RT
+  RT --> RC[runc] --> C[Container]`}
+/>
 
-- On a node: kubelet → CRI → containerd or CRI-O → an OCI runtime (such as runc) starts the container.
-- Docker Engine itself uses containerd inside, so moving nodes to containerd drops a layer.
-- Where the runtime sits in the cluster: [Kubernetes architecture](card:kubernetes-architecture).
+1. You build the payment-service image with `docker build` and push it to a registry, a server that stores images.
+2. The scheduler binds a Pod that uses this image to a node.
+3. The kubelet on that node calls the runtime over CRI, a gRPC API, to pull the image and create the container.
+4. containerd or CRI-O hands the actual start to a low-level OCI runtime such as runc, which creates the isolated Linux process.
+5. The kubelet keeps asking the runtime for each container's state and reports it to the API server.
+
+So Docker's job ends at the registry; from there, the node's runtime takes over.
 
 ## Example
+
+You build and push with Docker, as in the Docker tech. Nothing in this step mentions Kubernetes:
 
 ```bash
 docker build -t registry.example.com/payments/payment-service:1.4.0 .
 docker push registry.example.com/payments/payment-service:1.4.0
-kubectl apply -f payment-service.yaml   # the node's runtime pulls and runs it
-kubectl get nodes -o wide               # CONTAINER-RUNTIME, e.g. containerd://...
 ```
+
+Then you ask the cluster which runtime each node uses:
+
+```bash
+kubectl get nodes -o custom-columns=NODE:.metadata.name,RUNTIME:.status.nodeInfo.containerRuntimeVersion
+```
+
+```text output
+NODE                       RUNTIME
+k8s-basics-control-plane   containerd://2.3.4
+```
+
+What to notice:
+
+- The node runs containerd 2.3.4, the runtime kind nodes use, not Docker Engine. The image built with `docker build` still runs on it.
+- The kubelet reports this value after asking the runtime, over CRI, for its name and version.
+- The image name in the Pod spec must match what you pushed, including the tag; the runtime pulls exactly that.
+
+## Rules and defaults
+
+- **dockershim:** removed in Kubernetes 1.24. Docker Engine on a node now needs the cri-dockerd adapter, maintained outside the Kubernetes project by Mirantis and Docker.
+- **CRI version:** since Kubernetes 1.26 the kubelet needs a runtime that supports the v1 CRI API. Otherwise the node does not register.
+- **Supported runtimes:** containerd, CRI-O, or any other CRI implementation.
+
+## Not to be confused with
+
+Docker Engine is the full tool on one machine: CLI, image builds, networks and volumes. containerd is the runtime underneath that runs containers; Docker Engine uses it, and Kubernetes can use it directly. Rule: Docker builds, containerd runs, Kubernetes decides where.
 
 ## Interview Qs
 
-### Does Kubernetes replace Docker?
+### Why do we need Kubernetes when Docker already exists?
 
-No. Docker builds and ships images; Kubernetes schedules and heals containers across machines. Teams still build with Docker, then let Kubernetes run the images on containerd or CRI-O.
+Docker packages an app as an image and runs containers on one host. Kubernetes coordinates many hosts: it schedules Pods onto nodes, replaces failed ones, scales copies, gives them stable network names and rolls out new versions. Teams use both: Docker to build, Kubernetes to run in production.
 
 ### Can Kubernetes run without Docker?
 
-Yes. It needs any CRI runtime on each node, most often containerd or CRI-O. Docker Engine still works only through the cri-dockerd adapter, kept by Mirantis and Docker.
+Yes. Each node needs a CRI runtime, most often containerd or CRI-O. Docker Engine works only through the cri-dockerd adapter. Developers can still build with Docker, because the images are standard OCI images.
 
 ### Is Docker Compose the same as Kubernetes?
 
-No. Compose starts a multi-container app from one file on one host: good for local development, tests and single-host deploys. Kubernetes adds scheduling over many nodes, self-healing and rolling updates.
+No. Compose starts a multi-container app from one file on one host, which suits local development, tests and single-host deployments. Kubernetes adds scheduling across many nodes, replacement of lost Pods, rolling updates and autoscaling.

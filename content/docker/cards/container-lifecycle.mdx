@@ -5,43 +5,61 @@ title: Container Lifecycle and Restart Policies
 topic: runtime
 level: beginner
 heat: 3
-hook: "A container lives as long as its main process: created, running, exited, removed. A restart policy decides if it comes back."
+hook: "A container lives only as long as its main process: it is created, runs, exits and is removed. A restart policy decides whether Docker starts it again."
 points:
-  - { k: "Main process", v: "when PID 1 ends, the container exits" }
-  - { k: "docker run", v: "create + start in one step" }
-  - { k: "docker stop", v: "stop signal first, SIGKILL after the grace period" }
-  - { k: "docker kill", v: "SIGKILL at once; no time to clean up", kind: minus }
-  - { k: "--rm", v: "deletes the container and its anonymous volumes on exit", kind: plus }
+  - { k: "Main process", v: "the container runs while its main process (PID 1) runs; when that process ends, the container exits" }
+  - { k: "docker run", v: "does two steps at once: docker create makes the container, docker start runs its main process" }
+  - { k: "Exited is not gone", v: "an exited container keeps its writable layer and logs until you remove it with docker rm" }
+  - { k: "Restart policy", v: "the default is no: Docker does not restart a container that crashes unless you set a policy", kind: default }
+  - { k: "--rm", v: "removes the container, and its anonymous volumes, as soon as it exits", kind: plus }
 trap:
   wrong: "Docker restarts a crashed container by itself."
-  right: "Only with a restart policy. The default is no; set on-failure or unless-stopped."
-sayIt: "A container runs while its main process runs. Stop sends SIGTERM, then SIGKILL after a grace period; kill sends SIGKILL at once. Docker brings it back only if a restart policy says so."
+  right: "Only when a restart policy says so. The default policy is no; set on-failure or unless-stopped for a service that must come back."
+  why: "Orchestrators such as Kubernetes do restart failed containers by default, so people expect plain Docker to do the same."
+sayIt: "A container runs while its main process runs; when it ends the container is exited, not deleted, until docker rm. Docker brings it back only with a restart policy: on-failure for crashes, unless-stopped for a service that should survive host reboots."
+cheat:
+  idea: "A container is created, runs while its main process runs, exits when that process ends, and stays on disk until removed."
+  flow: "create → start → running → exited → start again, or rm"
+  remember: "The restart policy defaults to no: a crashed container stays down unless you set on-failure or unless-stopped."
+buildsOn: [images-and-layers, docker-architecture]
+scenarios:
+  - q: "The payment service crashed at 2 a.m. with exit code 1 and was still down in the morning. It was started with plain docker run -d. Why?"
+    a: "The default restart policy is no, so Docker recorded the exit and did nothing more. Starting it with --restart on-failure (or unless-stopped) makes Docker restart it after a non-zero exit."
+  - q: "You run docker stop pay, then the host reboots. pay has --restart always. Is it running after the reboot? What if it had unless-stopped?"
+    a: "With always, yes: when the daemon starts again it starts every always container, even one you stopped by hand. With unless-stopped, no: it remembers that you stopped it and leaves it stopped."
 confusedWith: [docker-stop-vs-docker-kill, docker-run-vs-start-vs-exec]
 tags: [lifecycle, restart-policy]
 visual: flow
 sources:
   - title: "Start containers automatically (Docker docs)"
     url: "https://docs.docker.com/engine/containers/start-containers-automatically/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "docker container run: --restart, --rm (Docker CLI)"
+    url: "https://docs.docker.com/reference/cli/docker/container/run/"
+    verifiedOn: "2026-10-21"
   - title: "docker container stop (Docker CLI)"
     url: "https://docs.docker.com/reference/cli/docker/container/stop/"
     verifiedOn: "2026-10-20"
-  - title: "docker container ls (Docker CLI)"
-    url: "https://docs.docker.com/reference/cli/docker/container/ls/"
+  - title: "Pod Lifecycle: container restart policy, default Always (Kubernetes docs)"
+    url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/"
     verifiedOn: "2026-10-20"
-  - title: "docker container run (Docker CLI)"
-    url: "https://docs.docker.com/reference/cli/docker/container/run/"
+  - title: "docker container ls: status filter (Docker CLI)"
+    url: "https://docs.docker.com/reference/cli/docker/container/ls/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The container lifecycle is the set of states a container moves through, from the moment Docker makes it from an [image](card:images-and-layers) to the moment you delete it. A container always has one main process, the command the image starts, and it is "running" only while that process runs. A restart policy is a setting on the container that tells Docker what to do when that process ends.
+
 ## Why it exists
 
-A container stops when its main process ends. You must know each state, and when Docker brings a container back.
+You need to know, at any moment, whether your service is running, stopped but still on disk, or gone. Without that, you lose data in a stopped container you thought was deleted, or you pile up hundreds of dead ones. And when the payment service crashes at night, something has to start it again. A restart policy lets the Docker daemon do that, so you do not need a cron job or a person watching it.
 
 ## How it works
 
 <Mermaid
-  alt="create gives a created container; start makes it running; pause and unpause toggle paused; the process ending, stop or kill make it exited; start or a restart policy runs it again; rm removes it."
+  alt="Container states. docker create gives a created container. docker start makes it running. docker pause and docker unpause switch between running and paused. The main process ending, docker stop or docker kill make it exited. docker start, or a restart policy, makes it running again. docker rm deletes an exited container."
   chart={`stateDiagram-v2
   [*] --> created: docker create
   created --> running: docker start
@@ -52,36 +70,67 @@ A container stops when its main process ends. You must know each state, and when
   exited --> [*]: docker rm`}
 />
 
-- Other statuses: restarting, removing, dead. Paused uses the cgroup freezer.
-- The app's side: [graceful shutdown](card:signals-and-graceful-shutdown). Exit codes: [troubleshooting](card:troubleshooting-containers).
+1. `docker create` makes the container: a new writable layer on top of the image, plus its settings. Nothing runs yet; the status is `Created`.
+2. `docker start` starts the main process. The status is `Up`. `docker run` does steps 1 and 2 in one command.
+3. The main process ends, because the app finished, crashed, or got a stop signal. The container is now `Exited (code)`, and its files and logs are still there.
+4. Docker checks the restart policy. If the policy matches this exit, Docker starts the same container again after a short delay. If not, it stays exited.
+5. `docker rm` deletes the container and its writable layer. Until then, `docker start` can bring it back as it was.
+
+So the key is: exiting and removing are two different steps.
 
 ## Example
 
+The payment service should come back after a crash, but stay down when you stop it on purpose. Here a stand-in app exits with code 1 on start, and the policy allows three restarts:
+
 ```bash
-docker run -d --name pay --restart unless-stopped payment-service:1.4.0
+docker run -d --name pay -e MODE=crash --restart on-failure:3 payment-service:1.4.0
+docker inspect -f 'status={{.State.Status}} exit={{.State.ExitCode}} restarts={{.RestartCount}}' pay
 ```
 
-| `--restart` | Restarts when it exits | When the daemon restarts |
+```text output
+2e7b8382ebf6a709e5722c564c08828853e4bf5b5dfc43e45d92e5d636143a65
+status=exited exit=1 restarts=3
+```
+
+What to notice:
+
+- `on-failure:3` restarted the container three times after each non-zero exit, then gave up. The container is still there, so `docker logs pay` shows all four failed starts.
+- Without `--restart`, the same command gives `restarts=0`: the default policy `no` never restarts.
+- For a long-running service, `unless-stopped` is the usual choice, because it also starts the container again after the host reboots.
+
+## Rules and defaults
+
+| `--restart` | Restarts after the process exits | After the daemon restarts |
 |---|---|---|
-| `no` | Never | Not started |
+| `no` (default) | Never | Not started |
 | `on-failure[:max-retries]` | Only on a non-zero exit code | Not started |
-| `always` | Yes, unless you stopped it | Started, even if you stopped it |
-| `unless-stopped` | Yes, unless you stopped it | Started, unless you stopped it |
+| `always` | Yes, unless you stopped it by hand | Started, even if you stopped it |
+| `unless-stopped` | Yes, unless you stopped it by hand | Started, unless you stopped it |
 
-## Defaults
+- **Delay between restarts:** Docker waits before each restart, starting at 100 ms and doubling each time, up to 1 minute. The delay resets to 100 ms once the container has run for at least 10 seconds (Docker Engine 29).
+- **Manual stop wins:** after `docker stop`, the restart policy is ignored until the daemon restarts or you start the container yourself.
+- **Containers only:** restart policies apply to plain containers. Swarm services and Kubernetes have their own restart settings.
+- **Other statuses:** `paused` (processes frozen with the cgroup freezer), `restarting`, `removing` and `dead` also appear in `docker ps -a`.
 
-| What | Default | Where |
-|---|---|---|
-| Restart policy | `no` | Docker Engine 29 |
-| Stop grace period | 10 s Linux, 30 s Windows (`-t`, `--stop-timeout`) | Docker Engine 29 |
-| Stop signal | `SIGTERM` (`STOPSIGNAL`, `--stop-signal`) | Docker Engine 29 |
+## Not to be confused with
+
+`docker stop` asks the main process to end and waits; `docker kill` ends it at once. Both leave an exited container; only `docker rm` deletes it. How the app should react to the stop signal is in [graceful shutdown](card:signals-and-graceful-shutdown).
+
+## Common mistakes
+
+- **"docker stop deletes the container."** It only ends the main process. The container and its writable layer stay until `docker rm`, or until it exits when it was started with `--rm`.
+- **"always and unless-stopped are the same."** They differ only after a manual stop followed by a daemon restart: `always` starts the container again, `unless-stopped` does not.
 
 ## Interview Qs
 
-### The service crashed at night and stayed down. Why?
+### What are the states of a Docker container?
 
-The default restart policy is `no`; use `--restart on-failure` or `unless-stopped`. A crash loop is restarted with a doubling delay, from 100 ms up to 1 minute.
+Created after `docker create`, running after `docker start`, paused while frozen, and exited when the main process ends. An exited container keeps its files until `docker rm` removes it. `docker ps -a` also shows restarting, removing and dead.
 
-### always vs unless-stopped?
+### The service crashed at night and stayed down. Why, and how do you fix it?
 
-Both restart on any exit. After a manual stop and a daemon restart, `always` starts it again; `unless-stopped` leaves it stopped.
+The default restart policy is `no`, so Docker never restarts it. Run it with `--restart on-failure` to restart after a non-zero exit, or `unless-stopped` to also survive daemon restarts. Docker waits between restarts, starting at 100 ms and doubling up to 1 minute.
+
+### What is the difference between always and unless-stopped?
+
+Both restart the container whenever it exits, and neither restarts it right after you stop it by hand. The difference is the next daemon restart, for example after a host reboot: `always` starts the stopped container again, `unless-stopped` leaves it stopped.

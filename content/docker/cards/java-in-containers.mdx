@@ -5,49 +5,75 @@ title: Java and Spring Boot in Containers
 topic: dockerfile
 level: intermediate
 heat: 2
-hook: "The JVM reads the container's memory limit but uses only 25% of it for heap by default; size it with MaxRAMPercentage."
+hook: "The JVM reads the container's memory limit, but by default gives only 25% of it to the heap. Set -XX:MaxRAMPercentage and leave room for memory outside the heap."
 points:
-  - { k: "Container support", v: "on by default on Linux since JDK 10 (backported to 8u191)", kind: default }
-  - { k: "Heap is not all", v: "metaspace, thread stacks and direct buffers live outside it", kind: minus }
-  - { k: "Layered jar", v: "libraries and app code in separate layers; libraries stay cached", kind: plus }
-  - { k: "No Dockerfile", v: "mvn spring-boot:build-image uses buildpacks" }
+  - { k: "Container support", v: "on by default on Linux since JDK 10 (backported to 8u191): the JVM reads the container's limits", kind: default }
+  - { k: "Default max heap", v: "25% of the container's memory limit in Java 25, so a 1 GB limit gives a 256 MB heap", kind: default }
+  - { k: "-XX:MaxRAMPercentage", v: "sets the heap as a share of the limit, so it follows the limit when it changes; -Xmx is a fixed size" }
+  - { k: "Not only the heap", v: "metaspace, thread stacks, direct buffers and the code cache also count toward the limit", kind: minus }
+  - { k: "Layered jar", v: "Spring Boot can split the jar into library and code layers, so a code change re-ships only a small layer", kind: plus }
 trap:
   wrong: "Set -Xmx to the container's memory limit."
-  right: "Heap plus non-heap memory then passes the limit and the container is killed. Leave headroom below the limit."
-sayIt: "The JVM reads the container limit, but default max heap is only 25% of it. I set -XX:MaxRAMPercentage, leave room for non-heap memory, and use Spring Boot's layered jar so library layers stay cached."
+  right: "Heap plus non-heap memory then passes the limit, and the kernel kills the container. Keep the heap well below the limit."
+  why: "The heap is the only JVM memory most developers ever tune, so the heap size and the container limit look like the same number."
+sayIt: "The JVM reads the container's limits, but its default max heap is only 25% of the memory limit. I set -XX:MaxRAMPercentage, leave room for non-heap memory, and use Spring Boot's layered jar so the library layers stay cached."
+cheat:
+  idea: "Inside a container the JVM sizes its heap from the container's memory limit, but by default takes only 25% of it. Memory outside the heap counts toward the limit too."
+  remember: "Use -XX:MaxRAMPercentage, never -Xmx equal to the limit, and leave headroom for non-heap memory."
+buildsOn: [multi-stage-builds, namespaces-and-cgroups]
+scenarios:
+  - q: "The payment service runs with docker run -m 1g and no JVM flags. How large can its heap grow?"
+    a: "About 256 MB. On Linux the JVM reads the 1 GB limit, and MaxRAMPercentage defaults to 25. Most of the gigabyte stays unused by the heap unless you raise the percentage."
+  - q: "You set -Xmx1g in a container limited to 1 GB. Under load the container is killed, but the logs show no OutOfMemoryError. Why?"
+    a: "The heap never filled up, so Java threw nothing. Heap plus metaspace, thread stacks and buffers passed 1 GB, and the kernel killed the process. Keep the heap well below the limit, for example with -XX:MaxRAMPercentage=75."
 confusedWith: [dockerfile-vs-buildpacks]
 tags: [java, jvm, spring-boot, heap, layered-jar]
 visual: table
 sources:
-  - title: "The java command (Java SE 25)"
+  - title: "The java command: UseContainerSupport, MaxRAMPercentage, JDK_JAVA_OPTIONS (Java SE 25)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/specs/man/java.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "JDK 8u191 release notes: Java improvements for Docker containers"
     url: "https://www.oracle.com/java/technologies/javase/8u191-relnotes.html"
     verifiedOn: "2026-10-20"
   - title: "Dockerfiles with jarmode tools (Spring Boot 4.1)"
     url: "https://docs.spring.io/spring-boot/reference/packaging/container-images/dockerfiles.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Layered jar or war (Spring Boot 4.1 Maven plugin)"
+    url: "https://docs.spring.io/spring-boot/maven-plugin/packaging.html"
+    verifiedOn: "2026-10-21"
+  - title: "Packaging OCI images (Spring Boot 4.1 Maven plugin)"
+    url: "https://docs.spring.io/spring-boot/maven-plugin/build-image.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+This concept is about running the payment service's JVM well inside a container. The JVM sizes itself from the machine it sees: the heap, the memory where Java objects live, gets a share of the available memory, and thread pools are sized from the CPU count. In a container, that machine should be the container's limits, which Docker enforces with [cgroups](card:namespaces-and-cgroups). It also covers packaging the jar so a code change re-ships only a small layer.
 
 ## Why it exists
 
-A JVM sizes its heap and thread pools from the memory and CPUs it sees. Inside a container it must use the container's limits, not the whole host's.
+A JVM that sized its heap from the host's 64 GB, not the container's 1 GB limit, would grow past the limit and be killed. Modern JVMs read the limit, but the default heap is only a quarter of it, so a 1 GB container gets a 256 MB heap and the rest sits idle. And a Spring Boot jar is one file, mostly libraries: copied as one layer, every code change re-ships all of them.
 
 ## How it works
 
-| JVM flag | What it controls | Default (Java 25, Linux) |
+| JVM option | What it controls | Default (Java 25, Linux) |
 |---|---|---|
 | `UseContainerSupport` | Read the container's memory and CPU limits | On |
-| `-XX:MaxRAMPercentage` | Max heap, as % of available memory | 25 |
-| `-XX:InitialRAMPercentage` | Starting heap, as % of available memory | 1.5625 |
-| `-XX:ActiveProcessorCount` | CPUs used to size GC and pool threads | Detected |
+| `-XX:MaxRAMPercentage` | Maximum heap, as a % of the memory limit | 25 |
+| `-XX:InitialRAMPercentage` | Starting heap, as a % of the memory limit | 1.5625 |
+| `-XX:ActiveProcessorCount` | CPU count used to size GC and pool threads | Detected |
 
-- A 1 GB [memory limit](card:resource-limits) gives a 256 MB max heap by default.
-- Spring Boot 4.1: `java -Djarmode=tools -jar application.jar extract --layers` gives four layers: dependencies, spring-boot-loader, snapshot-dependencies, application.
-- Shutdown on SIGTERM: [graceful shutdown](card:signals-and-graceful-shutdown).
+1. At start, the JVM detects that it runs in a container and reads the memory and CPU limits from cgroups.
+2. It sets the maximum heap to `MaxRAMPercentage` of the memory limit: 25% by default.
+3. It takes the CPU count from the CPU limit and sizes garbage-collector and pool threads from it.
+4. Memory outside the heap, such as metaspace for class data, one stack per thread, direct buffers and compiled code, also counts toward the limit. If the total passes it, the kernel kills the process.
+
+So the key is: heap share plus non-heap memory must stay below the container's limit.
 
 ## Example
+
+The payment-service image splits the jar into four layers and gives the heap 75% of the limit.
 
 ```dockerfile
 FROM eclipse-temurin:25-jre AS extract
@@ -61,19 +87,53 @@ COPY --from=extract /x/out/dependencies/ ./
 COPY --from=extract /x/out/spring-boot-loader/ ./
 COPY --from=extract /x/out/snapshot-dependencies/ ./
 COPY --from=extract /x/out/application/ ./
+ENV JDK_JAVA_OPTIONS="-XX:MaxRAMPercentage=75"
 ENTRYPOINT ["java", "-jar", "application.jar"]
 ```
+
+What to notice:
+
+- `extract --layers` splits the jar into four folders, from least to most likely to change. Each `COPY` makes one layer, so after a code change only the `application` layer is rebuilt and pushed. In a small Spring Boot web app, `docker history` shows about 20 MB of dependencies and about 12 kB of application.
+- `JDK_JAVA_OPTIONS` is read by the `java` launcher itself, so the exec-form `ENTRYPOINT` needs no shell to pick it up.
+- 75% leaves a quarter of the limit for non-heap memory. Remove the `ENV` line and the heap falls back to 25%.
+
+The same base image shows the default and the raised heap under a 1 GB limit:
+
+```bash
+docker run --rm -m 1g eclipse-temurin:25-jre \
+  java -XX:+PrintFlagsFinal -version 2>/dev/null | grep -w MaxHeapSize
+docker run --rm -m 1g eclipse-temurin:25-jre \
+  java -XX:MaxRAMPercentage=75 -XX:+PrintFlagsFinal -version 2>/dev/null | grep -w MaxHeapSize
+```
+
+```text output
+   size_t MaxHeapSize                              = 268435456                                 {product} {ergonomic}
+   size_t MaxHeapSize                              = 805306368                                 {product} {ergonomic}
+```
+
+268435456 bytes is 256 MB, a quarter of 1 GB. With 75%, the heap may grow to 768 MB.
+
+## Rules and defaults
+
+- **Container support:** on by default on Linux since JDK 10, and backported to 8u191. Older Java 8 builds sized the heap from the host's memory.
+- **Passing options:** put them in the `ENTRYPOINT` array, or in `JDK_JAVA_OPTIONS`. A `$JAVA_OPTS` inside an exec-form array is not expanded.
+- **Layer index:** Spring Boot's Maven plugin writes `layers.idx` into the jar by default; it defines the layers `dependencies`, `spring-boot-loader`, `snapshot-dependencies` and `application`.
+- **Headroom:** the right heap share depends on how much non-heap memory the app uses; measure it, then leave that much free below the limit.
+
+## Not to be confused with
+
+A Dockerfile is a recipe you write and maintain, step by step. Cloud Native Buildpacks, run by `mvn spring-boot:build-image`, inspect the project and build the image for you, with a base image and JVM chosen by the builder and a non-root user. Rule: buildpacks for a standard Spring Boot service; a Dockerfile when you need full control.
 
 ## Interview Qs
 
 ### Does Java know it runs in a container?
 
-Yes. On Linux, since JDK 10 and 8u191, the JVM reads the container's memory and CPU limits; UseContainerSupport is on by default. Older Java 8 builds sized the heap from the host's memory.
+Yes. On Linux, since JDK 10 and 8u191, the JVM reads the container's memory and CPU limits; `UseContainerSupport` is on by default. It then takes 25% of the memory limit as the maximum heap unless you set `MaxRAMPercentage` or `-Xmx`.
 
-### The container was OOM-killed but the heap looked fine. Why?
+### The container was killed for memory, but the heap looked fine. Why?
 
-The limit covers the whole process: heap plus metaspace, thread stacks and direct buffers. Lower MaxRAMPercentage or raise the limit; see [troubleshooting](card:troubleshooting-containers).
+The limit covers the whole process: heap plus metaspace, thread stacks, direct buffers and the code cache. When the total passes the limit, the kernel kills it without a Java `OutOfMemoryError`. Lower `MaxRAMPercentage` or raise the limit.
 
 ### Why use a layered jar?
 
-A fat jar is one layer, so each code change re-ships every library. With layers, the dependencies layer stays cached and only the small application layer changes.
+A fat jar copied as one file is one layer, so each code change re-ships every library. Extracted with `jarmode=tools`, the libraries sit in their own layers that stay cached in the build and in the registry, and only the small application layer changes.

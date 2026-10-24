@@ -5,35 +5,59 @@ title: BuildKit, Buildx and Multi-Platform Images
 topic: dockerfile
 level: intermediate
 heat: 2
-hook: "BuildKit is Docker's build engine and Buildx its client; together they can build one tag for amd64 and arm64."
+hook: "BuildKit is the engine that runs your Dockerfile, and Buildx is the docker build command that drives it. Together they can build one tag for x86 and ARM servers."
 points:
-  - { k: "Default builder", v: "BuildKit on Linux since Engine 23.0; still in Engine 29", kind: default }
-  - { k: "docker build", v: "an alias of docker buildx build since Engine 23.0" }
-  - { k: "Faster", v: "skips unused stages; builds independent stages in parallel", kind: plus }
-  - { k: "Extras", v: "cache and secret mounts; cache export with --cache-to" }
-  - { k: "Multi-platform", v: "one tag, an image index, one image per platform" }
+  - { k: "BuildKit", v: "the build engine that runs each Dockerfile step and keeps the cache; default on Linux since Engine 23.0", kind: default }
+  - { k: "Buildx", v: "the client that sends builds to BuildKit; docker build is an alias for docker buildx build" }
+  - { k: "Faster builds", v: "BuildKit skips stages nobody needs and builds independent stages in parallel", kind: plus }
+  - { k: "Platform", v: "an OS and CPU pair, such as linux/amd64 for x86 or linux/arm64 for ARM; the default is the builder's own" }
+  - { k: "Multi-platform image", v: "one tag pointing to an image index, which lists one image per platform" }
+  - { k: "RUN for another CPU", v: "needs emulation (QEMU) or a native builder node, and emulation is much slower", kind: minus }
 trap:
   wrong: "An image built on my Apple silicon Mac runs on any server."
-  right: "It is built for the builder's platform, linux/arm64. An amd64 server cannot run it without emulation; add linux/amd64."
-sayIt: "Since Engine 23.0, docker build runs on BuildKit through Buildx. For mixed servers I build with --platform linux/amd64,linux/arm64; the registry keeps an image index and each host pulls its variant."
+  right: "It is built for the builder's platform, linux/arm64. An x86 server cannot run it natively; also build for linux/amd64."
+  why: "Java code is portable and the image runs fine on the laptop, so people assume the image is portable too. But the JVM and OS packages inside it are native programs for one CPU."
+sayIt: "BuildKit is Docker's build engine and Buildx is its client; since Engine 23.0 docker build uses them by default. For mixed servers I build with --platform linux/amd64,linux/arm64 and push; the tag points to an image index and each host pulls its own variant."
+cheat:
+  idea: "BuildKit runs the Dockerfile, and Buildx (docker build) drives it. With --platform it builds one tag with an image per CPU type, and each server pulls its match."
+  remember: "An image is CPU-specific even for Java: the JVM inside is native. Build linux/amd64 and linux/arm64 for mixed servers."
+buildsOn: [multi-stage-builds, registries]
+scenarios:
+  - q: "A developer builds payment-service:1.4.0 on an Apple silicon Mac and pushes it. The x86 production server fails to start it. What happened, and what is the fix?"
+    a: "The build used the Mac's platform, linux/arm64, so the tag holds only an ARM image, and the x86 server has no matching variant. Rebuild with --platform linux/amd64,linux/arm64 and push; the tag then points to an index with both."
+  - q: "Your Dockerfile has a RUN step, and a build for linux/arm64 on an x86 CI runner takes ten times longer than the amd64 build. Why?"
+    a: "RUN executes programs, and the x86 runner can run ARM programs only through QEMU emulation, which is slow. Use a native ARM builder node, or cross-compile in a stage that runs on the build platform."
 confusedWith: []
 tags: [buildkit, buildx, multi-platform, arm64]
 visual: flow
 sources:
-  - title: "Docker Engine 23.0 release notes"
+  - title: "Docker Engine 23.0 release notes: BuildKit and Buildx as default builder"
     url: "https://docs.docker.com/engine/release-notes/23.0/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "BuildKit (Docker Docs)"
     url: "https://docs.docker.com/build/buildkit/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Builders: docker build vs docker buildx build (Docker Docs)"
+    url: "https://docs.docker.com/build/builders/"
+    verifiedOn: "2026-10-21"
   - title: "Multi-platform builds (Docker Docs)"
     url: "https://docs.docker.com/build/building/multi-platform/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "docker buildx build: --platform (Docker CLI reference)"
+    url: "https://docs.docker.com/reference/cli/docker/buildx/build/"
+    verifiedOn: "2026-10-21"
+  - title: "Cache storage backends: --cache-to and --cache-from (Docker Docs)"
+    url: "https://docs.docker.com/build/cache/backends/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+BuildKit is Docker's build engine: the part that reads a Dockerfile, runs each step and keeps the [build cache](card:build-cache). Buildx is the client that sends builds to BuildKit, and `docker build` is an alias for `docker buildx build`. A platform is an operating system and CPU type, such as `linux/amd64` for x86 servers or `linux/arm64` for ARM servers and Apple silicon Macs. A multi-platform image is one tag that holds a separate image for each platform.
 
 ## Why it exists
 
-Containers share the host kernel, so an image must match the server's CPU type. Teams build on ARM laptops but deploy to x86 and ARM servers.
+A container runs its programs directly on the host's CPU, so an image built for one CPU type does not run natively on another. That is true for Java too: the code is portable, but the JVM inside the image is a native program. Teams build on ARM laptops and deploy to x86 servers, ARM servers or both. Without multi-platform images you would push one tag per CPU type and pick the right one for each server.
 
 ## How it works
 
@@ -48,23 +72,44 @@ Containers share the host kernel, so an image must match the server's CPU type. 
   R -.-> S2["ARM server"]`}
 />
 
-- Other platforms are built by QEMU emulation, native nodes per platform, or cross-compiling.
-- Keeping them locally needs the containerd image store (default in Docker Desktop and fresh Engine 29.0+ installs); a docker-container builder can push them instead.
-- The start-up error on the wrong CPU: [troubleshooting](card:troubleshooting-containers).
+1. You run `docker build` with `--platform linux/amd64,linux/arm64`. Buildx sends the Dockerfile and the context to BuildKit.
+2. BuildKit runs the Dockerfile once per platform and pulls the matching variant of each base image.
+3. `COPY` steps work for any platform. A `RUN` step for a foreign CPU runs under QEMU emulation or on a builder node with that CPU.
+4. BuildKit pushes one image per platform plus an image index, a small list that maps each platform to its image.
+5. A server that pulls `payment-service:1.4.0` gets the index, and Docker picks the entry that matches its own platform.
 
 ## Example
+
+The payment service runs on x86 and ARM servers, so CI builds both variants and pushes them under one tag.
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
   -t registry.example.com/payment-service:1.4.0 --push .
 ```
 
+What to notice:
+
+- `--platform` lists both targets. Without it, BuildKit builds only for its own platform.
+- `--push` sends both images and the index to the registry in one step.
+- The multi-stage Dockerfile from before needs no change: its `RUN ./mvnw` steps run under emulation for the foreign CPU, which works but is slower.
+
+## Rules and defaults
+
+- **Default builder:** BuildKit, on Linux since Docker Engine 23.0 and in Docker Desktop. Builds of Windows containers still use the legacy builder, and `DOCKER_BUILDKIT=0` forces it on Linux.
+- **Default platform:** the platform of the BuildKit daemon that runs the build.
+- **Keeping it locally:** a multi-platform image needs the containerd image store, the default in Docker Desktop and Docker Engine 29.0 and later. Otherwise use a `docker-container` builder and push the result.
+- **Sharing the cache:** `--cache-to type=registry,ref=<image>` exports the build cache and `--cache-from` imports it, so a fresh CI runner can reuse earlier layers.
+
 ## Interview Qs
 
-### What is BuildKit, and how does it relate to Buildx?
+### What is BuildKit, and how does it relate to Buildx and docker build?
 
-BuildKit is the build engine that runs the steps. Buildx is the client that sends it builds; since Engine 23.0, `docker build` is an alias of `docker buildx build`.
+BuildKit is the engine that executes builds: it solves the steps as a graph, skips unused stages, runs independent ones in parallel and manages the cache. Buildx is the client. Since Engine 23.0, `docker build` is an alias for `docker buildx build` and uses BuildKit by default on Linux.
 
 ### How do you ship one image for x86 and ARM servers?
 
-Build with `--platform linux/amd64,linux/arm64` and push. The tag points to an image index, and each server pulls the variant for its own CPU.
+Build with `--platform linux/amd64,linux/arm64` and push. The tag then points to an image index with one image per platform, and each server pulls the variant for its own CPU. `RUN` steps for the other CPU need emulation or a native builder node.
+
+### Why can an image fail to start on a server even though it works on your laptop?
+
+The image may contain only your laptop's platform, for example `linux/arm64`, while the server is x86. Its native programs, including the JVM, cannot run there without emulation. Building for the server's platform, or for both, fixes it.

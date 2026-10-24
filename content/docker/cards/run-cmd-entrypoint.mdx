@@ -5,45 +5,75 @@ title: RUN vs CMD vs ENTRYPOINT
 topic: dockerfile
 level: beginner
 heat: 3
-hook: "RUN works while building. ENTRYPOINT is the program a container runs; CMD gives its default args, easy to replace."
+hook: "RUN runs a command while the image is built. ENTRYPOINT is the program a container starts, and CMD gives it default arguments that docker run can replace."
 points:
-  - { k: "RUN", v: "build time only; its output is saved as a new layer" }
-  - { k: "docker run args", v: "replace CMD; are appended to an exec-form ENTRYPOINT" }
-  - { k: "--entrypoint", v: "docker run flag that replaces ENTRYPOINT" }
-  - { k: "Last one wins", v: "only the last CMD and the last ENTRYPOINT count" }
-  - { k: "Shell-form ENTRYPOINT", v: "ignores CMD and run args; java gets no SIGTERM", kind: minus }
+  - { k: "RUN", v: "runs during docker build and saves the changed files as a layer; it never runs when a container starts" }
+  - { k: "ENTRYPOINT", v: "the program every container from the image starts, such as java -jar app.jar" }
+  - { k: "CMD", v: "default arguments for ENTRYPOINT, or the whole default command when there is no ENTRYPOINT" }
+  - { k: "Arguments in docker run", v: "words after the image name replace CMD and are added after an exec-form ENTRYPOINT" }
+  - { k: "Last one wins", v: "if a Dockerfile has several CMD or ENTRYPOINT lines, only the last of each is used" }
+  - { k: "Shell-form ENTRYPOINT", v: "a plain string runs under /bin/sh -c, ignores CMD, and java never gets the stop signal", kind: minus }
 trap:
   wrong: "CMD runs during the build, like RUN."
-  right: "Only RUN runs at build time. CMD is stored in the image and used when a container starts."
-sayIt: "RUN prepares the image at build time. At start, the container runs ENTRYPOINT with CMD as its default args; docker run args replace CMD, and --entrypoint replaces ENTRYPOINT."
+  right: "Only RUN runs during the build. CMD is stored in the image and used each time a container starts."
+  why: "RUN and CMD sit in the same file and both take a command, so they look alike. The only difference is when the command runs, which the file does not show."
+sayIt: "RUN prepares the image at build time. A container runs ENTRYPOINT with CMD as default arguments; arguments after the image name replace CMD, and --entrypoint replaces ENTRYPOINT. I write both as JSON arrays so java gets the stop signal."
+cheat:
+  idea: "RUN works during the build. A starting container runs ENTRYPOINT, the fixed program, with CMD as default arguments that docker run can replace."
+  code: |
+    ENTRYPOINT ["java", "-jar", "app.jar"]
+    CMD ["--spring.profiles.active=prod"]
+  remember: "Use JSON arrays (exec form). A plain-string ENTRYPOINT ignores CMD, and java misses SIGTERM."
+buildsOn: [dockerfile-instructions]
+scenarios:
+  - q: "The image has ENTRYPOINT [\"java\", \"-jar\", \"app.jar\"] and CMD [\"--spring.profiles.active=prod\"]. You run docker run payment-service:1.4.0 --server.port=9090. Is the prod profile active?"
+    a: "No. Arguments after the image name replace the whole CMD, so the container runs java -jar app.jar --server.port=9090. To keep the profile, pass both arguments."
+  - q: "A Dockerfile says ENTRYPOINT java -jar app.jar, with no brackets. docker stop always takes 10 seconds, and the app never logs a clean shutdown. Why?"
+    a: "The plain-string form runs /bin/sh -c, so the shell is the first process and java is its child. docker stop signals the shell, which does not pass the signal on; after 10 seconds Docker kills everything. The JSON-array form makes java the first process."
 confusedWith: [exec-form-vs-shell-form]
 tags: [run, cmd, entrypoint, exec-form]
 visual: table
 sources:
   - title: "Dockerfile reference: CMD, ENTRYPOINT and how they interact (Docker Docs)"
     url: "https://docs.docker.com/reference/dockerfile/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Running containers: commands and arguments (Docker Docs)"
     url: "https://docs.docker.com/engine/containers/run/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "docker container stop: default signal and timeout (Docker CLI reference)"
+    url: "https://docs.docker.com/reference/cli/docker/container/stop/"
+    verifiedOn: "2026-10-21"
+  - title: "The java command: JDK_JAVA_OPTIONS (Java SE 25)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/specs/man/java.html"
+    verifiedOn: "2026-10-21"
   - title: "Docker interview questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/docker-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+These are three [Dockerfile instructions](card:dockerfile-instructions) that all take a command but act at different times. `RUN` executes its command once, while the image is built, for example to create a folder or install a package. `ENTRYPOINT` and `CMD` execute nothing during the build: they record what a container should start. `ENTRYPOINT` is the program itself; `CMD` holds default arguments for it, which you can change each time you start a container.
+
 ## Why it exists
 
-An image needs steps that prepare it once and a command each container runs. A fixed program with changeable arguments lets one image serve many runs.
+One image should serve many runs: production with the prod profile, a test run on another port, a debug session with a shell. If the whole start command were fixed, each variation would need its own image. Splitting it into a fixed program (`ENTRYPOINT`) and changeable defaults (`CMD`) lets you change the arguments at `docker run` without rebuilding. `RUN` is separate because setup work should happen once, at build time, not at every start.
 
 ## How it works
 
 <Compare id="run-vs-cmd-vs-entrypoint" />
 
-- Write ENTRYPOINT and CMD as JSON arrays: [exec vs shell form](compare:exec-form-vs-shell-form).
-- If the base image has a CMD, setting ENTRYPOINT clears it; set CMD again.
-- Why java must be PID 1: [graceful shutdown](card:signals-and-graceful-shutdown).
+1. During `docker build`, each `RUN` line runs in order, and its file changes become a layer. `CMD` and `ENTRYPOINT` are only saved in the image's configuration.
+2. If the file has several `CMD` or `ENTRYPOINT` lines, the build keeps only the last of each.
+3. At `docker run`, Docker builds the start command: the `ENTRYPOINT` array followed by the `CMD` array.
+4. Words you type after the image name replace `CMD`; the `ENTRYPOINT` stays. The `--entrypoint` flag replaces `ENTRYPOINT` and also drops the image's `CMD`.
+5. The program that starts becomes the container's first process, called PID 1. `docker stop` sends this process the SIGTERM signal, a polite request to shut down.
+
+So the key is: `ENTRYPOINT` is the fixed part, and `CMD` is the default you may replace.
 
 ## Example
+
+The payment service always runs `java -jar app.jar`, and the prod profile is only a default.
 
 ```dockerfile
 ENTRYPOINT ["java", "-jar", "app.jar"]
@@ -54,18 +84,36 @@ CMD ["--spring.profiles.active=prod"]
 |---|---|
 | `docker run payment-service:1.4.0` | `java -jar app.jar --spring.profiles.active=prod` |
 | `docker run payment-service:1.4.0 --server.port=9090` | `java -jar app.jar --server.port=9090` |
-| `docker run -it --entrypoint sh payment-service:1.4.0` | `sh`, for a look inside |
+| `docker run -it --entrypoint sh payment-service:1.4.0` | `sh`, a shell for looking inside the image |
+
+What to notice:
+
+- With no arguments, the container runs `ENTRYPOINT` plus `CMD`, so the prod profile is on.
+- `--server.port=9090` replaces the whole `CMD`, not only part of it, so the prod profile is gone. Pass both if you need both.
+- `--entrypoint sh` swaps `java` for a shell and drops `CMD`, so `sh` starts with no stray arguments.
+
+## Rules and defaults
+
+- **Exec form:** a JSON array, such as `["java", "-jar", "app.jar"]`, with double quotes only. Docker starts the program directly, with no shell.
+- **Shell form:** a plain string, such as `java -jar app.jar`, which Docker runs as `/bin/sh -c "..."` on Linux. Fine for `RUN`, but avoid it for `ENTRYPOINT` and `CMD`.
+- **No variables in exec form:** `$JAVA_OPTS` inside a JSON array is not expanded, because no shell runs. Pass JVM options through the `JDK_JAVA_OPTIONS` environment variable, which the `java` launcher reads itself.
+- **Inherited CMD:** setting `ENTRYPOINT` resets a `CMD` that came from the base image, so set `CMD` again if you need defaults.
+- **Stop timeout:** `docker stop` waits 10 seconds by default after SIGTERM, then sends SIGKILL, which ends the process at once.
+
+## Not to be confused with
+
+Exec form and shell form are two ways to write the same instruction. Exec form is a JSON array and starts the program itself; shell form is a plain string that a shell runs. With a shell-form `ENTRYPOINT`, the shell is PID 1: it ignores `CMD` and run arguments, and it does not pass SIGTERM to `java`. Rule: JSON arrays for `ENTRYPOINT` and `CMD`; either form for `RUN`. Why PID 1 must handle signals is covered in [graceful shutdown](card:signals-and-graceful-shutdown).
 
 ## Interview Qs
 
 ### What is the difference between RUN, CMD and ENTRYPOINT?
 
-RUN executes at build time and saves its result in the image. ENTRYPOINT sets the program a container starts. CMD sets default arguments, or the default command when there is no ENTRYPOINT.
+`RUN` executes at build time and saves its result as a layer. `ENTRYPOINT` sets the program a container starts. `CMD` sets default arguments for it, or the whole default command when there is no `ENTRYPOINT`. Only `RUN` changes the image's files.
 
-### How do CMD and ENTRYPOINT work together?
+### How do CMD and ENTRYPOINT work together, and how do you override each?
 
-With an exec-form ENTRYPOINT, CMD becomes its default arguments. Arguments after the image name in docker run replace CMD and are passed to the ENTRYPOINT.
+With an exec-form `ENTRYPOINT`, `CMD` supplies its default arguments. Arguments after the image name in `docker run` replace `CMD` and are passed to the `ENTRYPOINT`. To replace the program itself, use `docker run --entrypoint`.
 
-### Why prefer the exec form?
+### Why should ENTRYPOINT use the exec form?
 
-Exec form starts java directly, so it is PID 1 and receives SIGTERM from docker stop. A shell-form ENTRYPOINT runs under /bin/sh -c, which does not pass signals on.
+In exec form, `java` is PID 1 and receives SIGTERM from `docker stop`, so the app can shut down cleanly. In shell form, `/bin/sh` is PID 1 and does not forward the signal, so after 10 seconds Docker kills the app without a clean shutdown.

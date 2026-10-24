@@ -5,77 +5,149 @@ title: "Namespaces, Labels and Selectors"
 topic: basics
 level: beginner
 heat: 3
-hook: "Namespaces split one cluster into named rooms; labels tag objects; selectors pick objects by their labels."
+hook: "Namespaces split one cluster into named sections; labels are key-value tags on objects; selectors find objects by their labels."
 points:
-  - { k: "Namespace", v: "a scope for names: payment-service once per namespace" }
-  - { k: "Cluster-scoped", v: "Nodes, PersistentVolumes, StorageClasses: in no namespace" }
-  - { k: "Label", v: "key-value tag such as app: payment-service; many objects share it" }
-  - { k: "Selector", v: "comma means AND; in (a, b) is the only OR, on one key's values" }
-  - { k: "Deployment selector", v: "must match the Pod template labels; cannot change later", kind: minus }
+  - { k: "Namespace", v: "a section of the cluster where names are unique; payment-service can exist once in each namespace" }
+  - { k: "Not namespaced", v: "cluster-wide objects such as Nodes, PersistentVolumes and Namespaces belong to no namespace" }
+  - { k: "Label", v: "a key-value tag such as app: payment-service; many objects can share the same label" }
+  - { k: "Selector logic", v: "a comma means AND; in (a, b) matches either value of one key; there is no OR across keys" }
+  - { k: "Deployment selector", v: "must match the Pod template's labels, and cannot be changed after the Deployment is created", kind: minus }
+  - { k: "Default namespace", v: "kubectl uses -n, else the current context's namespace, else default (kubectl 1.37)", kind: default }
 trap:
   wrong: "Give each team its own namespace and the teams are isolated."
-  right: "A namespace only scopes names, RBAC and quotas. By default any Pod can still reach any Pod; add RBAC and NetworkPolicies."
-sayIt: "Namespaces group objects and scope names, permissions and quotas. Labels are key-value tags, and Services, Deployments and kubectl -l pick objects with label selectors. Annotations hold extra data for tools."
-confusedWith: []
+  right: "A namespace only scopes names, permissions and quotas. By default any Pod can still reach any Pod; add RBAC rules and NetworkPolicies."
+  why: "The word sounds like the Linux namespaces that isolate containers, and objects in other namespaces vanish from kubectl get, so they feel walled off."
+sayIt: "Namespaces group objects and scope names, permissions and quotas, but do not block network traffic. Labels are key-value tags, and Services, Deployments and kubectl -l find objects through label selectors, so they always see the current Pods."
+cheat:
+  idea: "A namespace is a named section of a cluster where object names are unique. Labels are key-value tags, and selectors pick objects by their labels."
+  remember: "A namespace separates names, not traffic: Pods in different namespaces can reach each other until a NetworkPolicy says no."
+buildsOn: [kubectl-and-manifests]
+scenarios:
+  - q: "kubectl get pods shows no payment-service Pods, yet the payment API works. What is the most likely reason?"
+    a: "The Pods are in another namespace. kubectl lists only the current context's namespace, usually default. Add -n payments, or -A to list every namespace."
+  - q: "Can one label selector pick Pods that have env=prod OR team=payments?"
+    a: "No. Commas mean AND, and there is no OR between different keys. A set-based in (a, b) gives OR only across values of one key. Run two queries, or give those Pods one shared label."
+  - q: "A Deployment's selector says app: payment-service, but its Pod template is labelled app: payments. What happens when you apply it?"
+    a: "The API server rejects it, because the selector does not match the template labels. Otherwise the Deployment would create Pods that it could never find, and keep creating more."
+confusedWith: [labels-vs-annotations]
 tags: [namespace, labels, selectors, annotations]
-visual: table
+visual: code
 sources:
-  - title: "Namespaces (Kubernetes docs)"
+  - title: "Namespaces: initial namespaces, kube- prefix, scope (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/"
-    verifiedOn: "2026-10-20"
-  - title: "Labels and Selectors (Kubernetes docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Labels and Selectors: syntax, AND, no OR, set-based, non-overlapping selectors (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Recommended Labels: the app.kubernetes.io prefix (Kubernetes docs)"
+    url: "https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/"
+    verifiedOn: "2026-10-21"
   - title: "Multi-tenancy: namespaces and network isolation (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/security/multi-tenancy/"
     verifiedOn: "2026-10-20"
-  - title: "Deployments: selector and label selector updates (Kubernetes docs)"
+  - title: "Deployments: selector immutable, overlapping selectors (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/controllers/deployment/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "kubectl reference: namespace defaulting (Kubernetes docs)"
     url: "https://kubernetes.io/docs/reference/kubectl/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A namespace is a named section inside one cluster. Object names must be unique inside a namespace, but the same name can exist in two namespaces, so `payments` and `orders` can each have an object called `api`. A label is a short key-value tag on an object, such as `app: payment-service`. A selector is a query on labels, such as "every Pod with `app=payment-service`", which Kubernetes objects and kubectl use to find a group of objects.
+
 ## Why it exists
 
-One cluster serves many teams and apps. Namespaces stop names from clashing; labels let Services and controllers find their Pods without fixed lists of names.
+One cluster usually holds many apps and teams. Without namespaces, two teams could never both name something `api`, and permissions and quotas could only be set for the whole cluster. Without labels, a Deployment would need a fixed list of Pod names, but Pods are replaced all the time and get new names. With a selector, the Deployment says "my Pods are the ones labelled `app=payment-service`" and always finds the current ones.
 
 ## How it works
 
-<Compare id="labels-vs-annotations" />
+<Mermaid
+  alt="Inside the payments namespace, a Deployment with selector app=payment-service matches three Pods labelled app=payment-service and ignores a Pod labelled app=fraud-check. A Pod labelled app=payment-service in the orders namespace is not matched either, because selectors look only inside their own namespace."
+  chart={`flowchart LR
+  subgraph payments [namespace: payments]
+    D["Deployment<br/>selector app=payment-service"] --> P1["Pod app=payment-service"]
+    D --> P2["Pod app=payment-service"]
+    D --> P3["Pod app=payment-service"]
+    X["Pod app=fraud-check"]
+  end
+  subgraph orders [namespace: orders]
+    Y["Pod app=payment-service"]
+  end`}
+/>
 
-- Equality-based: `kubectl get pods -l app=payment-service,tier!=web`. Set-based: `-l 'env in (prod, qa)'`.
-- Shared tools read the recommended `app.kubernetes.io/` labels: name, instance, version, component, part-of, managed-by.
-- Reaching a Service in another namespace needs the namespace in its DNS name: [Pod networking and DNS](card:cluster-networking-dns).
+1. You place each object in a namespace with `metadata.namespace`, or with `-n` on the command line.
+2. You add labels under `metadata.labels`. A Deployment's Pod template, the Pod description it copies, carries labels, so every Pod it creates gets them.
+3. The Deployment holds a selector. Kubernetes compares it with the labels of Pods in the same namespace only.
+4. A Pod whose labels match is counted as one of the Deployment's Pods. A Pod that does not match, like `app=fraud-check`, is ignored.
+5. A [Service](card:services) uses a selector the same way to decide which Pods get its traffic; you will meet it in Services.
+
+So a selector is a live query, not a fixed list: new Pods with the right labels are found at once.
 
 ## Example
 
+The payment-service Deployment with its namespace, labels and selector:
+
 ```yaml
-apiVersion: v1
-kind: Service
+apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: payment-service
   namespace: payments
-  labels: { app.kubernetes.io/name: payment-service, app.kubernetes.io/part-of: checkout }
-  annotations: { example.com/on-call: "payments team, #payments-oncall" }
+  labels: { app.kubernetes.io/part-of: checkout }
+  annotations: { example.com/owner: "payments team" }      # a note for tools, never selected
 spec:
-  selector: { app: payment-service }     # every Pod with this label, in payments only
-  ports: [{ port: 80, targetPort: 8080 }]
+  replicas: 3
+  selector: { matchLabels: { app: payment-service } }      # which Pods belong to it
+  template:
+    metadata: { labels: { app: payment-service, tier: backend } }   # must include the selector
+    spec: { containers: [{ name: payment-service, image: "registry.example.com/payments/payment-service:1.4.0" }] }
 ```
 
-## Defaults
+```bash
+kubectl get pods -n payments -l app=payment-service,tier=backend
+```
 
-| What | Default | Where |
-|---|---|---|
-| Namespace when none is given | the current kubeconfig context's namespace; `default` if it sets none | kubectl 1.37 |
+```text output
+NAME                               READY   STATUS    RESTARTS   AGE
+payment-service-6c97df9496-5gmtz   1/1     Running   0          7s
+payment-service-6c97df9496-jqfz2   1/1     Running   0          8s
+payment-service-6c97df9496-k7z2t   1/1     Running   0          9s
+```
+
+What to notice:
+
+- The template's labels include everything in the selector. Change the template to `app: payments` and the API server rejects it: `selector` does not match template `labels`.
+- The template may carry extra labels, like `tier: backend`. The comma in `-l` means AND, so a Pod must have both labels.
+- Without `-n payments`, kubectl looks in your context's namespace, usually `default`, and prints `No resources found in default namespace.`
+
+## Rules and defaults
+
+- **Initial namespaces:** `default`, `kube-system` (system components and add-ons), `kube-public` (readable by everyone) and `kube-node-lease` (node heartbeats). The `kube-` prefix is reserved.
+- **Label syntax:** a label value is at most 63 characters and starts and ends with a letter or digit. A key may have a prefix. The recommended labels share the `app.kubernetes.io/` prefix (`name`, `instance`, `version`, `part-of`), so different tools describe apps the same way.
+- **Set-based selectors:** `in`, `notin` and "key exists", as in `-l 'env in (prod, qa)'`.
+- **Deployment selector:** in `apps/v1` it cannot be changed after creation, by apply, edit or patch. To change it, delete the Deployment and create it again.
+- **Other namespaces:** calling a Service in another namespace needs the namespace in its DNS name (see [Pod networking and DNS](card:cluster-networking-dns)).
+
+## Not to be confused with
+
+A namespace is a hard boundary for names: every namespaced object sits in exactly one. A label is a soft tag: an object can carry many, and many objects can share one. An annotation also sits in `metadata`, but holds notes for tools and is never used by selectors. Rule: namespace = where it lives; label = how it is found; annotation = extra information.
+
+## Common mistakes
+
+- **Two Deployments with the same selector in one namespace.** Kubernetes does not stop you, but the two controllers fight over the same Pods and behave unpredictably. Give every Deployment a unique label, such as its own `app` value.
 
 ## Interview Qs
 
 ### How would you separate teams that share one cluster?
 
-A namespace per team, [RBAC](card:rbac) Roles bound in each namespace, a ResourceQuota per namespace, and a default-deny [NetworkPolicy](card:network-policies) plus rules that allow only the traffic each team needs.
+Give each team a namespace. Bind [RBAC](card:rbac) roles per namespace so a team can change only its own objects, set a ResourceQuota per namespace to cap CPU and memory, and add a default-deny [NetworkPolicy](card:network-policies) with rules that allow only the traffic each team needs.
+
+### How does a Deployment know which Pods are its own?
+
+Through its label selector. The Deployment, through the ReplicaSet it manages, counts the Pods in its namespace whose labels match, and creates or removes Pods until the count equals `replicas`. Pod names play no part, so replaced Pods with new names are still found.
 
 ### Why can you not change a Deployment's selector?
 
-In apps/v1 it is immutable after creation, so apply and edit are rejected. Delete and recreate the Deployment; deletion removes its Pods too, unless you use `--cascade=orphan`.
+In `apps/v1` the selector is immutable after creation, so apply, edit and patch are rejected. A new selector would no longer match the Pods the Deployment already runs. Delete and recreate the Deployment; `--cascade=orphan` on the delete keeps the old Pods running meanwhile.

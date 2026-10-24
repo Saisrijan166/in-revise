@@ -5,60 +5,138 @@ title: Kubernetes Architecture
 topic: basics
 level: beginner
 heat: 3
-hook: "The control plane decides, worker nodes run: the API server is the front door, etcd remembers, the scheduler places, kubelets run."
+hook: "A cluster has two halves: the control plane decides what should run where, and worker nodes run it. Every part talks through the API server."
 points:
-  - { k: "kube-apiserver", v: "the one entry point; kubectl, nodes and controllers all call it" }
-  - { k: "etcd", v: "stores all cluster data; runs no app containers" }
-  - { k: "kube-scheduler", v: "picks a node for each new Pod; does not start it" }
-  - { k: "Controllers", v: "kube-controller-manager runs the loops that fix drift" }
-  - { k: "kubelet", v: "on every node; starts its Pods through the container runtime" }
+  - { k: "kube-apiserver", v: "the single entry point: kubectl, controllers, the scheduler and every kubelet call it" }
+  - { k: "etcd", v: "the key-value store that holds all cluster data; only the API server should reach it" }
+  - { k: "kube-scheduler", v: "picks a node for each new Pod and records the choice; it does not start containers" }
+  - { k: "kube-controller-manager", v: "one program that runs the built-in controllers, such as the Node and Job controllers" }
+  - { k: "kubelet", v: "the agent on every node; it starts the Pods bound to its own node through the container runtime" }
+  - { k: "Optional parts", v: "kube-proxy (if the network plugin forwards Service traffic) and cloud-controller-manager (off cloud)", kind: minus }
 trap:
   wrong: "The scheduler starts the containers on the node it picks."
-  right: "The scheduler only binds the Pod to a node through the API server. That node's kubelet then starts the containers."
-sayIt: "A cluster is a control plane plus worker nodes. The API server is the front door and the only part that should touch etcd; the scheduler picks nodes, controllers fix drift, and each kubelet runs its node's Pods."
-confusedWith: []
+  right: "The scheduler only records the chosen node in the API server, a step called binding. That node's kubelet then starts the containers."
+  why: "In everyday speech, scheduling a job means running it, and kubectl shows the Pod running seconds later, so the two steps look like one."
+sayIt: "A cluster is a control plane plus worker nodes. The API server is the front door and the only part that should touch etcd; the scheduler picks a node, controllers fix drift, and each node's kubelet starts its Pods through the container runtime."
+cheat:
+  idea: "A cluster is a control plane, which stores state and decides, plus worker nodes, which run Pods. The API server is the only entry point and the only part that touches etcd."
+  remember: "The scheduler only picks the node; the kubelet on that node starts the containers."
+buildsOn: [what-is-kubernetes]
+scenarios:
+  - q: "New payment-service Pods stay Pending and none shows a node name, although the nodes have spare room. Which component do you suspect first, and why?"
+    a: "The kube-scheduler. Choosing a node is its only job, and until it binds a Pod, no kubelet will start it. Check that the scheduler is running, then read the Pod's events for a scheduling message."
+  - q: "A teammate wants a monitoring tool to read objects straight from etcd, to take load off the API server. Is that a good idea?"
+    a: "No. Access to etcd is equal to root on the cluster, and it skips the API server's login, permission and validation checks. Tools should read through the API server, the only component that should talk to etcd."
+confusedWith: [control-plane-vs-worker-node]
 tags: [architecture, control-plane, etcd, kubelet, scheduler]
-visual: table
+visual: flow
 sources:
-  - title: "Cluster Architecture (Kubernetes docs)"
+  - title: "Cluster Architecture: control plane and node components (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/architecture/"
-    verifiedOn: "2026-10-20"
-  - title: "Communication between Nodes and the Control Plane (Kubernetes docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Communication between Nodes and the Control Plane: hub-and-spoke (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/architecture/control-plane-node-communication/"
-    verifiedOn: "2026-10-20"
-  - title: "Kubernetes Scheduler (Kubernetes docs)"
+    verifiedOn: "2026-10-21"
+  - title: "Kubernetes Scheduler: filtering, scoring and binding (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/scheduling-eviction/kube-scheduler/"
-    verifiedOn: "2026-10-20"
-  - title: "Operating etcd clusters for Kubernetes (Kubernetes docs)"
+    verifiedOn: "2026-10-21"
+  - title: "kubelet: PodSpecs come primarily from the API server (Kubernetes 1.37 reference)"
+    url: "https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/"
+    verifiedOn: "2026-10-21"
+  - title: "Operating etcd clusters for Kubernetes: securing etcd (Kubernetes docs)"
     url: "https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "kind: Configuration, default CNI kindnetd (kind docs)"
+    url: "https://kind.sigs.k8s.io/docs/user/configuration/"
+    verifiedOn: "2026-10-21"
   - title: "Kubernetes Interview Questions and Answers (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/kubernetes-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Kubernetes architecture is the set of programs that make up a [cluster](card:what-is-kubernetes), split into two halves. The control plane is the decision-making half: it stores what you asked for, chooses where each Pod runs and reacts when something changes. The worker nodes are the machines that run your Pods. Each half is made of a few programs, called components, and they all communicate through one of them, the API server.
+
 ## Why it exists
 
-Kubernetes separates deciding what should run (the control plane) from running it (worker nodes), so many machines can be managed as one cluster.
+Many machines must agree on one picture of what should run. If every machine kept its own list and talked to every other machine, the lists would drift apart and nobody could manage the cluster as one. Kubernetes keeps a single source of truth, etcd behind the API server, and gives every other component one narrow job: the scheduler places, controllers fix drift, the kubelet runs. When a worker node dies, only its Pods are lost, and the control plane can replace them on other nodes.
 
 ## How it works
 
-<Compare id="control-plane-vs-worker-node" />
+<Mermaid
+  alt="Creating payment-service Pods. kubectl sends the Deployment to kube-apiserver, which stores it in etcd. The controller manager sees it and asks the API server for Pods. The scheduler sees Pods without a node and binds each one to a node. The kubelet on that node sees its new Pod and tells the container runtime to start the containers."
+  chart={`flowchart LR
+  K[kubectl] -- "1. send Deployment" --> A[kube-apiserver]
+  A <--> E[(etcd)]
+  CM[controller manager] -- "2. create Pods" --> A
+  S[scheduler] -- "3. bind Pod to node" --> A
+  A -- "4. Pod for this node" --> KL[kubelet]
+  KL -- "5. start containers" --> R[container runtime]`}
+/>
 
-- Hub and spoke: components coordinate through the API server, not with each other.
-- Add-ons, like cluster DNS, run as ordinary workloads in kube-system; DNS and network plugins: [Pod networking and DNS](card:cluster-networking-dns).
-- Running the control plane on several machines, and etcd quorum: [high availability](card:high-availability).
+Follow what happens when you ask for 3 payment-service Pods:
+
+1. kubectl sends the Deployment to the kube-apiserver, which checks it and saves it in etcd.
+2. A controller in kube-controller-manager sees the new Deployment and asks the API server for 3 Pods. They are saved with no node yet. ([Deployments](card:deployments-and-replicasets) shows the exact chain.)
+3. The kube-scheduler sees Pods without a node, picks a suitable node for each, and records the choice in the API server. This step is called binding.
+4. The kubelet on each chosen node gets its new Pod from the API server and tells the container runtime to start the containers.
+5. The kubelet reports the Pod's status back to the API server, so kubectl and the controllers see it running.
+
+So every component reads and writes through the API server; none of them talk to each other directly.
+
+## Example
+
+A one-node [kind](https://kind.sigs.k8s.io/) test cluster runs its control plane components as Pods in the `kube-system` namespace, so you can list them:
+
+```bash
+kubectl get pods -n kube-system -o name
+```
+
+```text output
+pod/coredns-559f6c778d-496p6
+pod/coredns-559f6c778d-jj8z7
+pod/etcd-k8s-basics-control-plane
+pod/kindnet-686b8
+pod/kube-apiserver-k8s-basics-control-plane
+pod/kube-controller-manager-k8s-basics-control-plane
+pod/kube-proxy-7g7mv
+pod/kube-scheduler-k8s-basics-control-plane
+```
+
+What to notice:
+
+- `etcd`, `kube-apiserver`, `kube-scheduler` and `kube-controller-manager` are the control plane. Their Pod names end with the node they run on.
+- `kube-proxy` runs one copy per node, because each node needs its own network rules for [Services](card:services), the stable addresses in front of Pods. `kindnet` is the network plugin kind installs.
+- `coredns` is an add-on: cluster DNS that runs as an ordinary workload, here with 2 copies.
+- In this one-node test cluster the same node also ran the payment-service Pods. Real setups keep them apart, as the rules below say.
+
+## Rules and defaults
+
+- **Hub and spoke:** all requests from nodes and Pods end at the API server; the other control plane components expose no remote services.
+- **etcd access:** access to etcd equals root on the cluster, so ideally only the API server reaches it. Back etcd up; without it the cluster forgets every object.
+- **Where the control plane runs:** setup tools usually put all control plane components on the same machines and keep user containers off them. Production spreads them over several machines (see [high availability](card:high-availability)).
+- **Worker nodes:** a cluster needs at least one to run Pods.
+- **Add-ons:** cluster DNS and similar features run as normal workloads in the `kube-system` namespace. Every cluster should have cluster DNS.
+
+## Not to be confused with
+
+The control plane stores the cluster's state and makes decisions: the API server, etcd, the scheduler and the controller managers. A worker node runs Pods: the kubelet, the container runtime and usually kube-proxy. Rule: the control plane decides, worker nodes do, and they meet only at the API server.
+
+## Common mistakes
+
+- **"The kubelet schedules Pods across the cluster."** The kubelet works only on its own node and only runs Pods already bound to it. Choosing the node is the scheduler's job.
 
 ## Interview Qs
 
 ### What does etcd store, and why protect it?
 
-Every object: what you asked for and what the cluster reports. Lose it without a backup and the cluster forgets its state. Access to etcd equals root on the cluster, so only the API server should reach it.
+Every object: the spec you asked for and the status the cluster reports. Lose etcd without a backup and the cluster forgets its whole state. Access to etcd equals root on the cluster, so only the API server should reach it, over TLS.
 
 ### Is kube-proxy always needed?
 
-No. It programs node rules so Service addresses reach Pods. Some network plugins do that forwarding themselves; then nodes do not run kube-proxy.
+No. kube-proxy keeps network rules on each node so that traffic to a Service address reaches the right Pods. Some network plugins do that forwarding themselves; with those, nodes do not need kube-proxy.
 
 ### What does the cloud-controller-manager do?
 
-It links the cluster to a cloud API: checks whether a silent node was deleted, sets up routes, and creates load balancers for LoadBalancer Services. On-premises or local clusters do not have one.
+It links the cluster to a cloud provider's API: it checks whether a node that stopped responding was deleted in the cloud, sets up network routes, and creates cloud load balancers for Services. Clusters on your own servers or on a laptop do not have one.

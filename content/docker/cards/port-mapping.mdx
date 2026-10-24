@@ -5,71 +5,119 @@ title: Publishing Ports
 topic: networking-storage
 level: beginner
 heat: 3
-hook: "EXPOSE only documents a port; -p HOST:CONTAINER actually opens it on the host."
+hook: "-p 9090:8080 opens port 9090 on the host and forwards it to port 8080 inside the container. EXPOSE in the Dockerfile only documents the port and opens nothing."
 points:
-  - { k: "-p 9090:8080", v: "host port 9090 forwards to app port 8080: outside, then inside" }
-  - { k: "No IP given", v: "published on all host interfaces, 0.0.0.0 (Docker Engine 29)", kind: default }
-  - { k: "-p 127.0.0.1:8080:8080", v: "reachable only from the Docker host itself", kind: plus }
-  - { k: "ufw on Linux", v: "published ports bypass ufw: Docker manages its own iptables rules", kind: minus }
-  - { k: "Same network", v: "containers talk on the container port; no -p needed" }
+  - { k: "-p 9090:8080", v: "the host port comes first, the container port second: host 9090 forwards to the app's 8080" }
+  - { k: "No IP given", v: "the port opens on every host address (0.0.0.0 and [::]), so other machines can reach it (Docker Engine 29)", kind: default }
+  - { k: "-p 127.0.0.1:9090:8080", v: "only programs on the Docker host itself can reach the port", kind: plus }
+  - { k: "EXPOSE 8080", v: "records the app's port in the image; it publishes nothing until you use -p or -P" }
+  - { k: "ufw on Linux", v: "a ufw rule does not block a published port, because Docker writes its own iptables rules", kind: minus }
+  - { k: "Same network", v: "containers on one network use the container port directly; they need no -p" }
 trap:
   wrong: "EXPOSE 8080 in the Dockerfile makes the service reachable from my browser."
-  right: "EXPOSE is only metadata. Publish the port at run time with -p 8080:8080, or -P for every EXPOSEd port."
-sayIt: "EXPOSE documents which port the app listens on. Publishing with -p host:container opens a host port; I bind it to 127.0.0.1 unless the outside world needs it."
-confusedWith: []
+  right: "EXPOSE only records the port in the image. Publish it at run time with -p 8080:8080, or with -P for every EXPOSEd port."
+  why: "The word expose sounds like opening the port to the world, and many Dockerfiles show EXPOSE next to the app's port, so it looks like the step that makes it reachable."
+sayIt: "EXPOSE documents which port the app listens on. Publishing with -p host:container opens a host port and forwards it into the container. I bind it to 127.0.0.1 unless clients on other machines need it, because a published port bypasses ufw."
+cheat:
+  idea: "Publishing opens a port on the host and forwards it into a container, so clients outside Docker can call the app. EXPOSE only documents the port."
+  code: |
+    docker run -p 9090:8080 payment-service:1.4.0          # host 9090 → container 8080
+    docker run -p 127.0.0.1:9090:8080 payment-service:1.4.0  # this host only
+  remember: "Order is host:container. With no IP, the port is open to other machines, and ufw does not block it."
+buildsOn: [docker-networking, dockerfile-instructions]
+scenarios:
+  - q: "The Dockerfile has EXPOSE 8080 and you run docker run -d payment-service:1.4.0. Does http://localhost:8080 work in your browser?"
+    a: "No. EXPOSE only records the port as metadata. Nothing is published, so the host does not forward port 8080. Run it with -p 8080:8080, or -P to publish every EXPOSEd port on a random host port."
+  - q: "You run -p 8080:8080, but curl localhost:8080 on the host fails, and the app log says it listens on 127.0.0.1:8080. Why?"
+    a: "Docker forwards traffic to the container's own network address, but the app accepts connections only from inside the container. Make the app listen on 0.0.0.0."
+  - q: "A teammate publishes the admin port with -p 9000:9000 on a Linux server and says ufw blocks port 9000 anyway. Is the port safe?"
+    a: "No. Docker manages its own iptables rules, so a published port bypasses ufw and is reachable from other machines. Bind it to loopback with -p 127.0.0.1:9000:9000, or do not publish it."
+confusedWith: [expose-vs-publish]
 tags: [ports, networking, expose]
 visual: table
 sources:
-  - title: "docker container run: -p, -P and the UFW note (Docker CLI reference)"
+  - title: "docker container run: -p, -P, --expose and the UFW note (Docker CLI reference)"
     url: "https://docs.docker.com/reference/cli/docker/container/run/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Port publishing and mapping (Docker Engine docs)"
+    url: "https://docs.docker.com/engine/network/port-publishing/"
+    verifiedOn: "2026-10-21"
   - title: "Dockerfile reference: EXPOSE"
     url: "https://docs.docker.com/reference/dockerfile/#expose"
     verifiedOn: "2026-10-20"
-  - title: "Publishing and exposing ports (Docker docs, get started)"
-    url: "https://docs.docker.com/get-started/docker-concepts/running-containers/publishing-ports/"
-    verifiedOn: "2026-10-20"
+  - title: "Host network driver: published ports are discarded (Docker Engine docs)"
+    url: "https://docs.docker.com/engine/network/drivers/host/"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Publishing a port means opening a port on the host and forwarding its traffic to a port inside a container. You do it at run time with `-p HOST_PORT:CONTAINER_PORT`. The container port is where the app listens, for example 8080 for the payment service. The host port is what a browser or another machine calls.
 
 ## Why it exists
 
-A container's ports are reachable from the host and from its own network, but not from other machines. Publishing maps a host port to a container port so clients outside can call the service.
+A container has its own network stack, as [Docker networks](card:docker-networking) showed. By default, machines outside the Docker host and containers on other networks cannot reach its ports. That is safe, but a browser, a mobile app or a load balancer must still call the payment service. Publishing opens exactly one door: the host port you choose, forwarded to the app's port.
 
 ## How it works
 
 <Compare id="expose-vs-publish" />
 
-- Order is outside:inside, so `-p 9090:8080` sends host port 9090 to the app's 8080.
-- `-p 8080` or `-P` lets Docker pick a free host port; read it with `docker port`.
-- In [host network mode](card:docker-networking) `-p` is ignored: the app uses host ports directly.
+1. You run `docker run -p 9090:8080 payment-service:1.4.0`.
+2. Docker adds a forwarding rule on the host: traffic to host port 9090 goes to port 8080 of this container.
+3. A client calls `http://<host>:9090`. With no IP in `-p`, every address of the host accepts it, so other machines can call it too.
+4. The request reaches the app inside the container on port 8080. The app must listen on `0.0.0.0`, or the forwarded traffic is refused.
+
+So the key is: `-p` is the only thing that opens a port to the outside; EXPOSE only describes it.
 
 ## Example
 
+The payment service runs twice: once published to this host only, and once with `-P`, which lets Docker pick the host port.
+
 ```bash
-docker run -d --name payment-service -p 127.0.0.1:8080:8080 payment-service:1.4.0
+docker run -d --name payment-service -p 127.0.0.1:9090:8080 payment-service:1.4.0
+curl localhost:9090/health
+
 docker run -d --name payment-test -P payment-service:1.4.0
 docker port payment-test
-# 8080/tcp -> 0.0.0.0:55021
+# 8080/tcp -> 0.0.0.0:32769
+# 8080/tcp -> [::]:32769
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Host address when none is given | All interfaces (0.0.0.0) | Docker Engine 29 |
-| Protocol | TCP; add `/udp` for UDP | EXPOSE and `-p` |
-| Host port for `-P` or `-p 8080` | Random port from the ephemeral range | Docker Engine 29 on Linux |
+- `127.0.0.1:9090:8080` makes the health check work from this host, but another machine calling port 9090 gets no answer.
+- `-P` publishes only the ports listed with EXPOSE in the image, here 8080, each to a random free host port. `docker port` shows which one.
+- The two `docker port` lines show the default: no IP was given, so the port is open on all IPv4 (`0.0.0.0`) and IPv6 (`[::]`) addresses.
+- If the app inside listened on `127.0.0.1:8080` instead of `0.0.0.0:8080`, the curl would fail even with `-p`.
+
+## Rules and defaults
+
+- **Format:** `-p [HOST_IP:]HOST_PORT:CONTAINER_PORT[/udp]`. TCP is the default protocol.
+- **Host address:** with no IP, Docker publishes on all host addresses, `0.0.0.0` and `[::]` (Docker Engine 29). Docker's docs call this insecure by default.
+- **Firewall:** on Linux, Docker writes its own iptables rules, so a ufw rule that blocks the port does not stop a published port.
+- **No host port:** `-p 8080` or `-P` gets a random free host port; `docker port` or `docker ps` shows it.
+- **Host network mode:** with `--network host`, Docker discards `-p` and prints a warning, because the app already uses the host's ports directly.
+- **Between containers:** containers on the same network reach every port of each other with no publishing.
+
+## Not to be confused with
+
+`EXPOSE 8080` is a Dockerfile instruction that records the app's port in the image as information; it opens nothing. `-p 8080:8080` is a run-time flag that opens a host port and forwards it into the container. Rule: EXPOSE documents, `-p` opens.
+
+## Common mistakes
+
+- **Publishing the database "so the app can reach it".** On one network the app uses `postgres:5432` with no `-p`. Publish the database only when a tool on the host must connect, and then on `127.0.0.1`.
+- **Swapping the order.** `-p 8080:9090` forwards host 8080 to container 9090. The host side always comes first.
 
 ## Interview Qs
 
 ### What is the difference between EXPOSE and -p?
 
-EXPOSE records the app's port in the image and publishes nothing. `-p` at run time opens a host port and forwards it to the container. `-P` publishes all EXPOSEd ports to random host ports.
+EXPOSE records the app's port in the image and publishes nothing. `-p` at run time opens a host port and forwards it to the container port. `-P` publishes every EXPOSEd port to random host ports, so EXPOSE matters only together with `-P`.
 
 ### Do two containers need published ports to talk to each other?
 
-No. On the same Docker network they use the container port directly, for example `postgres:5432`. Publish only what clients outside the host need.
+No. Containers on the same network reach each other's container ports directly, for example `postgres:5432`. Publish only what clients outside the Docker host need, which keeps the database off the host's ports.
 
 ### How do you keep a published port off the internet?
 
-Bind it to loopback, `-p 127.0.0.1:8080:8080`, or do not publish it. On Linux, ufw does not block published ports.
+Bind it to loopback with `-p 127.0.0.1:9090:8080`, so only the Docker host can connect, or do not publish it at all. On Linux, do not rely on ufw: Docker's own iptables rules let published ports through.

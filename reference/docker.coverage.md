@@ -1,5 +1,5 @@
 # Coverage: Docker
-Reference: reference/docker.md  ·  Last updated: 20-10-2026
+Reference: reference/docker.md  ·  Last updated: 21-10-2026
 
 Every reference item (key list: the numbered sections, plus each question, pattern and "X vs Y" row inside them) appears in exactly
 one of Mapped, Corrected or Dropped. A section whose parts went to different places has one row here (Corrected wins over
@@ -238,3 +238,78 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | S28 row "Networking" (container networks / service names on Compose networks / Pod networking and Services) | cut: duplicate: name lookup is owned by docker-networking and docker-compose; Kubernetes networking by the Kubernetes tech |
 | S28.Q1 Does Kubernetes replace Docker? | also: concept docker-and-orchestration (Interview Q 1, trap) |
 | S32 multiple-choice wrong options (the distractors) | cut: duplicate: the site Quiz is question -> answer; each question lands through its owner |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass checked about 475 claims and fixed 0.
+
+### Unit basics
+
+**Added from the reference**
+
+| Reference item | Landed in |
+|---|---|
+| D1 "Why Docker" (works on one machine, fails on another) | containers-and-vms: Why it exists, now concrete (Java 21 on the server vs Java 25 needed), plus the Example that shows the container's own Java 25 on a Java 21 host |
+| D1 VM vs container (guest OS, hypervisor, lighter, faster start) | containers-and-vms: What it is, How it works steps 1-4, Interview Q "Why does a container start faster" |
+| D1.Q1 / Q2 / Q3 | containers-and-vms (scenario 2, Interview Qs), namespaces-and-cgroups (Interview Q "Are containers completely isolated?") |
+| D2 typical flow (Dockerfile → build → image → run → container) | images-and-layers Example (build, then history); docker-architecture How it works (docker run steps) |
+| D2 registry not required for local build and run | docker-architecture (Rules and defaults, scenario 2, Interview Q) |
+| D3 "immutable image", "containers have separate writable layers" | images-and-layers (points, How it works steps 3-5, scenario 1, Common mistakes) |
+| D3 "tags can be changed; a digest identifies specific content" | registries How it works step 4, scenario 1, Common mistakes "Only latest can change"; tag-vs-digest example |
+| S29.8 Image vs Container | images-and-layers Analogy (class and object) and Not to be confused with; image-vs-container explain/example/sayIt |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| containers-and-vms Example showed a kernel version "6.8.0-45-generic" that was not from a real run | Replaced with a real run on this host (Docker Engine 29.1.3, kernel 7.0.0-38-generic), which also shows host Java 21 vs container Java 25 and Ubuntu 24.04 vs 26.04 OS files | real run |
+| images-and-layers point "filesystem steps (RUN, COPY, ADD) add layers" read as a closed list | "Steps that change files, such as RUN, COPY and ADD, add a layer" (a WORKDIR that creates a folder also added a layer in a real build) | https://docs.docker.com/engine/storage/drivers/ |
+| registries: Docker Hub unauthenticated limit said "per IP address" | "per IPv4 address or IPv6 /64 subnet"; Pro, Team and Business unlimited under fair use | https://docs.docker.com/docker-hub/usage/ (checked 21-10-2026) |
+| namespaces-and-cgroups: user namespace wording | Root in a container keeps user ID 0 (host root) with fewer privileges unless userns-remap is enabled; added that the cgroup namespace is private by default on cgroup v2 and that Engine 29 deprecates cgroup v1 (support until at least May 2029) | dockerd reference; Engine 29 release notes |
+| docker-architecture: the Docker Desktop licence fact appeared twice | Kept once (Interview Q); Desktop vs Engine now in "Not to be confused with" | Docker Desktop licence page |
+
+### Unit networking-storage
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| D7 trap: "network connectivity does not guarantee the app listens on the right interface" | docker-networking (point "Listen address", Rules "Listen address"); port-mapping (How step 4, scenario 2, What to notice) |
+| D7 trap: localhost is the container itself | docker-networking (point, Example bullet, scenario 1, Interview Q 1) |
+| D7 host network: normal port mapping is not used | docker-networking (Rules "Drivers"); port-mapping (Rules "Host network mode") |
+| D8 rule: removing an image does not delete a volume | volumes-and-mounts (Rules "Survives removal") |
+| D8 rule: mounting over a directory hides its contents | volumes-and-mounts (point, Rules "Hiding", scenario 3, Interview Q 3) |
+| D8 rule: docker volume prune can delete unused volumes, use it carefully | volumes-and-mounts (Common mistakes) |
+| D9 configuration separation (one image, settings outside) | env-and-secrets (hook, What it is, Why, Interview Q 1) |
+| D9 ARG leaks through build metadata | env-and-secrets (trap, scenario 1, Example second block) |
+| Not in reference, added: containers on different user-defined networks cannot talk; names do not resolve across networks | docker-networking (point "Separate networks", Rules "More than one network") |
+| Not in reference, added: build secret as env var with `RUN --mount=type=secret,env=...` | env-and-secrets (Example second block) |
+
+**Corrections**
+
+| What | Fixed to | Source |
+|---|---|---|
+| Draft: published port with no IP binds 0.0.0.0 | 0.0.0.0 and [::] (IPv4 and IPv6); seen in a real `docker port` run on Engine 29.1.3 | https://docs.docker.com/engine/network/port-publishing/ |
+| Draft comparison row: tmpfs "counts toward the memory limit" | Dropped: not stated in Docker's docs; replaced by "not shared between containers" and the 50%-of-RAM default size | https://docs.docker.com/engine/storage/tmpfs/ |
+| Draft: anonymous volumes removed by `docker rm -v` or `--rm` | Kept, and added that otherwise they stay behind unattached (seen in a real run) | https://docs.docker.com/engine/storage/volumes/ |
+| Reference example mounts `/var/lib/postgresql/data` | For postgres 18 the mount point is `/var/lib/postgresql` (image VOLUME checked with `docker image inspect postgres:18`) | https://hub.docker.com/_/postgres |
+| Draft env-and-secrets example used Compose (taught later) | Example now uses `docker run` with a read-only secret file; Compose secrets moved to a Rules line linking docker-compose | https://docs.docker.com/compose/how-tos/use-secrets/ |
+
+### Unit runtime
+
+**Added from the reference**
+
+- D6 "docker run does not restart an existing named container" -> docker-cli-essentials (scenario 1, Example: second run fails on the name; verified by a real run).
+- D6 "docker rm needs a stopped container; rm -f" -> docker-cli-essentials (Example output shows the real refusal).
+- D11 "running container means healthy" -> container-health-checks (What it is, Why, Interview Q 1, scenario 1).
+- D11 "Docker restarts every crashed container" -> container-lifecycle (trap with why, scenario 1, real on-failure run).
+- S29.4 limit part (CPU throttled, memory overuse terminated) -> resource-limits (How it works steps 3-4, real OOM run).
+- S31.10 graceful shutdown -> signals-and-graceful-shutdown (real shell-form vs exec-form run).
+- New: start period explained as a scenario (health checks); Spring Boot logs only to the console by default (logging).
+
+**Corrections**
+
+- docker rmi: draft said it "refuses one a running container uses unless forced". Real run on Engine 29.1.3: it also refuses while a STOPPED container uses the image ("must be forced"). Fixed in docker-cli-essentials (trap, Rules). Source: docker image rm CLI reference + local run.
+- Restart policy "10 s rule": the docs page on starting containers automatically says a policy takes effect only after the container is up 10 s, but a real run with on-failure:3 and an app that exits at once restarted it 3 times. The site states the documented behaviour that is certain (docker run reference): the back-off delay starts at 100 ms, doubles up to 1 minute, and resets after the container ran for at least 10 s. Kept out: "no restart within the first 10 s".
+- resource-limits Interview Q "OOM-killed but heap looked fine" was a duplicate of java-in-containers' Interview Q; replaced with "why every production container needs a memory limit" (daemon OOM priority, from the Resource constraints page).
+- container-health-checks: removed the draft-free claim that Kubernetes ignores Docker HEALTHCHECK (could not confirm from a primary source today; kubernetes.io fetch was blocked).

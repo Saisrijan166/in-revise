@@ -5,75 +5,143 @@ title: "Docker Architecture: Client, Daemon, Runtime"
 topic: basics
 level: beginner
 heat: 2
-hook: "The docker CLI calls dockerd's REST API; dockerd hands the work to containerd, which uses runc to start the container."
+hook: "The docker command is only a client. It sends each request to dockerd, a background service, which runs containers through containerd and runc."
 points:
-  - { k: "Client-server", v: "docker CLI sends REST calls to dockerd, local or remote" }
-  - { k: "API socket", v: "Engine 29: /var/run/docker.sock; access to it is root-level", kind: default }
-  - { k: "Image store", v: "containerd image store: default on fresh installs since Engine 29.0", kind: default }
-  - { k: "OCI specs", v: "open standards for images, runtimes and registries; image-spec v1.1.1" }
-  - { k: "Engine vs Desktop", v: "Engine is open source (Apache 2.0); Desktop is paid for bigger companies" }
+  - { k: "Client", v: "the docker CLI turns each command into a REST API call to a daemon, on this machine or another one" }
+  - { k: "dockerd", v: "the daemon: a background service that builds images, runs containers and manages networks and volumes" }
+  - { k: "containerd and runc", v: "dockerd hands containers to containerd, which uses runc to make the kernel start the container process" }
+  - { k: "API socket", v: "Docker Engine 29 on Linux: unix:///var/run/docker.sock; access to it gives root-level power", kind: default }
+  - { k: "Image store", v: "Docker Engine 29.0+: fresh installs keep images in the containerd image store", kind: default }
+  - { k: "OCI standards", v: "open formats for images, runtimes and registries, so other tools can run images Docker builds", kind: plus }
 trap:
   wrong: "The docker command runs the containers itself."
-  right: "It is only a client. dockerd does the work through containerd and runc, and the CLI can drive a remote daemon too."
-sayIt: "Docker is client-server: the docker CLI sends REST calls to the dockerd daemon, which uses containerd and runc to run OCI containers. A registry is needed only to pull or push images."
+  right: "It is only a client. dockerd does the work, through containerd and runc, and the CLI can just as well drive a daemon on another machine."
+  why: "You type docker run and a container appears, so the command looks like the thing that runs it."
+sayIt: "Docker is client-server: the docker CLI sends REST calls to the dockerd daemon, which uses containerd and runc to run containers in the open OCI format. A registry is needed only to share images. Access to docker.sock is root-level, so I guard it."
+cheat:
+  idea: "Docker is client-server. The docker CLI sends each command as an API call to dockerd, a background service that builds images and runs containers."
+  flow: "docker CLI → docker.sock → dockerd → containerd → runc → container"
+  remember: "Whoever can reach docker.sock controls the host as root; a registry is needed only to share images."
+buildsOn: [images-and-layers, registries]
+scenarios:
+  - q: "A developer is added to the docker group on a shared Linux server so they can run docker without sudo. Why does the security team object?"
+    a: "The docker group can use /var/run/docker.sock, and through it the daemon, which runs as root. Docker's docs say this group grants root-level privileges, for example by starting a container that mounts the host's files."
+  - q: "You build payment-service:1.4.0 on your laptop and immediately run it there. Did the image pass through a registry?"
+    a: "No. docker build stores the image in the daemon's local image store, and docker run uses it from there. A registry is needed only when another machine must pull the image."
 confusedWith: []
 tags: [dockerd, containerd, runc, oci, docker-desktop]
 visual: flow
 sources:
-  - title: "What is Docker? Docker architecture (Docker docs)"
+  - title: "What is Docker? Docker architecture and the docker run steps (Docker docs)"
     url: "https://docs.docker.com/get-started/docker-overview/"
-    verifiedOn: "2026-10-20"
-  - title: "dockerd: daemon socket and runtime options (Docker CLI reference)"
+    verifiedOn: "2026-10-21"
+  - title: "dockerd: daemon socket, default runtime runc, containerd (Docker CLI reference)"
     url: "https://docs.docker.com/reference/cli/dockerd/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "docker CLI: -H, DOCKER_HOST and contexts (Docker CLI reference)"
+    url: "https://docs.docker.com/reference/cli/docker/"
+    verifiedOn: "2026-10-21"
+  - title: "Linux post-installation steps: the docker group grants root-level privileges (Docker docs)"
+    url: "https://docs.docker.com/engine/install/linux-postinstall/"
+    verifiedOn: "2026-10-21"
   - title: "Docker Engine version 29 release notes"
     url: "https://docs.docker.com/engine/release-notes/29/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "containerd overview"
+    url: "https://containerd.io/"
+    verifiedOn: "2026-10-21"
+  - title: "runc README (Open Container Initiative)"
+    url: "https://github.com/opencontainers/runc"
+    verifiedOn: "2026-10-21"
   - title: "Docker Desktop license agreement (Docker docs)"
     url: "https://docs.docker.com/subscription-billing/desktop-license/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "About the Open Container Initiative"
     url: "https://opencontainers.org/about/overview/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Docker is a client-server system. The `docker` command you type is only the client: it sends each command as a request to dockerd, the Docker daemon. A daemon is a program that runs in the background all the time; dockerd builds [images](card:images-and-layers), pulls them from [registries](card:registries) and runs containers. To start a container, dockerd uses two smaller tools: containerd, which manages containers, and runc, which asks the kernel to start the container's process.
+
 ## Why it exists
 
-Building and running containers needs a long-running service with root access to the kernel. Splitting client and daemon lets any tool, local or remote, drive it through one API.
+Running containers needs a program that stays alive after your command ends: it must watch the payment-service container, keep its logs and restart it if it crashes. It also needs root rights to use kernel features. A short-lived command cannot do that. So Docker splits the work: one long-running daemon does it, and thin clients, such as the CLI, Docker Compose or a CI tool, talk to it through one API, from the same machine or another one.
 
 ## How it works
 
 <Mermaid
-  alt="The docker CLI sends REST API calls over the Unix socket /var/run/docker.sock to dockerd. dockerd passes containers to containerd, which calls runc, which starts the container. dockerd also pulls images from and pushes images to a registry."
+  alt="The docker CLI sends REST API calls over the Unix socket /var/run/docker.sock to dockerd. dockerd pulls images from a registry when they are missing. dockerd passes the container to containerd, which calls runc, which starts the container process on the kernel."
   chart={`flowchart LR
-  CLI([docker CLI]) -- "REST API, docker.sock" --> D[dockerd]
-  D --> C[containerd]
+  CLI([docker CLI]) -- "1. REST API over docker.sock" --> D[dockerd]
+  REG[(Registry)] -- "2. pull if missing" --> D
+  D -- "4. start" --> C[containerd]
   C --> R[runc]
-  R --> K([Container])
-  D <-->|"pull / push"| REG[(Registry)]`}
+  R --> K([Container process])`}
 />
 
-- Docker Desktop bundles dockerd, the CLI and Compose, with a Linux VM on macOS and Windows.
-- Anyone who can reach docker.sock controls the host: see [runtime security](card:container-runtime-security).
+What happens when you type `docker run payment-service:1.4.0`:
+
+1. The CLI turns the command into an HTTP request to the Docker API and sends it to the daemon, by default through the Unix socket `/var/run/docker.sock`.
+2. dockerd checks its local image store. If the image is missing, it pulls it from the registry first.
+3. dockerd creates the container: it adds a writable layer on top of the image and creates a network interface with an IP address.
+4. dockerd hands the container to containerd, which calls runc. runc sets up the isolation, explained in [namespaces and cgroups](card:namespaces-and-cgroups), and starts the process.
+
+So the key is: the CLI only asks; dockerd decides; containerd and runc do the low-level start.
 
 ## Example
 
+Two questions that show the layers of the engine on a Linux host:
+
 ```bash
-docker build -t payment-service:1.4.0 .            # Dockerfile -> image (stored locally)
-docker run -d -p 8080:8080 payment-service:1.4.0   # image -> container
-docker version     # Client section, then Server: Engine, containerd, runc
+docker version --format '{{range .Server.Components}}{{println .Name .Version}}{{end}}'
+curl -s --unix-socket /var/run/docker.sock http://localhost/version | grep -o '"ApiVersion":"[^"]*"' | head -1
+ls -l /var/run/docker.sock
 ```
+
+```text output
+Engine 29.1.3
+containerd 2.2.1
+runc 1.3.4-0ubuntu1~24.04.1
+docker-init 0.19.0
+
+"ApiVersion":"1.52"
+srw-rw---- 1 root docker 0 Oct 22 10:12 /var/run/docker.sock
+```
+
+What to notice:
+
+- The daemon reports the parts from the diagram: Engine (dockerd), containerd and runc. docker-init is a tiny helper process you meet in [PID 1 and signals](card:signals-and-graceful-shutdown).
+- `curl` talks to the same socket and gets an answer without the docker CLI at all. The CLI is just one client of this HTTP API.
+- The socket belongs to `root` and the `docker` group. Anyone who can write to it can tell a root daemon what to do.
+
+## Rules and defaults
+
+- **Socket:** on Linux the CLI connects to `unix:///var/run/docker.sock` by default. Point it at another daemon with `-H`, the `DOCKER_HOST` variable or a `docker context`.
+- **Root-level access:** the daemon runs as root unless you use rootless mode, and Docker's docs warn that the `docker` group grants root-level privileges. Hardening is in [runtime security](card:container-runtime-security).
+- **Runtime:** dockerd's default OCI runtime is runc.
+- **Image store:** since Docker Engine 29.0, fresh installs use the containerd image store; hosts upgraded from older versions keep the classic storage driver, such as overlay2.
+- **Registry optional:** `docker build` followed by `docker run` on one machine never needs a registry.
+
+## Not to be confused with
+
+Docker Engine is the open-source server and client: dockerd, its API and the docker CLI. Docker Desktop is a desktop app that packages the engine, Compose and a Linux VM for laptops. Rule: servers run Docker Engine; developer laptops on macOS or Windows usually run Docker Desktop.
 
 ## Interview Qs
 
 ### What happens when you type docker run?
 
-The CLI calls the daemon's API. dockerd pulls the image if it is missing, creates the container with a writable layer and a network interface, and containerd starts it through runc.
+The CLI sends an API call to dockerd. dockerd pulls the image if it is missing, creates the container with a writable layer and a network interface, and hands it to containerd, which starts the process through runc.
 
 ### Do you need a registry to run a container?
 
-No. docker build stores the image locally and docker run uses it. A registry is needed only to share images between machines, such as CI and servers.
+No. `docker build` stores the image in the daemon's local store and `docker run` uses it from there. A registry is needed only to share images between machines, such as from CI to servers.
+
+### Why is access to the Docker socket dangerous?
+
+The socket is the API of a daemon that runs as root. Anyone who can call it can start a privileged container or mount the host's files, which is the same as root on the host. Treat the docker group, and mounting docker.sock into a container, as granting root.
 
 ### Is Docker free for companies?
 
-Docker Engine is open source. Docker Desktop is free for personal use, education, non-commercial open source and small businesses (under 250 employees and under USD 10 million revenue); larger companies and governments must pay.
+Docker Engine is open source. Docker Desktop is free for personal use, education, non-commercial open source and small companies (under 250 employees and under USD 10 million revenue); larger companies and governments need a paid subscription.

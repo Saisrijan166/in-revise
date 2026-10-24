@@ -5,46 +5,66 @@ title: Container Health Checks
 topic: runtime
 level: intermediate
 heat: 2
-hook: "A health check runs a command inside the container on a timer; Docker marks it starting, healthy or unhealthy."
+hook: "A health check is a command Docker runs inside the container on a timer to test the app itself; the result marks the container starting, healthy or unhealthy."
 points:
-  - { k: "Running", v: "only means PID 1 is alive, not that the app answers" }
-  - { k: "Check result", v: "exit 0 = healthy, exit 1 = unhealthy; 2 is reserved" }
-  - { k: "Start period", v: "failures do not count while the app boots" }
-  - { k: "Plain Docker", v: "marks the container unhealthy; does not restart it", kind: minus }
-  - { k: "Swarm", v: "replaces a task that fails its health check", kind: plus }
+  - { k: "Running is not healthy", v: "running only means the main process is alive; the app inside may still be broken or not ready" }
+  - { k: "Check result", v: "the command's exit code decides: 0 means healthy, 1 means unhealthy, 2 is reserved" }
+  - { k: "Unhealthy", v: "after 3 failed checks in a row by default, Docker marks the container unhealthy", kind: default }
+  - { k: "Start period", v: "failed checks do not count during the start period, so a slow-starting app is not marked unhealthy" }
+  - { k: "No restart", v: "plain Docker and Compose only mark a container unhealthy; they do not restart or replace it", kind: minus }
 trap:
   wrong: "Docker restarts an unhealthy container."
-  right: "docker run and Compose only mark it; restart policies react to exits. Swarm replaces it."
-sayIt: "A HEALTHCHECK runs a command, such as a call to /actuator/health, every interval. After 3 failures in a row (default) it is unhealthy. Docker only reports it; Swarm replaces it."
+  right: "Plain Docker and Compose only mark it unhealthy; restart policies react to the process exiting, not to health. Swarm replaces an unhealthy task."
+  why: "Kubernetes restarts a container whose liveness probe fails, and people expect Docker's health check to do the same."
+sayIt: "A HEALTHCHECK runs a command, such as a curl to /actuator/health, every interval. After 3 failures in a row by default the container is unhealthy. Plain Docker only reports it, and Compose can wait for healthy before starting dependants; Swarm replaces unhealthy tasks."
+cheat:
+  idea: "A health check is a command Docker runs inside the container every interval to test whether the app answers. It turns running into healthy or unhealthy."
+  code: |
+    HEALTHCHECK --interval=10s --start-period=60s \
+      CMD curl -fsS http://localhost:8080/actuator/health || exit 1
+  remember: "Plain Docker only marks a container unhealthy; it does not restart it."
+buildsOn: [container-lifecycle, dockerfile-instructions]
+scenarios:
+  - q: "The payment service runs with --restart unless-stopped. Its database pool is exhausted, /actuator/health returns 503 and docker ps shows (unhealthy). Will Docker restart it?"
+    a: "No. The restart policy reacts only when the main process exits, and the JVM is still running. Docker just reports unhealthy. Something else must act: Swarm, Kubernetes, or your own monitoring."
+  - q: "The service needs 45 seconds to start. With a 10 s interval, 3 retries and no start period, what goes wrong, and how do you fix it?"
+    a: "The first checks fail while Spring is still starting, so after 3 failures the container is marked unhealthy before it ever served a request. Set --start-period=60s: failures in that window do not count."
 confusedWith: []
 tags: [healthcheck, actuator]
-visual: flow
+visual: code
 sources:
-  - title: "Dockerfile reference (Docker docs)"
+  - title: "Dockerfile reference: HEALTHCHECK (Docker docs)"
     url: "https://docs.docker.com/reference/dockerfile/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "How services work (Docker Swarm docs)"
     url: "https://docs.docker.com/engine/swarm/how-swarm-mode-works/services/"
     verifiedOn: "2026-10-20"
-  - title: "Services (Compose Specification)"
+  - title: "Services: healthcheck (Compose Specification)"
     url: "https://docs.docker.com/reference/compose-file/services/"
     verifiedOn: "2026-10-20"
-  - title: "Endpoints (Spring Boot 4.1 reference)"
+  - title: "Endpoints: health (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/actuator/endpoints.html"
     verifiedOn: "2026-10-20"
   - title: "eclipse-temurin 25 JRE Dockerfile (Adoptium)"
     url: "https://github.com/adoptium/containers/blob/main/25/jre/ubuntu/noble/Dockerfile"
     verifiedOn: "2026-10-20"
+  - title: "Liveness, Readiness, and Startup Probes (Kubernetes docs)"
+    url: "https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/"
+    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+A health check is a test command that Docker runs inside a running container, again and again on a timer. You declare it with the `HEALTHCHECK` instruction in the Dockerfile, or with `--health-*` flags on `docker run`. The command's exit code is the answer: 0 means the app is fine, 1 means it is not. Docker shows the result next to the container's status as starting, healthy or unhealthy.
 
 ## Why it exists
 
-A process can be up but useless: deadlocked, out of DB connections, or still warming up. A health check tests the app itself, not just the process.
+In the [container lifecycle](card:container-lifecycle), "running" only means the main process has not ended. The payment service can be running and still useless: stuck in a deadlock, out of database connections, or still starting up. Without a health check, Docker and every tool built on it would send work to that container. A health check tests the app the way a client would, so others can see whether the container is really ready.
 
 ## How it works
 
 <Mermaid
-  alt="starting becomes healthy when a check passes; healthy becomes unhealthy after retries failures in a row; one pass makes it healthy again."
+  alt="Health states. A new container starts as starting. One passing check makes it healthy. A run of failed checks equal to retries makes it unhealthy. One passing check makes it healthy again. During the start period, failures do not count."
   chart={`stateDiagram-v2
   [*] --> starting
   starting --> healthy: check passes
@@ -53,38 +73,72 @@ A process can be up but useless: deadlocked, out of DB connections, or still war
   starting --> unhealthy: failures after start period`}
 />
 
-- The state shows in `docker ps` and `docker inspect` (`.State.Health`).
-- Compose `healthcheck:` has the same options and defaults. Waiting on it: [startup order](card:compose-startup-order).
+1. The container starts, and its health status is `starting`.
+2. After the first interval, Docker runs the check command inside the container, the way `docker exec` would. A check that runs longer than the timeout counts as failed.
+3. Exit code 0 sets the status to `healthy`. A failure adds one to a counter; during the start period, failures are not counted.
+4. When the counter reaches the retries value, 3 by default, the status becomes `unhealthy`. One passing check makes it `healthy` again and resets the counter.
+5. Docker shows the status in `docker ps` and keeps the last few results in `docker inspect`, under `.State.Health`. It takes no other action.
 
 ## Example
 
+The payment-service image gets curl, because the `eclipse-temurin:25-jre` image has none, and a check against Spring Boot Actuator's health endpoint:
+
 ```dockerfile
 FROM eclipse-temurin:25-jre
-# this JRE image ships without curl
+# ... copy the app and set ENTRYPOINT as before ...
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 HEALTHCHECK --interval=10s --timeout=3s --start-period=60s --retries=3 \
   CMD curl -fsS http://localhost:8080/actuator/health || exit 1
 ```
 
-## Defaults
+```bash
+docker run -d --name pay payment-service:1.4.0
+docker inspect -f '{{.State.Health.Status}}' pay     # right away
+docker inspect -f '{{.State.Health.Status}}' pay     # 15 seconds later
+docker ps --filter name=pay --format '{{.Names}}  {{.Status}}'
+```
 
-| What | Default | Where |
+```text output
+c3a4e8acc677edabce60a4948206ccd947d6925b8543ba3a2072c0961344db6b
+starting
+healthy
+pay  Up 16 seconds (healthy)
+```
+
+What to notice:
+
+- `curl -f` exits with an error on an HTTP error status, such as the 503 Actuator returns when the app is down. `|| exit 1` turns any failure into exit code 1, because code 2 is reserved.
+- The status was `starting` until the first check ran, 10 seconds after start, and `healthy` after it passed.
+- With the check pointed at a wrong port, the same container became `unhealthy` after 3 failures, and its restart count stayed 0, even with `--restart unless-stopped`.
+
+## Rules and defaults
+
+| Option | Default | Where |
 |---|---|---|
 | `--interval` / `--timeout` | 30 s / 30 s | Docker Engine 29 |
 | `--retries` | 3 | Docker Engine 29 |
-| `--start-period` / `--start-interval` | 0 s / 5 s (start interval needs Engine 25.0+) | Docker Engine 29 |
+| `--start-period` | 0 s | Docker Engine 29 |
+| `--start-interval` | 5 s; checks run this often during the start period (needs Engine 25.0 or later) | Docker Engine 29 |
+
+- **One per image:** if a Dockerfile has several `HEALTHCHECK` lines, only the last one counts. `HEALTHCHECK NONE` turns off a check inherited from the base image.
+- **The tool must exist in the image:** a check that calls `curl` fails in an image without curl.
+- **Who acts on it:** Compose can start a service only after another one is healthy (see [startup order](card:compose-startup-order)); Swarm replaces a task that becomes unhealthy; plain Docker does nothing.
+
+## Not to be confused with
+
+A health check reports whether the app answers. A [restart policy](card:container-lifecycle) restarts a container whose main process has exited. They do not talk to each other in plain Docker: an unhealthy container that keeps running is never restarted. Rule: health checks report, restart policies react to exits.
 
 ## Interview Qs
 
 ### Is a running container a healthy one?
 
-No. Running means the main process is alive. A HEALTHCHECK also tests the app and shows healthy or unhealthy in `docker ps`.
+No. Running means only that the main process is alive. The app may be deadlocked, out of database connections or still starting. A `HEALTHCHECK` tests the app itself and shows healthy or unhealthy in `docker ps`.
 
 ### Does Docker restart an unhealthy container?
 
-Not with `docker run` or Compose: it only marks it. Restart policies react to the container exiting. Swarm replaces a task that fails its health check.
+Not with `docker run` or Compose: it only marks it unhealthy. Restart policies react to the container exiting. Docker Swarm does replace a task that fails its health check. In plain Docker, something else must act on the status, such as your monitoring.
 
 ### What should a Spring Boot health check call?
 
-`/actuator/health`: HTTP 200 when UP, 503 when DOWN or OUT_OF_SERVICE. The check command must exist in the image; the eclipse-temurin JRE image has no curl, so install it or use another check.
+The Actuator endpoint `/actuator/health`. It returns HTTP 200 when the app is UP and 503 when it is DOWN or OUT_OF_SERVICE, so a `curl -f` check fails exactly when the app is unhealthy. The check tool must be in the image; the eclipse-temurin JRE image has no curl.

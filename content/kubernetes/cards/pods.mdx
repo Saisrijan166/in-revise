@@ -5,48 +5,80 @@ title: Pods
 topic: workloads
 level: beginner
 heat: 3
-hook: "A Pod is one or more containers sharing one IP and volumes; Kubernetes schedules Pods, never bare containers."
+hook: "A Pod is the smallest thing Kubernetes runs: one or more containers that share one IP address and run together on one node."
 points:
-  - { k: "Shared network", v: "one IP and port space per Pod; containers talk over localhost" }
-  - { k: "Shared volumes", v: "every container in the Pod can mount the Pod's volumes" }
-  - { k: "Disposable", v: "never moved to another node; replaced by a new Pod, usually with a new IP", kind: minus }
-  - { k: "containerPort", v: "informational; leaving a port out does not block it" }
-  - { k: "imagePullPolicy", v: "if unset: Always for :latest or no tag, else IfNotPresent (1.37)", kind: default }
+  - { k: "Smallest unit", v: "Kubernetes schedules and runs Pods; a container never runs on a node outside a Pod" }
+  - { k: "Shared network", v: "all containers in a Pod share one IP and one set of ports, and reach each other on localhost" }
+  - { k: "Shared volumes", v: "every container in the Pod can mount the Pod's volumes, so they can share files" }
+  - { k: "Never moved", v: "a Pod stays on its node until it ends; a replacement is a new Pod, usually with a new IP", kind: minus }
+  - { k: "imagePullPolicy (1.37)", v: "if unset: Always for a :latest or missing tag, IfNotPresent for any other tag", kind: default }
 trap:
-  wrong: "If its node dies, a bare Pod is restarted on another node."
-  right: "Nothing recreates a bare Pod. Run it under a controller such as a Deployment, which creates a replacement."
-sayIt: "A Pod is the smallest unit Kubernetes runs: one or more containers sharing an IP, ports and volumes. Pods are disposable, so I never create them bare; a Deployment keeps replacements coming."
-confusedWith: []
+  wrong: "If its node dies, Kubernetes restarts my Pod on another node."
+  right: "A Pod is never moved. A Pod you created yourself is simply gone; only a controller, such as a Deployment, creates a new Pod to replace it."
+  why: "Container restarts look like healing: the kubelet restarts a crashed container in the same Pod, so people assume the Pod itself is also restarted elsewhere."
+sayIt: "A Pod is the smallest unit Kubernetes runs: one or more containers sharing an IP, ports and volumes on one node. Pods are disposable and never moved, so I do not create them by hand; a Deployment or another controller creates replacements."
+cheat:
+  idea: "A Pod wraps one or more containers that run together on one node, sharing one IP address and the Pod's volumes. Kubernetes schedules Pods, never bare containers."
+  remember: "Pods are never moved or healed. A Pod you create yourself stays dead; a controller such as a Deployment makes a new Pod."
+buildsOn: [kubernetes-architecture, kubectl-and-manifests]
+scenarios:
+  - q: "You create the payment-service Pod with kubectl apply, not through a Deployment. Then its node shuts down. What happens to the Pod?"
+    a: "It is not recreated anywhere. The control plane marks the Pod for deletion after a timeout, and nothing makes a new one, because no controller owns it. Create Pods through a Deployment so a replacement appears."
+  - q: "The app container listens on 8080 and a log-shipper container in the same Pod wants to read its health endpoint. Which address does it use?"
+    a: "localhost:8080. Containers in one Pod share the network, so they reach each other on localhost. Because they share the port space, the two containers cannot both listen on 8080."
+confusedWith: [container-vs-pod]
 tags: [pod, container, localhost, image-pull-policy]
-visual: table
+visual: flow
 sources:
   - title: "Pods (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/pods/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Pod Lifecycle: Pods and fault recovery (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Images: default image pull policy (Kubernetes 1.37 docs)"
     url: "https://kubernetes.io/docs/concepts/containers/images/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Pod v1 API: Container ports (Kubernetes 1.37 reference)"
     url: "https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A Pod is the smallest thing Kubernetes runs: a wrapper around one or more containers that always run together on one node. The containers in a Pod share one IP address and can share files through volumes, which are directories the Pod gives its containers. Most Pods hold just one container, like the payment-service Pod. Kubernetes never places a bare container on a node; it places a Pod, and that node's [kubelet](card:kubernetes-architecture) starts the containers inside it.
+
 ## Why it exists
 
-Tightly coupled processes need the same machine, network and files. A Pod groups them so Kubernetes can place, start and stop them as one unit.
+Some helpers must sit right next to the app. A log shipper must read the app's log files, and a local proxy must be reachable on the same machine. If Kubernetes placed every container on its own, these two could land on different nodes. A Pod makes them one unit: placed on the same node, given one network address, sharing files, and started and stopped together. For the common one-container case, the Pod is a thin wrapper.
 
 ## How it works
 
-<Compare id="container-vs-pod" />
+<Mermaid
+  alt="The payment-service Pod on node 1 has one IP, 10.244.1.7. Inside it, the app container listens on port 8080 and a helper container reaches it at localhost:8080. Both mount the same shared volume. Another Pod reaches the app at 10.244.1.7:8080."
+  chart={`flowchart LR
+  subgraph P["Pod payment-service (IP 10.244.1.7) on node 1"]
+    A["app container :8080"]
+    H["helper container"]
+    V[("shared volume")]
+    H -- "localhost:8080" --> A
+    A --- V
+    H --- V
+  end
+  O["another Pod"] -- "10.244.1.7:8080" --> A`}
+/>
 
-- Most Pods hold one container; a helper container is the exception: [Init Containers and Sidecars](card:multi-container-pods).
-- Pods are created from a template by a controller: [Deployments and ReplicaSets](card:deployments-and-replicasets).
-- Phases, restarts and shutdown: [Pod Lifecycle](card:pod-lifecycle).
+1. You, or a controller, send a Pod manifest to the API server.
+2. The scheduler picks a node for the Pod. The Pod is bound to that node for its whole life.
+3. The kubelet on that node asks the container runtime to pull each image and start the containers. The Pod gets its own IP address.
+4. Containers inside the Pod reach each other on `localhost`. Other Pods reach it on the Pod IP.
+5. If a container crashes, the kubelet restarts it inside the same Pod, on the same node. If the Pod is deleted or its node fails, the Pod is gone for good.
+
+So the key is: containers get restarted, Pods get replaced, and only a controller does the replacing.
 
 ## Example
+
+The payment-service image from the Docker tech, run as a bare Pod in the `payments` namespace:
 
 ```yaml
 apiVersion: v1
@@ -54,24 +86,55 @@ kind: Pod
 metadata:
   name: payment-service
   namespace: payments
+  labels: { app: payment-service }
 spec:
   containers:
     - name: payment-service
-      image: payment-service:1.4.0   # fixed tag, so IfNotPresent
+      image: payment-service:1.4.0   # fixed tag, so the pull policy becomes IfNotPresent
       ports:
-        - containerPort: 8080        # informational only
+        - containerPort: 8080        # documents the port; does not publish it
 ```
+
+After `kubectl apply`, delete the Pod and list what is left:
+
+```bash
+kubectl delete pod payment-service -n payments
+kubectl get pods -n payments
+```
+
+```text output
+pod "payment-service" deleted from payments namespace
+No resources found in payments namespace.
+```
+
+What to notice:
+
+- `kind: Pod` has no controller around it, so after the delete nothing creates it again and the namespace is empty. In real apps a Deployment writes this same container list as its Pod template.
+- The tag `1.4.0` is fixed, so the node reuses an image it already has. With `:latest` or no tag, the pull policy becomes `Always` and the node pulls on every container start.
+- `containerPort` does not make the app reachable from outside the cluster. Other Pods can already reach 10.244.x.x:8080; outside callers need a [Service](card:services), which you will see in the next topic.
+
+## Rules and defaults
+
+- **Restarts stay local:** the kubelet restarts failed containers in the same Pod on the same node. A Pod is never moved to another node.
+- **Pod IP:** each new Pod gets a new IP from the cluster network, so callers must never store a Pod IP.
+- **imagePullPolicy (Kubernetes 1.37):** if you leave it out, it is set to `Always` for a `:latest` tag or no tag, and to `IfNotPresent` for any other tag or a digest. It is set once, when the Pod is created.
+- **Ports inside a Pod:** containers share one port space, so two containers in one Pod cannot listen on the same port.
+- **Use a controller:** the Kubernetes docs advise creating Pods through workload resources such as Deployments or Jobs, even when you need only one copy.
+
+## Not to be confused with
+
+A container is one running process started from an image. A Pod is the Kubernetes object that wraps one or more containers and gives them a shared IP, shared volumes and one place on one node. Rule: Kubernetes schedules and replaces Pods; the kubelet starts and restarts containers.
 
 ## Interview Qs
 
 ### Why does Kubernetes run Pods instead of containers directly?
 
-A Pod gives its containers one network, shared volumes and one lifecycle, so a helper can sit beside the app. Kubernetes schedules and manages Pods; the containers come along.
-
-### Is a Pod the same as a container?
-
-No. A container runs a process from an image. A Pod wraps one or more containers that share an IP, ports and volumes and always run on the same node.
+A Pod gives its containers one network, shared volumes and one lifecycle on one node. That lets a helper, such as a log shipper, sit beside the app and reach it on localhost. Kubernetes schedules and tracks Pods, and the kubelet runs the containers inside them.
 
 ### What happens when you delete a Pod?
 
-A bare Pod is gone for good. A Pod owned by a ReplicaSet is replaced by a new Pod with a new name and, usually, a new IP.
+It depends on who owns it. A Pod you created yourself is gone for good. A Pod owned by a ReplicaSet is replaced, because the ReplicaSet sees one Pod too few and creates a new one, with a new name and usually a new IP.
+
+### Can two containers in one Pod both listen on port 8080?
+
+No. Containers in a Pod share one network namespace, so they share the IP address and the port space. The second container fails to bind the port. Give each container its own port and let them talk over localhost.

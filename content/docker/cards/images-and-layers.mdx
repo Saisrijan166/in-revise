@@ -5,38 +5,58 @@ title: Images and Layers
 topic: basics
 level: beginner
 heat: 3
-hook: "An image is a stack of read-only layers; each container adds its own thin writable layer on top."
+hook: "An image is a read-only stack of layers, each one a set of file changes. Every container adds its own thin writable layer on top."
 points:
-  - { k: "Layers", v: "filesystem steps (RUN, COPY, ADD) add layers; CMD and LABEL add only metadata" }
-  - { k: "Immutable", v: "an image never changes; a rebuild makes a new image" }
-  - { k: "Copy-on-write", v: "a file is copied up only when a container changes it" }
-  - { k: "Shared layers", v: "many containers and images reuse the same layers on disk", kind: plus }
-  - { k: "Writable layer", v: "deleted with docker rm; keep lasting data in a volume", kind: minus }
+  - { k: "Image", v: "a read-only package of files and settings that containers are created from" }
+  - { k: "Layer", v: "one set of file changes from one build step; steps that only set settings, like CMD or LABEL, add none" }
+  - { k: "Read-only", v: "a running container never changes its image; a rebuild makes a new image" }
+  - { k: "Copy-on-write", v: "a container's first change to a file from the image copies it into the container's writable layer" }
+  - { k: "Shared layers", v: "images and containers that use the same layer keep one copy on disk", kind: plus }
+  - { k: "Writable layer", v: "it survives a stop and start, but docker rm deletes it; lasting data belongs in a volume", kind: minus }
 trap:
-  wrong: "Deleting a file in a later RUN step makes the image smaller."
-  right: "The file still sits in the earlier layer. Delete it in the same RUN step, or leave it behind in a build stage."
-sayIt: "An image is a read-only stack of layers, one per filesystem change in the Dockerfile. A container is that image plus a thin writable layer, so many containers share one image and their changes vanish on removal."
+  wrong: "Deleting a file in a later build step makes the image smaller."
+  right: "The file still sits in the earlier layer. Delete it in the same step that created it, or keep it out of the final image."
+  why: "After the delete, the file is gone from the container's view, so it looks as if the space came back."
+sayIt: "An image is a read-only stack of layers, one per build step that changes files, plus settings. A container is that image plus a thin writable layer, so many containers share one image and their changes vanish on removal."
+cheat:
+  idea: "An image is a read-only stack of layers, each holding the file changes of one build step. A container is the image plus its own thin writable layer."
+  remember: "Layers are shared and never change: deleting a file in a later step does not shrink the image."
+buildsOn: [containers-and-vms]
+scenarios:
+  - q: "Inside a running payment-service container you delete /app/app.jar. You then start a second container from the same image. Is the jar there?"
+    a: "Yes. The delete was recorded only in the first container's writable layer. The image is read-only, so every new container starts from the original files."
+  - q: "Ten containers run from payment-service:1.4.0 on one host. Does the host store ten copies of the Java layers?"
+    a: "No. The image's layers are stored once and shared by all ten containers. Each container adds only its own writable layer, which holds just the files it changed."
+  - q: "You release payment-service 1.4.1, where only the jar changed. What does a server that already has 1.4.0 download?"
+    a: "Only the new jar layer and the new image settings. The base layers with the OS files and Java are the same as in 1.4.0, so the server already has them."
 confusedWith: [image-vs-container]
 tags: [image, layers, copy-on-write, writable-layer]
 visual: flow
 sources:
-  - title: "Storage drivers: images, layers and copy-on-write (Docker docs)"
+  - title: "Storage drivers: images, layers, container layer and copy-on-write (Docker docs)"
     url: "https://docs.docker.com/engine/storage/drivers/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "What is an image? (Docker docs)"
     url: "https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-an-image/"
     verifiedOn: "2026-10-20"
-  - title: "docker image pull: shared layers (Docker CLI reference)"
+  - title: "docker image pull: layers are shared and reused (Docker CLI reference)"
     url: "https://docs.docker.com/reference/cli/docker/image/pull/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "What is Docker? Example docker run command (Docker docs)"
+    url: "https://docs.docker.com/get-started/docker-overview/"
+    verifiedOn: "2026-10-21"
   - title: "Docker Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/docker-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An image is the read-only package a [container](card:containers-and-vms) starts from: files, such as the OS libraries, Java and your jar, plus settings, such as the command to run. It is stored as a stack of layers. A layer is one set of file changes, such as "add app.jar". When a container starts, Docker puts a thin writable layer on top, and every change the container makes goes there.
+
 ## Why it exists
 
-Shipping a full filesystem for every version would waste disk and bandwidth. Layers let images share common parts, so Docker stores and moves only the layers that changed.
+Without layers, every release of the payment service would be one big file holding the OS files, Java and the jar, stored and downloaded again in full even when only the jar changed. With layers, the OS and Java layers are shared: a new release adds just a new jar layer, and servers download only that. Because the image is read-only, ten containers can share one copy of it on disk.
 
 ## How it works
 
@@ -50,28 +70,84 @@ Shipping a full filesystem for every version would waste disk and bandwidth. Lay
   L2 --> WB["Container B: writable layer"]`}
 />
 
-- List an image's layers with `docker history payment-service:1.4.0`.
-- Data that must outlive the container goes in a [volume](card:volumes-and-mounts); slimming images is in [image size](card:image-size-optimization).
+1. A build starts from a base image, named in the `FROM` line of a Dockerfile, the recipe file for an image. Its layers come first.
+2. Each later step that changes files, such as `COPY` or `RUN`, adds one new read-only layer that records only what changed. Steps that only set settings, such as `CMD`, add no layer.
+3. When the build ends, the image is fixed. Changing it means building a new image.
+4. `docker run` adds an empty writable layer for the new container. Reading a file uses it straight from the image layer that holds it; nothing is copied.
+5. The first time the container changes a file from the image, Docker copies it up into the writable layer and changes the copy. This is called copy-on-write.
+
+So the key is: layers below are shared and never change, and each container writes only to its own layer on top.
+
+## Analogy
+
+<Analogy title="A Java class and its objects" limit="An image holds files and settings, not code that runs; and containers do not share memory the way objects of one class share static fields.">
+An image is like a class and a container like an object created with `new`. One class can make many objects, each with its own state; one image can start many containers, each with its own writable layer.
+</Analogy>
 
 ## Example
 
+A first Dockerfile for the payment service, saved next to its built jar. The [Dockerfile instructions](card:dockerfile-instructions) concept covers every instruction.
+
 ```dockerfile
-FROM eclipse-temurin:25-jre               # base image: its layers come first
-COPY payment-service.jar /app/app.jar     # new layer
-LABEL team="payments"                     # metadata only, no layer
-CMD ["java", "-jar", "/app/app.jar"]      # metadata only, no layer
+FROM eclipse-temurin:25-jre
+COPY target/payment-service.jar /app/app.jar
+LABEL team="payments"
+CMD ["java", "-jar", "/app/app.jar"]
 ```
+
+Build it, then list the image's layers from the newest down:
+
+```bash
+docker build -q -t payment-service:1.4.0 .
+docker history --format 'table {{.CreatedBy}}\t{{.Size}}' payment-service:1.4.0 | head -5
+```
+
+```text output
+sha256:b708dc5a1185f3b55b4b3f6761d8a9519de3cfff034a8a235fa81853e831c0ea
+CREATED BY                                      SIZE
+CMD ["java" "-jar" "/app/app.jar"]              0B
+LABEL team=payments                             0B
+COPY target/payment-service.jar /app/app.jar…   12.3kB
+ENTRYPOINT ["/__cacert_entrypoint.sh"]          0B
+```
+
+What to notice:
+
+- `FROM eclipse-temurin:25-jre` brings all the base image's layers. The last line of the output is already one of them.
+- `COPY` is the only step here that changes files, so it is the only one with a size. That small layer is all a server must download for a new release.
+- `LABEL` and `CMD` show `0B`: they change only the image's settings. `CMD` is the command a container runs when it starts.
+- `-t payment-service:1.4.0` gives the image a name and a version, called a tag. [Registries](card:registries) explains tags.
+
+## Rules and defaults
+
+- **Layer-making steps:** steps that change files, such as `RUN`, `COPY` and `ADD`, add a layer. Adding and deleting files both add a layer.
+- **Read-only image:** a container never changes its image. A rebuild makes a new image; old containers keep running the old one.
+- **Writable layer lifetime:** it survives `docker stop` and `docker start`, and `docker rm` deletes it. Data that must last goes in a [volume](card:volumes-and-mounts).
+- **Write speed:** writes through copy-on-write are slower than the host's own disk, so write-heavy data such as database files belongs in a volume.
+
+## Not to be confused with
+
+An image is the read-only template that you build or pull. A container is one running copy of it, with its own writable layer and its own process. Rule: build and ship the image once; run as many containers from it as you need.
+
+## Common mistakes
+
+- **"Changing a file inside a running container updates the image."** The change goes only to that container's writable layer; the image and other containers do not see it.
+- **"Each image keeps its own copy of the Java base."** Images built on the same base share those layers on disk and in downloads.
 
 ## Interview Qs
 
 ### What is the difference between an image and a container?
 
-An image is a read-only template: layers plus settings. A container is a runnable instance of it with its own writable layer. One image can run as many containers.
+An image is a read-only template: a stack of layers plus settings such as the start command. A container is a runnable instance of it, with its own writable layer and process. One image can run as many containers as you need.
 
 ### A container writes a file. Where does it go, and when is it lost?
 
-Into the container's writable layer. It survives stop and start, but docker rm deletes it. Keep data that must last, such as Postgres files, in a volume.
+Into the container's thin writable layer. It survives a stop and start of the same container, but `docker rm` deletes it. Data that must last, such as PostgreSQL's files, belongs in a volume.
 
-### Why is the second pull of a similar image fast?
+### Why is pulling a second, similar image so fast?
 
-Layers are shared. An image built on eclipse-temurin reuses base layers already on the host, so a pull downloads only the missing layers.
+Layers are shared. An image built on `eclipse-temurin:25-jre` reuses the base layers already on the host, so the pull downloads only the layers that are missing.
+
+### Why does deleting a file in a later step not shrink the image?
+
+Each layer records only changes. The delete adds a new layer that hides the file, but the earlier layer still holds it and still counts towards the image size. Delete temporary files in the same step that creates them.
