@@ -5,22 +5,33 @@ title: Partition Keys and Hot Partitions
 topic: storage
 level: intermediate
 heat: 3
-hook: "Same key, same partition, same order: key every order event by orderId."
+hook: "The key picks the partition: the same key always goes to the same partition, so key every payment event by orderId and each order's events stay in order."
 points:
-  - { k: "Key present", v: "murmur2 hash of the key bytes, mod the partition count" }
-  - { k: "No key", v: "Kafka 3.3+: stay on one partition until batch.size bytes, then switch", kind: default }
-  - { k: "Count changes", v: "adding partitions changes hash mod N, so keys can move", kind: minus }
-  - { k: "Hot partition", v: "one busy key overloads one partition and its consumer", kind: minus }
-  - { k: "Good key", v: "the entity that needs order, with many distinct values" }
+  - { k: "Key present", v: "the producer hashes the key bytes with murmur2 and takes the result modulo the partition count (Kafka 4.3)" }
+  - { k: "Same key, same partition", v: "every event of order-101 lands in one partition, so its events keep their order", kind: plus }
+  - { k: "No key (Kafka 3.3+)", v: "the producer fills one partition until about batch.size bytes, then switches; it is not round-robin", kind: default }
+  - { k: "Hot partition", v: "one very busy key sends most events to one partition and overloads that partition's consumer", kind: minus }
+  - { k: "Good key", v: "the thing whose events must stay in order, with many different values, such as orderId" }
 trap:
   wrong: "Records without a key are spread round-robin, one per partition."
-  right: "Since Kafka 2.4 the producer sticks to one partition per batch; since 3.3 it switches after batch.size bytes. Round-robin needs RoundRobinPartitioner."
-sayIt: "The producer hashes the key with murmur2 modulo the partition count, so one orderId always goes to one partition and stays in order. No key means sticky batches. One very busy key makes a hot partition."
+  right: "Since Kafka 2.4 the producer sticks to one partition per batch, switching after about batch.size bytes (3.3+). Round-robin needs RoundRobinPartitioner."
+  why: "Before Kafka 2.4 keyless records really were spread across partitions in turn, and many blogs and answers still describe that old behaviour."
+sayIt: "The producer hashes the key with murmur2 modulo the partition count, so one orderId always goes to one partition and stays in order. Without a key, it fills one partition per batch. One very busy key makes a hot partition."
+cheat:
+  idea: "A key, such as orderId, decides the partition: hash(key) mod partition count. Events with the same key always share a partition and keep their order."
+  flow: "key order-101 → murmur2 hash → mod 3 → partition 1"
+  remember: "No key is not round-robin: the producer fills one partition per batch. One busy key makes a hot partition."
+buildsOn: [partitions]
+scenarios:
+  - q: "payments grows from 3 to 4 partitions. Before, every event for order-101 went to partition 1. Where do new order-101 events go?"
+    a: "To partition 2. The partition is murmur2(key) mod the count, and the result changes when the count changes. Old order-101 events stay in partition 1, so for a while one order's events sit in two partitions and their order is no longer guaranteed. See ordering vs scaling."
+  - q: "One big merchant sends 70% of all payments, and payments are keyed by merchantId. One consumer is always far behind. Will adding partitions help?"
+    a: "No. All of that merchant's events share one key, so they still go to one partition and one consumer. Key by something with more values, such as orderId, or split the merchant into sub-keys, accepting order only per sub-key."
 confusedWith: []
 tags: [partition-key, partitioner, hot-partition]
-visual: table
+visual: code
 sources:
-  - title: "Producer Configs: partitioner.class (Apache Kafka 4.3)"
+  - title: "Producer Configs: partitioner.class, partitioner.ignore.keys (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/producer-configs/"
     verifiedOn: "2026-10-20"
   - title: "BuiltInPartitioner.java (Apache Kafka 4.3 source)"
@@ -29,49 +40,95 @@ sources:
   - title: "Upgrade notes 3.3: new sticky partitioner (Apache Kafka)"
     url: "https://kafka.apache.org/33/getting-started/upgrade/"
     verifiedOn: "2026-10-20"
+  - title: "Basic Kafka Operations: adding partitions changes the key mapping (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
+    verifiedOn: "2026-10-22"
   - title: "Apache Kafka Partition Key: hot partitions (Confluent)"
     url: "https://www.confluent.io/learn/kafka-partition-key/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A partition key is a value sent with each event, such as the order id `order-101`, that decides which [partition](card:partitions) the event goes to. The producer turns the key into a number with a hash function, a formula that always gives the same number for the same input. Because of that, events with the same key always land in the same partition, while the count stays the same.
+
 ## Why it exists
 
-Events of one order must be read in order. Order holds only inside a [partition](card:partitions), so related events must reach the same one.
+Order is kept only inside one partition. A payment for order-101 and its refund must be handled in that order; if they landed in different partitions, a consumer could see the refund first. Sending both with the key `order-101` puts them in one partition, read by one consumer, in the order they were written. Different orders still spread over all partitions.
 
 ## How it works
 
-| The record has | Partition chosen (Kafka 4.3 producer) | Order |
-| --- | --- | --- |
-| A partition number | That partition | Per partition |
-| A key | murmur2(key bytes) mod partition count | Kept per key |
-| Neither | A sticky partition, changed after batch.size bytes | None between records |
+<Mermaid
+  alt="The producer looks at each record. If it names a partition, that partition is used. If it has a key, murmur2 of the key bytes modulo the partition count picks the partition. If it has neither, the sticky partitioner fills one partition until about batch.size bytes, then moves to another."
+  chart={`flowchart TD
+  R[New record] --> Q1{Partition number given?}
+  Q1 -- yes --> A[Use that partition]
+  Q1 -- no --> Q2{Key given?}
+  Q2 -- yes --> H["murmur2(key) mod partition count"]
+  Q2 -- no --> S[Sticky: fill one partition, then switch]`}
+/>
 
-- `partitioner.class` picks RoundRobinPartitioner or your own Partitioner; `partitioner.ignore.keys` (default false) can ignore keys.
-- More partitions remap keys and old data stays put: [ordering vs scaling](card:ordering-and-scaling).
-- Hot key fixes: a key with more values, or sub-keys (merchant-42-0 to -3) with order only per sub-key.
+1. The producer checks whether the record names a partition. If it does, that partition is used.
+2. If not and the record has a key, the producer hashes the key bytes with murmur2 and takes the result modulo the partition count. `order-101` with 3 partitions always gives partition 1.
+3. If there is no key either, the producer keeps adding records to one partition until about `batch.size` bytes, the size of one batch of records ([batching](card:batching-and-compression), later), have gone there, then switches to another. Batches stay large, and over time the load evens out.
+
+So the key is the only thing that ties related events together; without one, there is no order between records.
 
 ## Example
 
+The Payment service sends three events, keyed by order id. The producer setup lines are explained in [producers](card:producer-basics), later:
+
 ```java
-// Every event of order-101 uses the same key, so the same partition
-var record = new ProducerRecord<>("orders", "order-101", orderPlacedJson);
-producer.send(record, (meta, ex) -> {
-    if (ex == null) log.info("partition {} offset {}", meta.partition(), meta.offset());
-});
+var props = new Properties();
+props.put("bootstrap.servers", "localhost:9092");
+props.put("key.serializer", StringSerializer.class.getName());
+props.put("value.serializer", StringSerializer.class.getName());
+
+String[][] events = { {"order-101", "PaymentCompleted"}, {"order-102", "PaymentCompleted"}, {"order-101", "RefundIssued"} };
+try (var producer = new KafkaProducer<String, String>(props)) {
+    for (String[] e : events) {
+        var record = new ProducerRecord<>("payments", e[0], e[1]);   // topic, key, value
+        RecordMetadata meta = producer.send(record).get();             // wait, only to print
+        System.out.printf("%s %s -> partition %d, offset %d%n", e[0], e[1], meta.partition(), meta.offset());
+    }
+}
 ```
 
-## Defaults
+```text output
+order-101 PaymentCompleted -> partition 1, offset 0
+order-102 PaymentCompleted -> partition 0, offset 0
+order-101 RefundIssued -> partition 1, offset 1
+```
 
-| What | Default | Where |
-| --- | --- | --- |
-| `partitioner.class` | not set: built-in hash or sticky logic | Kafka 4.3 producer |
+What to notice:
+
+- Both `order-101` events went to partition 1, at offsets 0 and 1, so any consumer reads the payment before the refund.
+- `order-102` went elsewhere: different keys spread over partitions.
+- `new ProducerRecord<>("payments", e[1])`, with no key, would let the producer pick partitions in batches, and the two `order-101` events could end up in different partitions.
+- `.get()` waits for each send only so the example can print the result; real producers do not block like this.
+
+## Rules and defaults
+
+- **Partition named in the record:** it always wins over the key.
+- **partitioner.class (Kafka 4.3):** not set by default, so the built-in key hash and sticky logic is used. Set it to `RoundRobinPartitioner` or your own `Partitioner` class to change that.
+- **partitioner.ignore.keys (Kafka 4.3):** `false` by default; `true` makes keyed records use the sticky logic too.
+- **Partition count changes:** adding partitions changes `hash mod count`, so keys move; existing events are not moved ([ordering vs scaling](card:ordering-and-scaling)).
+
+## Common mistakes
+
+- **"More partitions will fix a hot partition."** One key always maps to one partition. Use a key with more distinct values, or split the hot key into sub-keys such as `merchant-42-0` to `merchant-42-3`, keeping order only per sub-key.
+- **Keying by a value with few options**, such as the payment method. With three values, at most three partitions get data, whatever the partition count.
 
 ## Interview Qs
 
 ### Why send a key with a record?
 
-So all events of one orderId go to one partition: they stay in order and one consumer in the group sees them all. Compaction also works per key.
+So all events of one entity, such as one orderId, go to one partition. They then stay in order, and one consumer in the group sees all of them. Log compaction also works per key.
+
+### What happens to records without a key?
+
+The built-in partitioner sends a run of records to one partition until about `batch.size` bytes, then moves to another partition. This keeps batches large. There is no ordering between such records, and true round-robin needs `RoundRobinPartitioner`.
 
 ### What causes a hot partition, and how do you fix it?
 
-One key carries most traffic, such as a big merchant. Use a key with more values, or split the hot key into sub-keys, with order only per sub-key. More partitions do not help: one key maps to one partition.
+One key carries most of the traffic, such as a big merchant. Choose a key with more values, or split the hot key into sub-keys and accept order only per sub-key. More partitions do not help, because one key still maps to one partition.

@@ -5,24 +5,34 @@ title: "KRaft: Kafka Without ZooKeeper"
 topic: basics
 level: intermediate
 heat: 2
-hook: "KRaft keeps cluster metadata in Kafka's own replicated log, run by a Raft quorum of controllers; Kafka 4.x has no ZooKeeper at all."
+hook: "In KRaft, a small group of controllers keeps the cluster metadata in Kafka's own log and agrees on it by majority vote; Kafka 4.x needs no ZooKeeper."
 points:
-  - { k: "Controller quorum", v: "3 or 5 controllers; a majority must be up (2N + 1 survive N failures)" }
-  - { k: "Active controller", v: "the leader of the metadata log; the others are hot standbys" }
-  - { k: "process.roles", v: "broker, controller, or both (combined: dev, not critical production)" }
-  - { k: "Timeline", v: "ready in 3.3, ZooKeeper deprecated in 3.5, removed in 4.0", kind: default }
-  - { k: "Gains", v: "one system to run, faster controller failover, more partitions", kind: plus }
+  - { k: "Metadata log", v: "every metadata change, such as 'topic payments created', is a record in the internal __cluster_metadata log" }
+  - { k: "Active controller", v: "one controller leads and writes the log; the others copy it and wait as hot standbys" }
+  - { k: "Majority rule", v: "a change counts once most controllers have it; 3 controllers survive 1 failure, 5 survive 2" }
+  - { k: "process.roles", v: "broker, controller, or both; both (combined mode) is for development, not critical production" }
+  - { k: "Timeline", v: "KRaft ready for production in Kafka 3.3, ZooKeeper deprecated in 3.5 and removed in 4.0", kind: default }
 trap:
   wrong: "Kafka needs a ZooKeeper ensemble to run."
-  right: "Not since 3.3 (KRaft production-ready). Since 4.0 KRaft is the only mode; ZooKeeper clusters migrate on a bridge release (last: 3.9) first."
-sayIt: "KRaft replaced ZooKeeper. A quorum of controllers stores metadata in an internal log using Raft; one is active, the rest are hot standbys. Production-ready since 3.3, and the only mode since Kafka 4.0."
-confusedWith: []
+  right: "Not since Kafka 3.3, when KRaft became production-ready. Since 4.0 KRaft is the only mode; ZooKeeper clusters migrate on 3.9 first."
+  why: "Years of tutorials, books and docker-compose files start a ZooKeeper container before Kafka, and every Kafka 3.x release still supported it."
+sayIt: "KRaft replaced ZooKeeper. A quorum of controllers stores the metadata in an internal log using the Raft protocol; one is active, the rest are hot standbys. It became production-ready in 3.3 and is the only mode since Kafka 4.0."
+cheat:
+  idea: "KRaft is Kafka's built-in way to keep cluster metadata: 3 or 5 controllers store it in an internal log, and one active controller leads."
+  remember: "Kafka 4.x runs only in KRaft mode; a majority of controllers must be up, so 3 survive 1 failure."
+buildsOn: [kafka-architecture]
+scenarios:
+  - q: "A cluster has 3 controllers and 2 of them crash. Can you still create a topic?"
+    a: "No. Only 1 of 3 controllers is up, which is not a majority, so no metadata change can be agreed: no new topic, and no new leader if a broker fails. A majority must come back first. With 5 controllers, losing 2 would have been fine."
+  - q: "Your team runs Kafka 3.6 with ZooKeeper and wants Kafka 4.3. Can you upgrade straight away?"
+    a: "No. A Kafka 4.x broker cannot start in ZooKeeper mode. First upgrade to a bridge release (the last is 3.9) and migrate the metadata to KRaft, then upgrade to 4.x."
+confusedWith: [zookeeper-vs-kraft]
 tags: [kraft, zookeeper, controller, metadata]
-visual: table
+visual: flow
 sources:
-  - title: "KRaft operations: process roles, controllers, migration (Apache Kafka 4.3 docs)"
+  - title: "KRaft operations: process roles, quorum size, dynamic quorum, kafka-metadata-quorum (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/operations/kraft/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Upgrading to 4.3.0: KRaft only, ZooKeeper removed (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/getting-started/upgrade/"
     verifiedOn: "2026-10-20"
@@ -34,20 +44,35 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+KRaft (Kafka Raft) is how Kafka's controllers store and agree on the cluster metadata. The metadata, which topics and partitions exist and who leads each one, is kept as a log of changes inside Kafka itself. Raft is a voting method: one controller leads and writes the log, the others copy it, and a change counts once a majority of them has it. Before KRaft, a separate system called ZooKeeper held the metadata.
+
 ## Why it exists
 
-ZooKeeper was a second system to deploy and configure, and a new controller had to reload all metadata from it. KRaft moves the metadata into Kafka itself.
+With ZooKeeper you ran and secured two different systems, each with its own configuration and failures. When the controller broker died, the new one had to reload all metadata from ZooKeeper before it could act, which was slow on big clusters. KRaft keeps the metadata inside Kafka and on every controller, so there is one system to run, and a standby can take over at once.
 
 ## How it works
 
-<Compare id="zookeeper-vs-kraft" />
+<Mermaid
+  alt="Three controllers. Controller 1 is active and writes the metadata log; controllers 2 and 3 copy it as hot standbys. The three brokers fetch new metadata records from the controllers."
+  chart={`flowchart LR
+  C1["Controller 1 (active)"] -- copies log --> C2[Controller 2: standby]
+  C1 -- copies log --> C3[Controller 3: standby]
+  C1 -. new metadata .-> B1[Broker 1]
+  C1 -. new metadata .-> B2[Broker 2]
+  C1 -. new metadata .-> B3[Broker 3]`}
+/>
 
-- Metadata changes are events in the [`__cluster_metadata`](card:cluster-metadata-topic) log; brokers fetch new entries from the active controller, like consumers.
-- Controllers handle metadata requests; brokers handle data requests.
+1. An admin creates the topic `payments`. The request reaches the active controller.
+2. The active controller adds a record such as "topic payments, 3 partitions, these leaders" to the `__cluster_metadata` log.
+3. The standby controllers copy the record. Once a majority (2 of 3) has it, the change is final.
+4. Brokers fetch the new records and update their view, so a client that asks any broker for metadata now sees `payments`.
+5. If the active controller dies, the others vote in a new leader. It already holds the whole log, so it takes over quickly.
 
 ## Example
 
-One of three controllers (each controller and broker lists all three):
+One of three dedicated controllers. Every controller and broker lists the controllers in `controller.quorum.bootstrap.servers`:
 
 ```properties
 process.roles=controller
@@ -57,16 +82,51 @@ controller.listener.names=CONTROLLER
 controller.quorum.bootstrap.servers=controller1:9093,controller2:9093,controller3:9093
 ```
 
+To see who leads, ask the cluster (here a test cluster of three servers):
+
+```bash
+bin/kafka-metadata-quorum.sh --bootstrap-server localhost:9092 describe --status
+```
+
+```text output
+ClusterId:              VIqNm6FxSKiiUtGdiY-BwA
+LeaderId:               2
+LeaderEpoch:            2
+HighWatermark:          35600
+MaxFollowerLag:         0
+MaxFollowerLagTimeMs:   213
+CurrentVoters:          [{"id": 1, "endpoints": ["CONTROLLER://kbs-1:9093"]}, {"id": 2, "endpoints": ["CONTROLLER://kbs-2:9093"]}, {"id": 3, "endpoints": ["CONTROLLER://kbs-3:9093"]}]
+CurrentObservers:       []
+```
+
+What to notice:
+
+- `process.roles=controller` makes this server a controller only; it stores no topic data.
+- `LeaderId: 2` is the active controller. `LeaderEpoch: 2` means a second election has happened: this cluster was restarted once.
+- `CurrentVoters` lists the three controllers that vote. `MaxFollowerLag: 0` means the standbys have copied the whole metadata log.
+
+## Rules and defaults
+
+- **Quorum size:** run 3 or 5 controllers. To survive N failures you need 2N + 1.
+- **No majority, no change:** with too few controllers up, no metadata change (new topic, new leader) can be made.
+- **Combined mode:** `process.roles=broker,controller` is fine for development; the docs advise against it in critical deployments.
+- **Controller list:** every broker and controller sets `controller.quorum.bootstrap.servers` (the older `controller.quorum.voters` is deprecated for new clusters).
+- **Upgrade path:** a ZooKeeper cluster migrates to KRaft on a 3.x bridge release (last: 3.9); a 4.x broker cannot start in ZooKeeper mode.
+
+## Not to be confused with
+
+ZooKeeper mode kept the metadata in a separate ZooKeeper cluster, and one broker at a time acted as the controller. KRaft keeps the metadata in Kafka's own log, run by dedicated controllers that vote. Rule: ZooKeeper = an outside system, up to Kafka 3.9; KRaft = built in, the only mode in Kafka 4.x.
+
 ## Interview Qs
 
 ### What is KRaft, and why did Kafka drop ZooKeeper?
 
-KRaft is Kafka's Raft-based metadata mode: controllers keep metadata in an internal log. It removes a separate system, makes controller failover fast because standbys already hold the state, and supports more partitions.
+KRaft is Kafka's Raft-based metadata mode: controllers keep the metadata in an internal log and agree on it by majority. It removes a second system to run and secure, makes controller failover fast because standbys already hold the log, and lets a cluster hold more partitions.
 
 ### How many controllers do you run?
 
-Three or five. A majority must stay up: three survive one failure, five survive two. Keep them separate from brokers in production.
+Three or five. A majority must stay up: three survive one failure, five survive two. In production, run them separately from the brokers.
 
 ### How do you move a ZooKeeper cluster to Kafka 4.x?
 
-Migrate it to KRaft first on a 3.x bridge release (the last is Kafka 3.9), then upgrade. A 4.x broker cannot start in ZooKeeper mode.
+Migrate the metadata to KRaft first on a 3.x bridge release, the last being Kafka 3.9, then upgrade to 4.x. A 4.x broker cannot start in ZooKeeper mode.

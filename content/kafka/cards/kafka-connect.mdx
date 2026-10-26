@@ -5,84 +5,132 @@ title: "Kafka Connect and CDC"
 topic: ecosystem
 level: intermediate
 heat: 2
-hook: "Kafka Connect moves data between Kafka and other systems with ready-made connectors and config, not your own producer code."
+hook: "Kafka Connect copies data between Kafka and other systems, such as a database or a search index, using ready-made connectors that you configure instead of code."
 points:
-  - { k: "Source connector", v: "another system into Kafka, e.g. a database table to a topic" }
-  - { k: "Sink connector", v: "Kafka out to another system, e.g. a topic to a search index" }
-  - { k: "Distributed mode", v: "workers share tasks; configs and offsets live in Kafka topics", kind: plus }
-  - { k: "CDC with Debezium", v: "reads the database's change log, so every change becomes an event" }
-  - { k: "Bad records", v: "fail the task by default; a sink can send them to a DLQ topic", kind: minus }
+  - { k: "Source connector", v: "reads from another system and writes into Kafka, for example rows of a payments table into a topic" }
+  - { k: "Sink connector", v: "reads from Kafka and writes into another system, for example a topic into a search index or warehouse" }
+  - { k: "Separate service", v: "connectors run in Connect worker processes, not in the brokers; workers use normal producers and consumers" }
+  - { k: "Distributed mode", v: "workers share the tasks and keep configs, offsets and status in Kafka topics, so a dead worker's tasks move", kind: plus }
+  - { k: "CDC with Debezium", v: "a Debezium source connector reads the database's change log, so every committed change becomes an event" }
+  - { k: "Bad record", v: "errors.tolerance is none by default in Kafka 4.3, so the first bad record fails the task", kind: default }
 trap:
   wrong: "Connectors run inside the Kafka brokers."
-  right: "Kafka Connect is a separate service: its own worker processes, which use normal producers and consumers to talk to the brokers."
-sayIt: "Kafka Connect is Kafka's integration framework. Source connectors bring data in, sink connectors push it out, and distributed workers share the tasks. For database changes I use Debezium CDC."
+  right: "Kafka Connect is a separate service: its own worker processes, which talk to the brokers through normal producers and consumers."
+  why: "Connect ships in the Apache Kafka download and its scripts sit next to the broker scripts, so it looks like part of the broker."
+sayIt: "Kafka Connect is Kafka's integration framework: source connectors bring data in, sink connectors push it out, and distributed workers share and restart the tasks. For database changes I use Debezium CDC, which reads the database log instead of polling."
+cheat:
+  idea: "Kafka Connect moves data between Kafka and other systems with connectors: source connectors bring data in, sink connectors write it out. It runs in its own worker processes."
+  flow: "Database → source connector → Kafka topic → sink connector → search index"
+  remember: "Plain data copying: Connect. Business logic decides what to send: your own producer or consumer."
+buildsOn: [producer-basics, consumer-basics, transactional-outbox]
+scenarios:
+  - q: "The Analytics team wants every row change of the payments table in Kafka, including updates and deletes. A teammate suggests a job that runs SELECT every minute. What would you use instead, and why?"
+    a: "A Debezium source connector (CDC). It reads the database's change log, so it sees every committed insert, update and delete in order. A polling SELECT misses deletes and rows that change twice between polls, and it adds load to the database."
+  - q: "A Connect worker in a three-worker distributed cluster crashes. What happens to the connector tasks it was running?"
+    a: "The remaining workers rebalance and take over its tasks. Connector configs and source offsets live in Kafka topics, so the new worker continues from the last saved offset instead of starting over."
 confusedWith: []
 tags: [kafka-connect, cdc, debezium, integration]
 visual: flow
 sources:
-  - title: "Kafka Connect User Guide (Apache Kafka 4.3)"
+  - title: "Kafka Connect User Guide: modes, REST API, error handling (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/kafka-connect/user-guide/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Debezium Architecture (Debezium 3.7)"
     url: "https://debezium.io/documentation/reference/stable/architecture.html"
     verifiedOn: "2026-10-20"
-  - title: "Debezium connector for PostgreSQL (Debezium 3.7)"
+  - title: "Debezium connector for PostgreSQL: setup, pgoutput, topic names, snapshot (Debezium 3.7)"
     url: "https://debezium.io/documentation/reference/stable/connectors/postgresql.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Configuration Providers: FileConfigProvider (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/configuration-providers/"
+    verifiedOn: "2026-10-22"
+  - title: "Five Advantages of Log-Based Change Data Capture (Debezium blog, Gunnar Morling)"
+    url: "https://debezium.io/blog/2018/07/19/advantages-of-log-based-change-data-capture/"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Interview Questions: Kafka Connect API (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Kafka Connect is a framework, shipped with Apache Kafka, for copying data between Kafka and other systems. A connector is a ready-made plug-in for one system, such as PostgreSQL or Elasticsearch. A source connector brings data into Kafka; a sink connector takes data out of Kafka. You give a connector a JSON configuration, and Connect worker processes run it.
+
 ## Why it exists
 
-Teams kept writing the same glue code to copy data into and out of Kafka. Connect is one framework for it, with offsets and scaling handled.
+Without Connect, every team writes its own glue service: read rows from a database, call `send()`, remember how far it got, restart after a crash, and scale when the table grows. That code is the same everywhere and easy to get wrong. Connect does this work once: it tracks progress, restarts failed work and spreads it over several machines, so you only write configuration.
 
 ## How it works
 
 <Mermaid
-  alt="A source connector reads the shop database's change log and writes to a Kafka topic; a sink connector copies that topic to a search index or warehouse."
+  alt="Debezium, a source connector, reads the payments database's change log and writes to a Kafka topic. A sink connector reads that topic and writes to a search index or warehouse. Both connectors run in Connect workers, outside the brokers."
   chart={`flowchart LR
-  DB[(Shop database)] -- change log --> S[Source connector]
+  DB[(Payments database)] -- change log --> S["Source connector (Debezium)"]
   S --> K[[Kafka topic]]
   K --> SK[Sink connector]
   SK --> W[(Search index or warehouse)]`}
 />
 
-- A connector splits its job into tasks; distributed workers share them and rebalance when a worker joins or fails.
-- Converters turn records into bytes (JSON, Avro); single message transforms make small per-record edits.
-- You create and manage connectors through a REST API on each worker.
+1. You send a connector's JSON config to the REST API of any worker.
+2. The connector splits the job into tasks, at most `tasks.max` of them.
+3. In distributed mode, the workers share those tasks. A source task uses a producer to write to Kafka; a sink task uses a consumer to read from it.
+4. A converter turns each record into bytes (JSON or Avro), and optional single message transforms make small per-record edits on the way.
+5. Workers save configs, offsets and status in Kafka topics. When a worker dies, the others rebalance and continue its tasks from the saved offsets.
 
 ## Example
 
+The Analytics team wants every change to the payments table as an event. This Debezium source connector config is sent with `POST /connectors` to a worker:
+
 ```json
 {
-  "name": "shop-orders-cdc",
+  "name": "payments-cdc",
   "config": {
     "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-    "database.hostname": "orders-db",
+    "plugin.name": "pgoutput",
+    "database.hostname": "payments-db",
     "database.port": "5432",
     "database.user": "debezium",
-    "database.dbname": "shop",
-    "topic.prefix": "shop",
-    "table.include.list": "public.orders"
+    "database.password": "${file:/secrets/db.properties:password}",
+    "database.dbname": "payments",
+    "topic.prefix": "paydb",
+    "table.include.list": "public.payments"
   }
 }
 ```
 
-## Defaults
+What to notice:
+
+- Debezium reads PostgreSQL's write-ahead log, so the database must run with `wal_level=logical`. `pgoutput` is the decoding plug-in built into PostgreSQL; the default, `decoderbufs`, must be installed separately.
+- Change events go to the topic `<topic.prefix>.<schema>.<table>`, here `paydb.public.payments`.
+- On its first start the connector takes a snapshot of the existing rows, then streams new changes.
+- `${file:...}` reads the password from a file through the `FileConfigProvider`, which the worker config enables with `config.providers=file` and `config.providers.file.class=org.apache.kafka.common.config.provider.FileConfigProvider`. Without it, the secret would sit in plain text in the connector config.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| REST API port | 8083, HTTP | Kafka Connect 4.3 |
-| Change event topic | prefix.schema.table, e.g. shop.public.orders | Debezium 3.7 PostgreSQL connector |
+| REST API | HTTP on port 8083 | Kafka Connect 4.3 |
+| `errors.tolerance` | `none`: the task fails on the first bad record | Kafka Connect 4.3 |
+| Dead letter queue | off; set `errors.tolerance=all` and `errors.deadletterqueue.topic.name` on a sink | Kafka Connect 4.3 |
+| `snapshot.mode` | `initial`: snapshot existing rows on first start | Debezium 3.7 PostgreSQL |
+
+- **Standalone mode:** one process with offsets in a local file. Good for a laptop, but there is no fault tolerance.
+- **Distributed mode:** for production. Create the three internal topics (configs, offsets, status) yourself, replicated and compacted, because auto-created topics may get unsuitable settings.
+
+## Common mistakes
+
+- **"Use Connect for everything that touches Kafka."** Connect is for plain data movement. When business logic decides what to publish, such as a `PaymentCompleted` event after a charge succeeds, write the producer in the service, or use an [outbox](card:transactional-outbox) table that Debezium relays.
 
 ## Interview Qs
 
 ### What is Kafka Connect, and when would you use it?
 
-A framework that runs connectors to copy data between Kafka and databases, search indexes or storage. Use it for plain data movement; write your own producer or consumer when business logic decides what to send.
+A framework that runs connectors to copy data between Kafka and databases, search indexes or storage. Use it for plain data movement, because it already handles offsets, restarts and scaling. Write your own producer or consumer when business logic decides what to send or how to process it.
 
 ### What is change data capture, and how does Debezium do it?
 
-CDC turns each committed insert, update and delete into an event. Debezium reads the database's own log (MySQL binlog, PostgreSQL logical decoding) instead of polling tables. It is a common relay for the [transactional outbox](card:transactional-outbox).
+CDC turns each committed insert, update and delete into an event. Debezium reads the database's own log, the MySQL binlog or PostgreSQL logical decoding, instead of polling tables, so it misses no change and adds little load. It is a common relay for the [transactional outbox](card:transactional-outbox).
+
+### Why not just poll the table with a SELECT every minute?
+
+Polling misses deletes, misses a row that changed twice between two polls, needs a reliable "updated at" column, and puts query load on the database. Reading the change log sees every committed change, in commit order.

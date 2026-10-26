@@ -5,57 +5,78 @@ title: "Kafka Security: TLS, SASL and ACLs"
 topic: playbook
 level: intermediate
 heat: 2
-hook: "Three layers: TLS encrypts the traffic, SASL or mutual TLS proves who the client is, ACLs decide what it may do."
+hook: "Kafka security has three layers: TLS encrypts the traffic, SASL or mutual TLS proves who the client is, and ACLs decide what that client may do."
 points:
-  - { k: "Default", v: "Kafka 4.3: a PLAINTEXT listener on 9092, no encryption, no login", kind: default }
-  - { k: "Encrypt", v: "TLS on the listener: security.protocol SSL or SASL_SSL" }
-  - { k: "Authenticate", v: "mutual TLS, or SASL: SCRAM, OAUTHBEARER, GSSAPI, PLAIN" }
-  - { k: "Authorise", v: "ACLs: principal, operation, resource" }
-  - { k: "At rest", v: "Kafka does not encrypt disks: use volume or payload encryption", kind: minus }
+  - { k: "Out of the box", v: "Kafka 4.3 listens on PLAINTEXT port 9092: no encryption and no login", kind: default }
+  - { k: "Encrypt", v: "a TLS listener encrypts traffic; clients set security.protocol to SSL or SASL_SSL" }
+  - { k: "Authenticate", v: "mutual TLS (a client certificate) or SASL: SCRAM, OAUTHBEARER, GSSAPI (Kerberos) or PLAIN" }
+  - { k: "Authorise", v: "ACLs allow or deny a principal an operation, such as Read, on a resource, such as a topic" }
+  - { k: "No ACL, no access", v: "with the authorizer on, a resource with no ACL is open only to super users", kind: plus }
+  - { k: "At rest", v: "Kafka does not encrypt its log files: use disk or volume encryption, or encrypt payloads", kind: minus }
 trap:
   wrong: "SASL_PLAINTEXT is secure because it has a username and password."
   right: "It logs in but sends everything unencrypted. Use SASL_SSL, so the login and the data travel over TLS."
-sayIt: "I turn on TLS, authenticate each service with SASL SCRAM or OAUTHBEARER over SASL_SSL, or mutual TLS, and give it ACLs only on its own topics and group. Disks need their own encryption."
+  why: "The word SASL suggests security, and a password prompt feels safe, so people miss that PLAINTEXT means no encryption."
+sayIt: "I turn on TLS listeners, authenticate each service with SASL SCRAM or OAUTHBEARER over SASL_SSL, or with mutual TLS, and give it ACLs only on its own topics and group. Disks need their own encryption."
+cheat:
+  idea: "Three layers: TLS encrypts traffic, SASL or mutual TLS proves who the client is, and ACLs decide what each principal may do on each topic and group."
+  flow: "TLS (encrypt) → SASL or mTLS (who) → ACL (what)"
+  remember: "Default is PLAINTEXT on 9092. SASL_PLAINTEXT logs in but does not encrypt: use SASL_SSL."
+buildsOn: [kafka-architecture]
+scenarios:
+  - q: "The Notification service gets a TopicAuthorizationException when it starts reading payments. The cluster has the StandardAuthorizer on. What is missing?"
+    a: "ACLs for its principal. A consumer needs Read and Describe on the payments topic and Read on its group, notification. With no ACL, only super users may access a resource."
+  - q: "A team uses SASL_PLAINTEXT with SCRAM between data centres. Is the payment data protected on the network?"
+    a: "No. SCRAM proves who the client is, but SASL_PLAINTEXT sends the records unencrypted. Switch to SASL_SSL so the same login runs over TLS."
 confusedWith: []
 tags: [security, tls, sasl, acl]
 visual: table
 sources:
   - title: "Security overview (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/security/security-overview/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Authentication using SASL (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/security/authentication-using-sasl/"
     verifiedOn: "2026-10-20"
-  - title: "Authorization and ACLs (Apache Kafka 4.3 docs)"
+  - title: "Authorization and ACLs: StandardAuthorizer, super users, --consumer (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/security/authorization-and-acls/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Broker configs: listeners (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/configuration/broker-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Producer configs: security.protocol (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/configuration/producer-configs/"
+    verifiedOn: "2026-10-22"
   - title: "Security model: data at rest (Apache Kafka docs, trunk source)"
     url: "https://apache.googlesource.com/kafka/+/trunk/docs/security/security-model.md"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Kafka security is three separate layers. Encryption (TLS) hides the bytes on the network. Authentication proves who a client is: with SASL, a framework for logins such as a username and password or a token, or with mutual TLS, where the client shows a certificate. Authorisation then decides what that identity, called a principal, may do, using ACLs (access control lists) such as "payment-service may write to payments".
+
 ## Why it exists
 
-Out of the box, anyone who reaches a broker can read the payments topic in plain text. Production clusters need encryption, a login and per-topic permissions.
+Out of the box, a broker accepts any client on its port with no login and no encryption. Anyone who reaches the network can read the payments topic in plain text, or write fake `PaymentCompleted` events. A production cluster must encrypt traffic, know which service is connecting, and limit each service to its own topics.
 
 ## How it works
 
 | Layer | In Kafka | Setting |
 |---|---|---|
-| Encrypt in transit | TLS on the listener | security.protocol=SSL or SASL_SSL |
-| Authenticate | Mutual TLS, or a SASL mechanism | ssl.client.auth=required, sasl.mechanism |
-| Authorise | ACLs per principal | authorizer.class.name=…StandardAuthorizer |
-| Limit | Client quotas on bytes and requests | per user or client.id |
+| Encrypt in transit | TLS on the listener | `security.protocol=SSL` or `SASL_SSL` |
+| Authenticate | Mutual TLS, or a SASL mechanism | `ssl.client.auth=required`, `sasl.mechanism` |
+| Authorise | ACLs per principal | `authorizer.class.name=…StandardAuthorizer` |
+| Limit | Client quotas on bytes and requests | per user or `client.id` |
 
-- security.protocol is PLAINTEXT, SSL, SASL_PLAINTEXT or SASL_SSL; only SSL and SASL_SSL encrypt.
-- With the authorizer on, a resource with no ACL is open only to super users.
+1. The client connects to a TLS listener, and the two sides set up an encrypted channel.
+2. The client authenticates, for example with SCRAM, and the broker maps it to a principal such as `User:payment-service`.
+3. For every request, the authorizer checks the ACLs: is this principal allowed this operation on this topic or group?
+4. If no ACL allows it, the request fails with an authorisation error, unless the principal is a super user.
 
 ## Example
 
-The Payment Service connects with SCRAM over TLS:
+The Payment service connects with SCRAM over TLS:
 
 ```properties
 bootstrap.servers=broker1:9093
@@ -66,12 +87,31 @@ sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule require
 ssl.truststore.location=/etc/kafka/truststore.jks
 ```
 
+What to notice:
+
+- `SASL_SSL` means the SCRAM login and all records travel inside TLS. With `SASL_PLAINTEXT`, the same login works but the data is unencrypted.
+- The user name becomes the principal `User:payment-service`, which ACLs refer to, so each service should have its own user.
+- The truststore holds the certificate authority that signed the brokers' certificates. If that authority is a private one and the truststore is missing, the client cannot trust the broker and the connection fails.
+- The password comes from a secret store, never from source code.
+
+## Rules and defaults
+
+- **Default listener:** `PLAINTEXT://:9092` in Kafka 4.3; clients default to `security.protocol=PLAINTEXT`.
+- **Protocols:** `security.protocol` is `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT` or `SASL_SSL`; only `SSL` and `SASL_SSL` encrypt.
+- **KRaft authorizer:** `org.apache.kafka.metadata.authorizer.StandardAuthorizer`, set on brokers and controllers; super users are listed in `super.users`.
+- **Consumer ACLs:** Read and Describe on the topic, plus Read on the group. `kafka-acls.sh --add --consumer` with `--topic` and `--group` adds them.
+- **At rest:** Kafka writes log segments as plain bytes; encrypt the disks or the payloads yourself.
+
 ## Interview Qs
 
 ### How do you secure a Kafka cluster?
 
-Encrypt with TLS listeners, authenticate every client and broker with SASL (SCRAM, OAUTHBEARER, Kerberos) or mutual TLS, authorise with ACLs, and add quotas so one client cannot starve others. Encrypt disks separately.
+Encrypt with TLS listeners, authenticate every client and broker with SASL (SCRAM, OAUTHBEARER, Kerberos) or mutual TLS, authorise with ACLs, and add quotas so one client cannot starve others. Encrypt disks separately, because Kafka does not.
 
 ### What ACLs does a consumer need?
 
-Read and Describe on the topic, and Read on its consumer group. `kafka-acls.sh --add --consumer`, with the principal, `--topic` and `--group`, creates them.
+Read and Describe on the topic, and Read on its consumer group. `kafka-acls.sh --add --consumer`, with the principal, `--topic` and `--group`, creates them in one command.
+
+### What is the difference between SASL_PLAINTEXT and SASL_SSL?
+
+Both authenticate the client with SASL. `SASL_PLAINTEXT` then sends the login exchange and all data unencrypted; `SASL_SSL` runs everything over TLS. Use `SASL_SSL` anywhere outside a test setup.

@@ -5,68 +5,111 @@ title: Consumer Lag and Backpressure
 topic: consumers
 level: intermediate
 heat: 3
-hook: "Lag is how far a group is behind: log-end offset minus committed offset, per partition."
+hook: "Lag is how many records a group still has to read in a partition: the log-end offset minus the group's committed offset."
 points:
-  - { k: "Measure", v: "per partition; add the partitions up for the group's total" }
-  - { k: "See it", v: "kafka-consumer-groups.sh --describe, LAG column" }
-  - { k: "Backpressure", v: "the retained log absorbs bursts; lag grows, producers keep going", kind: plus }
-  - { k: "Lag beyond retention", v: "unread records are deleted; auto.offset.reset picks the restart", kind: minus }
+  - { k: "Per partition", v: "lag is measured for each partition; add them up for the group's total" }
+  - { k: "See it", v: "kafka-consumer-groups.sh --describe prints CURRENT-OFFSET, LOG-END-OFFSET and LAG per partition" }
+  - { k: "Backpressure", v: "the log stores the backlog, so producers keep writing and a slow group just falls behind", kind: plus }
+  - { k: "Alert on trend", v: "lag that keeps growing is the problem; a short spike after a burst is normal" }
+  - { k: "Lag past retention", v: "unread records are deleted, and auto.offset.reset decides where the group restarts", kind: minus }
 trap:
   wrong: "High lag means the brokers are slow."
-  right: "Lag usually means consumers are too slow or too few. Check processing and downstream calls first."
-sayIt: "Lag is log-end offset minus committed offset per partition. If it keeps growing, consumers cannot keep up: I fix slow processing or downstream calls, add consumers up to the partition count, then add partitions."
+  right: "Lag usually means consumers are too slow or too few. Check processing time and downstream calls first."
+  why: "Lag appears on Kafka dashboards, so Kafka gets the blame. The number only says the readers are behind, not why."
+sayIt: "Lag is log-end offset minus committed offset, per partition. If it keeps growing, consumers cannot keep up: I fix slow processing or downstream calls first, then add consumers up to the partition count, then add partitions."
+cheat:
+  idea: "Consumer lag is how far a group is behind: for each partition, the log-end offset minus the group's committed offset. Growing lag means consumers cannot keep up."
+  remember: "Fix in order: slow processing or downstream calls, then more consumers (up to partitions), then more partitions."
+buildsOn: [offsets, offset-commits, consumer-groups]
+scenarios:
+  - q: "The analytics group has lag 0 on seven partitions and 50,000 on partition 3. What do you suspect?"
+    a: "A problem with that partition, not the whole group: a hot key sending most records to partition 3, or the consumer owning it is stuck on a record. Adding consumers will not help, because one partition has only one owner."
+  - q: "The topic has 4 partitions, the group has 4 consumers and lag keeps growing. Someone adds 4 more consumers. Does lag fall?"
+    a: "No. The 4 new consumers get no partitions and stay idle. Make processing faster first, for example by batching database writes; if that is not enough, add partitions so more consumers can work."
 confusedWith: []
 tags: [consumer-lag, backpressure, monitoring]
-visual: table
+visual: code
 sources:
   - title: "Basic Kafka Operations: checking consumer position (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
     verifiedOn: "2026-10-20"
-  - title: "Monitoring: consumer fetch metrics (Apache Kafka 4.3)"
+  - title: "Monitoring: consumer fetch metrics, records-lag-max (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/operations/monitoring/"
     verifiedOn: "2026-10-20"
   - title: "Design: push vs. pull (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/design/design/"
-    verifiedOn: "2026-10-20"
-  - title: "KafkaConsumer: consumption flow control (Apache Kafka 4.3 javadoc)"
+    verifiedOn: "2026-10-22"
+  - title: "KafkaConsumer: consumption flow control, pause and resume (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Consumer and Share Consumer Configs: auto.offset.reset (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/consumer-configs/"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+Consumer lag is how many records a consumer group still has to read. For one partition it is the log-end offset, where the next record will be written, minus the group's [committed offset](card:offset-commits). The group's total lag is the sum over its partitions. Lag 0 means the group has caught up.
 
 ## Why it exists
 
-Producers can write faster than consumers process. Lag shows the gap early, before a delay reaches users or records expire unread.
+The Payment service can write faster than Analytics can process. Without a number for the gap, you find out when reports are an hour late, or when [retention](card:log-storage) deletes records nobody read. Lag shows the gap early. It also shows Kafka's backpressure: a slow reader does not slow the writers, because the log stores the backlog and the reader falls behind instead.
 
 ## How it works
 
-| Cause | Fix |
+| Cause | What to do |
 |---|---|
-| Slow processing per record | Optimise it; batch the database writes |
-| Slow database or API downstream | Bulk writes, caching, rate limits; pause() partitions |
+| Slow processing per record | Make it faster, for example batch the database writes |
+| Slow database or API downstream | Bulk calls, caching; `pause()` partitions while it recovers |
 | Fewer consumers than partitions | Add consumers, up to the [partition count](card:consumer-groups) |
-| Every partition already has a consumer | Add partitions ([ordering and scaling](card:ordering-and-scaling)) |
+| Every partition already has a consumer | Add partitions ([ordering and scaling](card:ordering-and-scaling), later) |
 | Frequent rebalances | Fix poll timeouts, use static membership ([rebalancing](card:rebalancing)) |
 
-- Pull model: a slow consumer falls behind and catches up later; it does not slow the producers.
-- pause() and resume() stop and restart fetching chosen partitions while the consumer keeps polling.
-- Client metric records-lag-max uses the consumer's position, not its committed offset.
+1. The Payment service writes 1,000 records a second to `payments`.
+2. Analytics processes 800 a second, so its lag grows by about 200 a second. The records wait in the log.
+3. Monitoring reads the lag, with `kafka-consumer-groups.sh` or the client metric `records-lag-max`, and alerts when it keeps growing.
+4. You find the cause with the table above and fix it in that order: the slow work first, then more consumers, then more partitions.
+5. If the lag is never fixed and records pass the retention time, they are deleted unread. The group's offset is then out of range, and [auto.offset.reset](card:consumer-configs) decides where it restarts.
 
 ## Example
 
+Analytics read 6 of 10 payments and stopped. The group tool shows where it is:
+
 ```bash
 bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
-  --describe --group payment-service
-# TOPIC     PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
-# payments  0          900             1000            100
-# payments  1          1000            1000            0
+  --describe --group analytics
 ```
+
+```text output
+Consumer group 'analytics' has no active members.
+
+GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG             CONSUMER-ID     HOST            CLIENT-ID
+analytics       payments        0          5               5               0               -               -               -
+analytics       payments        1          1               5               4               -               -               -
+```
+
+What to notice:
+
+- `CURRENT-OFFSET` is the committed offset. On partition 1 it is 1 and `LOG-END-OFFSET` is 5, so `LAG` is 5 − 1 = 4.
+- Partition 0 has caught up and partition 1 has not. Lag is per partition, so always look at the rows, not only the total.
+- "No active members" means no Analytics consumer is running. The lag stays, and grows with new payments, until one starts.
+
+## Rules and defaults
+
+- **Which offset:** the tool uses the committed offset. The client metric `records-lag-max` uses the consumer's position, so it can be lower than the tool's number.
+- **Slowing one partition:** `pause()` stops fetching from chosen partitions while the consumer keeps polling and stays in the group; `resume()` starts them again.
+- **Share groups:** have their own tool, `kafka-share-groups.sh --describe`, which also shows lag.
 
 ## Interview Qs
 
 ### What is consumer lag and how do you monitor it?
 
-The gap between the newest offset and the group's committed offset, per partition. Check it with kafka-consumer-groups.sh --describe or the records-lag-max metric, and alert when it keeps growing, not on one spike.
+It is the gap between the newest offset in a partition and the group's committed offset. Check it with kafka-consumer-groups.sh --describe or the records-lag-max metric, and alert when it keeps growing over minutes, not on one spike after a burst.
 
 ### What causes lag, and how do you fix it?
 
-Slow processing, slow downstream calls, too few consumers, too few partitions or frequent rebalances. Fix the slow part first, then add consumers up to the partition count, then add partitions.
+Slow processing, slow downstream calls, too few consumers, too few partitions, or frequent rebalances. Fix the slow part first, then add consumers up to the partition count, then add partitions. More consumers than partitions never helps.
+
+### How does Kafka handle backpressure?
+
+The consumer pulls, so Kafka never forces records on a slow reader. Unread records wait in the log for the retention time, and the gap shows up as lag. Producers keep writing at full speed. The risk is lag growing past retention, which loses records for that group.

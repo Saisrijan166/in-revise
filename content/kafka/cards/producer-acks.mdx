@@ -5,63 +5,129 @@ title: "Producer acks: 0, 1 and all"
 topic: producers
 level: intermediate
 heat: 3
-hook: "acks says who must have a record before the producer calls it sent: nobody, the leader, or every in-sync replica."
+hook: "acks tells the producer how many copies must exist before a write counts as done: none confirmed (0), the leader's (1), or every in-sync copy (all)."
 points:
-  - { k: "acks=all", v: "the default since Kafka 3.0 (was 1); still the default in Kafka 4.3", kind: default }
-  - { k: "all means ISR", v: "waits for the replicas now in sync, not every replica" }
-  - { k: "acks=1", v: "lost if the leader dies before followers copy it", kind: minus }
-  - { k: "acks=0", v: "no error feedback; retries do nothing; offset comes back -1", kind: minus }
-  - { k: "Trade-off", v: "more acks: safer writes, a little more latency" }
+  - { k: "acks=all is the default", v: "the default since Kafka 3.0 (before that it was 1); still the default in Kafka 4.3", kind: default }
+  - { k: "acks=all means the ISR", v: "the leader waits for the replicas that are in sync right now, not for every replica of the partition" }
+  - { k: "acks=1", v: "the leader replies after its own write; if it dies before followers copy the record, the record is lost", kind: minus }
+  - { k: "acks=0", v: "the producer never waits: it gets no error, retries do nothing, and the returned offset is always -1", kind: minus }
+  - { k: "The trade-off", v: "the more copies the producer waits for, the safer the write and the longer each send takes" }
 trap:
   wrong: "acks=all waits until every replica of the partition has the record."
-  right: "It waits for the replicas currently in the ISR. If the ISR has shrunk to the leader, one copy is enough, unless min.insync.replicas refuses the write."
-sayIt: "acks=0 does not wait, acks=1 waits for the leader, acks=all waits for every in-sync replica. acks=all is the default since Kafka 3.0, and I pair it with min.insync.replicas=2."
-confusedWith: []
+  right: "It waits for the replicas currently in the ISR. If the ISR has shrunk to the leader alone, one copy is enough, unless min.insync.replicas refuses the write."
+  why: "The word \"all\" sounds like every replica. The docs mean all in-sync replicas, and the ISR can shrink when followers fall behind."
+sayIt: "acks=0 does not wait, acks=1 waits for the leader's write, and acks=all waits for every in-sync replica. acks=all is the default since Kafka 3.0, and I pair it with replication factor 3 and min.insync.replicas=2."
+cheat:
+  idea: "acks is the producer setting that decides when a write counts as successful: 0 does not wait, 1 waits for the partition leader, all waits for every in-sync replica."
+  remember: "acks=all is the default since Kafka 3.0, and it waits for the in-sync replicas, not every replica."
+buildsOn: [producer-basics, kafka-architecture, partitions]
+scenarios:
+  - q: "The Payment service uses acks=1. The leader of payments-2 writes a ₹500 payment event, replies, and crashes before any follower copies it. A follower becomes leader. What happened to the event?"
+    a: "It is lost. acks=1 only promised that the old leader wrote it. The new leader never had the record, so the log no longer holds it, even though the producer was told the send succeeded."
+  - q: "Click-stream analytics events can lose a few records but need the lowest latency. Which acks would you choose, and why not 0 for payments too?"
+    a: "acks=1, or 0 if even send errors do not matter, is fine for click-streams. Payments need acks=all: with 0 the producer cannot even tell that a write failed, so it cannot retry it."
+confusedWith: [acks-0-vs-1-vs-all]
 tags: [acks, durability, producer, isr]
-visual: table
+visual: flow
 sources:
   - title: "Producer Configs: acks (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/producer-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Upgrading: notable changes in 3.0.0 (Apache Kafka 3.9 docs)"
     url: "https://kafka.apache.org/39/getting-started/upgrade/"
     verifiedOn: "2026-10-20"
   - title: "Design: availability and durability guarantees (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/design/design/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Interview Questions and Answers (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+`acks` (short for acknowledgements) is a producer setting that says when the leader broker may tell the producer "your write worked". Each partition usually has copies, called replicas, on several brokers: one leader takes the writes and the followers copy from it. The in-sync replicas (ISR) are the copies that are fully caught up. `acks` picks how many of those copies must hold the record before the reply: none (`0`), the leader (`1`) or the whole ISR (`all`).
+
 ## Why it exists
 
-A write is only safe once enough brokers hold it, but waiting costs time. `acks` lets each producer choose its point between speed and durability.
+A record is safe only when more than one broker holds it, but waiting for copies costs time on every send. Payment events must never vanish; a click-stream counter can lose a few records if that makes it faster. Without `acks`, Kafka would force one choice on both. With it, each producer picks its own point between speed and safety. You will see how copies are made in [replication](card:replication).
 
 ## How it works
 
-<Compare id="acks-0-vs-1-vs-all" />
+<Mermaid
+  alt="Timeline of one write. The producer sends a record to the leader. With acks=0 the producer does not wait at all. The leader writes it to its log; with acks=1 the leader replies now. The followers copy the record; once every in-sync replica has it, the leader replies for acks=all."
+  chart={`sequenceDiagram
+  participant P as Payment service
+  participant L as Leader (payments-2)
+  participant F as In-sync followers
+  P->>L: send record
+  Note over P: acks=0: does not wait
+  L->>L: write to own log
+  L-->>P: acks=1 reply
+  F->>L: copy the record
+  L-->>P: acks=all reply (whole ISR has it)`}
+/>
 
-- `acks=-1` is the same setting as `acks=all`.
-- How small the ISR may get before writes fail is [min.insync.replicas](card:isr-and-min-insync).
-- The full no-loss setup is in [delivery semantics](card:delivery-semantics).
+1. The producer sends a batch to the partition's leader. With `acks=0` it treats the send as done at this point and never reads a reply.
+2. The leader appends the batch to its own log. With `acks=1` it replies now, before any follower has a copy.
+3. The followers fetch the new records from the leader and write them to their own logs.
+4. With `acks=all` the leader waits until every replica in the ISR has the records, then replies.
+5. If an error comes back, the producer can retry. With `acks=0` there is no reply, so it never learns of a failure.
 
-## Defaults
+So the key is when the reply comes: before the write, after the leader's write, or after the in-sync copies.
 
-| What | Default | Where |
-|---|---|---|
-| `acks` | `all` (was `1` before 3.0) | Kafka 4.3 producer |
+## Example
+
+The same payment event sent three times, once with each `acks` value, to the `payments` topic.
+
+```java
+for (String acks : List.of("0", "1", "all")) {
+    var props = new Properties();
+    props.put("bootstrap.servers", "localhost:9092");
+    props.put("acks", acks);
+    props.put("key.serializer", StringSerializer.class.getName());
+    props.put("value.serializer", StringSerializer.class.getName());
+    try (var producer = new KafkaProducer<String, String>(props)) {
+        var meta = producer.send(new ProducerRecord<>("payments", "o-101", "PaymentCompleted")).get();
+        System.out.println("acks=" + acks + " -> partition " + meta.partition() + ", offset " + meta.offset());
+    }
+}
+```
+
+```text output
+acks=0 -> partition 2, offset -1
+acks=1 -> partition 2, offset 2
+acks=all -> partition 2, offset 3
+```
+
+What to notice:
+
+- With `acks=0` the offset is `-1`: the producer never heard back, so it does not know where the record went.
+- The `acks=0` record was still written (it took offset 1), which is why the next one got 2. "No acknowledgement" does not mean "not written"; it means "not confirmed".
+- On this one-broker test, `1` and `all` behave the same. The difference appears only when followers exist and the leader fails.
+
+## Rules and defaults
+
+- **Default:** `acks=all` since Kafka 3.0; it was `1` before. Kafka 4.3 keeps `all`.
+- **Same value, two names:** `acks=-1` means exactly the same as `acks=all`.
+- **acks=0:** retries never happen, because the producer never sees a failure.
+- **Idempotence needs all:** the [idempotent producer](card:idempotent-producer) requires `acks=all`.
+- **acks=all is not a copy count:** if the ISR has shrunk to the leader alone, one copy satisfies it. The topic setting [min.insync.replicas](card:isr-and-min-insync) sets the minimum ISR size for such writes.
+
+## Not to be confused with
+
+`acks` is a producer setting: it says how long the producer waits. `min.insync.replicas` is a topic or broker setting: it says how small the ISR may be before the leader refuses `acks=all` writes. Rule: acks = when the producer hears back; min.insync.replicas = how many copies must exist for that answer to be "yes".
 
 ## Interview Qs
 
-### acks=0 vs acks=1 vs acks=all?
+### What is the difference between acks=0, acks=1 and acks=all?
 
-`0`: the producer does not wait, so failures go unseen. `1`: the leader wrote it locally; it is lost if the leader fails before followers copy it. `all`: every in-sync replica has it, the strongest guarantee, with the most latency.
+With `0` the producer does not wait, so failures go unseen. With `1` the leader replies after its own write; the record is lost if the leader fails before followers copy it. With `all` the leader replies after every in-sync replica has it: the strongest guarantee, with the most latency.
 
 ### Can acks=all still lose data?
 
-Yes, if the ISR has shrunk to just the leader: the write is acknowledged with one copy, and losing that broker loses it. Set [min.insync.replicas](card:isr-and-min-insync) to 2 with replication factor 3 to refuse such writes.
+Yes, if the ISR has shrunk to just the leader. The write is then acknowledged with one copy, and losing that broker loses it. Use replication factor 3 with `min.insync.replicas=2`, so the leader refuses `acks=all` writes when fewer than two copies are in sync.
 
-### Which acks would you pick for payments?
+### Which acks would you pick for a payment service?
 
-`acks=all`, the default, so a ₹500 UPI payment event survives a broker crash. `acks=0` or `1` suits only data where losing a few records is acceptable.
+`acks=all`, which is already the default, so a ₹500 UPI payment event survives the crash of one broker. I would use `0` or `1` only for data where losing a few records is acceptable, such as metrics or click-streams.

@@ -5,72 +5,132 @@ title: Ordering vs Scaling and Choosing Partition Count
 topic: patterns
 level: interview
 heat: 3
-hook: "Kafka keeps order only inside a partition: key by the entity whose order matters, and scale by adding partitions."
+hook: "Kafka keeps order only inside a partition. Key events by the thing whose order matters, such as orderId, and scale by adding partitions."
 points:
-  - { k: "Global order", v: "one partition, so only one consumer per group", kind: minus }
-  - { k: "Per-key order", v: "same key, same partition: each order in sequence, orders in parallel", kind: plus }
-  - { k: "Partition count", v: "at least max(t/p, t/c) from measured per-partition rates" }
-  - { k: "Change later", v: "you can add partitions but not remove them (Kafka 4.3)", kind: minus }
-  - { k: "Too many", v: "more open files on brokers and more memory in clients", kind: minus }
+  - { k: "Global order", v: "one order for the whole topic needs one partition, so only one consumer per group can read it", kind: minus }
+  - { k: "Per-key order", v: "same key, same partition: each order's events stay in sequence while different orders run in parallel", kind: plus }
+  - { k: "Partition count", v: "at least max(t/p, t/c): target throughput t over measured per-partition producer (p) and consumer (c) rates" }
+  - { k: "Adding partitions", v: "allowed, but hash(key) mod count changes, so some keys move to a new partition and old data stays put", kind: minus }
+  - { k: "Removing partitions", v: "not supported (Kafka 4.3); the way out is a new topic with fewer partitions", kind: minus }
 trap:
   wrong: "Adding partitions is safe: each key stays on its partition."
   right: "The partition is hash(key) mod the partition count, so adding partitions moves keys, and per-key order can break during the change."
-sayIt: "Kafka orders only within a partition. I key by the entity, like orderId, so each order's events stay in sequence while orders run in parallel, and I size partitions from measured throughput with headroom."
+  why: "The key-to-partition rule looks fixed, and the command only adds new partitions, so it seems nothing existing could move."
+sayIt: "Kafka orders only within a partition, so I key by the entity whose order matters, like orderId, and get per-order sequence with parallelism across orders. I size partitions from measured throughput with headroom, because adding them later moves keys."
+cheat:
+  idea: "Kafka keeps order only inside one partition. Keying by an entity id keeps that entity's events in order while partitions add parallelism."
+  remember: "Pick the partition count up front with headroom: adding partitions moves keys, and removing them is not supported."
+buildsOn: [partition-keys, consumer-groups]
+scenarios:
+  - q: "The product owner asks that every event in the payments topic be consumed in exactly the order it was produced. What does that cost?"
+    a: "The topic needs a single partition, so at most one consumer in each group can read it and throughput is limited to what one partition and one consumer handle. Usually the real need is per-order sequence, which keying by orderId gives with many partitions."
+  - q: "The orders topic has 6 partitions and is keyed by orderId. You grow it to 12 while order ord-1001 is mid-flow. Can its events be processed out of order?"
+    a: "Yes. ord-1001 moves from partition 0 to partition 6. Its older events are still in partition 0, and a different consumer may read the new ones from partition 6 first. Drain or pause producers for such keys, or size the topic generously at the start."
 confusedWith: []
 tags: [ordering, partition-count, scaling]
-visual: flow
+visual: code
 sources:
   - title: "Basic Kafka Operations: modifying topics (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
-    verifiedOn: "2026-10-20"
-  - title: "Hardware and OS: file descriptors (Apache Kafka 4.3 docs)"
-    url: "https://kafka.apache.org/43/operations/hardware-and-os/"
-    verifiedOn: "2026-10-20"
-  - title: "KafkaConsumer: groups and threading (Apache Kafka 4.3 javadoc)"
+    verifiedOn: "2026-10-22"
+  - title: "BuiltInPartitioner.partitionForKey (Apache Kafka 4.3 source)"
+    url: "https://github.com/apache/kafka/blob/4.3/clients/src/main/java/org/apache/kafka/clients/producer/internals/BuiltInPartitioner.java"
+    verifiedOn: "2026-10-22"
+  - title: "KafkaConsumer: groups and multi-threaded processing (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html"
     verifiedOn: "2026-10-20"
   - title: "How to choose the number of topics/partitions (Jun Rao, Confluent blog)"
     url: "https://www.confluent.io/blog/how-choose-number-topics-partitions-kafka-cluster/"
+    verifiedOn: "2026-10-20"
+  - title: "Hardware and OS: file descriptors (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/operations/hardware-and-os/"
     verifiedOn: "2026-10-20"
   - title: "Kafka Interview Questions and Answers (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Ordering and scaling pull in opposite directions in Kafka. [Partitions](card:partitions) are the unit of parallel work: a group can run one consumer per partition. But Kafka guarantees order only inside one partition, never across a topic. Designing a topic means deciding which order you really need, choosing the [key](card:partition-keys) that keeps it, and picking a partition count.
+
 ## Why it exists
 
-More partitions let more consumers work in parallel, but Kafka orders records only inside one partition. Decide which order you really need.
+A topic with one partition is fully ordered, but only one consumer per group can read it, so it cannot keep up as traffic grows. A topic with 12 partitions and no key spreads load well, but two events of the same order can land in different partitions and be processed in the wrong order, for example "refunded" before "paid". Keying by orderId gives both: order where it matters, parallelism everywhere else.
 
 ## How it works
 
-<Steps label="Keep each order's events in sequence">
-  <Step title="Key by the entity">Send with key orderId; a key maps to one partition ([keys](card:partition-keys)).</Step>
-  <Step title="Producer keeps order">The [idempotent producer](card:idempotent-producer) stops retries from reordering a partition.</Step>
-  <Step title="One reader per partition">The group gives each partition to one consumer ([groups](card:consumer-groups)).</Step>
-  <Step title="Process in order">Do not hand records to a thread pool that can finish a later one first.</Step>
-</Steps>
+<Mermaid
+  alt="Producer sends events keyed by orderId. ord-1001 events go to partition 0, ord-1002 events go to partition 2. Consumer A reads partition 0, consumer B reads partition 2, so each order stays in sequence while the two orders run in parallel."
+  chart={`flowchart LR
+  P[Payment Service] -- "key ord-1001" --> P0[(partition 0)]
+  P -- "key ord-1002" --> P2[(partition 2)]
+  P0 --> A[Consumer A]
+  P2 --> B[Consumer B]`}
+/>
 
-- t is the target throughput; p and c are what one partition handles on the producer and consumer side, measured.
+1. The producer sends each event with key `orderId`. The default partitioner picks the partition as hash(key) mod the partition count, so one order always maps to one partition.
+2. The [idempotent producer](card:idempotent-producer) keeps the records of a partition in send order even when batches are retried.
+3. The consumer group gives each partition to exactly one consumer, which reads it in offset order.
+4. The consumer handles a partition's records one after another. Handing them to a thread pool can let a later record finish first, so order then needs extra care.
+5. To scale, you add partitions and consumers. Each order still has one partition, but which one depends on the count.
+
+So order is per key, and only as long as the partition count stays the same.
 
 ## Example
 
+The `orders` topic is grown from 6 to 12 partitions, then someone tries to shrink it back:
+
 ```bash
-# orders has 6 partitions; grow it to 12 (Kafka 4.3 cannot shrink it back)
-kafka-topics.sh --bootstrap-server localhost:9092 --alter \
-  --topic orders --partitions 12
-# now hash(orderId) % 12 sends some orders to a new partition
+kafka-topics.sh --bootstrap-server localhost:9092 --alter --topic orders --partitions 12
+kafka-topics.sh --bootstrap-server localhost:9092 --alter --topic orders --partitions 6
 ```
+
+```text output
+ERROR org.apache.kafka.common.errors.InvalidPartitionsException: The topic orders currently has 12 partition(s); 6 would not be an increase.
+```
+
+This program applies the default partitioner's formula to four order ids, before and after the change:
+
+```java
+for (String orderId : List.of("ord-1001", "ord-1002", "ord-1009", "ord-1011")) {
+    byte[] key = orderId.getBytes(StandardCharsets.UTF_8);
+    int hash = Utils.toPositive(Utils.murmur2(key));      // what the default partitioner uses
+    System.out.println(orderId + ": partition " + hash % 6 + " of 6, " + hash % 12 + " of 12");
+}
+```
+
+```text output
+ord-1001: partition 0 of 6, 6 of 12
+ord-1002: partition 2 of 6, 8 of 12
+ord-1009: partition 2 of 6, 2 of 12
+ord-1011: partition 1 of 6, 1 of 12
+```
+
+What to notice:
+
+- Growing succeeds silently; shrinking is refused. A partition count can only go up.
+- Two of the four orders move. New events of ord-1001 now go to partition 6, while its older events are still in partition 0, which another consumer may be behind on.
+- Existing records are not moved. Kafka only changes where new records go.
+
+## Rules and defaults
+
+- **Order guarantee:** only within a partition. Records with the same key go to the same partition while the partition count is unchanged.
+- **Sizing:** measure what one partition handles for producing (p) and consuming (c). For a target throughput t, use at least max(t/p, t/c) partitions, plus headroom for growth.
+- **Cost of too many:** each partition adds open files on the brokers, memory in clients, and more work when leaders change after a failure.
+- **Reducing:** not supported in Kafka 4.3. Create a new topic with fewer partitions and move producers and consumers to it.
+- **Internal topics:** never add partitions to topics such as `__consumer_offsets`.
 
 ## Interview Qs
 
 ### How do you guarantee ordering in Kafka?
 
-Only per partition. Key by the entity id, such as orderId, keep the idempotent producer on, and process each partition in order. Global order needs one partition, so one consumer per group.
+Only per partition. Key every event by the entity whose order matters, such as orderId, keep the idempotent producer on, and process each partition's records in sequence. If one global order is truly required, the topic must have one partition, so only one consumer per group can read it.
 
 ### How do you choose the number of partitions?
 
-Measure what one partition handles for producing (p) and consuming (c). For target throughput t, use at least max(t/p, t/c), plus headroom, since adding partitions later moves keys.
+Measure what one partition handles for producing (p) and consuming (c). For target throughput t, take at least max(t/p, t/c), then add headroom, because adding partitions later moves keys. Do not go far beyond that: every partition costs open files, client memory and failover time.
 
 ### Can you reduce a topic's partition count?
 
-No. Kafka does not support it. The usual workaround is a new topic with fewer partitions, then moving producers and consumers to it.
+No, Kafka does not support it. The usual way is to create a new topic with the smaller count, point producers at it, let consumers finish the old topic, then switch them over.

@@ -5,50 +5,79 @@ title: "Producers: Sending Records"
 topic: producers
 level: beginner
 heat: 2
-hook: "A producer turns a record into bytes, picks its partition, batches it and sends it to that partition's leader in the background."
+hook: "A producer is the client library your service uses to write records to Kafka. send() only queues the record; the broker's answer arrives later in a callback."
 points:
-  - { k: "send()", v: "asynchronous: buffers the record and returns a Future" }
-  - { k: "Callback", v: "runs when the write succeeds or fails; check the exception" }
-  - { k: "send().get()", v: "blocks until the broker replies: simple but slow", kind: minus }
-  - { k: "Serializers", v: "turn key and value into bytes; String and byte[] are built in" }
-  - { k: "One instance", v: "thread-safe: share one per app and close it on shutdown", kind: plus }
+  - { k: "Producer", v: "the Kafka client object in your service that writes records to topics: KafkaProducer in Java" }
+  - { k: "send() is asynchronous", v: "send() puts the record in a memory buffer and returns a Future at once; the write happens later" }
+  - { k: "Callback", v: "code you pass to send(); it runs when the broker accepts or rejects the record, with metadata or an exception" }
+  - { k: "send().get()", v: "waits for the broker's answer on every record, so it is simple but much slower", kind: minus }
+  - { k: "Serializers", v: "key.serializer and value.serializer turn the key and value into bytes; String and byte[] ones are built in" }
+  - { k: "One shared instance", v: "KafkaProducer is thread-safe: share one per app and close() it on shutdown to send what is buffered", kind: plus }
 trap:
   wrong: "send() returns after the broker has stored the record."
-  right: "send() only adds the record to a buffer and returns a Future. The callback or get() tells you whether the write worked."
-sayIt: "A producer serialises the key and value, picks a partition from the key, batches records and sends them to the partition leader. send() is asynchronous, so I handle errors in a callback and share one producer."
+  right: "send() only adds the record to a buffer and returns a Future. The callback, or get() on the Future, tells you whether the write worked."
+  why: "The method is called send, and most client calls people know, such as a JDBC insert, block until the server answers."
+sayIt: "A producer serialises the record, picks the partition, batches records and sends each batch to the partition leader. send() is asynchronous, so I check errors in a callback, and share one producer per app."
+cheat:
+  idea: "A producer is the client object that writes records to a topic. It turns key and value into bytes, picks the partition and sends batches to the partition's leader."
+  flow: "send() → serialise → pick partition → batch in memory → leader → callback"
+  remember: "send() returns before the write happens; check the callback's exception, or failures go unseen."
+buildsOn: [topics, partition-keys, offsets]
+scenarios:
+  - q: "A service calls producer.send(record) with no callback and never calls get(). The broker rejects the record. What does the service see?"
+    a: "Nothing. The failure is reported only through the Future and the callback, and the code reads neither, so the record is lost silently. Always pass a callback that checks the exception, or call get() where blocking is acceptable."
+  - q: "The Payment service creates a new KafkaProducer for every payment and never closes it. What goes wrong?"
+    a: "Each producer opens its own connections, threads and buffer, so the service wastes resources and loses batching. Records still in an unclosed producer's buffer may never be sent. Share one thread-safe producer and close it on shutdown."
 confusedWith: []
 tags: [producer, send, callback, serializer]
 visual: flow
 sources:
   - title: "KafkaProducer (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "ProducerRecord (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/producer/ProducerRecord.html"
     verifiedOn: "2026-10-20"
+  - title: "Producer Configs: key.serializer, value.serializer (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/producer-configs/"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Interview Questions and Answers (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A producer is the part of your service that writes records to Kafka. In Java it is a `KafkaProducer` object from the `kafka-clients` library. You give it a record: the topic, an optional key and the value, such as a `PaymentCompleted` event keyed by `orderId`. The producer does the rest: it turns the record into bytes, chooses the [partition](card:partition-keys), and sends it to the broker that leads that partition.
+
 ## Why it exists
 
-Services need one safe, fast way to write events into Kafka. The producer client hides serialising, partition choice, batching, retries and broker discovery behind one `send()` call.
+Without a client library, each service would have to find the right broker for every partition, convert objects to bytes, group small writes, retry on errors and follow leaders when they move. Every team would write this differently, and most would get it wrong. The producer hides all of it behind one `send()` call, and does the network work on its own background thread so your request thread is not held up.
 
 ## How it works
 
-<Steps label="One send() on the payments topic">
-  <Step title="Serialise">`key.serializer` and `value.serializer` turn the key and value into bytes.</Step>
-  <Step title="Pick a partition">From the key, or a set partition: see [partition keys](card:partition-keys).</Step>
-  <Step title="Batch">The record joins its partition's batch in memory: see [batching](card:batching-and-compression).</Step>
-  <Step title="Send">A background I/O thread sends the batch to the partition's leader broker.</Step>
-  <Step title="Acknowledge">The leader replies as the [acks setting](card:producer-acks) says; the Future completes.</Step>
-</Steps>
+<Mermaid
+  alt="The Payment service calls send(). The producer serialises the key and value into bytes, picks a partition of the payments topic from the key, and adds the record to that partition's batch in memory. A background thread sends the batch to the leader broker of that partition. The broker's reply completes the Future and runs the callback."
+  chart={`flowchart LR
+  A["Payment service: send()"] --> S[1. Serialise to bytes]
+  S --> P[2. Pick partition]
+  P --> B[3. Add to batch in memory]
+  B --> T["4. Background thread sends batch"]
+  T --> L[(Leader broker)]
+  L -- "5. reply" --> C[Callback runs]`}
+/>
 
-- Avro, Protobuf or JSON payloads need format serializers: see [schemas](card:schema-registry-and-serialization).
-- With no callback and no `get()`, a failed send goes unseen.
+1. Your code calls `send(record, callback)`. The call returns at once with a `Future`, an object that will hold the result later.
+2. The `key.serializer` and `value.serializer` turn the key and value into bytes, because brokers store only bytes.
+3. The producer picks the partition: from the key's hash, or the partition you set yourself ([partition keys](card:partition-keys)).
+4. The record joins that partition's batch in memory. A background I/O thread sends the batch to the partition's leader broker ([batching](card:batching-and-compression)).
+5. The broker replies with the partition and [offset](card:offsets), or an error. The producer completes the `Future` and runs your callback.
+
+So the key is that sending and the result are separated in time: you learn about success or failure only in step 5.
 
 ## Example
+
+The Payment service sends one `PaymentCompleted` event to the `payments` topic (3 partitions), keyed by `orderId`.
 
 ```java
 var props = new Properties();
@@ -56,28 +85,50 @@ props.put("bootstrap.servers", "localhost:9092");
 props.put("key.serializer", StringSerializer.class.getName());
 props.put("value.serializer", StringSerializer.class.getName());
 try (var producer = new KafkaProducer<String, String>(props)) {
-    var event = "{\"type\":\"PaymentCompleted\",\"orderId\":\"o-101\",\"amountInr\":500,\"method\":\"UPI\"}";
+    var event = "{\"type\":\"PaymentCompleted\",\"orderId\":\"o-101\",\"amountInr\":500}";
     producer.send(new ProducerRecord<>("payments", "o-101", event), (meta, ex) -> {
         if (ex != null) System.err.println("send failed: " + ex);
         else System.out.println("partition " + meta.partition() + ", offset " + meta.offset());
     });
+    System.out.println("send() returned");
 }
 ```
 
 ```text output
-partition 0, offset 0
+send() returned
+partition 2, offset 0
 ```
+
+What to notice:
+
+- `send() returned` prints **first**: `send()` only queued the record, and the callback ran later, when the broker answered.
+- The callback checks `ex` first. Remove that check and a rejected payment event disappears without a trace.
+- The key `o-101` decided the partition (2 here). Every later event for order `o-101` goes to the same partition, so they stay in order.
+- `try (...)` closes the producer at the end, and `close()` waits until buffered records are sent. Without it, the program could exit before the record leaves memory.
+
+## Rules and defaults
+
+- **Required settings:** `bootstrap.servers`, `key.serializer` and `value.serializer` have no default in Kafka 4.3; the producer will not start without them.
+- **Thread safety:** one `KafkaProducer` can be shared by all threads, and the Kafka javadoc says that is generally faster than many instances.
+- **Callback order:** callbacks for records sent to the same partition run in the order of the sends.
+- **Keep callbacks short:** they run on the producer's I/O thread, so slow work there delays every other send. Hand heavy work to another thread.
+- **Blocking cases:** `send()` can block when it must fetch topic metadata first or when the buffer is full; the limits are in [producer configs](card:producer-configs).
+
+## Common mistakes
+
+- **"One producer per request is safer."** It wastes connections and memory and kills batching. One shared producer is the documented pattern.
+- **"JSON or Avro payloads need nothing special."** They need a matching serializer; formats and schemas are covered in [Schema Registry](card:schema-registry-and-serialization).
 
 ## Interview Qs
 
-### What is a Kafka producer?
+### What is a Kafka producer, and what does it do with a record?
 
-A client that publishes records to topics. It serialises each record, picks its partition (from the key when one is set), batches records per partition and sends each batch to the partition's leader broker.
+It is the client that publishes records to topics. For each record it serialises the key and value, picks the partition (from the key's hash when there is a key), adds the record to that partition's batch, and a background thread sends the batch to the partition's leader broker.
 
 ### Is send() synchronous?
 
-No. It adds the record to a buffer and returns a `Future<RecordMetadata>` at once. Call `get()` to block until the reply (slow), or pass a callback to handle success or failure without blocking.
+No. It puts the record in a buffer and returns a `Future<RecordMetadata>` at once. Call `get()` on it to block until the broker answers, which is simple but slow, or pass a callback that handles success or failure without blocking. With neither, a failed send goes unnoticed.
 
 ### Should each thread create its own KafkaProducer?
 
-No. `KafkaProducer` is thread-safe, and one shared instance is generally faster than many. Close it on shutdown so buffered records are sent and its resources are freed.
+No. `KafkaProducer` is thread-safe, and one shared instance usually gives better throughput because records from all threads share batches. Close it on shutdown so buffered records are sent and its threads and connections are released.

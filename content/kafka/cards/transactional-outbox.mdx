@@ -5,17 +5,28 @@ title: "Transactional Outbox: Database and Kafka Together"
 topic: patterns
 level: interview
 heat: 2
-hook: "Save the order and its event row in one database transaction; a relay publishes the event to Kafka afterwards."
+hook: "Save the business row and its event row in one database transaction; a separate relay publishes the event to Kafka afterwards."
 points:
-  - { k: "Dual write", v: "a DB commit and a Kafka send cannot be atomic", kind: minus }
-  - { k: "Outbox row", v: "written in the same local transaction as the business row" }
-  - { k: "Relay", v: "a polling publisher, or log tailing (CDC) such as Debezium" }
-  - { k: "Kafka key", v: "the aggregate id (orderId), so each order's events stay in order" }
-  - { k: "At-least-once", v: "the relay can publish twice after a crash: consumers dedupe", kind: minus }
+  - { k: "Dual write", v: "saving to a database and then sending to Kafka are two separate steps; a crash between them breaks one", kind: minus }
+  - { k: "Outbox table", v: "a table of events to publish, written in the same database transaction as the business rows" }
+  - { k: "Relay", v: "a process that reads new outbox rows and publishes them: a poller, or a log reader (CDC) such as Debezium" }
+  - { k: "Kafka key", v: "the aggregate id, here the orderId, so all events of one order stay in order in one partition" }
+  - { k: "At-least-once", v: "a relay that crashes after publishing but before marking the row sends it again, so consumers dedupe", kind: minus }
 trap:
   wrong: "Put the database write and the Kafka send in one Kafka transaction."
-  right: "A Kafka transaction covers only Kafka writes and offsets. With an outbox, the database transaction decides."
-sayIt: "Writing the database and Kafka separately can lose events or send them for rolled-back data. With an outbox, the order and its OrderPlaced row commit together, and a relay such as Debezium publishes it."
+  right: "A Kafka transaction covers only Kafka writes and offsets. With an outbox, the database transaction alone decides whether the event exists."
+  why: "Both are called transactions, and putting both calls in one try block looks atomic in code even though two systems are involved."
+sayIt: "Writing the database and Kafka separately can lose events, or send events for data that rolled back. With an outbox, the payment and its PaymentCompleted row commit together, and a relay such as Debezium publishes the row; consumers dedupe on the event id."
+cheat:
+  idea: "The service writes its business row and an event row to an outbox table in one database transaction. A relay then publishes the event to Kafka."
+  flow: "DB transaction (row + outbox row) → relay → Kafka → consumers dedupe"
+  remember: "The event exists only if the data committed; delivery is at-least-once, so consumers must be idempotent."
+buildsOn: [kafka-transactions, idempotent-consumers]
+scenarios:
+  - q: "The Payment service commits the payment row, then calls kafkaTemplate.send(PaymentCompleted). The pod is killed between the two lines. What is the result, and how does an outbox fix it?"
+    a: "The payment is saved but no event is ever sent, so the Notification and Analytics services never hear of it. With an outbox, the event row commits in the same transaction as the payment, and the relay publishes it whenever it next runs."
+  - q: "You have an outbox and a polling relay. Can the same PaymentCompleted event reach Kafka twice?"
+    a: "Yes. If the relay publishes the row and crashes before marking it as sent, it publishes it again after restart. That is why consumers deduplicate on the event id carried with the event."
 confusedWith: []
 tags: [outbox, dual-write, cdc, debezium]
 visual: flow
@@ -29,54 +40,79 @@ sources:
   - title: "Pattern: Transaction log tailing (microservices.io)"
     url: "https://microservices.io/patterns/data/transaction-log-tailing.html"
     verifiedOn: "2026-10-20"
-  - title: "Outbox Event Router (Debezium 3.7 docs)"
+  - title: "Outbox Event Router: table columns, key, topic routing, id header (Debezium 3.7 docs)"
     url: "https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Reliable Microservices Data Exchange With the Outbox Pattern (Debezium blog)"
     url: "https://debezium.io/blog/2019/02/19/reliable-microservices-data-exchange-with-the-outbox-pattern/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The transactional outbox is a pattern for a service that must both update its database and publish an event. Instead of sending to Kafka directly, the service inserts the event as a row into an outbox table, in the same database transaction as its business data. A separate process, the relay, reads new outbox rows and publishes them to Kafka. The database transaction alone decides whether the event exists.
+
 ## Why it exists
 
-If the Order Service saves an order and crashes before sending OrderPlaced, no one hears of it. Sending first risks an event for an order that rolled back.
+The Payment service saves a payment and must publish `PaymentCompleted`. If it saves first and crashes before sending, the payment exists but no service hears of it. If it sends first and the database transaction then rolls back, consumers act on a payment that does not exist. This is the dual-write problem. A [Kafka transaction](card:kafka-transactions) cannot help, because it does not include the database. One database transaction can include both rows.
 
 ## How it works
 
 <Mermaid
-  alt="The Order Service writes the order row and an outbox row in one database transaction. A relay, a poller or Debezium reading the database log, publishes OrderPlaced with key orderId to the orders topic. Consumers skip repeats by eventId."
+  alt="The Payment Service writes the payment row and an outbox row in one database transaction. A relay, either a poller or Debezium reading the database log, publishes PaymentCompleted with key orderId to Kafka. Consumers skip repeats by event id."
   chart={`flowchart LR
-  S[Order Service] -- "one DB transaction" --> DB[("orders + outbox")]
+  S[Payment Service] -- "one DB transaction" --> DB[("payments + outbox")]
   DB -- "poll or read the log" --> R[Relay]
-  R -- "OrderPlaced, key orderId" --> K[[orders topic]]
-  K --> C[Consumers skip repeats by eventId]`}
+  R -- "PaymentCompleted, key orderId" --> K[[Kafka topic]]
+  K --> C[Consumers skip repeats by event id]`}
 />
 
-- The event is published only if the transaction commits, but maybe more than once ([idempotent consumers](card:idempotent-consumers)).
-- Log tailing reads the MySQL binlog or PostgreSQL WAL ([CDC with Connect](card:kafka-connect)).
+1. The Payment service starts a database transaction, inserts the payment row and inserts an outbox row holding the `PaymentCompleted` event, then commits. Both rows exist, or neither does.
+2. The relay finds the new outbox row. A polling publisher queries the table for unsent rows; a log-tailing relay, such as Debezium, reads the database's change log (the PostgreSQL WAL or the MySQL binlog).
+3. The relay publishes the event to Kafka, keyed by the order id, and marks the row as sent or moves its position in the log.
+4. If the relay crashes between steps 3 and its marking, it publishes the event again, so consumers must be [idempotent](card:idempotent-consumers).
+
+So the event is published if and only if the data committed, but possibly more than once.
 
 ## Example
 
+The Payment service's transaction, in PostgreSQL. The outbox columns follow the defaults of Debezium's outbox event router:
+
 ```sql
 BEGIN;
-INSERT INTO orders (order_id, customer_id, total_inr)
-VALUES ('ord-1001', 'c-42', 500);
+INSERT INTO payments (payment_id, order_id, amount_inr, status)
+VALUES ('pay-77', 'ord-1001', 500, 'COMPLETED');
 INSERT INTO outbox (id, aggregatetype, aggregateid, type, payload)
-VALUES ('evt-9b1c', 'order', 'ord-1001', 'OrderPlaced',
-        '{"orderId":"ord-1001","totalInr":500}');
-COMMIT;   -- both rows or neither
+VALUES ('evt-9b1c', 'payment', 'ord-1001', 'PaymentCompleted',
+        '{"paymentId":"pay-77","orderId":"ord-1001","amountInr":500}');
+COMMIT;
 ```
+
+What to notice:
+
+- Both inserts are in one transaction. When the outbox insert failed in a test run (a duplicate `id`), PostgreSQL rolled back the payment row too: no payment without its event.
+- `aggregateid` holds the order id because Debezium uses this column as the Kafka key, which keeps one order's events in one partition.
+- `id` travels with the event as a header; it is the event id consumers deduplicate on.
+- By default Debezium routes by `aggregatetype`, to a topic named `outbox.event.payment`; a router setting can rename it to `payments`.
+
+## Rules and defaults
+
+- **Polling publisher:** works with any SQL database and is easy to build, but publishing events in order is tricky.
+- **Log tailing (CDC):** reads every committed change from the database log, so nothing is missed, but needs database-specific setup; Debezium runs as a [Kafka Connect](card:kafka-connect) source connector, covered later.
+- **Debezium outbox router (3.7):** expects the columns `id`, `aggregatetype`, `aggregateid`, `type` and `payload`; `aggregateid` becomes the message key.
+- **Delivery:** at-least-once. The outbox removes lost and phantom events, not duplicates.
+- **Clean-up:** delete or archive outbox rows once they are published, or the table keeps growing.
 
 ## Interview Qs
 
 ### What is the dual-write problem?
 
-A service updates its database and publishes an event, but the two cannot share one transaction. A crash between them leaves an order with no event, or an event for an order never saved.
+A service updates its database and publishes an event, but the two writes cannot share one transaction. A crash between them leaves data with no event, or an event for data that was rolled back. Other services then hold a different picture of the world than the service that owns the data.
 
 ### Polling publisher or log tailing?
 
-Polling is simple and works with any SQL database, but keeping order is tricky. Log tailing, such as Debezium, reads the database log instead, but needs database-specific setup.
+A polling publisher queries the outbox table for unsent rows: simple, and it works with any SQL database, but keeping events in order is tricky. Log tailing, such as Debezium, reads the database's change log instead, so it sees every committed change, but it needs database-specific setup, usually with Kafka Connect.
 
 ### Does the outbox give exactly-once delivery?
 
-No. A relay that crashes after publishing but before recording it sends the event again. Consumers dedupe on the event id.
+No. A relay that crashes after publishing but before recording it publishes the event again. The outbox guarantees that every committed change produces an event and that rolled-back changes produce none. Consumers still deduplicate on the event id.

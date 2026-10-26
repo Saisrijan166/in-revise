@@ -5,62 +5,102 @@ title: "Delivery Semantics: At-Most, At-Least, Exactly Once"
 topic: reliability
 level: intermediate
 heat: 3
-hook: "Commit the offset before processing and you may lose records; process first and you may repeat them."
+hook: "If a consumer crashes mid-work, a record is either skipped or handled again. Commit before the work and you may lose it; commit after and you may repeat it."
 points:
-  - { k: "Kafka's default", v: "at-least-once: producer retries; commit after the work", kind: default }
-  - { k: "Usual design", v: "at-least-once plus an idempotent consumer", kind: plus }
-  - { k: "Exactly-once", v: "built in for Kafka to Kafka: transactions or Kafka Streams" }
-  - { k: "External systems", v: "a database or API needs dedup, or offsets stored with the output", kind: minus }
+  - { k: "At-most-once", v: "commit the offset, then process: a crash skips the unfinished records, but none is handled twice", kind: minus }
+  - { k: "At-least-once", v: "process, then commit: a crash repeats records since the last commit, but none is lost; Kafka's default", kind: default }
+  - { k: "Exactly-once", v: "output records and offsets commit in one Kafka transaction; works only when input and output are Kafka topics" }
+  - { k: "External systems", v: "a database or an SMS is outside Kafka's transaction, so it needs deduplication or offsets stored with the data", kind: minus }
+  - { k: "Usual design", v: "at-least-once delivery plus an idempotent consumer, so a repeated record does no harm", kind: plus }
 trap:
   wrong: "Kafka gives exactly-once into my database by default."
-  right: "The default is at-least-once. Exactly-once covers Kafka-to-Kafka writes; a database needs idempotent writes or offsets saved with the data."
-sayIt: "Commit before processing is at-most-once; process then commit is at-least-once, Kafka's default. I use at-least-once with idempotent consumers, and transactions only for Kafka-to-Kafka exactly-once."
-confusedWith: [idempotent-producer-vs-idempotent-consumer]
+  right: "The default is at-least-once. Exactly-once covers Kafka-to-Kafka work; a database needs an idempotent consumer or offsets stored with the data."
+  why: "Kafka advertises exactly-once semantics, and the producer's idempotence is on by default, so it sounds as if the whole path is covered."
+sayIt: "Commit before processing gives at-most-once; process then commit gives at-least-once, Kafka's default. Exactly-once needs transactions and covers only Kafka-to-Kafka work, so I use at-least-once with idempotent consumers."
+cheat:
+  idea: "A delivery semantic says what a crash can do to a record: skip it, repeat it, or neither. It is decided by when the consumer commits its offset."
+  flow: "Commit → process: may lose · Process → commit: may repeat"
+  remember: "Kafka's default is at-least-once. Exactly-once is Kafka-to-Kafka only; for a database, make the consumer idempotent."
+buildsOn: [offset-commits, idempotent-producer]
+scenarios:
+  - q: "The Notification service sends an SMS for each PaymentCompleted event and then commits. It crashes after the SMS but before the commit. What does the customer see?"
+    a: "A second SMS. After the restart the group resumes from the last committed offset and handles the same event again: at-least-once. To stop this, the service records the paymentId of each SMS sent and skips repeats."
+  - q: "A dashboard counts page views from a topic. A rare lost event is fine, but a double count looks like a bug. Which semantic fits, and how do you get it?"
+    a: "At-most-once. Commit the offsets before processing each batch (and send without producer retries). A crash then skips a few events instead of counting them twice."
+confusedWith: []
 tags: [delivery-semantics, exactly-once, reliability]
 visual: table
 sources:
   - title: "Design: Message Delivery Semantics (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-22"
+  - title: "KafkaConsumer: offsets and consumer position (Apache Kafka 4.3 javadoc)"
+    url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html"
     verifiedOn: "2026-10-20"
   - title: "Kafka Interview Questions and Answers (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A delivery semantic is the promise a system makes about how many times each record is processed when something fails. There are three: at-most-once (never twice, but maybe never), at-least-once (never lost, but maybe twice) and exactly-once (once, with no loss and no repeat). In Kafka the consumer side is decided mostly by when it [commits its offset](card:offset-commits) relative to the work.
+
 ## Why it exists
 
-Producers and consumers can crash halfway through a step, so a record may be lost or handled twice. Each semantic is a choice of which risk you accept.
+Crashes happen between two steps. A consumer that has sent an SMS but not yet committed will, after a restart, read the same event and send it again. A consumer that committed first and then crashed will skip the event for good. No setting removes both risks for free, so you choose which one your use case can live with, and design around it.
 
 ## How it works
 
 <Compare id="at-most-once-vs-at-least-once-vs-exactly-once" />
 
-- Committing after the work: [offset commits](card:offset-commits). Making repeats harmless: [idempotent consumers](card:idempotent-consumers).
-- How exactly-once works inside Kafka: [Kafka transactions](card:kafka-transactions).
+1. The consumer polls a batch of records.
+2. It either commits the batch's offsets first and then does the work (at-most-once), or does the work first and then commits (at-least-once).
+3. A crash happens between the two steps. The group gives the partition to another consumer, which starts from the last committed offset.
+4. With commit-first, the records that were in progress are past that offset, so they are skipped. With work-first, they are before it, so they run again.
+5. Exactly-once removes the gap only when the work is "write to another Kafka topic": the output and the offset are committed together in one [transaction](card:kafka-transactions), which comes next.
+
+So the order of "work" and "commit" decides between loss and repeats.
 
 ## Example
 
-A reliable pipeline for the ₹500 PaymentCompleted events (each row is explained in its own concept):
+The Notification service reads `PaymentCompleted` events and sends an SMS for each:
 
-| Layer | Setting | See |
-| --- | --- | --- |
-| Topic | RF 3, min.insync.replicas 2 | [ISR](card:isr-and-min-insync) |
-| Producer | acks=all, idempotence on | [acks](card:producer-acks), [idempotent producer](card:idempotent-producer) |
-| Consumer | commit only after processing | [offset commits](card:offset-commits) |
-| Consumer | dedupe on paymentId | [idempotent consumers](card:idempotent-consumers) |
-| Failures | retry, then a dead letter topic | [retries and DLT](card:retries-and-dead-letter-topics) |
-| Operations | alert on consumer lag | [consumer lag](card:consumer-lag) |
+```java
+while (true) {
+    var records = consumer.poll(Duration.ofMillis(500));
+    for (var record : records) {
+        sendSms(record.value());       // 1. do the work
+    }
+    consumer.commitSync();             // 2. then save "done up to here"
+}
+```
+
+What to notice:
+
+- The SMS is sent before the commit, so this loop is at-least-once. A crash between the two lines makes the next consumer send the same SMSes again.
+- Move `commitSync()` above the `for` loop and it becomes at-most-once: a crash during the loop loses those SMSes instead.
+- The loop assumes `enable.auto.commit=false`. Auto commit saves offsets on a timer, unrelated to whether `sendSms` finished.
+- The cure for the repeat is not a different order but an [idempotent consumer](card:idempotent-consumers) that skips a paymentId it has already handled.
+
+## Rules and defaults
+
+- **Kafka's default:** at-least-once. The producer retries failed sends, and a consumer that commits after processing repeats work after a crash.
+- **At-most-once on purpose:** disable producer retries and commit before processing.
+- **Exactly-once inside Kafka:** a transactional producer that also commits the consumed offsets, and consumers with `isolation.level=read_committed`; or Kafka Streams with `processing.guarantee=exactly_once_v2`.
+- **Exactly-once into another system:** not automatic. Either store the offsets in the same database transaction as the output, or make the write idempotent.
+- **Producer side:** the [idempotent producer](card:idempotent-producer) stops duplicates caused by producer retries; it does nothing about consumer repeats.
 
 ## Interview Qs
 
 ### At-most-once vs at-least-once vs exactly-once?
 
-At-most-once commits first, so a crash loses records. At-least-once processes first, so a crash repeats them. Exactly-once commits output and offsets in one Kafka transaction, so neither happens, but only for Kafka-to-Kafka work.
+At-most-once commits the offset before processing, so a crash loses records but never repeats them. At-least-once processes first, so a crash repeats records but never loses them; this is Kafka's default. Exactly-once commits output and offsets in one Kafka transaction, so neither happens, but only for Kafka-to-Kafka work.
 
-### How do you get at-most-once on purpose?
+### Why is at-least-once with idempotent consumers the usual choice?
 
-Turn off producer retries and commit offsets before processing each batch. It suits data where an occasional loss is fine and a duplicate is not.
+It never loses data, it works with any destination, such as a database, an API or an SMS gateway, and it costs no transactions. The repeats it causes are made harmless by deduplicating on a business id inside the event. Exactly-once is reserved for Kafka-to-Kafka pipelines.
 
 ### How would you design a reliable Kafka pipeline?
 
-RF 3 with min.insync.replicas 2, producers with acks=all and idempotence, commits only after processing, idempotent consumers, retries then a dead letter topic, and lag alerts: at-least-once with harmless duplicates.
+Topics with RF 3 and min.insync.replicas 2; producers with acks=all and idempotence; consumers that commit only after processing and deduplicate on an event id; failed records retried, then sent to a dead letter topic; and alerts on consumer lag. The result is at-least-once delivery where duplicates do no harm.

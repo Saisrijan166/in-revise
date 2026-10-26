@@ -5,66 +5,111 @@ title: Retries, Dead Letter Topics and Poison Messages
 topic: patterns
 level: intermediate
 heat: 2
-hook: "Retry a failing record a few times with backoff; if it still fails, park it in a dead letter topic and move on."
+hook: "Retry a failing record a few times with growing waits; if it still fails, park it in a dead letter topic and move on to the next record."
 points:
-  - { k: "Transient error", v: "timeout or 503: retry with backoff, up to a max attempt count" }
-  - { k: "Permanent error", v: "bad JSON or failed validation: skip retries, send to the DLT" }
-  - { k: "Poison message", v: "fails every time; retried in place, it stalls its partition", kind: minus }
-  - { k: "DLT record", v: "the original value plus headers: error, topic, partition, offset" }
-  - { k: "DLT needs", v: "an owner, an alert and a way to re-drive fixed records", kind: minus }
+  - { k: "Transient error", v: "a failure that may pass, such as a timeout or HTTP 503: retry it with backoff, up to a set number of attempts" }
+  - { k: "Permanent error", v: "a failure that will repeat, such as bad JSON or a failed validation: retrying is pointless, send it to the DLT" }
+  - { k: "Poison message", v: "a record that fails every time; retried forever, it stops its partition, since the offset never moves on", kind: minus }
+  - { k: "Dead letter topic (DLT)", v: "a separate topic for records that cannot be processed, with the error and origin in headers" }
+  - { k: "DefaultErrorHandler", v: "Spring for Apache Kafka's default: 10 attempts with no wait between them, then the record is only logged", kind: default }
 trap:
   wrong: "Retry topics keep the order of events for each key."
-  right: "Non-blocking retries let later records overtake the failed one, so per-key order is lost. Retry in place when order matters."
-sayIt: "Transient errors retry with exponential backoff and a cap; permanent ones go straight to a dead letter topic with the error in headers. Retry topics keep the partition moving but give up order."
+  right: "With retry topics, later records overtake the failed one, so per-key order is lost. Retry in place (blocking) when order matters."
+  why: "Retry topics feel like a queue behind the main topic, and in a quiet test the delayed record still lands in a sensible order."
+sayIt: "I retry transient errors with exponential backoff and a cap, and send permanent errors, or records out of attempts, to a dead letter topic with the error in headers. Retry topics keep the partition moving but give up order."
+cheat:
+  idea: "A failing record is retried a few times with growing waits. If it still fails, or can never pass, it goes to a dead letter topic and the partition moves on."
+  flow: "Fail → retry with backoff → still failing → DLT → alert"
+  remember: "Retry only transient errors. Retry topics lose per-key order; in-place retries keep it."
+buildsOn: [offset-commits, delivery-semantics]
+scenarios:
+  - q: "One PaymentCompleted event has \"amount\": \"five hundred\". The Notification service retries every failure forever. What happens to partition 2, where it sits?"
+    a: "It stops. The record fails on every attempt, so the consumer never moves past its offset, and every later event in partition 2 waits while lag grows. Treat a parse failure as permanent and send the record straight to the DLT."
+  - q: "The SMS gateway returns 503 for 30 minutes during an outage. Which retry style fits, if order per customer does not matter?"
+    a: "Non-blocking retry topics. In-place retries would hold the consumer thread for the whole outage, and long waits risk exceeding max.poll.interval.ms. Retry topics park the records with a delay while new events keep flowing."
 confusedWith: []
 tags: [retries, dlt, poison-message, error-handling]
 visual: table
 sources:
-  - title: "Handling Exceptions: DefaultErrorHandler and DeadLetterPublishingRecoverer (Spring for Apache Kafka 4.1 reference)"
+  - title: "Handling Exceptions: DefaultErrorHandler, DeadLetterPublishingRecoverer (Spring for Apache Kafka 4.1 reference)"
     url: "https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Non-Blocking Retries: How the Pattern Works (Spring for Apache Kafka 4.1 reference)"
     url: "https://docs.spring.io/spring-kafka/reference/retrytopic/how-the-pattern-works.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Using dead-letter queues in Amazon SQS (AWS docs)"
     url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+When a consumer cannot process a record, it has two tools. A retry tries the same record again, usually after a wait that grows each time, which is called exponential backoff. A dead letter topic (DLT) is a separate topic where records that still fail are parked, so the consumer can move on. A record that fails on every attempt, such as malformed JSON, is called a poison message.
+
 ## Why it exists
 
-Some records fail. A failed payment record must not be lost, and one bad record must not hold up every record behind it in the partition.
+A consumer must not lose a failed payment event, and it must not get stuck on it either. Its [committed offset](card:offset-commits) can only move past a record once that record is handled, so a record that is retried forever blocks every record behind it in the partition. Skipping it silently loses money. Retrying for a limited time fixes short outages; the DLT keeps the rest safe for a person to fix, while the partition keeps flowing.
 
 ## How it works
 
 <Compare id="blocking-vs-non-blocking-retries" />
 
-- Spring for Apache Kafka names: DefaultErrorHandler retries in place; DeadLetterPublishingRecoverer writes the DLT ([setup](card:spring-kafka)).
-- @RetryableTopic creates the retry topics and the DLT for one listener.
-- ErrorHandlingDeserializer turns a bad payload into an error the handler can route, instead of a crash loop.
+1. The consumer's processing code throws an exception while handling a record.
+2. An error handler, the code that decides what happens to failed records, checks the exception type. A permanent error, such as a deserialisation failure, skips the retries.
+3. A transient error is retried after a wait: in place, holding the partition (blocking), or by moving the record to a delayed retry topic (non-blocking).
+4. When the attempts run out, the record is published to the DLT, with headers saying what failed and where it came from.
+5. The consumer commits past the record and continues. An alert on the DLT tells the owning team to look.
+
+So the key is to retry only what can pass, cap the attempts, and never let one record hold a partition.
 
 ## Example
 
-```text
-topic:   payments-dlt
-value:   {"paymentId":"pay-77","amount":"five hundred"}   original bytes
-headers: kafka_dlt-exception-cause-fqcn = java.lang.NumberFormatException
-         kafka_dlt-exception-message    = ...; For input string: "five hundred"
-         kafka_dlt-original-topic       = payments
-         kafka_dlt-original-partition   = 2
-         kafka_dlt-original-offset      = 18734
+The Notification service uses Spring for Apache Kafka (covered in [Spring for Apache Kafka](card:spring-kafka)), which calls a listener method for each record. This bean tells it what to do when the method throws:
+
+```java
+@Bean
+DefaultErrorHandler errorHandler(KafkaTemplate<Object, Object> template) {
+    var recoverer = new DeadLetterPublishingRecoverer(template);  // writes to payments-dlt
+    var backOff = new ExponentialBackOffWithMaxRetries(3);        // 3 retries after the first try
+    backOff.setInitialInterval(1_000L);                            // wait 1 s, then 2 s, then 4 s
+    backOff.setMultiplier(2.0);
+    var handler = new DefaultErrorHandler(recoverer, backOff);
+    handler.addNotRetryableExceptions(PaymentValidationException.class);  // no retries: DLT at once
+    return handler;
+}
 ```
+
+What to notice:
+
+- These are blocking retries: the consumer thread waits 1, 2 and 4 seconds in place, so the order of the partition is kept.
+- `DeadLetterPublishingRecoverer` sends the failed record to `payments-dlt`, to the same partition number, with headers such as `kafka_dlt-exception-message` and `kafka_dlt-original-offset`.
+- `PaymentValidationException` and deserialisation errors skip the retries, because a bad record will never pass.
+- Without this bean, the default handler tries 10 times with no wait and then only logs the record, so it is lost.
+
+## Rules and defaults
+
+- **Default handler (Spring for Apache Kafka 4.1):** `DefaultErrorHandler` with `FixedBackOff(0, 9)`: ten attempts, no delay, then the record is logged and skipped.
+- **Not retried by default:** `DeserializationException`, `MessageConversionException`, `ConversionException`, `MethodArgumentResolutionException`, `NoSuchMethodException` and `ClassCastException`.
+- **Spring Boot wiring:** declare the handler as a `@Bean` and Boot adds it to the auto-configured listener container factory.
+- **DLT name and partitions:** by default `<topic>-dlt`, same partition number, so the DLT needs at least as many partitions as the original topic.
+- **Long waits:** blocking retries suspend the consumer thread; keep the total wait well under `max.poll.interval.ms` (5 min by default), or the consumer is removed from its group.
+- **Bad bytes:** wrap the deserialiser in `ErrorHandlingDeserializer`, so a record that cannot be parsed reaches the error handler instead of failing every poll.
+
+## Common mistakes
+
+- **"Infinite retries are the safe choice."** They turn one bad record into a stopped partition and growing lag. Always cap the attempts.
+- **Creating a DLT and never reading it.** Records there are payments nobody handled. Alert on new DLT records, and have a way to re-send fixed ones to the main topic.
 
 ## Interview Qs
 
 ### How would you handle failed messages in Kafka?
 
-Classify the error. Retry transient ones with exponential backoff and a maximum attempt count. Send permanent ones, and records that run out of attempts, to a dead letter topic with the error and origin in headers. Alert on it.
+Classify the error first. Retry transient errors with exponential backoff and a maximum number of attempts. Send permanent errors, and records that run out of attempts, to a dead letter topic with the error and the original topic, partition and offset in headers. Alert on the DLT and re-send records once the cause is fixed.
 
 ### What is a poison message?
 
-A record that fails on every attempt, such as malformed JSON. If the consumer keeps retrying it in place, the partition's offset never moves forward and every later record waits. Cap the retries, then send it to the DLT.
+A record that fails on every attempt, such as malformed JSON or data from an unknown schema version. If the consumer keeps retrying it in place, the partition's offset never moves forward and every later record waits. Detect it as a permanent error, or cap the retries, then send it to the DLT.
 
 ### What do you do with records in the DLT?
 
-Someone owns the DLT and is alerted when it grows. They read the headers to find the cause, fix the code or data, then re-drive the records to the main topic.
+The DLT has an owning team that is alerted when records arrive. They read the headers to find the cause, fix the code or the data, then re-drive the records, which means publishing them again to the main topic. Consumers should be idempotent, because a re-driven record may already have been partly processed.

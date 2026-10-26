@@ -5,27 +5,41 @@ title: "Kafka Architecture: Brokers, Cluster, Controller"
 topic: basics
 level: beginner
 heat: 2
-hook: "Brokers store the partitions; controllers keep the cluster's metadata; clients ask any broker where to go, then talk to the leader."
+hook: "Brokers store the data and serve clients; controllers keep the map of topics and leaders; a client asks any broker for the map, then talks to the right broker."
 points:
-  - { k: "Broker", v: "a Kafka server that stores partition copies and serves reads and writes" }
-  - { k: "Cluster", v: "brokers plus controllers; controllers hold topics, leaders and configs" }
-  - { k: "bootstrap.servers", v: "a few brokers to start from; the client finds the rest" }
-  - { k: "Metadata", v: "any broker says which broker leads each partition", kind: plus }
-  - { k: "advertised.listeners", v: "the address clients are told to use; unset means listeners", kind: default }
+  - { k: "Broker", v: "a Kafka server that stores partitions on its disk and answers producers and consumers" }
+  - { k: "Cluster", v: "several brokers plus a few controllers working as one Kafka; add brokers to store and serve more" }
+  - { k: "Controller", v: "keeps the metadata: which topics and partitions exist and which broker leads each partition" }
+  - { k: "bootstrap.servers", v: "a few broker addresses a client starts from; the first answer tells it about all the others" }
+  - { k: "advertised.listeners", v: "the address a broker tells clients to use; if unset, its listeners value is used (Kafka 4.3)", kind: default }
 trap:
   wrong: "bootstrap.servers must list every broker in the cluster."
-  right: "It only starts the connection; metadata gives the full list. Still list more than one, in case one is down."
-sayIt: "A cluster has brokers, which store partition copies and serve clients, and controllers, which hold metadata. A client bootstraps from a few brokers, learns which broker leads each partition, then talks to that leader directly."
+  right: "It is only the starting point; the metadata answer lists every broker. Still list two or three, in case one is down."
+  why: "The name sounds like 'the servers I use', and in a one-broker test setup the list really is every broker."
+sayIt: "A cluster has brokers, which store partitions and serve clients, and controllers, which hold the metadata. A client bootstraps from a few brokers, learns which broker leads each partition, then sends to and reads from that leader directly."
+cheat:
+  idea: "A Kafka cluster is a group of brokers, servers that store partitions and serve clients, plus controllers that keep the metadata: topics, partitions and each partition's leader."
+  flow: "Client → any broker: metadata? → send to the partition's leader"
+  remember: "bootstrap.servers is only a starting list; set advertised.listeners to an address clients can reach."
+buildsOn: [what-is-kafka]
+scenarios:
+  - q: "Your app on a laptop connects to Kafka in Docker. The first connection to localhost:9092 works, then every send fails with 'could not connect to kafka-1:9092'. Why?"
+    a: "The first call only fetched metadata. The broker advertised its internal name kafka-1, which the laptop cannot resolve, so the client failed when it tried that address. Set advertised.listeners to an address the client can reach, such as localhost:9092."
+  - q: "bootstrap.servers lists only broker1, and broker1 is down when the app starts. What happens?"
+    a: "The client cannot fetch metadata, so it cannot find any broker and fails to connect, even though the other brokers are fine. List two or three brokers so one failure does not block startup."
 confusedWith: [topic-vs-partition-vs-broker]
 tags: [broker, cluster, controller, listeners]
 visual: flow
 sources:
   - title: "Broker Configs: listeners, advertised.listeners (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/configuration/broker-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Protocol guide: partitioning and bootstrapping (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/design/protocol/"
     verifiedOn: "2026-10-20"
+  - title: "Introduction: servers, brokers and clusters (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/getting-started/introduction/"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Listeners Explained (Robin Moffatt, Confluent blog)"
     url: "https://www.confluent.io/blog/kafka-listeners-explained/"
     verifiedOn: "2026-10-20"
@@ -34,29 +48,38 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Kafka runs as a cluster: a group of servers that work as one system. Most of them are brokers, servers that store topic data on disk and answer producers and consumers. A few are controllers, which keep the cluster's metadata: which topics exist, how each is split into [partitions](card:partitions), and which broker is the leader of each partition, the one that handles its reads and writes.
+
 ## Why it exists
 
-One server cannot hold every event or survive its own crash. Kafka spreads partitions over many brokers, so storage and traffic grow by adding machines.
+One server can hold only so much data, and if it crashes every service that uses it stops. Kafka spreads each topic's partitions over many brokers. To store or serve more, you add brokers. Copies of each partition on other brokers keep it available when one broker fails ([replication](card:replication), later).
 
 ## How it works
 
 <Mermaid
-  alt="The Order Service asks broker 1 for metadata, then sends events straight to broker 2, the partition leader. Each of three brokers leads one orders partition. Controllers share metadata with the brokers. The Payment Service reads from broker 3."
+  alt="The Payment service asks broker 1 for metadata, then sends its event straight to broker 2, the leader of payments partition 1. Each of three brokers leads one payments partition. The controllers send metadata to every broker. The Notification service reads from broker 3."
   chart={`flowchart LR
-  O[Order Service] -- "1. metadata?" --> B1["Broker 1: orders-0"]
-  O -- "2. send to leader" --> B2["Broker 2: orders-1"]
-  B3["Broker 3: orders-2"] --> P[Payment Service]
+  PS[Payment service] -- "1. metadata?" --> B1["Broker 1: payments-0"]
+  PS -- "2. send to the leader" --> B2["Broker 2: payments-1"]
+  B3["Broker 3: payments-2"] -- "3. fetch" --> NS[Notification service]
   K[Controllers] -. metadata .-> B1
   K -. metadata .-> B2
   K -. metadata .-> B3`}
 />
 
-- No routing tier: producers send to the partition leader; copies live on other brokers ([replication](card:replication)).
-- How controllers agree on the metadata: [KRaft](card:kraft).
+1. The Payment service starts with `bootstrap.servers`, a short list of broker addresses.
+2. It asks one of them for metadata. Every broker has it, because the controllers keep all brokers up to date.
+3. The answer lists all brokers, the partitions of `payments`, and the leader broker of each partition, with the address to reach it.
+4. The Payment service sends each event straight to the leader of the chosen partition. Consumers read from leaders the same way.
+5. If a leader moves, for example because its broker crashed, the client gets an error, asks for fresh metadata and retries with the new leader.
+
+So there is no router in front of Kafka: clients find the right broker themselves. How the controllers agree on the metadata is [KRaft](card:kraft), next.
 
 ## Example
 
-A broker in Docker, with clients on the host machine:
+A broker running in Docker, with client apps on the host machine:
 
 ```properties
 process.roles=broker
@@ -67,23 +90,33 @@ controller.quorum.bootstrap.servers=controller1:9093
 controller.listener.names=CONTROLLER
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| `listeners` | `PLAINTEXT://:9092` | Kafka 4.3 broker |
-| `advertised.listeners` | unset: the `listeners` value is used | Kafka 4.3 broker |
+- `listeners` is where the broker accepts connections: every network interface, port 9092.
+- `advertised.listeners` is the address put into metadata answers. Clients on the host can reach `localhost:9092`. If it named the container's internal hostname instead, host clients would receive that name and fail to connect: the classic Docker problem.
+- `process.roles=broker` and `controller.quorum.bootstrap.servers` say that this server is only a broker and where it finds the controllers.
+
+## Rules and defaults
+
+- **listeners default (Kafka 4.3):** `PLAINTEXT://:9092`.
+- **advertised.listeners default (Kafka 4.3):** not set, so the `listeners` value is used.
+- **bootstrap.servers:** list more than one broker; the client still discovers all the others from metadata.
+- **Who talks to whom:** producers and consumers talk to brokers; brokers get their metadata from the controllers.
+
+## Not to be confused with
+
+A broker is a server. A topic is a name for a stream of events, and a partition is one ordered log of that topic, stored on a broker. One broker holds partitions of many topics. Rule: topic = what the events are about; partition = one log of it; broker = the machine that stores it.
 
 ## Interview Qs
 
 ### What is a broker?
 
-A Kafka server. It stores replicas of some partitions, leads some of them, and answers produce, fetch and metadata requests.
+A Kafka server. It stores partitions on its disk, leads some of them, and answers produce, fetch and metadata requests. A cluster has several brokers so that data and traffic are spread out and a failed broker can be replaced by copies on the others.
 
 ### Clients outside Docker cannot connect, though port 9092 is open. Why?
 
-The first connection works, but metadata returns the advertised address, often the container's internal name. Set `advertised.listeners` to an address the clients can reach.
+The first connection works, but the metadata answer contains the advertised address, often the container's internal name. The client then tries that name and fails. Set `advertised.listeners` to an address the clients can reach.
 
 ### How does a producer know which broker to send to?
 
-It asks any bootstrap broker for metadata: topics, partitions and each partition's leader. It then sends straight to the leader and refreshes metadata when leaders move.
+It asks any bootstrap broker for metadata: the topics, their partitions and each partition's leader. It then sends straight to the leader, and refreshes the metadata when a leader moves.

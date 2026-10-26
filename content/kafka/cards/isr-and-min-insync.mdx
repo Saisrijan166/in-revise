@@ -5,62 +5,115 @@ title: "ISR and min.insync.replicas"
 topic: reliability
 level: intermediate
 heat: 3
-hook: "The ISR is the set of caught-up replicas; an acks=all write needs every ISR member, and at least min.insync.replicas of them."
+hook: "The ISR is the list of replicas that are caught up with the leader. min.insync.replicas says how short that list may get before acks=all writes are refused."
 points:
-  - { k: "ISR", v: "the leader plus the followers that keep up with it" }
-  - { k: "replica.lag.time.max.ms", v: "30 s (Kafka 4.3): a follower this far behind leaves the ISR", kind: default }
-  - { k: "Committed", v: "every ISR member has the record; only then consumers see it" }
-  - { k: "min.insync.replicas", v: "1 by default (Kafka 4.3); checked only for acks=all", kind: default }
-  - { k: "ISR too small", v: "acks=all writes fail with NotEnoughReplicas", kind: minus }
+  - { k: "ISR (in-sync replicas)", v: "the leader plus every follower that is caught up with it; only these can become leader safely" }
+  - { k: "replica.lag.time.max.ms", v: "30 s (Kafka 4.3): a follower that stays behind the leader this long is removed from the ISR", kind: default }
+  - { k: "Committed record", v: "a record that every ISR member has stored; only committed records are shown to consumers" }
+  - { k: "min.insync.replicas", v: "1 by default (Kafka 4.3); it only affects producers that use acks=all", kind: default }
+  - { k: "ISR too small", v: "when the ISR has fewer members than min.insync.replicas, acks=all writes fail with NotEnoughReplicas", kind: minus }
+  - { k: "Usual setup", v: "RF 3, min.insync.replicas 2, acks=all: one broker can fail and writes go on, each on 2 brokers", kind: plus }
 trap:
   wrong: "min.insync.replicas=3 with RF 3 is the safest setup."
-  right: "Then one broker down stops every acks=all write. RF 3 with min.insync.replicas 2 survives one loss and keeps writing."
-sayIt: "The ISR is the leader plus followers that are caught up. An acks=all write commits when every ISR member has it, and fails if fewer than min.insync.replicas are in sync. I use RF 3, min.insync 2, acks=all."
+  right: "Then any one broker down stops every acks=all write. RF 3 with min.insync.replicas=2 survives one loss and still puts each write on two brokers."
+  why: "A higher minimum sounds like more safety, and on a healthy cluster both settings behave the same, so the cost only shows during the first broker restart."
+sayIt: "The ISR is the leader plus the followers that are caught up. An acks=all write is committed when every ISR member has it, and it is refused if the ISR is smaller than min.insync.replicas. I use RF 3, min.insync.replicas 2 and acks=all."
+cheat:
+  idea: "The ISR is the leader plus the followers that are caught up. An acks=all write waits for every ISR member, and min.insync.replicas sets how small the ISR may get before such writes fail."
+  remember: "RF 3 + min.insync.replicas 2 + acks=all: one broker can fail and writes continue, each on at least two brokers."
+buildsOn: [replication, producer-acks]
+scenarios:
+  - q: "Topic payments: RF 3, min.insync.replicas 2, producers use acks=all. Brokers 1 and 2 both go down. What happens to writes and to reads of old records?"
+    a: "The ISR shrinks to one replica, which is below the minimum of 2, so every acks=all write fails with NotEnoughReplicas until a replica catches up. Consumers can still read the records that were already committed."
+  - q: "Same topic, but a producer uses acks=1. Brokers 1 and 2 are down. Is its write accepted?"
+    a: "Yes. min.insync.replicas is only checked for acks=all, so the leader accepts the write alone. If that last broker then fails, the record is lost, which is why acks=all and the minimum go together."
 confusedWith: [acks-0-vs-1-vs-all]
 tags: [isr, durability, replication]
 visual: table
 sources:
-  - title: "Design: Replication, Availability and Durability Guarantees (Apache Kafka 4.3 docs)"
+  - title: "Design: Replication; Availability and Durability Guarantees (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/design/design/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Broker Configs: min.insync.replicas, replica.lag.time.max.ms (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/configuration/broker-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Eligible Leader Replicas (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/operations/eligible-leader-replicas/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Interview Questions and Answers (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The ISR (in-sync replicas) is the list of a partition's [replicas](card:replication) that are caught up with the leader, the leader included. A follower that falls too far behind is taken off the list, and it comes back once it has caught up. `min.insync.replicas` is a topic setting: the smallest ISR size at which Kafka still accepts writes from producers that use [acks=all](card:producer-acks).
+
 ## Why it exists
 
-A write is safe only if a copy outlives the leader. Kafka tracks which replicas are caught up, and lets you demand a minimum number of them per write.
+Not every copy is equally useful. A follower whose disk is slow may be minutes behind, and if it became leader, the records it never copied would be gone. Kafka therefore tracks which followers are safe and only treats a record as committed once all of them have it. min.insync.replicas covers the other gap: without it, an acks=all write still "succeeds" when the ISR has shrunk to the leader alone, so it exists on one disk only.
 
 ## How it works
 
 | RF | min.insync.replicas | Replicas down | acks=all write |
 | --- | --- | --- | --- |
-| 3 | 2 | 0 | OK: all 3 in the ISR must ack |
-| 3 | 2 | 1 | OK: 2 in the ISR |
-| 3 | 2 | 2 | Fails: NotEnoughReplicas |
-| 3 | 3 | 1 | Fails: one loss stops writes |
-| 3 | 1 | 2 | OK, but only one copy exists |
+| 3 | 2 | 0 | Accepted: waits for all 3 ISR members |
+| 3 | 2 | 1 | Accepted: waits for the 2 left in the ISR |
+| 3 | 2 | 2 | Refused: NotEnoughReplicas |
+| 3 | 3 | 1 | Refused: one loss already stops writes |
+| 3 | 1 | 2 | Accepted, but only one copy exists |
 
-- acks=all waits for the current ISR, not every assigned replica: see [producer acks](card:producer-acks).
-- The last committed offset is the high watermark: see [offsets](card:offsets).
+1. The leader of `payments-0` writes a new record to its log.
+2. Each follower fetches it. A follower that has not caught up with the leader for `replica.lag.time.max.ms` (30 s), or whose broker loses its session with the controller, is removed from the ISR.
+3. When every replica still in the ISR has the record, it is committed. The leader moves the [high watermark](card:offsets) past it, and consumers can now read it.
+4. For an acks=all producer, the leader first checks the ISR size. If it is below `min.insync.replicas`, the write is refused with `NotEnoughReplicas`; otherwise the producer gets its acknowledgement at step 3.
+
+So acks=all means "every replica in the ISR now", and min.insync.replicas makes sure "now" is never just one replica.
+
+## Example
+
+On the three-broker cluster, broker 1 is stopped, so the ISR of each payments partition is `2,3`. The minimum is then raised to 3 and the Payment Service sends one event with acks=all:
+
+```bash
+kafka-configs.sh --bootstrap-server localhost:9092 --alter --entity-type topics \
+  --entity-name payments --add-config min.insync.replicas=3
+kafka-console-producer.sh --bootstrap-server localhost:9092 --topic payments \
+  --command-property acks=all
+```
+
+```text output
+ERROR Error when sending message to topic payments with key: 5 bytes, value: 32 bytes with error: (org.apache.kafka.clients.producer.internals.ErrorLoggingCallback)
+org.apache.kafka.common.errors.NotEnoughReplicasException: Messages are rejected since there are fewer in-sync replicas than required.
+```
+
+What to notice:
+
+- Two replicas are alive and in sync, but the topic demands three, so the leader refuses the write. This is the trap in action: min.insync.replicas equal to RF turns one broker restart into a write outage.
+- The producer retried a few times before giving up, because NotEnoughReplicas is a retriable error: the ISR may grow back.
+- With `min.insync.replicas=2` (the value the topic was created with), the same send succeeds and the record is on brokers 2 and 3.
+
+## Rules and defaults
+
+- **Where to set it:** `min.insync.replicas` is a broker default (1 in Kafka 4.3) that a topic can override, as in the example.
+- **Only for acks=all:** producers with acks=0 or acks=1 are never refused because of it.
+- **Consumers wait too:** a record becomes visible to consumers only when every ISR member has it and the ISR is at least `min.insync.replicas`.
+- **Rejoining:** a removed follower returns to the ISR only after it has fully caught up with the leader.
+- **ELR (Eligible Leader Replicas):** since Kafka 4.0 the controller also remembers replicas that left the ISR but still hold every committed record, so it can elect one of them safely. It is on by default for clusters created on Kafka 4.1 or later.
+
+## Not to be confused with
+
+[acks](card:producer-acks) is a producer setting: how many replicas the producer waits for before it calls a send done. min.insync.replicas is a topic setting: how small the ISR may get before acks=all writes are refused. Rule: acks = what the producer waits for; min.insync.replicas = the floor the broker enforces.
 
 ## Interview Qs
 
-### What is the ISR and how does a replica leave it?
+### What is the ISR, and how does a replica leave it?
 
-The in-sync replicas: the leader plus followers that keep up. A follower that has not caught up to the leader's log end for `replica.lag.time.max.ms` (30 s), or whose broker loses its controller session, is removed.
+The ISR is the leader plus the followers that are caught up. A follower leaves it if it has not caught up with the leader's log for `replica.lag.time.max.ms` (30 s in Kafka 4.3), or if its broker loses its session with the controller. Only ISR members can become leader without losing committed records.
 
 ### RF 3, min.insync.replicas 2, acks=all: what happens as brokers fail?
 
-One replica down: the ISR has 2, writes go on. Two down: the ISR has 1, so acks=all writes fail with NotEnoughReplicas until a replica catches up. Committed data survives while one in-sync replica lives.
+With one replica down, the ISR has two members and writes continue, each stored on two brokers. With two down, the ISR has one member, below the minimum, so acks=all writes fail with NotEnoughReplicas until a replica catches up. Records already committed are still readable from the surviving replica.
 
 ### Does min.insync.replicas matter with acks=1?
 
-Not for the producer: only acks=all writes are rejected when the ISR is too small. Consumers still see a record only once it is on every ISR member and the minimum is met.
+Not for the producer. Only acks=all writes are refused when the ISR is too small; an acks=1 write is accepted by the leader alone and can be lost if that broker dies before followers copy it. That is why the two settings are always used together.

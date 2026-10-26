@@ -5,72 +5,120 @@ title: Topics
 topic: storage
 level: beginner
 heat: 3
-hook: "A topic is a named stream of events, such as orders; Kafka splits it into partitions spread over brokers."
+hook: "A topic is a named stream of one kind of event, such as payments. Producers write to the name, consumers read from it, and Kafka splits it into partitions over brokers."
 points:
-  - { k: "Topic", v: "a named stream of one kind of event: orders, payments" }
-  - { k: "Many writers, many readers", v: "any number of producers and consumer groups share one topic", kind: plus }
-  - { k: "Split into partitions", v: "the partition count is set when you create the topic" }
-  - { k: "Per-topic config", v: "--config overrides a broker default for this topic only" }
-  - { k: "Auto-creation", v: "on by default (Kafka 4.3): first write to a missing topic creates it", kind: minus }
+  - { k: "Topic", v: "a named stream of one kind of event, such as payments; producers and consumers meet only through this name" }
+  - { k: "Many writers, many readers", v: "any number of producers can write to one topic, and every consumer group reads all of it", kind: plus }
+  - { k: "Set at creation", v: "you choose the partition count and the replication factor (copies of each partition) when you create it" }
+  - { k: "Own settings", v: "a topic can override broker defaults, such as keeping its events 14 days instead of 7" }
+  - { k: "Auto-creation", v: "on by default (Kafka 4.3): writing to a missing topic creates it with 1 partition and 1 copy", kind: minus }
 trap:
-  wrong: "Let the first producer write auto-create the orders topic."
-  right: "Create it explicitly with the partition count and replication factor you planned; auto-created topics get the broker defaults, 1 and 1."
-sayIt: "A topic is a named stream such as orders. It is split into partitions spread over brokers, which gives parallelism and copies. Many producers write to it, and every consumer group reads all of it on its own."
+  wrong: "Let the first producer write create the payments topic automatically."
+  right: "Create it on purpose with the partition count and replication factor you planned; an auto-created topic gets the broker defaults, 1 partition and 1 copy."
+  why: "Auto-creation is on by default, so in development the topic just appears and everything seems to work."
+sayIt: "A topic is a named stream such as payments. It is split into partitions spread over brokers, which gives parallelism and room for copies. Many producers write to it, and every consumer group reads all of it."
+cheat:
+  idea: "A topic is a named stream of one kind of event, such as payments. Producers write to it and consumers read from it by name; Kafka stores it as partitions on brokers."
+  code: |
+    kafka-topics.sh --bootstrap-server localhost:9092 --create --topic payments \
+      --partitions 3 --replication-factor 3
+  remember: "Create topics on purpose: auto-created ones get 1 partition and 1 copy by default (Kafka 4.3)."
+buildsOn: [what-is-kafka, kafka-architecture]
+scenarios:
+  - q: "A developer's producer writes to 'paymnets' by mistake, and the write succeeds. Why, and what does the new topic look like?"
+    a: "auto.create.topics.enable is true by default, so the broker created the misspelt topic on first use. It got the broker defaults: num.partitions=1 and default.replication.factor=1, so one partition and no spare copy. Turn auto-creation off in production to catch such mistakes."
+  - q: "The Notification and Analytics services both read the payments topic. Does Analytics get fewer events because Notification read them first?"
+    a: "No. Each service reads with its own consumer group, and every group reads the whole topic with its own position. Reading does not remove events, so both get every PaymentCompleted event."
 confusedWith: []
 tags: [topics, partitions, brokers]
-visual: table
+visual: code
 sources:
   - title: "Introduction: main concepts and terminology (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/getting-started/introduction/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Basic Kafka Operations: adding and removing topics (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Broker Configs: num.partitions, default.replication.factor, auto.create.topics.enable (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/broker-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A topic is a named stream of one kind of event, such as `payments` or `refunds`. Producers write events to a topic by its name, and consumers read from it by the same name; they never need to know each other. Kafka stores each topic as one or more [partitions](card:partitions), ordered logs placed on different brokers. A topic also has its own settings, such as how long its events are kept.
+
 ## Why it exists
 
-Producers and consumers need a shared name for a stream, so the Order Service and every reader of orders meet in one place without knowing each other.
+Producers and consumers need one agreed place to meet. Without a named stream, the Payment service would have to know where each reader lives. Different kinds of events also need different handling: payment events may need 3 copies and 14 days of history, while page clicks may need 1 day. A topic gives each stream a name and its own settings.
 
 ## How it works
 
-<Compare id="topic-vs-partition-vs-broker" />
+<Mermaid
+  alt="The Payment service writes to the payments topic, which has three partitions. Two consumer groups, Notification and Analytics, each read all three partitions."
+  chart={`flowchart LR
+  P[Payment service] --> T
+  subgraph T[payments topic]
+    P0[payments-0]
+    P1[payments-1]
+    P2[payments-2]
+  end
+  T --> N[Notification group]
+  T --> A[Analytics group]`}
+/>
 
-- Each [consumer group](card:consumer-groups) reads the whole topic with its own progress: payment-service and analytics never block each other.
-- Order holds per [partition](card:partitions), never across the topic.
-- Retention and compaction are topic configs: see [log storage](card:log-storage).
+1. An admin creates the topic with a name, a partition count and a replication factor, the number of copies of each partition.
+2. The controllers record the new topic and place each partition's copies on brokers, choosing one leader per partition.
+3. Producers write events that name the topic. Each event lands in exactly one partition.
+4. Each consumer group reads the whole topic, all of its partitions, keeping its own position. Inside one group the partitions are shared out among its members ([consumer groups](card:consumer-groups), later).
 
 ## Example
 
-```bash
-# orders: 6 partitions, 3 copies of each, keep 14 days (this topic only)
-bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic orders \
-  --partitions 6 --replication-factor 3 --config retention.ms=1209600000
+Create the `payments` topic on a three-broker cluster, then look at where Kafka placed it:
 
-# Shows each partition's leader, replicas and ISR
-bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic orders
+```bash
+# payments: 3 partitions, 3 copies of each, keep events 14 days (this topic only)
+bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic payments \
+  --partitions 3 --replication-factor 3 --config retention.ms=1209600000
+
+bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic payments
 ```
 
-## Defaults
+```text output
+Created topic payments.
+Topic: payments	TopicId: BBUARHJ_TtanG1WocRp6Fg	PartitionCount: 3	ReplicationFactor: 3	Configs: min.insync.replicas=1,retention.ms=1209600000
+	Topic: payments	Partition: 0	Leader: 1	Replicas: 1,2,3	Isr: 1,2,3	Elr: 	LastKnownElr: 
+	Topic: payments	Partition: 1	Leader: 2	Replicas: 2,3,1	Isr: 2,3,1	Elr: 	LastKnownElr: 
+	Topic: payments	Partition: 2	Leader: 3	Replicas: 3,1,2	Isr: 3,1,2	Elr: 	LastKnownElr: 
+```
 
-| What | Default | Where |
-| --- | --- | --- |
-| Partitions when none are given | 1 (`num.partitions`) | Kafka 4.3 broker |
-| Copies when none are given | 1 (`default.replication.factor`) | Kafka 4.3 broker |
-| Create a topic on first use | `true` (`auto.create.topics.enable`) | Kafka 4.3 broker |
+What to notice:
+
+- Each partition has a different leader broker (1, 2, 3), so the write and read load is spread over all three.
+- `Replicas` lists the three brokers holding a copy; `Isr` lists the copies that are up to date ([ISR](card:isr-and-min-insync), later).
+- `--config retention.ms=1209600000` (14 days) changes only this topic. Without it, the topic keeps the broker default of 7 days. `min.insync.replicas=1` is a cluster default shown here; you will meet it with ISR.
+
+## Rules and defaults
+
+- **Partitions when none are given (Kafka 4.3):** 1, from the broker's `num.partitions`.
+- **Copies when none are given (Kafka 4.3):** 1, from `default.replication.factor`. The Kafka docs advise 2 or 3 in production.
+- **Auto-creation (Kafka 4.3):** `auto.create.topics.enable=true`, so a write to a missing topic creates it with these defaults.
+- **Changing the count later:** you can add partitions but never remove them; see [ordering vs scaling](card:ordering-and-scaling).
+- **Internal topics:** Kafka runs its own topics, such as `__consumer_offsets`; never add partitions to them by hand.
 
 ## Interview Qs
 
 ### Can many producers write to one topic, and many consumers read it?
 
-Yes to both. Kafka topics are multi-producer and multi-subscriber. Every consumer group reads every record; inside one group, the partitions are shared out among its consumers.
+Yes to both. A topic accepts writes from any number of producers. Every consumer group reads every event in it; inside one group, the partitions are shared out so each event is handled by one member of that group.
 
 ### Why not rely on topic auto-creation in production?
 
-Auto-created topics take the broker defaults: one partition and one copy unless changed. That gives no parallelism and no copy to fail over to. Create topics explicitly with planned partitions and replication factor.
+An auto-created topic takes the broker defaults: one partition and one copy, unless the broker was changed. That gives no parallel reading and no copy to fail over to, and a typo in a topic name silently creates a new topic. Create topics on purpose, with planned partitions and replication factor.
+
+### What decides the settings of a topic?
+
+The broker defaults, unless the topic overrides them. You pass overrides with `--config` at creation, or change them later with `kafka-configs.sh`. Retention time, cleanup policy and segment size are common per-topic settings.

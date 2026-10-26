@@ -5,17 +5,29 @@ title: "Kafka Streams"
 topic: ecosystem
 level: intermediate
 heat: 2
-hook: "Kafka Streams is a Java library inside your own app: it reads topics, filters, joins or counts records, and writes results back."
+hook: "Kafka Streams is a Java library you put inside your own service: it reads topics, filters, joins or counts the records, and writes the results to other topics."
 points:
-  - { k: "A library, not a cluster", v: "runs in your service; scale by starting more instances", kind: plus }
-  - { k: "Stateless", v: "filter, map, mapValues: one record at a time" }
-  - { k: "Stateful", v: "count, aggregate, join: a local state store backed by a changelog topic" }
-  - { k: "Parallelism", v: "one task per input partition; instances beyond that sit idle", kind: minus }
-  - { k: "exactly_once_v2", v: "offsets, state and output topics commit together" }
+  - { k: "A library, not a cluster", v: "it runs inside your service; to scale, you start more instances of the same app", kind: plus }
+  - { k: "Stateless steps", v: "filter, map and mapValues look at one record at a time and remember nothing" }
+  - { k: "Stateful steps", v: "count, aggregate and join keep a local state store, copied to a compacted changelog topic" }
+  - { k: "Tasks", v: "one task per input partition; instances beyond the task count sit idle as spares", kind: minus }
+  - { k: "application.id", v: "names the app: it is the consumer group id and the prefix of its internal topics" }
+  - { k: "Guarantee", v: "processing.guarantee is at_least_once by default in Kafka 4.3; exactly_once_v2 is opt-in", kind: default }
 trap:
-  wrong: "Kafka Streams runs on the brokers or needs its own processing cluster."
-  right: "It is a client library inside your app. Brokers only store its input, output and internal topics."
-sayIt: "Kafka Streams is a client library for stream processing inside my service. It reads topics as streams or tables, keeps state in local stores backed by changelog topics, and scales with partitions."
+  wrong: "Kafka Streams runs on the brokers, or needs its own processing cluster."
+  right: "It is a client library inside your app. The brokers only store its input, output and internal topics."
+  why: "Other stream processors, such as Apache Flink, run on their own cluster, and the name sounds like a feature of the Kafka server."
+sayIt: "Kafka Streams is a client library for stream processing inside my service. It reads topics as streams or tables, keeps state in local stores backed by changelog topics, scales with the input partitions, and gives exactly-once with exactly_once_v2."
+cheat:
+  idea: "A Java library inside your service: it reads topics, filters, joins or counts records, and writes results to topics. Counts live in a local store, backed up to a topic."
+  flow: "payments → filter → group by method → count → payment-counts-by-method"
+  remember: "No separate cluster: scale by adding app instances, up to one per input partition."
+buildsOn: [consumer-groups, log-storage, kafka-transactions]
+scenarios:
+  - q: "A Streams app only filters the payments topic, which has 6 partitions, with no grouping. You run it on 8 instances with one thread each. How many instances do work?"
+    a: "Six. Kafka Streams makes one task per input partition, so there are 6 tasks. The other 2 instances sit idle and take over if a busy one fails. A groupBy would add a repartition topic and more tasks."
+  - q: "An instance that counts payments per method crashes and its task moves to another instance. Are the counts lost?"
+    a: "No. Every update to the local state store is also written to a changelog topic. The new instance replays that topic to rebuild the store before it continues processing."
 confusedWith: [kstream-vs-ktable]
 tags: [kafka-streams, stream-processing, state-store, windowing]
 visual: flow
@@ -23,69 +35,98 @@ sources:
   - title: "Kafka Streams Core Concepts (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/streams/core-concepts/"
     verifiedOn: "2026-10-20"
-  - title: "Kafka Streams Architecture: tasks and state (Apache Kafka 4.3)"
+  - title: "Kafka Streams Architecture: tasks, threads and state (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/streams/architecture/"
-    verifiedOn: "2026-10-20"
-  - title: "Kafka Streams DSL API (Apache Kafka 4.3)"
+    verifiedOn: "2026-10-22"
+  - title: "Kafka Streams DSL API: groupBy, KTable, windows (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/streams/developer-guide/dsl-api/"
-    verifiedOn: "2026-10-20"
-  - title: "Configuring a Streams Application: processing.guarantee (Apache Kafka 4.3)"
+    verifiedOn: "2026-10-22"
+  - title: "Configuring a Streams Application: application.id, processing.guarantee (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/streams/developer-guide/config-streams/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Interview Questions: Kafka Streams (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Kafka Streams is a Java library for stream processing: working on records continuously as they arrive, instead of in a nightly batch job. You add it to your own service as a dependency. You describe the work as a chain of steps, called a topology: read a topic, filter, group, count or join, and write the result to another topic. It uses normal [consumers](card:consumer-groups) and producers underneath.
+
 ## Why it exists
 
-With a plain consumer, counting or joining events means hand-writing state, recovery and scaling. Kafka Streams provides them inside a Java app.
+With a plain consumer, "count completed payments per method" means writing a lot yourself: a map of counts, saving it so a crash does not lose it, rebuilding it when partitions move to another instance, and avoiding double counts. Kafka Streams provides all of that. You write the business steps; it handles state, recovery, scaling and, if you ask, exactly-once.
 
 ## How it works
 
 <Mermaid
-  alt="Topology: payments topic, source, filter completed, group by method and count (using a state store copied to a changelog topic), sink, payment-counts topic."
+  alt="Topology: the payments topic feeds a source node, then a filter for completed payments, then a group by method and count step. The count uses a local state store, which is copied to a changelog topic. A sink node writes the counts to the payment-counts-by-method topic."
   chart={`flowchart LR
   P[[payments]] --> SRC[Source]
   SRC --> F[filter completed]
-  F --> C[groupBy method, count]
+  F --> C[group by method, count]
   C <--> ST[(State store)]
   ST -.-> CL[[changelog topic]]
   C --> SNK[Sink]
-  SNK --> OUT[[payment-counts]]`}
+  SNK --> OUT[[payment-counts-by-method]]`}
 />
 
-- A moved task rebuilds its store by replaying the changelog topic, so a crash loses no state.
-- Reading a topic as a [KStream, KTable or GlobalKTable](compare:kstream-vs-ktable) decides what a repeated key means.
-- Windows (tumbling, hopping, sliding, session) group one key's records by time.
+1. At start-up the app joins a consumer group named by its `application.id`, and Kafka Streams creates one task per input partition.
+2. Each task reads its partition's records and passes them through the topology, one record at a time.
+3. Stateless steps such as `filter` decide using the record alone. Stateful steps such as `count` read and update a local state store.
+4. Every change to a store is also written to a compacted changelog topic, and results go to the output topic.
+5. If an instance dies, its tasks move to another instance, which replays the changelog to rebuild the store, then continues.
 
 ## Example
+
+The Analytics service counts completed payments per payment method, live:
 
 ```java
 StreamsBuilder builder = new StreamsBuilder();
 KStream<String, Payment> payments = builder.stream("payments");   // key: orderId
 
 payments.filter((orderId, p) -> p.completed())
-        .groupBy((orderId, p) -> p.method())       // re-key by UPI, CARD, WALLET
+        .groupBy((orderId, p) -> p.method())       // new key: UPI, CARD, WALLET
         .count()                                   // KTable<String, Long>
         .toStream()
-        .to("payment-counts", Produced.with(Serdes.String(), Serdes.Long()));
+        .to("payment-counts-by-method", Produced.with(Serdes.String(), Serdes.Long()));
 
-new KafkaStreams(builder.build(), props).start();  // props: application.id, serdes
+new KafkaStreams(builder.build(), props).start();  // props: id, servers, serdes
 ```
 
-## Defaults
+What to notice:
+
+- `builder.stream("payments")` reads the topic as a KStream, where every record is a new event.
+- `groupBy` changes the key from orderId to the method, so Kafka Streams first writes the records through an internal repartition topic. That way all UPI payments meet in one task.
+- `count()` returns a KTable: one running total per method, kept in a state store. Each new payment updates the total for its key.
+- `props` must set `application.id`, `bootstrap.servers` and the default serdes (serializer plus deserializer); without them the app cannot start or read records.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| processing.guarantee | at_least_once | Kafka Streams 4.3 |
+| `processing.guarantee` | `at_least_once`; set `exactly_once_v2` for exactly-once | Kafka Streams 4.3 |
+| `exactly_once_v2` | needs at least 3 brokers with the default settings | Kafka Streams 4.3 |
+| `num.standby.replicas` | 0: no warm copy of a task's state elsewhere | Kafka Streams 4.3 |
+| Persistent store | RocksDB, on the instance's local disk | Kafka Streams 4.3 |
+
+- **`application.id` is required:** it is the consumer group id, the prefix of internal topic names and the state directory name. Two apps with the same id share work as one app.
+- **Windows:** tumbling, hopping, sliding and session windows group one key's records by time, for example "payments per minute".
+
+## Not to be confused with
+
+A plain [consumer](card:consumer-basics) hands you records; anything you remember between records is your problem. Kafka Streams is built on consumers and producers and adds state stores, joins, windows, recovery and exactly-once. Apache Flink is a separate engine that runs on its own cluster. Rule: one record at a time, use a consumer; counts, joins or windows inside a Java service, use Kafka Streams.
 
 ## Interview Qs
 
 ### How is Kafka Streams different from a plain consumer?
 
-A consumer hands you records; state, joins, windows, recovery and exactly-once are your job. Kafka Streams adds them on top of the same clients. For one-record-at-a-time work a plain consumer is enough.
+A consumer hands you records; state, joins, windows, recovery and exactly-once are your job. Kafka Streams adds them on top of the same clients, inside your app. For one-record-at-a-time work such as sending a receipt, a plain consumer is enough.
+
+### How does Kafka Streams scale and recover?
+
+Each input partition becomes a task, and the group spreads tasks over the running instances, so you scale by starting instances up to the partition count. State lives in local stores copied to changelog topics; a moved task replays its changelog to rebuild the store.
 
 ### How does Kafka Streams give exactly-once?
 
-Set processing.guarantee=exactly_once_v2. It uses [Kafka transactions](card:kafka-transactions) to commit input offsets, state store updates and output records together. By default it needs at least three brokers.
+Set `processing.guarantee=exactly_once_v2`. It uses [Kafka transactions](card:kafka-transactions) to commit the input offsets, the state store changes and the output records together, so a crash cannot leave one without the others. With default settings it needs at least three brokers.

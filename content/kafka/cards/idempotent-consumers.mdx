@@ -5,19 +5,30 @@ title: Idempotent Consumers and Deduplication
 topic: patterns
 level: intermediate
 heat: 3
-hook: "Kafka can deliver a record twice, so make a repeat do nothing: remember each eventId and skip one you have seen."
+hook: "Kafka can deliver the same event twice, so make the second time do nothing: remember each event id and skip one you have already handled."
 points:
-  - { k: "Duplicates come from", v: "redelivery after a crash, rebalances, re-sends and replay" }
-  - { k: "Dedupe key", v: "a business id in the event (eventId, paymentId), never the offset" }
-  - { k: "One transaction", v: "store the eventId and apply the effect in the same DB transaction" }
-  - { k: "Natural idempotency", v: "set status = PAID by id is safe to repeat; add 500 is not", kind: plus }
+  - { k: "Idempotent", v: "doing it twice has the same effect as doing it once, like setting status to PAID, unlike adding ₹500" }
+  - { k: "Duplicates come from", v: "a crash before the offset commit, a rebalance, a producer or relay sending again, or a replay" }
+  - { k: "Dedupe key", v: "a business id inside the event (eventId, paymentId), never the offset, which changes when an event is re-sent" }
+  - { k: "Same transaction", v: "record the event id and apply the effect in one database transaction, or a crash between them breaks it", kind: plus }
+  - { k: "Kafka cannot do it for you", v: "exactly-once covers Kafka-to-Kafka writes only; your database and APIs need their own deduplication", kind: minus }
 trap:
   wrong: "Exactly-once is on, so the consumer does not need to be idempotent."
-  right: "Kafka's exactly-once covers writes back to Kafka. A database write or API call can still run twice, so dedupe there."
-sayIt: "I assume at-least-once. The consumer inserts each eventId into a processed-events table with a unique key, in the same transaction as the effect, so a repeat inserts nothing and the ₹500 is charged once."
+  right: "Kafka's exactly-once covers writes back to Kafka. A database write, an SMS or an API call can still run twice, so the consumer must deduplicate."
+  why: "Exactly-once sounds like an end-to-end promise, and the idempotent producer is on by default, which is easy to mistake for the consumer side."
+sayIt: "I assume at-least-once delivery. The consumer inserts each eventId into a processed-events table with a unique key, in the same database transaction as the business change, so a repeat inserts nothing and the ₹500 is charged once."
+cheat:
+  idea: "An idempotent consumer handles a repeated event without a second effect. It records each event id and skips any id it has already handled."
+  remember: "Dedupe on a business id inside the event, in the same database transaction as the effect; never on the offset."
+buildsOn: [delivery-semantics, offsets]
+scenarios:
+  - q: "A consumer checks \"is evt-7f3a in processed_events?\", sees no row, charges ₹500, then inserts evt-7f3a in a separate statement and commit. It crashes between the charge and the insert. What happens after restart?"
+    a: "The event is redelivered, the check again finds no row, and the customer is charged twice. The check, the charge and the insert must be one database transaction, or the insert itself must be the check, using a unique key."
+  - q: "A Ledger consumer adds each payment's amount to an account balance. Another consumer sets an order's status to PAID. Which one needs a dedupe table?"
+    a: "The Ledger consumer. Adding ₹500 twice gives the wrong balance, so it must remember which payments it applied. Setting status to PAID twice leaves the same result, so that write is already idempotent."
 confusedWith: [idempotent-producer-vs-idempotent-consumer]
 tags: [idempotency, deduplication, duplicates]
-visual: table
+visual: code
 sources:
   - title: "Pattern: Idempotent Consumer (microservices.io, Chris Richardson)"
     url: "https://microservices.io/patterns/communication-style/idempotent-consumer.html"
@@ -28,44 +39,97 @@ sources:
   - title: "INSERT: ON CONFLICT (PostgreSQL 18 docs)"
     url: "https://www.postgresql.org/docs/current/sql-insert.html"
     verifiedOn: "2026-10-20"
+  - title: "WITH queries: data-modifying statements in WITH (PostgreSQL 18 docs)"
+    url: "https://www.postgresql.org/docs/current/queries-with.html"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Interview Questions and Answers (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An operation is idempotent when doing it twice has the same effect as doing it once. An idempotent consumer is one whose processing has this property: if the same event arrives again, nothing changes the second time. The usual way is deduplication: the consumer stores the id of every event it has handled and skips an id it has seen before.
+
 ## Why it exists
 
-With at-least-once delivery, a record can arrive again after a crash, a rebalance or a replay. Charging a ₹500 UPI payment twice is far worse than processing it late.
+Kafka's default is [at-least-once](card:delivery-semantics): after a crash or a rebalance, a consumer resumes from the last committed offset and sees some events again. A producer, or an outbox relay, can also send the same event twice. For a notification that may only mean a second SMS, but charging a ₹500 UPI payment twice is a real loss. Since Kafka cannot remove these repeats, the consumer makes them harmless.
 
 ## How it works
 
-| Technique | How | Fits |
-|---|---|---|
-| Processed-events table | Insert the eventId under a unique key, in the same transaction as the effect | Any effect in the same database |
-| Upsert | Write the final state by id: `ON CONFLICT DO UPDATE` | State, not increments |
-| Version check | Update only when the event's version is newer than the stored one | Updates that may arrive out of order |
+<Mermaid
+  alt="An event arrives. Inside one database transaction the consumer inserts its eventId into processed_events with a unique key. If the row was inserted, it applies the effect. If the eventId already existed, it skips the effect. The database transaction commits, then the Kafka offset is committed."
+  chart={`flowchart LR
+  E[PaymentCompleted evt-7f3a] --> I{"Insert evt-7f3a: new row?"}
+  I -- yes --> A[Apply effect: ledger row]
+  I -- "no, seen before" --> S[Skip]
+  A --> C[Commit DB, then offset]
+  S --> C`}
+/>
 
-- Dedupe on an id inside the event: a re-sent copy lands at a new [offset](card:offsets).
-- If the dedupe insert and the effect commit separately, a crash between them still double-charges or skips.
+1. Every event carries a unique id set by the producer, such as `eventId`, or a business id such as `paymentId`.
+2. The consumer opens a database transaction and inserts that id into a `processed_events` table whose id column is unique.
+3. If the insert adds a row, the event is new: the consumer applies its effect, such as a ledger row, in the same transaction.
+4. If the id already exists, the insert adds nothing, and the consumer skips the effect.
+5. The database transaction commits, and only then the consumer commits its Kafka offset. A crash before that offset commit only causes a repeat, which step 4 absorbs.
+
+So the id check and the effect succeed or fail together, which closes every gap.
 
 ## Example
 
-```sql
-CREATE TABLE processed_events (event_id text PRIMARY KEY);
+The Ledger consumer handles `PaymentCompleted` with one PostgreSQL statement. The insert into `processed_events` is the check:
 
-BEGIN;
-INSERT INTO processed_events (event_id) VALUES ('evt-7f3a')
-  ON CONFLICT DO NOTHING;     -- 0 rows inserted: a repeat, so ROLLBACK
-INSERT INTO ledger (payment_id, amount_inr) VALUES ('pay-77', 500);
-COMMIT;
+```sql
+WITH first_time AS (
+  INSERT INTO processed_events (event_id) VALUES ('evt-7f3a')
+  ON CONFLICT DO NOTHING
+  RETURNING event_id
+)
+INSERT INTO ledger (payment_id, amount_inr)
+SELECT 'pay-77', 500 FROM first_time;
 ```
+
+Run once, then again for the redelivered event:
+
+```text output
+INSERT 0 1
+INSERT 0 0
+```
+
+What to notice:
+
+- `ON CONFLICT DO NOTHING` skips the insert when `evt-7f3a` is already there, and `RETURNING` then returns no row.
+- The ledger insert selects from `first_time`, so it writes a row only when the event id was new: `INSERT 0 1` the first time, `INSERT 0 0` the second.
+- It is one statement, so it is one transaction: there is no moment where the id is stored but the ledger row is not.
+- The key is the event id, not the Kafka offset. If the producer had re-sent the event, the copy would have a new offset but the same `evt-7f3a`.
+
+## Rules and defaults
+
+There are three ways to make a write idempotent:
+
+| Technique | How | Fits |
+|---|---|---|
+| Processed-events table | Insert the event id under a unique key, in the same transaction as the effect | Any effect in the same database |
+| Upsert | Write the final state by id: `INSERT ... ON CONFLICT DO UPDATE` | Setting state, not adding amounts |
+| Version check | Update only if the event's version is newer than the stored one | Updates that may arrive out of order |
+
+- **Effects outside the database:** an SMS or a payment gateway call cannot join the database transaction. Pass the event id as the provider's idempotency key, if it supports one.
+- **Housekeeping:** the processed-events table grows; delete ids older than the longest time a repeat can arrive, such as the topic's retention.
+
+## Not to be confused with
+
+The [idempotent producer](card:idempotent-producer) stops one producer's retries from writing the same batch twice into Kafka; it is a Kafka setting, on by default. An idempotent consumer stops a repeated event from having a second effect in your own database; you write it yourself. Rule: producer idempotence protects the log, consumer idempotence protects your data.
 
 ## Interview Qs
 
 ### How do you prevent duplicate processing in Kafka?
 
-Accept that delivery is at-least-once and make the consumer idempotent. Store each eventId in a processed-events table in the same transaction as the business change, or make the write itself idempotent with an upsert or a version check.
+Accept that delivery is at-least-once and make the consumer idempotent. Store each event id in a processed-events table with a unique key, in the same transaction as the business change, so a repeat changes nothing. Where possible, make the write itself idempotent with an upsert or a version check.
 
 ### Why not use the offset as the dedupe key?
 
-An offset is only a position in one partition. If the producer or an outbox relay sends the same event again, the copy gets a new offset, so only a business id inside the event shows it is a repeat.
+An offset is only a position in one partition. If the producer or an outbox relay sends the same event again, the copy gets a new offset, and a replay into a new topic changes offsets too. Only an id inside the event stays the same on every copy.
+
+### Why must the dedupe record and the effect be in one transaction?
+
+If they commit separately, a crash between them breaks deduplication. Effect first, id second: after the crash the effect runs again. Id first, effect second: the repeat is skipped, so the effect never happens. In one transaction both happen or neither does.

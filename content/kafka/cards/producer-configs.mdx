@@ -5,76 +5,123 @@ title: "Producer Configs to Know"
 topic: producers
 level: interview
 heat: 2
-hook: "Set the brokers, the serializers and a name; keep the safe defaults; bound retrying by time with delivery.timeout.ms, not by count."
+hook: "Set the brokers, the serializers and a client name; keep the safe defaults; and limit how long a send may retry with delivery.timeout.ms, not with retries."
 points:
-  - { k: "Required", v: "bootstrap.servers, key.serializer, value.serializer" }
-  - { k: "Time, not count", v: "with default retries, delivery.timeout.ms ends retrying" }
-  - { k: "retries=0", v: "every transient error reaches the app", kind: minus }
-  - { k: "client.id", v: "names the app in broker request logs" }
-  - { k: "Spring Boot 4.1", v: "spring.kafka.producer.* or spring.kafka.producer.properties[...]" }
+  - { k: "Required", v: "bootstrap.servers, key.serializer and value.serializer have no default; without them the producer fails" }
+  - { k: "Time, not count", v: "retries is almost unlimited by default, so delivery.timeout.ms is what ends retrying" }
+  - { k: "delivery.timeout.ms", v: "120000 ms (2 minutes) in Kafka 4.3: the whole time to report success or failure after send() returns", kind: default }
+  - { k: "max.block.ms", v: "60000 ms in Kafka 4.3: how long send() itself may block waiting for metadata or buffer space", kind: default }
+  - { k: "retries=0", v: "turns off retrying and idempotence, so every short network error reaches your callback", kind: minus }
+  - { k: "client.id", v: "a name such as payment-service that broker logs and metrics show for each request", kind: plus }
 trap:
   wrong: "Raise retries so a send never gives up."
-  right: "retries is already near-infinite. delivery.timeout.ms decides when the producer gives up: tune that, and handle the final error in the callback."
-sayIt: "I set bootstrap.servers with a few brokers, the serializers and a client.id, and keep acks=all and idempotence on. Retries are bounded by delivery.timeout.ms, so I tune that, not retries."
+  right: "retries is already 2147483647. delivery.timeout.ms decides when the producer gives up: tune that, and handle the final error in the callback."
+  why: "Before Kafka 2.1 the default was retries=0, so old advice says to raise it. The name also suggests that a count is what limits retrying."
+sayIt: "I set bootstrap.servers with a few brokers, the serializers and a client.id, and keep acks=all and idempotence on. Retrying is bounded by delivery.timeout.ms, so I tune that, not retries, and handle the final failure in the callback."
+cheat:
+  idea: "A producer needs only bootstrap.servers and two serializers; the safety settings are already on by default. Time limits, not retry counts, decide when a send gives up."
+  flow: "send() blocks ≤ max.block.ms → wait, send, retry ≤ delivery.timeout.ms → callback"
+  remember: "Leave retries alone; tune delivery.timeout.ms (2 minutes by default in Kafka 4.3)."
+buildsOn: [producer-basics, producer-acks, batching-and-compression]
+scenarios:
+  - q: "The Kafka cluster is unreachable when the Payment service sends an event to payments with default configs. What does the service experience?"
+    a: "The producer cannot get the topic's metadata, so send() blocks the calling thread for max.block.ms (60 s in Kafka 4.3). Then the send fails with a TimeoutException (\"Topic payments not present in metadata after 60000 ms\"), and the event is not in Kafka."
+  - q: "The Payment service sets delivery.timeout.ms=10000 and request.timeout.ms=30000. What does the producer do?"
+    a: "It refuses to start: the constructor throws, with a ConfigException saying delivery.timeout.ms should be at least linger.ms + request.timeout.ms. The whole send cannot be shorter than one wait in the batch plus one request attempt."
 confusedWith: []
 tags: [producer, configuration, retries, timeouts]
-visual: table
+visual: flow
 sources:
   - title: "Producer Configs (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/producer-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "KafkaProducer: retries and send() blocking (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Apache Kafka support: additional properties (Spring Boot 4.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/messaging/kafka.html"
     verifiedOn: "2026-10-20"
+  - title: "Common Application Properties: spring.kafka.producer.* (Spring Boot 4.1 reference)"
+    url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+The producer has dozens of settings, but a service needs only a few. Three are required: where to find the cluster (`bootstrap.servers`) and how to turn the key and value into bytes (the two serializers). The safety settings from earlier concepts, `acks=all` and idempotence, are already on by default. The rest are mostly time limits that decide how long a send may block, wait and retry before it is reported as failed.
 
 ## Why it exists
 
-The producer has dozens of settings; interviews and real services need only a few. Knowing which one bounds what avoids lost or endless sends.
+A producer that waits too little drops events during a short broker restart; one that waits forever hides an outage and lets memory fill up. Many teams try to fix this by raising `retries`, which changes nothing, because retrying is already limited by time. Knowing which setting bounds which part of a send lets you decide how long a payment event may keep trying and what your code does when it finally fails.
 
 ## How it works
 
-| Config | Controls | Default (Kafka 4.3) |
-|---|---|---|
-| `bootstrap.servers` | Brokers to contact first; the client finds the rest | none (required) |
-| `key.serializer`, `value.serializer` | Object to bytes: [producers](card:producer-basics) | none (required) |
-| `client.id` | App name in broker logs | empty |
-| `acks` | Who must have the record: [acks](card:producer-acks) | see the concept |
-| `retries` | Resends on transient errors | 2147483647 |
-| `delivery.timeout.ms` | Total time to report success or failure | 120000 (2 min) |
-| `request.timeout.ms` | Wait for one broker reply | 30000 (30 s) |
-| `max.block.ms` | How long `send()` may block on metadata or a full buffer | 60000 (1 min) |
-| `batch.size`, `linger.ms`, `compression.type` | [Batching](card:batching-and-compression) | see the concept |
-| `enable.idempotence` | No duplicates from retries: [idempotent producer](card:idempotent-producer) | see the concept |
+<Mermaid
+  alt="Life of one send and the setting that limits each part. send() may block up to max.block.ms for metadata or buffer space. After send() returns, the delivery.timeout.ms clock covers waiting in the batch for up to linger.ms, each request attempt limited by request.timeout.ms, and retries. When the clock runs out, the callback gets a timeout error."
+  chart={`flowchart LR
+  S["send()"] -- "blocks ≤ max.block.ms" --> R[send returns]
+  subgraph D["delivery.timeout.ms (2 min)"]
+    B["wait in batch ≤ linger.ms"] --> A["request ≤ request.timeout.ms"]
+    A -- "error: retry" --> A
+  end
+  R --> B
+  A --> C[Callback: success or error]`}
+/>
 
-- Keep `delivery.timeout.ms` at least `request.timeout.ms` + `linger.ms`.
-- List more than one broker in `bootstrap.servers` in case one is down.
-- All Spring settings: [Spring for Apache Kafka](card:spring-kafka).
+1. `send()` first needs the topic's metadata and space in the producer's buffer (`buffer.memory`). If either is missing, it blocks for up to `max.block.ms`, then fails the send with a `TimeoutException`.
+2. Once `send()` returns, the `delivery.timeout.ms` clock starts for that record.
+3. The record waits in its batch for up to `linger.ms`, then goes to the leader in a request.
+4. Each request attempt waits up to `request.timeout.ms` for the broker's reply. On a temporary error the producer retries.
+5. When the broker confirms, or when `delivery.timeout.ms` runs out, the callback runs with the result or the error.
+
+So the key is that two clocks matter: `max.block.ms` for the `send()` call itself, and `delivery.timeout.ms` for everything after it.
 
 ## Example
+
+The Payment service's producer settings: a few brokers, a name, the serializers, and an explicit time budget.
 
 ```properties
 bootstrap.servers=kafka-1:9092,kafka-2:9092,kafka-3:9092
 client.id=payment-service
 key.serializer=org.apache.kafka.common.serialization.StringSerializer
 value.serializer=org.apache.kafka.common.serialization.StringSerializer
-# leave retries unset; bound the time instead
 delivery.timeout.ms=120000
 ```
+
+What to notice:
+
+- Three brokers are listed, so the producer can still start when one of them is down. It finds the rest of the cluster from metadata.
+- `client.id=payment-service` makes broker request logs and quotas show which app sent each request.
+- `retries` and `acks` are not set on purpose: the defaults (almost unlimited retries, `acks=all`, idempotence on) are the safe ones.
+- `delivery.timeout.ms=120000` is the default written out, so the team sees and owns the 2-minute budget. Change it here, not through `retries`.
+
+## Rules and defaults
+
+| Config | Controls | Default (Kafka 4.3) |
+|---|---|---|
+| `bootstrap.servers` | Brokers to contact first | none (required) |
+| `key.serializer`, `value.serializer` | Object to bytes | none (required) |
+| `client.id` | App name sent with each request | empty |
+| `retries` | Resends after temporary errors | 2147483647 |
+| `delivery.timeout.ms` | Total time to report success or failure | 120000 (2 min) |
+| `request.timeout.ms` | Wait for one broker reply | 30000 (30 s) |
+| `max.block.ms` | How long `send()` may block | 60000 (1 min) |
+| `buffer.memory` | Memory for records waiting to be sent | 33554432 (32 MiB) |
+
+- **Timeout rule:** `delivery.timeout.ms` must be at least `request.timeout.ms` + `linger.ms`.
+- **Already covered:** `acks` in [producer acks](card:producer-acks), batching and compression in [batching](card:batching-and-compression), `enable.idempotence` in [idempotent producer](card:idempotent-producer).
+- **Spring Boot 4.1:** common settings have their own properties, such as `spring.kafka.producer.acks` and `spring.kafka.producer.compression-type`. Others, such as `linger.ms`, go in `spring.kafka.producer.properties[linger.ms]`. Spring Boot defaults the serializers to `StringSerializer` and `bootstrap-servers` to `localhost:9092`. More in [Spring for Apache Kafka](card:spring-kafka).
 
 ## Interview Qs
 
 ### What is the difference between request.timeout.ms and delivery.timeout.ms?
 
-`request.timeout.ms` is the wait for one broker reply before a retry. `delivery.timeout.ms` bounds the whole send, including batching, waiting and every retry. When it expires, the callback gets the error.
+`request.timeout.ms` is how long the producer waits for one broker reply before it treats that attempt as failed and may retry. `delivery.timeout.ms` bounds the whole send after `send()` returns: waiting in the batch, every attempt and every retry. When it expires, the callback receives the error.
 
 ### When does send() block?
 
-When it must fetch the topic's metadata first, or when the producer's buffer is full. It blocks up to `max.block.ms`; then the Future fails with a timeout.
+When it must fetch the topic's metadata first, or when the producer's buffer (`buffer.memory`) is full because records arrive faster than they can be sent. It blocks for up to `max.block.ms`, then fails the send with a `TimeoutException`. So a cluster outage can hold a request thread for a minute by default.
 
-### Which producer configs would you set for a payments service?
+### Which producer configs would you set for a payment service?
 
-`bootstrap.servers` with several brokers, the serializers and a `client.id`. Keep the defaults `acks=all` and idempotence on, and tune `delivery.timeout.ms` for how long a payment event may keep retrying.
+`bootstrap.servers` with several brokers, the serializers and a `client.id`. I keep the defaults `acks=all` and idempotence on, and do not touch `retries`. I choose `delivery.timeout.ms` for how long a payment event may keep retrying, and handle the final failure in the callback.

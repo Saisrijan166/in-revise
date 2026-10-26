@@ -5,17 +5,27 @@ title: Consumer Groups
 topic: consumers
 level: beginner
 heat: 3
-hook: "Consumers with the same group.id share a topic's partitions; each partition goes to exactly one of them."
+hook: "Consumers with the same group.id form a group and split a topic's partitions: each partition is read by exactly one of them."
 points:
-  - { k: "One owner per partition", v: "within a group, each partition is read by exactly one consumer" }
-  - { k: "Parallelism cap", v: "active consumers ≤ partitions; the extra ones sit idle", kind: minus }
-  - { k: "Many groups", v: "each group gets every record, with its own offsets (fan-out)", kind: plus }
-  - { k: "Group coordinator", v: "a broker that tracks the members and stores the group's offsets" }
-  - { k: "Topic vs group", v: "the topic is what is read; the group is who reads it" }
+  - { k: "One owner per partition", v: "inside one group, each partition is read by exactly one consumer at a time" }
+  - { k: "Parallelism cap", v: "a group can use at most as many consumers as the topic has partitions; extra ones sit idle", kind: minus }
+  - { k: "Many groups, one topic", v: "each group receives every record and keeps its own offsets, so services never slow each other", kind: plus }
+  - { k: "Group coordinator", v: "one broker per group tracks its members and stores its committed offsets" }
+  - { k: "Topic vs group", v: "the topic is what is read; the group is who reads it and where it resumes" }
 trap:
-  wrong: "Adding consumers to a group always makes it faster."
-  right: "Only up to the partition count. With 4 partitions, a 5th and 6th consumer sit idle; add partitions first."
-sayIt: "A consumer group is one logical subscriber made of many consumers. Kafka gives each partition to one member, so partitions cap parallelism. Separate groups read the same topic independently."
+  wrong: "Adding more consumers to a group always makes it faster."
+  right: "Only up to the partition count. With 2 partitions, a third consumer gets nothing and waits; add partitions first."
+  why: "In most worker pools more workers means more speed. Kafka hands out whole partitions, not single records, and that is easy to forget."
+sayIt: "A consumer group is one logical reader made of many consumers sharing a group.id. Kafka gives each partition to one member, so partitions cap a group's parallelism. Separate groups read the same topic independently, each with its own offsets."
+cheat:
+  idea: "A consumer group is the set of consumers sharing one group.id. They split the topic's partitions, one consumer per partition, and each separate group reads every record."
+  remember: "Useful consumers in a group ≤ partitions. Same service = same group.id; another service = another group.id."
+buildsOn: [consumer-basics, partitions]
+scenarios:
+  - q: "The Analytics service also needs every PaymentCompleted record that the Notification service reads. Should it use group.id notification-service or its own group.id?"
+    a: "Its own, such as analytics. In the same group the two services would split the partitions, and each would see only part of the payments. A separate group gets every record and its own offsets."
+  - q: "Each Notification service instance sets group.id to its own host name. Three instances run. What do customers notice?"
+    a: "Three messages per payment. Each instance is its own group, and every group receives every record. All instances of one service must share one group.id so they split the work instead of copying it."
 confusedWith: [consumer-vs-consumer-group, consumer-group-vs-share-group]
 tags: [consumer-group, group-id, fan-out, parallelism]
 visual: flow
@@ -23,43 +33,97 @@ sources:
   - title: "KafkaConsumer: consumer groups and topic subscriptions (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html"
     verifiedOn: "2026-10-20"
-  - title: "Distribution: consumer offset tracking (Apache Kafka 4.3)"
+  - title: "Distribution: consumer offset tracking and the group coordinator (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/implementation/distribution/"
     verifiedOn: "2026-10-20"
+  - title: "Consumer and Share Consumer Configs: group.id (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/consumer-configs/"
+    verifiedOn: "2026-10-22"
   - title: "Message Listener Containers: idle consumers above the partition count (Spring for Apache Kafka 4.1)"
     url: "https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/message-listener-container.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A consumer group is a set of [consumers](card:consumer-basics) that share the same `group.id` and share the work of reading a topic. Kafka gives each partition of the topic to exactly one consumer in the group, so together they read every record once. A different group, with a different `group.id`, reads the same topic again on its own, from its own position.
+
 ## Why it exists
 
-One consumer cannot keep up with a busy topic, and several services need the same records. Groups split the work inside a service and keep each service's reading separate.
+One Notification service instance cannot keep up, so you run three. If each read every record, every customer would get three messages. In one group, each partition goes to one instance, so each record is handled once and the work is split. The Analytics service needs every payment too. It uses its own group, so it gets all records without stealing any from Notification and without slowing it down.
 
 ## How it works
 
 <Mermaid
-  alt="The payments topic has four partitions. In group payment-service, consumer C1 reads P0 and P1 and consumer C2 reads P2 and P3. In group analytics, consumer A1 reads all four partitions on its own."
+  alt="The payments topic has four partitions. In group notification-service, consumer N1 reads P0 and P1 and consumer N2 reads P2 and P3. In group analytics, consumer A1 reads all four partitions on its own."
   chart={`flowchart LR
-  P0[P0] --> C1[payment-service C1]
-  P1[P1] --> C1
-  P2[P2] --> C2[payment-service C2]
-  P3[P3] --> C2
+  P0[P0] --> N1[notification N1]
+  P1[P1] --> N1
+  P2[P2] --> N2[notification N2]
+  P3[P3] --> N2
   P0 -.-> A1[analytics A1]
   P1 -.-> A1
   P2 -.-> A1
   P3 -.-> A1`}
 />
 
-- Four partitions, two consumers: two partitions each. Six consumers: four work, two wait.
-- Each group keeps its own [committed offsets](card:offset-commits), so a slow group never delays another.
-- Exception: in a [share group](card:share-groups), several consumers read the same partition.
+1. Each Notification instance starts with `group.id=notification-service` and subscribes to `payments`.
+2. Each one finds its group coordinator, a broker chosen for that group, and joins the group. The group is created on the first join; you do not create it beforehand.
+3. The partitions are divided among the members: with 4 partitions and 2 consumers, each consumer gets 2. No partition goes to two members of the same group.
+4. If there are more consumers than partitions, the extra ones get nothing and wait. They take over if a member leaves.
+5. The Analytics service joins with `group.id=analytics`. As the only member, it gets all 4 partitions and tracks its own offsets.
+
+So the partition count decides how many consumers in one group can work at once.
+
+## Example
+
+Three Notification instances run on a `payments` topic with 2 partitions. The group tool lists each member and how many partitions it owns:
+
+```bash
+bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --describe --group notification-service --members
+```
+
+```text output
+GROUP                CONSUMER-ID                                   HOST            CLIENT-ID       #PARTITIONS
+notification-service notify-1-3be5189b-5166-49ec-bbf0-08dbdd96942a /127.0.0.1      notify-1        1
+notification-service notify-2-4d02b57c-9977-4ac2-8df1-1f9fb7e3434d /127.0.0.1      notify-2        1
+notification-service notify-3-dbfa596c-0312-4c96-a42b-b70de3ec603d /127.0.0.1      notify-3        0
+```
+
+What to notice:
+
+- `notify-1` and `notify-2` own one partition each. `notify-3` owns 0: it is connected, but idle.
+- To make `notify-3` useful, the topic needs a third partition, not a fourth consumer.
+- If `notify-1` stops, the group moves its partition to another member. That move is a [rebalance](card:rebalancing), which you will see soon.
+
+## Rules and defaults
+
+- **group.id:** has no default. It is required when the consumer uses `subscribe()` or saves its offsets in Kafka.
+- **Ownership:** inside a consumer group, one partition has at most one consumer at a time. Share groups, covered later in this topic, are the exception.
+- **Offsets per group:** each group has its own committed offset for each partition, kept by its coordinator. One group's progress never moves another's.
+
+## Not to be confused with
+
+- **Consumer:** one client that polls and processes records. A group is all the consumers sharing a `group.id`.
+- **Topic:** the data being read. The group is the reader, together with where it will resume.
+
+Rule: topic = what; group = who; consumer = one worker in the who.
+
+## Common mistakes
+
+- **"Each instance should get a unique group.id."** Then each instance is a separate group and reads every record, so work is copied instead of split. Instances of one service share one `group.id`.
 
 ## Interview Qs
 
-### A group has 4 partitions and 6 consumers. What happens?
+### A topic has 4 partitions and a group has 6 consumers. What happens?
 
-Four consumers get one partition each; two stay idle until a member leaves or partitions are added. To use all six, the topic needs at least six partitions.
+Four consumers get one partition each, and two stay idle. The idle ones take over if an active member leaves. To use all six, the topic needs at least six partitions.
 
-### How do two services both read every order?
+### How do two services both read every payment?
 
-Give them different group.id values, such as payment-service and inventory-service. Each group receives every record and tracks its own offsets, so each service reads at its own pace.
+Give them different group.id values, such as notification-service and analytics. Each group receives every record and tracks its own offsets, so each service reads at its own pace and a slow one does not delay the other.
+
+### What happens when a consumer in a group dies?
+
+The group notices it is gone and moves its partitions to the remaining members. The new owner starts each partition at the group's committed offset, so records processed after the last commit are read again.

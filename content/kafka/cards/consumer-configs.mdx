@@ -5,23 +5,33 @@ title: Consumer Configs to Know
 topic: consumers
 level: intermediate
 heat: 2
-hook: "A few consumer configs matter most: which group, where to start, how much to fetch, and when a member counts as gone."
+hook: "A few consumer settings decide most behaviour: which group to join, where a new group starts, how much one poll returns, and when a slow member is removed."
 points:
-  - { k: "auto.offset.reset", v: "used only when the group has no valid committed offset" }
-  - { k: "Default latest", v: "a new group skips old records; earliest reads them all", kind: default }
-  - { k: "max.poll.records", v: "500 per poll() by default (Kafka 4.3); lower it for slow handlers", kind: default }
-  - { k: "Spring Boot", v: "the same settings under spring.kafka.consumer.*" }
+  - { k: "auto.offset.reset", v: "used only when the group has no valid committed offset for a partition, not on every restart" }
+  - { k: "latest (default)", v: "a new group starts at the end and skips older records; earliest reads from the oldest kept record", kind: default }
+  - { k: "max.poll.records", v: "at most 500 records per poll() by default (Kafka 4.3); lower it when each record is slow", kind: default }
+  - { k: "Spring Boot", v: "the same settings live under spring.kafka.consumer.*, for example spring.kafka.consumer.auto-offset-reset" }
 trap:
   wrong: "auto.offset.reset=earliest re-reads the whole topic on every restart."
-  right: "It applies only when the group has no valid committed offset: a new group, or an offset already deleted."
-sayIt: "I set group.id and the deserializers, pick auto.offset.reset for new groups, turn off auto commit, and size max.poll.records so a batch finishes well inside max.poll.interval.ms."
+  right: "It applies only when the group has no valid committed offset: a new group, or an offset whose records were already deleted."
+  why: "The name sounds like an instruction run at every start, and in a first test with a brand-new group it does read from the beginning."
+sayIt: "I set group.id and the deserializers, choose auto.offset.reset for new groups, turn off auto commit, and size max.poll.records so a batch finishes well inside max.poll.interval.ms."
+cheat:
+  idea: "A handful of consumer settings explain most behaviour: group.id, the deserializers, auto.offset.reset, enable.auto.commit, max.poll.records and the poll and session timeouts."
+  remember: "auto.offset.reset (default latest) applies only when the group has no valid committed offset."
+buildsOn: [consumer-basics, offset-commits, rebalancing]
+scenarios:
+  - q: "A new Analytics group starts on a topic that already holds a week of payments, with default settings. What does it read?"
+    a: "Only payments written after it starts. With no committed offset, auto.offset.reset=latest puts it at the end. Set earliest, or by_duration:P7D, before its first start to read the history."
+  - q: "Each payment takes 2 seconds to process, and the consumer keeps being removed from its group. Which setting do you change first?"
+    a: "max.poll.records. 500 records × 2 s is about 17 minutes per batch, far past the 5-minute max.poll.interval.ms. With 100 records a batch takes about 3 minutes. Making each record faster is better still."
 confusedWith: []
 tags: [consumer-config, auto-offset-reset, max-poll-records]
 visual: table
 sources:
   - title: "Consumer and Share Consumer Configs (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/consumer-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Apache Kafka 4.0.0 release announcement (KIP-1106 by_duration)"
     url: "https://kafka.apache.org/blog/2025/03/18/apache-kafka-4.0.0-release-announcement/"
     verifiedOn: "2026-10-20"
@@ -30,28 +40,38 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+This concept collects the consumer settings you meet most in interviews and in incidents. Each one is a key and a value in the consumer's `Properties`, or a `spring.kafka.consumer.*` property in Spring Boot. Most of them were explained in the earlier consumer concepts; the new ones here decide where a new group starts reading and how much one `poll()` brings back.
+
 ## Why it exists
 
-The consumer has dozens of settings, but interviews and incidents keep coming back to the same few. This table picks them and points to where each is explained.
+The consumer has dozens of settings, but most surprises come from a few. A new group that missed a week of history, a slow handler thrown out of its group, and auto commit losing records each come down to one setting. Knowing these few and their defaults lets you predict what a consumer will do before it runs.
 
 ## How it works
 
-| Config | Controls | Default (Kafka 4.3) |
+| Setting | Controls | Default (Kafka 4.3) |
 |---|---|---|
-| group.id | The group to join | see [consumer groups](card:consumer-groups) |
-| key/value.deserializer | Bytes to objects | required; see [poll loop](card:consumer-basics) |
-| auto.offset.reset | Start point with no valid commit | latest |
-| enable.auto.commit | Background commits | see [offset commits](card:offset-commits) |
-| max.poll.records | Records per poll() | 500 |
-| fetch.min.bytes, fetch.max.wait.ms | Long-poll size and wait | 1 byte, 500 ms |
-| session.timeout.ms, max.poll.interval.ms | When a member is dead | see [rebalancing](card:rebalancing) |
-| isolation.level | Hide aborted transactions | see [transactions](card:kafka-transactions) |
-| group.protocol | classic or consumer | see [rebalancing](card:rebalancing) |
-| client.rack | Rack, for nearby replicas | see [replication](card:replication) |
+| `group.id` | The group to join | none; see [consumer groups](card:consumer-groups) |
+| `key.deserializer`, `value.deserializer` | Bytes back to objects | none; see [the poll loop](card:consumer-basics) |
+| `auto.offset.reset` | Start point with no valid commit | `latest` |
+| `enable.auto.commit` | Commits on a timer | `true`; see [committing offsets](card:offset-commits) |
+| `max.poll.records` | Records returned by one `poll()` | 500 |
+| `fetch.min.bytes`, `fetch.max.wait.ms` | How long a fetch waits for data | 1 byte, 500 ms |
+| `max.poll.interval.ms`, `session.timeout.ms` | When a member counts as gone | 5 min, 45 s; see [rebalancing](card:rebalancing) |
+| `isolation.level` | Whether records of aborted transactions are shown | `read_uncommitted` |
 
-- max.poll.records limits what poll() returns, not how much is fetched.
+Follow a brand-new Analytics consumer as it starts:
+
+1. It joins the group named by `group.id`.
+2. The group has no committed offset yet, so `auto.offset.reset` decides the start: `latest` means only new records.
+3. Each fetch waits until at least `fetch.min.bytes` is ready or `fetch.max.wait.ms` passes.
+4. Each `poll()` hands the code at most `max.poll.records` records.
+5. Unless `enable.auto.commit` is off, the client commits every 5 s; the next restart uses that commit, and `auto.offset.reset` is not used again.
 
 ## Example
+
+The Analytics service wants the full history the first time it starts, and commits by hand:
 
 ```properties
 group.id=analytics
@@ -61,12 +81,25 @@ max.poll.records=200
 # Spring Boot 4.1: spring.kafka.consumer.auto-offset-reset=earliest
 ```
 
+What to notice:
+
+- `earliest` matters only on the very first start, or if the saved offset's records have been deleted. Later restarts resume at the committed offset.
+- With `enable.auto.commit=false`, the code must commit, or every restart reads the history again.
+- `max.poll.records=200` keeps each batch small, so slow processing still finishes well inside `max.poll.interval.ms`.
+
+## Rules and defaults
+
+- **auto.offset.reset values:** `latest` (default), `earliest`, `none`, which throws an exception, and `by_duration:<ISO 8601 duration>` since Kafka 4.0, for example `by_duration:P1D` for one day back.
+- **max.poll.records:** limits what one `poll()` returns, not how much the client fetches from the broker.
+- **isolation.level:** `read_committed` hides records from transactions that were aborted or are still open; you will see why in [Kafka transactions](card:kafka-transactions).
+- **client.rack:** tells Kafka where the consumer runs, so it can read from a nearby copy of the data; [replication](card:replication) explains this later.
+
 ## Interview Qs
 
 ### What does auto.offset.reset do?
 
-It decides where a group starts when it has no valid committed offset. latest (default) reads only new records, earliest reads from the oldest retained one, none throws. Since Kafka 4.0, by_duration:P1D starts one day back.
+It decides where a group starts in a partition when it has no valid committed offset: a new group, or an offset whose records were deleted. latest, the default, reads only new records; earliest starts from the oldest record still kept; none throws an exception. Since Kafka 4.0, by_duration starts a set time back.
 
-### A slow handler keeps getting the consumer kicked out of the group. What helps?
+### A slow handler keeps getting the consumer removed from its group. What helps?
 
-Lower max.poll.records so each batch finishes sooner, or raise max.poll.interval.ms. Speeding up the handler is better, since a longer interval also delays rebalances.
+The batch takes longer than max.poll.interval.ms. Lower max.poll.records so each batch finishes sooner, or raise max.poll.interval.ms. Making the handler faster is the real fix, because a longer interval also means a stuck consumer is noticed later.

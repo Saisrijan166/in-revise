@@ -5,17 +5,27 @@ title: "Kafka vs Queues, REST, Databases and Redis"
 topic: basics
 level: intermediate
 heat: 2
-hook: "REST asks and waits, a queue hands out work, a database keeps state, Redis serves hot data fast, Kafka keeps the event history."
+hook: "REST asks and waits, a queue hands out work once, a database keeps current state, Redis serves hot data fast, and Kafka keeps the event history."
 points:
-  - { k: "vs REST", v: "the caller waits for a reply; a Kafka producer does not wait for readers" }
-  - { k: "vs a queue", v: "acked messages are deleted; Kafka keeps events until retention ends" }
-  - { k: "vs a database", v: "it holds current state and answers queries; Kafka holds the changes" }
-  - { k: "vs Redis", v: "in memory, for cache and counters; its Pub/Sub is at-most-once" }
-  - { k: "Use together", v: "REST at the edge, database for state, Kafka between services", kind: plus }
+  - { k: "vs REST", v: "a REST caller waits for the reply; a Kafka producer gets no reply from readers and does not wait for them" }
+  - { k: "vs a message queue", v: "a queue deletes a message once a consumer acknowledges it; Kafka keeps events for the retention time" }
+  - { k: "vs a database", v: "a database holds the current value of each row and answers queries; Kafka holds the history of changes" }
+  - { k: "vs Redis", v: "Redis keeps data in memory for caching and counters; its Pub/Sub drops messages for offline subscribers" }
+  - { k: "Use them together", v: "REST for answers now, a database for state, Redis for speed, Kafka for events between services", kind: plus }
 trap:
   wrong: "With Kafka we no longer need a database."
   right: "Keep current state in the database, which queries and updates rows. Kafka carries the events about those changes to other services."
-sayIt: "I use REST when the caller needs an answer now, a database for current state, Redis for caching, and Kafka to stream events that many services read independently and may replay."
+  why: "Kafka stores events on disk and can keep them for a long time, so it looks like storage that could take the database's place."
+sayIt: "I use REST when the caller needs an answer now, a database for current state, Redis for caching, a queue for one-off jobs, and Kafka to stream events that many services read independently and may replay."
+cheat:
+  idea: "REST, queues, databases, Redis and Kafka all move or hold data, but each solves a different need. Name the need first, then pick the tool."
+  remember: "Answer needed now: REST. One job, one worker: queue. Current state: database. Fast hot data: Redis. Event history many services read: Kafka."
+buildsOn: [what-is-kafka]
+scenarios:
+  - q: "Checkout must know whether the card was approved before it shows the success page. Kafka or a REST call?"
+    a: "A REST call. The caller cannot continue without the answer, and a Kafka producer gets no reply from the services that read its event. Kafka fits the next step: telling other services that the payment completed."
+  - q: "Each uploaded image needs one resize, done by any free worker, in any order. Kafka consumer group, queue, or share group?"
+    a: "A queue such as RabbitMQ, or a Kafka share group (production-ready in Kafka 4.2). Both hand each job to one worker and track it job by job. A consumer group would tie each partition to one worker, which is not needed when order does not matter."
 confusedWith: [kafka-vs-rest, kafka-vs-database, kafka-vs-redis]
 tags: [rabbitmq, rest, database, redis, comparison]
 visual: table
@@ -23,6 +33,9 @@ sources:
   - title: "Design: the consumer position, push vs pull (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/design/design/"
     verifiedOn: "2026-10-20"
+  - title: "Upgrading to 4.2: Queues for Kafka (KIP-932) production-ready (Apache Kafka docs)"
+    url: "https://kafka.apache.org/42/getting-started/upgrade/"
+    verifiedOn: "2026-10-22"
   - title: "Streams and queues (RabbitMQ docs)"
     url: "https://www.rabbitmq.com/docs/streams"
     verifiedOn: "2026-10-20"
@@ -37,38 +50,61 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Kafka is one of five common ways to move or hold data between services, and interviewers often ask "why Kafka and not X?". The other four are a REST call (an HTTP request where the caller waits for the response), a message queue such as RabbitMQ (a broker that hands each message to one consumer), a database (the current state, ready to query) and Redis (an in-memory store used as a fast cache).
+
 ## Why it exists
 
-Kafka, a queue, a REST call, a database and Redis can all pass data between services, but each solves a different problem. Name the need, then pick.
+All five can carry a payment from one service to another, so it is easy to pick by habit. Use Kafka where a REST call fits and checkout waits for nothing; use REST where Kafka fits and one slow reader blocks payments. Knowing what each tool is built for lets you choose one per need and explain the choice.
 
 ## How it works
 
 <Compare id="kafka-vs-message-queue" />
 
-- Kafka 4.2+ [share groups](card:share-groups) add queue-style reading; RabbitMQ streams add a replayable log. The line is blurring.
+Walk through the needs in this order:
+
+1. Does the caller need an answer before it can continue? Use a REST call.
+2. Must a fact reach several services, or be kept so it can be read again? Write an event to a Kafka topic.
+3. Is it a job that exactly one worker should do, confirmed job by job? Use a queue, or a Kafka [share group](card:share-groups).
+4. Do you need the current value, to query, search or update it? Use a database.
+5. Do you need very fast reads of hot data, or counters? Use Redis.
+
+So the key is to name the need first. A real system often uses all five side by side.
 
 ## Example
 
-The online shop picks one tool per need:
+The payment system picks one tool per need:
 
 | Need | Pick |
 |---|---|
-| Checkout needs the price now | REST call |
-| Tell payments, stock and email that an order was placed | Kafka topic |
-| Give each image-resize job to one worker, ack each one | Queue, or a Kafka share group |
-| Show an order's status, search orders | Database |
-| Cache the product page, count views | Redis |
+| Checkout needs "card approved?" before it continues | REST call |
+| Tell Notification and Analytics that a payment completed | Kafka topic `payments` |
+| Send each receipt PDF job to one free worker | Queue, or a Kafka share group |
+| Show a payment's status, search payments by date | Database |
+| Count today's payments for a live dashboard | Redis |
+
+What to notice:
+
+- Only one row uses Kafka, and it is the row where one fact goes to many readers.
+- The status page reads the database, not Kafka: a topic is read in order from an offset, not queried by any column.
+- The same payment shows up in several tools: approved over REST, stored in the database, announced on Kafka.
+
+## Common mistakes
+
+- **"Kafka cannot do queue-style work."** Since Kafka 4.2, share groups are production-ready: several consumers share one partition's records, and each record is acknowledged on its own.
+- **"A queue can never replay."** RabbitMQ streams keep messages after they are read, like a log. The line between the two kinds of tool is now blurring.
 
 ## Interview Qs
 
 ### Kafka vs RabbitMQ?
 
-RabbitMQ routes messages through exchanges to queues and deletes each one once acked: good for task work. Kafka keeps an ordered log per partition that many consumer groups read and replay: good for event streams.
+RabbitMQ routes messages through exchanges to queues, pushes them to consumers and deletes each one once it is acknowledged: good for task work. Kafka keeps an ordered log per partition that many consumer groups pull from and can replay: good for event streams that several services read.
 
 ### Can Kafka replace the database?
 
-No. Kafka keeps an append-only history that consumers read by offset; a database answers queries and updates rows in place. Keep state in the database and publish its changes to Kafka, for example with the [outbox](card:transactional-outbox).
+No. Kafka keeps an append-only history that consumers read by position; a database answers queries and updates rows in place. Keep state in the database and publish its changes to Kafka, for example with the [transactional outbox](card:transactional-outbox), which you will see later.
 
 ### When is REST better than Kafka?
 
-When the caller needs the answer to continue, such as a price check or a login. Kafka suits telling others that something happened. See [Kafka vs REST](compare:kafka-vs-rest).
+When the caller needs the answer to continue, such as checking a card or logging in. Kafka gives the producer no reply from its readers, so it suits telling others that something already happened.

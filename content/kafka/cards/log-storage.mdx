@@ -5,79 +5,126 @@ title: "Log Storage: Segments, Retention and Compaction"
 topic: storage
 level: intermediate
 heat: 2
-hook: "Each partition is an append-only log cut into segment files; old segments go when time or size runs out, not when read."
+hook: "Each partition is stored as a row of segment files. Kafka deletes whole old segments when a time or size limit is reached, never because someone read them."
 points:
-  - { k: "Segments", v: "files up to 1 GiB (segment.bytes, Kafka 4.3); writes go to the newest", kind: default }
-  - { k: "Time limit", v: "retention.ms: 7 days by default (Kafka 4.3)", kind: default }
-  - { k: "Size limit", v: "retention.bytes counts per partition; -1 = none (Kafka 4.3)", kind: default }
-  - { k: "Whole segments", v: "deletion drops the oldest segment file, never one record" }
-  - { k: "Fast writes", v: "appends are sequential disk writes", kind: plus }
+  - { k: "Segments", v: "a partition is stored as files of up to 1 GiB each (segment.bytes, Kafka 4.3); new events go to the newest", kind: default }
+  - { k: "Time limit", v: "retention.ms is 7 days by default (Kafka 4.3); older segments are deleted", kind: default }
+  - { k: "Size limit", v: "retention.bytes counts per partition and is -1, no limit, by default (Kafka 4.3)", kind: default }
+  - { k: "Whole segments", v: "deletion removes whole segment files, oldest first, never single events" }
+  - { k: "Compaction", v: "with cleanup.policy=compact, Kafka keeps at least the latest event for each key and drops older ones" }
+  - { k: "Fast writes", v: "events are only appended at the end of a file, which disks handle quickly", kind: plus }
 trap:
-  wrong: "Kafka deletes a record once a consumer has read it."
-  right: "Reading only moves that group's offset. Records stay for every group, share groups too, until retention or compaction removes them."
-sayIt: "A partition is an append-only log of segment files. With cleanup.policy=delete, whole old segments go after retention.ms, 7 days by default, or retention.bytes; with compact, Kafka keeps the latest value per key. Reading never deletes."
+  wrong: "Kafka deletes an event once a consumer has read it."
+  right: "Reading only moves that group's offset. Events stay for every group until retention or compaction removes them."
+  why: "Traditional message queues delete a message once it is acknowledged, and Kafka is often introduced as a kind of message queue."
+sayIt: "A partition is an append-only log of segment files. With cleanup.policy=delete, whole old segments go after retention.ms, 7 days by default, or past retention.bytes; with compact, Kafka keeps the latest value per key. Reading never deletes."
+cheat:
+  idea: "Kafka stores each partition as segment files and appends only to the newest. Old data leaves by rule: whole segments past a time or size limit, or older events per key (compaction)."
+  flow: "Append → segment full → new segment → old one deleted or compacted"
+  remember: "Reading never deletes. Default retention is 7 days (Kafka 4.3)."
+buildsOn: [partitions, offsets]
+scenarios:
+  - q: "payments has 6 partitions and retention.bytes=10737418240 (10 GiB). Roughly how much disk can one copy of the topic use?"
+    a: "About 60 GiB, plus the segments still being written. retention.bytes is enforced per partition, so multiply it by the partition count; with 3 copies the cluster stores about three times that."
+  - q: "retention.ms is 7 days, but you still see 9-day-old events in a quiet partition. Is retention broken?"
+    a: "No. Kafka deletes whole segments, and a segment goes only when its newest event is older than retention.ms. The 9-day-old event shares a segment with newer events, so it stays until the whole segment qualifies."
 confusedWith: [retention-vs-log-compaction]
 tags: [segments, retention, log-compaction]
 visual: flow
 sources:
-  - title: "Implementation: Log (Apache Kafka 4.3)"
+  - title: "Implementation: Log, segment files named by first offset, deletes (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/implementation/log/"
-    verifiedOn: "2026-10-20"
-  - title: "Topic Configs (Apache Kafka 4.3)"
+    verifiedOn: "2026-10-22"
+  - title: "Topic Configs: segment.bytes, segment.ms, retention.ms, retention.bytes, cleanup.policy, delete.retention.ms (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/topic-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Broker Configs: log.retention.hours, log.dir (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/broker-configs/"
+    verifiedOn: "2026-10-22"
   - title: "Design: log compaction (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/design/design/"
     verifiedOn: "2026-10-20"
   - title: "KIP-405: Kafka Tiered Storage (production-ready since 3.9)"
     url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-405%3A+Kafka+Tiered+Storage"
     verifiedOn: "2026-10-20"
-  - title: "KIP-932: Queues for Kafka"
-    url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-932%3A+Queues+for+Kafka"
-    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+Log storage is how a broker keeps a [partition](card:partitions) on disk. A partition is a folder, such as `payments-0`, holding segment files: each segment holds a run of events, and its file name is the [offset](card:offsets) of its first event. New events are only appended to the newest segment, called the active segment. A cleanup policy decides when old events leave: by age or size (delete), or by keeping the latest event per key (compact).
 
 ## Why it exists
 
-Kafka keeps events after reading so many groups can read and replay them. Disks are finite, so old data must go by a clear rule.
+Kafka keeps events after they are read, so that many groups can read them and read them again. Disks are finite, so old data must go by a clear rule, not by who has read it. One giant file per partition would make that hard: removing old data would mean rewriting the file. With segments, removing old data means deleting whole old files, which is cheap.
 
 ## How it works
 
-<Steps label="Life of a segment in payments-0">
-  <Step title="Append">Writes go to the end of the active segment.</Step>
-  <Step title="Roll">At 1 GiB or after 7 days (segment.ms) the segment is closed and a new one starts.</Step>
-  <Step title="Clean">Closed segments are deleted once past retention, or recopied keeping only the latest value per key.</Step>
-</Steps>
+<Mermaid
+  alt="Events are appended to the active segment. When it reaches 1 GiB or 7 days, it is closed and a new active segment starts. A closed segment is later either deleted, when it is past retention, or compacted, keeping only the latest event per key."
+  chart={`flowchart LR
+  A[Append to active segment] --> R{"1 GiB or 7 days reached?"}
+  R -- yes --> C[Close it, start a new active segment]
+  C --> D[delete policy: remove once past retention]
+  C --> K[compact policy: keep latest event per key]`}
+/>
 
-- A segment is deleted when its newest record is older than retention.ms.
-- Compaction: a record with a key and a null value (a tombstone) deletes that key.
-- [Tiered storage](card:tiered-storage) (production-ready since Kafka 3.9) moves closed segments to remote storage such as S3.
+1. The leader appends each new event to the end of the active segment.
+2. When the active segment reaches `segment.bytes` (1 GiB) or `segment.ms` (7 days), Kafka closes it and starts a new one, named after the next offset.
+3. With `cleanup.policy=delete`, a segment is deleted once its newest event is older than `retention.ms`, or when the partition is over `retention.bytes`, oldest segment first.
+4. With `cleanup.policy=compact`, a background cleaner copies closed segments, keeping only the latest event for each key. Offsets do not change; the removed events leave gaps.
 
 ## Example
 
-```properties
-# payments topic: event history, kept 30 days
-cleanup.policy=delete
-retention.ms=2592000000
+Make segments roll quickly on a test topic, write about 3 MB, then list the segment files of its only partition:
 
-# customer-addresses topic: only the latest address per customerId
-cleanup.policy=compact
+```bash
+# Segments roll at 1 MiB, the smallest value Kafka 4.3 allows
+bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic seg-demo \
+  --partitions 1 --replication-factor 1 --config segment.bytes=1048576
+
+# Write 3,000 records of 1,000 bytes each
+bin/kafka-producer-perf-test.sh --topic seg-demo --num-records 3000 --record-size 1000 \
+  --throughput -1 --command-property bootstrap.servers=localhost:9092 > /dev/null
+
+# On the broker that stores the partition (its log directory is /tmp/kafka-logs)
+ls /tmp/kafka-logs/seg-demo-0/*.log
 ```
 
-## Defaults
+```text output
+Created topic seg-demo.
+/tmp/kafka-logs/seg-demo-0/00000000000000000000.log
+/tmp/kafka-logs/seg-demo-0/00000000000000001033.log
+/tmp/kafka-logs/seg-demo-0/00000000000000002057.log
+```
 
-| What | Default | Where |
-| --- | --- | --- |
-| `cleanup.policy` | `delete` | Kafka 4.3 topic config |
-| Broker-wide time limit | `log.retention.hours=168` (7 days) | Kafka 4.3 broker |
-| Tombstones kept for | 1 day (`delete.retention.ms`) | Kafka 4.3 topic config |
+What to notice:
+
+- About 3 MB became three segments of up to 1 MiB each. With the default 1 GiB, all of it would still sit in the first file.
+- Each file is named after the offset of its first event: the second segment starts at offset 1033.
+- The last file is the active segment, where new events go. Compaction never touches it; it works only on closed segments.
+
+## Rules and defaults
+
+- **cleanup.policy (Kafka 4.3):** `delete` by default. `compact` keeps the latest event per key; `delete,compact` applies both.
+- **Broker-wide time limit (Kafka 4.3):** `log.retention.hours=168`, 7 days; a topic's `retention.ms` overrides it, and `-1` means no time limit.
+- **retention.bytes:** per partition, so a topic can use about that value times its partition count, per copy.
+- **Tombstone:** an event with a key and an empty (null) value tells compaction to delete that key; tombstones are kept for `delete.retention.ms`, 1 day by default.
+- **Tiered storage:** since Kafka 3.9, closed segments can move to remote storage such as Amazon S3, keeping long history off the brokers' disks ([tiered storage](card:tiered-storage)).
+
+## Not to be confused with
+
+Retention (the delete policy) removes whole old segments once they pass a time or size limit, whatever keys they hold. Compaction removes older events only when a newer event with the same key exists, so the latest value of every key stays. Rule: delete for a history you keep for a while, such as payments; compact for the latest state per key, such as each customer's current address.
 
 ## Interview Qs
 
 ### When does Kafka delete old data?
 
-When a closed segment passes retention.ms or the partition passes retention.bytes. It drops whole segments, oldest first, whether or not anyone has read them.
+When a segment's newest event is older than `retention.ms`, or when the partition is bigger than `retention.bytes`. Kafka drops whole segments, oldest first, whether or not anyone has read them. With the compact policy, it instead removes older events that have a newer event with the same key.
 
 ### What is log compaction, and when do you use it?
 
-cleanup.policy=compact keeps at least the latest record per key and drops older ones in the background. Use it for latest state, such as each customer's address, that readers rebuild from the topic.
+`cleanup.policy=compact` keeps at least the latest event per key and drops older ones in the background. Use it for latest-state topics, such as each customer's address, so a new reader can rebuild the current state from the topic. A tombstone deletes a key.
+
+### Why does Kafka split a partition into segments?
+
+So old data can be removed by deleting whole files instead of rewriting one huge file, and so the compaction cleaner can work on closed files while new events go to the active one.

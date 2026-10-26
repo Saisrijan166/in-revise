@@ -5,65 +5,124 @@ title: "Partitions: The Unit of Order and Parallelism"
 topic: storage
 level: beginner
 heat: 3
-hook: "A partition is an ordered, append-only log; Kafka keeps order only inside one partition."
+hook: "A partition is one ordered, append-only log of a topic. Kafka keeps events in order inside a partition, never across the whole topic."
 points:
-  - { k: "Append-only", v: "new records go at the end and get the next offset" }
-  - { k: "Order", v: "guaranteed inside one partition, never across partitions" }
-  - { k: "Parallelism", v: "a group's consumers read different partitions at once", kind: plus }
-  - { k: "Replication", v: "with replication factor above 1, copies sit on other brokers", kind: plus }
-  - { k: "One machine", v: "a partition must fit on a single broker", kind: minus }
+  - { k: "Append-only log", v: "a new event is always added at the end of a partition and gets the next number, its offset" }
+  - { k: "Order", v: "readers see one partition's events in the order they were written; across partitions there is no order" }
+  - { k: "Parallel reading", v: "consumers in one group read different partitions at the same time, so more partitions allow more readers", kind: plus }
+  - { k: "Spread over brokers", v: "partitions of one topic sit on different brokers, so storage and traffic are shared", kind: plus }
+  - { k: "One machine", v: "each partition must fit on a single broker; it is never split further", kind: minus }
 trap:
-  wrong: "Kafka keeps the whole orders topic in order."
-  right: "Only each partition is in order. Events that must stay in order need the same key, so they land in one partition."
-sayIt: "A partition is an ordered, append-only log inside a topic. Order holds only within a partition. Partitions are spread over brokers, so they are the unit of parallel reads, of storage and of replication."
+  wrong: "Kafka keeps the whole payments topic in order."
+  right: "Only each partition is in order. Events that must stay in order, such as all events of one order, need the same key so they land in one partition."
+  why: "With a one-partition test topic, everything does come out in order, so the per-partition rule never shows up."
+sayIt: "A partition is an ordered, append-only log inside a topic. Order holds only within a partition. Partitions are spread over brokers, so they are the unit of parallel reading, of storage and of replication."
+cheat:
+  idea: "A partition is one ordered, append-only log of a topic. A topic with 3 partitions is 3 separate logs, usually led by 3 different brokers."
+  remember: "Order is kept only inside one partition, never across the topic."
+buildsOn: [topics]
+scenarios:
+  - q: "payments has 3 partitions. The Payment service writes PaymentCompleted for order-105 after PaymentCompleted for order-101, and the two events land in different partitions. Will a consumer always read order-101's event first?"
+    a: "No. The events are in different partitions, and Kafka keeps order only inside one partition. The consumer may read either partition first. Only events in the same partition, such as two events with the key order-101, keep their order."
+  - q: "One partition of payments is filling its broker's disk, while the other brokers have free space. Can Kafka split that partition across two brokers?"
+    a: "No. A partition is the smallest unit Kafka places, and it must fit on one broker. Plan enough partitions so the data spreads, shorten retention, or check whether one busy key is sending most events to that partition."
 confusedWith: [topic-vs-partition-vs-broker]
 tags: [partitions, ordering, parallelism]
 visual: flow
 sources:
-  - title: "Introduction: topics are partitioned (Apache Kafka 4.3)"
+  - title: "Introduction: topics are partitioned; order per partition (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/getting-started/introduction/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Implementation: Log, one directory per partition (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/implementation/log/"
     verifiedOn: "2026-10-20"
-  - title: "Basic Kafka Operations: partition count (Apache Kafka 4.3)"
+  - title: "Basic Kafka Operations: each partition fits on one server; partitions cap consumer parallelism (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+A partition is one ordered, append-only log that holds part of a topic. A topic with 3 partitions is really 3 separate logs: `payments-0`, `payments-1` and `payments-2`. Each new event goes into exactly one partition and is added at its end, where it gets the next number, called its [offset](card:offsets). Each partition is stored on brokers, with one broker as its leader.
 
 ## Why it exists
 
-One log on one machine caps how much a topic can store and how fast it can be read. Partitions let many brokers store a topic and many consumers read it at once.
+If a topic were one log on one broker, that broker's disk and network would cap how much the topic can store and how fast it can be read. Only one consumer of a group could read it at a time. Splitting the topic into partitions lets several brokers store it and several consumers read it in parallel, one partition each.
 
 ## How it works
 
 <Mermaid
-  alt="The Order Service writes to three partitions of the orders topic. orders-0 is on broker 1 with offsets 0 to 3, orders-1 on broker 2 with offsets 0 to 2, orders-2 on broker 3 with offsets 0 to 1. Each partition has its own order."
+  alt="The Payment service writes to three partitions of the payments topic. payments-0 is led by broker 1 and holds offsets 0 to 3, payments-1 is led by broker 2 and holds offsets 0 to 2, payments-2 is led by broker 3 and holds offsets 0 and 1. Each partition has its own order."
   chart={`flowchart LR
-  OS[Order Service] --> P0
-  OS --> P1
-  OS --> P2
+  PS[Payment service] --> P0
+  PS --> P1
+  PS --> P2
   subgraph B1[Broker 1]
-    P0["orders-0: 0, 1, 2, 3"]
+    P0["payments-0: 0, 1, 2, 3"]
   end
   subgraph B2[Broker 2]
-    P1["orders-1: 0, 1, 2"]
+    P1["payments-1: 0, 1, 2"]
   end
   subgraph B3[Broker 3]
-    P2["orders-2: 0, 1"]
+    P2["payments-2: 0, 1"]
   end`}
 />
 
-- Which partition a record goes to: [partition keys](card:partition-keys). Numbering inside each one: [offsets](card:offsets).
-- A [consumer group](card:consumer-groups) shares the partitions out; copies live on other brokers ([replication](card:replication)).
-- How many to create: [ordering vs scaling](card:ordering-and-scaling).
+1. The producer picks one partition for each event, usually from the event's key ([partition keys](card:partition-keys), next).
+2. The leader broker of that partition adds the event at the end of its log and gives it the next offset.
+3. Each partition grows on its own, so `payments-0` can be at offset 3 while `payments-2` is at 1.
+4. A consumer reads one partition from start to end in offset order. Several consumers of one group read different partitions at the same time.
+
+So the partition is the unit of order, of parallel reading and of storage.
+
+## Example
+
+The `payments` topic received six events, in this order: order-101 paid, order-102 paid, order-101 refunded, order-105 paid, order-102 refunded, order-105 refunded. Read them all back, printing where each one sits:
+
+```bash
+bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payments \
+  --from-beginning --max-messages 6 \
+  --formatter-property print.partition=true --formatter-property print.offset=true \
+  --formatter-property print.key=true
+```
+
+```text output
+Partition:0	Offset:0	order-102	PaymentCompleted
+Partition:0	Offset:1	order-102	RefundIssued
+Partition:2	Offset:0	order-105	PaymentCompleted
+Partition:2	Offset:1	order-105	RefundIssued
+Partition:1	Offset:0	order-101	PaymentCompleted
+Partition:1	Offset:1	order-101	RefundIssued
+```
+
+What to notice:
+
+- Inside each partition the order is kept: for every order, `PaymentCompleted` comes before `RefundIssued`.
+- Across partitions it is not: order-101 was written first but is read last. A second run printed partition 1 first; the order inside each partition stayed the same.
+- Each partition counts its own offsets from 0, so offset 0 exists three times.
+
+## Rules and defaults
+
+- **Order:** guaranteed per partition only.
+- **Parallelism cap:** inside one consumer group, each partition is read by one consumer, so the partition count limits how many consumers can work.
+- **Size:** one partition must fit on one broker's disk.
+- **On disk:** each partition is a folder named after the topic and partition number, such as `payments-0` ([log storage](card:log-storage)).
+- **Copies:** with a replication factor above 1, each partition has a leader and follower copies on other brokers ([replication](card:replication), later).
+
+## Not to be confused with
+
+A topic is the name of a stream; a partition is one ordered log of that topic; a broker is the server that stores partitions. Replication factor is also different: 3 partitions with replication factor 3 is still 3 partitions, each with 3 copies. Rule: partitions split the data; replicas copy it.
 
 ## Interview Qs
 
 ### What is a partition, and why split a topic?
 
-A partition is one ordered, append-only log of a topic. Splitting spreads storage and load over brokers and lets several consumers in a group read in parallel, one partition each.
+A partition is one ordered, append-only log of a topic. Splitting spreads storage and load over brokers, and lets several consumers in a group read in parallel, one partition each.
+
+### Does Kafka guarantee order across a topic?
+
+No, only within a partition. If several events must be processed in order, such as the events of one order, give them the same key so they go to the same partition. A topic with one partition is fully ordered but cannot be read in parallel.
 
 ### Where does a partition live on disk?
 
-As a folder named after the topic and partition number, such as orders-0, holding segment files. The leader and each follower replica keep their own copy on their broker.
+As a folder named after the topic and partition number, such as `payments-0`, holding segment files. The leader and each follower keep their own copy on their own broker.

@@ -5,37 +5,56 @@ title: "Kafka Code Templates"
 topic: ecosystem
 level: interview
 heat: 3
-hook: "Most Kafka coding asks need four skeletons: the yml, a KafkaTemplate producer, a @KafkaListener consumer and an error handler that parks failures in a dead letter topic."
+hook: "Most Kafka coding questions need four skeletons: application.yml, a KafkaTemplate producer, a @KafkaListener consumer and an error handler with a dead letter topic."
 points:
-  - { k: "Keyless send", v: "one order's events can spread over partitions: pass orderId", kind: minus }
-  - { k: "Error handler bean", v: "Boot attaches a CommonErrorHandler bean to the default factory", kind: plus }
-  - { k: "orders-dlt", v: "same partition as the failed record: give it as many partitions", kind: minus }
-  - { k: "--property", v: "deprecated since Kafka 4.2: --reader-property, --formatter-property", kind: default }
+  - { k: "Send with a key", v: "send(\"payments\", orderId, json): the key keeps one order's events in one partition, in order" }
+  - { k: "Keyless send", v: "without a key, one order's events can land on different partitions and be read out of order", kind: minus }
+  - { k: "Check the result", v: "send() is asynchronous; whenComplete logs the offset or the failure instead of losing it silently" }
+  - { k: "Error handler bean", v: "Spring Boot attaches a DefaultErrorHandler bean to the default listener factory by itself", kind: plus }
+  - { k: "payments-dlt", v: "a failed record goes to the same partition number, so give the DLT as many partitions", kind: minus }
+  - { k: "--property", v: "deprecated since Kafka 4.2: use --reader-property, --formatter-property or --command-property", kind: default }
 trap:
-  wrong: "@KafkaListener(topics = \"orders\") is all a consumer needs."
-  right: "It also needs a group id (group-id in the yml, groupId or id); without one the app fails to start."
-sayIt: "I set bootstrap-servers and group-id in application.yml, send with KafkaTemplate.send(topic, key, value) and check the result in whenComplete, consume with @KafkaListener, and add a DefaultErrorHandler bean that retries, then publishes to orders-dlt."
+  wrong: "@KafkaListener(topics = \"payments\") is all a consumer needs."
+  right: "It also needs a group id: spring.kafka.consumer.group-id in the yml, or groupId on the annotation. Without one the app fails to start."
+  why: "Short tutorials set the group id in a properties file they do not show, so the annotation looks complete on its own."
+sayIt: "I set bootstrap-servers and group-id in application.yml, send with KafkaTemplate.send(topic, key, value) and check the result in whenComplete, consume with @KafkaListener, and add a DefaultErrorHandler bean that retries, then publishes to the -dlt topic."
+cheat:
+  idea: "Four skeletons answer most Kafka coding asks: application.yml, a KafkaTemplate producer, a @KafkaListener consumer, and a DefaultErrorHandler bean with a dead letter topic."
+  code: |
+    kafka.send("payments", orderId, json);           // producer: always pass the key
+    @KafkaListener(topics = "payments")               // consumer: group id from the yml
+  remember: "No group id, no consumer: set spring.kafka.consumer.group-id or groupId."
+buildsOn: [spring-kafka, partition-keys]
+scenarios:
+  - q: "You write @KafkaListener(topics = \"payments\") and set no group id anywhere. What happens at start-up?"
+    a: "The app fails to start. A listener that subscribes to topics uses group management, which needs a group id. Set spring.kafka.consumer.group-id in the yml or groupId on the annotation."
+  - q: "The producer calls kafka.send(\"payments\", json) with no key. Notification sees PaymentRefunded before PaymentCompleted for the same order. Why?"
+    a: "Without a key the producer spreads records over partitions, so the two events of one order landed in different partitions, which are read independently. Sending with orderId as the key puts them in one partition, in order."
 confusedWith: []
 tags: [spring-kafka, coding-round, templates, console-tools]
 visual: code
 sources:
-  - title: "Apache Kafka support (Spring Boot 4.1 reference)"
+  - title: "Apache Kafka support (Spring Boot 4.1.1 reference)"
     url: "https://docs.spring.io/spring-boot/reference/messaging/kafka.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "@KafkaListener Annotation (Spring for Apache Kafka 4.1)"
     url: "https://docs.spring.io/spring-kafka/reference/kafka/receiving-messages/listener-annotation.html"
     verifiedOn: "2026-10-20"
-  - title: "Handling Exceptions (Spring for Apache Kafka 4.1)"
+  - title: "Handling Exceptions: dead letter topic partitions (Spring for Apache Kafka 4.1)"
     url: "https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Upgrading to 4.2.0: KIP-1147 tool options (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/getting-started/upgrade/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Kafka code templates are the small, fixed pieces of code you write when an interviewer says "integrate Kafka in a Spring Boot service". There are four: the `application.yml` settings, a producer that uses `KafkaTemplate`, a consumer method marked `@KafkaListener`, and an error-handler bean. The console tools that ship with Kafka let you test a topic without writing any code. Why each piece works is explained in [Spring for Apache Kafka](card:spring-kafka).
+
 ## Why it exists
 
-"How do you integrate Kafka?" usually means "write it on the board". A few fixed skeletons answer it; the theory sits in [Spring for Apache Kafka](card:spring-kafka).
+"How do you integrate Kafka?" usually means "write it on the board now". Candidates who know the theory still forget the group id, send without a key, or ignore what `send()` returns. A short, correct skeleton for each piece answers the question in two minutes and leaves time for the follow-ups: ordering, failures and duplicates.
 
 ## How it works
 
@@ -48,28 +67,35 @@ sources:
 | Read, process, write exactly once | [transactions](card:kafka-transactions) |
 | Save offsets before a rebalance | [rebalancing](card:rebalancing) |
 
-- Why the key matters: [partition keys](card:partition-keys).
+1. Add `spring-boot-starter-kafka` and set the broker address and group id in `application.yml`.
+2. Inject `KafkaTemplate` into the Payment service and send each event with `orderId` as the key.
+3. In the Notification service, put `@KafkaListener` on the method that handles one record.
+4. Declare a `DefaultErrorHandler` bean, so records that keep failing go to `payments-dlt` instead of blocking the partition.
+5. Test the topic from the command line with the console producer and consumer.
 
 ## Example
+
+The Payment service publishes `PaymentCompleted`, and the Notification service consumes it:
 
 ```yaml
 spring:
   kafka:
     bootstrap-servers: localhost:9092
     consumer:
-      group-id: billing
+      group-id: notification
       auto-offset-reset: earliest   # a new group starts from the oldest record
 ```
 
 ```java
 @Service
-class OrderProducer {
-    private static final Logger log = LoggerFactory.getLogger(OrderProducer.class);
+class PaymentEventProducer {
+    private static final Logger log = LoggerFactory.getLogger(PaymentEventProducer.class);
     private final KafkaTemplate<String, String> kafka;
-    OrderProducer(KafkaTemplate<String, String> kafka) { this.kafka = kafka; }
-    void send(String orderId, String json) {
-        kafka.send("orders", orderId, json).whenComplete((result, ex) -> {
-            if (ex != null) log.error("order {} not sent", orderId, ex);
+    PaymentEventProducer(KafkaTemplate<String, String> kafka) { this.kafka = kafka; }
+
+    void publish(String orderId, String paymentJson) {
+        kafka.send("payments", orderId, paymentJson).whenComplete((result, ex) -> {
+            if (ex != null) log.error("payment event for {} not sent", orderId, ex);
             else log.info("order {} at offset {}", orderId, result.getRecordMetadata().offset());
         });
     }
@@ -78,13 +104,13 @@ class OrderProducer {
 
 ```java
 @Component
-class OrderConsumer {
-    private static final Logger log = LoggerFactory.getLogger(OrderConsumer.class);
+class NotificationConsumer {
+    private static final Logger log = LoggerFactory.getLogger(NotificationConsumer.class);
 
-    @KafkaListener(topics = "orders", concurrency = "3")   // group billing, from the yml
-    void onOrder(ConsumerRecord<String, String> rec) {
-        if (rec.value().isBlank()) throw new IllegalArgumentException("empty order");
-        log.info("billing order {} from partition {}", rec.key(), rec.partition());
+    @KafkaListener(topics = "payments")   // group id comes from application.yml
+    void onPayment(ConsumerRecord<String, String> rec) {
+        if (rec.value().isBlank()) throw new IllegalArgumentException("empty payment event");
+        log.info("receipt for order {} from partition {}", rec.key(), rec.partition());
     }
 }
 ```
@@ -92,7 +118,7 @@ class OrderConsumer {
 ```java
 @Configuration
 class KafkaErrorConfig {
-    @Bean   // a failed record: 3 tries 1 s apart, then orders-dlt
+    @Bean   // a failed record: 3 tries 1 s apart, then payments-dlt
     DefaultErrorHandler errorHandler(KafkaTemplate<String, String> template) {
         var toDlt = new DeadLetterPublishingRecoverer(template);
         return new DefaultErrorHandler(toDlt, new FixedBackOff(1000L, 2L));
@@ -101,32 +127,46 @@ class KafkaErrorConfig {
 ```
 
 ```bash
-kafka-topics.sh --bootstrap-server localhost:9092 --create --topic orders --partitions 3
+kafka-topics.sh --bootstrap-server localhost:9092 --create --topic payments --partitions 3
 
-echo "o-101:OrderPlaced" | kafka-console-producer.sh --bootstrap-server localhost:9092 \
-  --topic orders --reader-property parse.key=true --reader-property key.separator=:
+echo "o-101:PaymentCompleted" | kafka-console-producer.sh --bootstrap-server localhost:9092 \
+  --topic payments --reader-property parse.key=true --reader-property key.separator=:
 
-kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic orders \
+kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic payments \
   --from-beginning --max-messages 1 --formatter-property print.key=true \
   --command-property group.protocol=consumer
 ```
 
 ```text output
-Created topic orders.
-o-101	OrderPlaced
+Created topic payments.
+o-101	PaymentCompleted
 Processed a total of 1 messages
 ```
+
+What to notice:
+
+- `send("payments", orderId, paymentJson)` passes the key; drop `orderId` and one order's events can be read out of order. `whenComplete` runs when the broker answers, so a failed send is logged, not lost silently.
+- The listener throws on a blank event. The error handler then delivers it 3 times, 1 second apart (`FixedBackOff(1000L, 2L)` means 2 retries), and publishes it to `payments-dlt`.
+- `parse.key=true` with `key.separator=:` makes the console producer split `o-101:PaymentCompleted` into key and value; `print.key=true` prints both, separated by a tab.
+- `group.protocol=consumer` uses the newer consumer group protocol; without it, the Kafka 4.3 console consumer prints a hint suggesting it.
+
+## Rules and defaults
+
+- **Group id is required:** a `@KafkaListener` on topics needs `spring.kafka.consumer.group-id`, `groupId` or `id`; otherwise start-up fails.
+- **Error handler wiring:** Spring Boot attaches a `CommonErrorHandler` bean, such as `DefaultErrorHandler`, to the default listener container factory. You do not call a setter.
+- **DLT partitions:** by default the recoverer writes to the same partition number in `payments-dlt`, so the DLT needs at least as many partitions as `payments`.
+- **Console tool options:** since Kafka 4.2, `--property` is deprecated; use `--reader-property` (producer), `--formatter-property` (consumer) or `--command-property`.
 
 ## Interview Qs
 
 ### How do you integrate Kafka in a Spring Boot service?
 
-Add spring-boot-starter-kafka and set bootstrap-servers and group-id. Inject KafkaTemplate and call send(topic, key, value); put @KafkaListener(topics = ...) on a method. Boot creates the producer factory, the template and the listener containers.
+Add `spring-boot-starter-kafka` and set `bootstrap-servers` and `group-id`. Inject `KafkaTemplate` and call `send(topic, key, value)`; put `@KafkaListener(topics = ...)` on a method. Boot creates the producer factory, the template and the listener containers.
 
 ### How do you send failed records to a dead letter topic?
 
-Declare a DefaultErrorHandler bean with a DeadLetterPublishingRecoverer and a back-off; Boot attaches it to the listener factory. After the retries the record goes to orders-dlt, with the exception in its headers.
+Declare a `DefaultErrorHandler` bean with a `DeadLetterPublishingRecoverer` and a back-off; Boot attaches it to the listener factory. After the retries the record goes to `payments-dlt`, with the exception and the original topic, partition and offset in its headers.
 
 ### How do you test a topic without writing code?
 
-kafka-console-producer.sh sends each input line as a record, and kafka-console-consumer.sh with --from-beginning prints the records already in the topic.
+`kafka-console-producer.sh` sends each input line as a record, and `kafka-console-consumer.sh` with `--from-beginning` prints the records already in the topic. Use `parse.key` and `print.key` to send and see keys.

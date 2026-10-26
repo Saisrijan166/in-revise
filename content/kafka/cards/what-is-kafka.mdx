@@ -5,24 +5,35 @@ title: "What Kafka Is: An Event Streaming Platform"
 topic: basics
 level: beginner
 heat: 3
-hook: "Kafka is a distributed, replicated log: producers append events once, and any number of services read them, now or later."
+hook: "Kafka is a shared, durable list of events: one service writes an event once, and any number of other services read it, now or later."
 points:
-  - { k: "Publish and subscribe", v: "producers write events to topics; consumers read them" }
-  - { k: "Store", v: "events stay for the topic's retention time, even after they are read" }
-  - { k: "Process", v: "transform streams as they arrive, for example with Kafka Streams" }
-  - { k: "Decoupled", v: "producers never wait for consumers and do not know them", kind: plus }
-  - { k: "Fan-out and replay", v: "every consumer group gets every event; rewind to read again", kind: plus }
+  - { k: "Event", v: "a record that something happened, such as PaymentCompleted for order-101; also called a record or a message" }
+  - { k: "Producer and consumer", v: "a producer is a program that writes events; a consumer is a program that reads them" }
+  - { k: "Topic", v: "a named stream of one kind of event, such as payments; producers write to it and consumers read from it" }
+  - { k: "Reading does not delete", v: "an event stays for the topic's retention time, so many services can read it, and read it again", kind: plus }
+  - { k: "Decoupled", v: "the producer never waits for consumers and does not know who they are; a new consumer needs no producer change", kind: plus }
 trap:
-  wrong: "The Order Service must know every service that needs its orders."
-  right: "It only writes to the orders topic. A new service reads with its own consumer group; the producer does not change."
-sayIt: "Kafka is a distributed event streaming platform. Producers append events to partitioned, replicated topics; consumers pull them at their own pace, and events stay for the retention time, so they can be replayed."
-confusedWith: [kafka-vs-message-queue, kafka-vs-rest]
+  wrong: "The Payment service must call every service that needs to know about a payment."
+  right: "It writes PaymentCompleted once to the payments topic. Each service that cares reads the topic on its own; adding a reader changes nothing in the producer."
+  why: "Most backend work starts with direct HTTP calls, so 'tell the other service' sounds like 'call the other service'."
+sayIt: "Kafka is a distributed event streaming platform. Producers append events to topics, which are split into partitions and stored on brokers; consumers pull them at their own pace. Events stay for the retention time, so many services can read and replay them."
+cheat:
+  idea: "Kafka stores events, records that something happened, in named topics. A producer writes each event once; any number of consumers read it."
+  flow: "Producer → topic (stored on brokers) → each consumer reads"
+  remember: "Reading does not delete an event: it stays for the retention time, so any service can read it, or read it again."
+buildsOn: []
+scenarios:
+  - q: "A new Fraud service needs every PaymentCompleted event. What must change in the Payment service?"
+    a: "Nothing. The Payment service only writes to the payments topic. The Fraud service starts reading the topic on its own, and Kafka gives it every event that is still kept, without disturbing the other readers."
+  - q: "The Notification service is down for ten minutes while payments keep coming in. What happens to those events?"
+    a: "They wait in the payments topic, because reading is not required for them to be stored. When the service comes back it continues from where it stopped, as long as the events are still within the retention time."
+confusedWith: [kafka-vs-message-queue]
 tags: [kafka, event-streaming, pub-sub]
 visual: flow
 sources:
-  - title: "Introduction (Apache Kafka 4.3 docs)"
+  - title: "Introduction: events, producers, consumers, topics (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/getting-started/introduction/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Design: consumers pull and can rewind (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/design/design/"
     verifiedOn: "2026-10-20"
@@ -34,46 +45,68 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Apache Kafka is a system that stores events and lets services share them. An event is a small record that something happened, such as "payment for order-101 completed, ₹500". A producer is a program that writes events; a consumer is a program that reads them. Kafka keeps events in topics, named streams such as `payments`, on servers called brokers. Inside a topic, events sit in append-only logs: lists where new events are only added at the end.
+
 ## Why it exists
 
-If the Order Service calls payments, stock, email and analytics one by one, a slow or failed service holds up checkout. Kafka sits in between and keeps the events.
+Without Kafka, the Payment service would call the Notification service, the Analytics service and every future reader over HTTP, one by one. A slow or crashed reader then slows or breaks payments, and each new reader means changing the Payment service. With Kafka, the Payment service writes one event and moves on. Each reader takes it when it is ready, and a new reader just starts reading.
 
 ## How it works
 
 <Mermaid
-  alt="The Order Service publishes OrderPlaced events to the orders topic. Four consumer groups read the same topic independently: payment-service, inventory-service, notification-service and analytics."
+  alt="The Payment service writes a PaymentCompleted event to the payments topic, which Kafka stores on its brokers. The Notification service and the Analytics service each read the same event from the topic on their own."
   chart={`flowchart LR
-  O[Order Service] -- OrderPlaced --> T[(orders topic)]
-  T --> P[payment-service]
-  T --> I[inventory-service]
-  T --> N[notification-service]
-  T --> A[analytics]`}
+  P[Payment service] -- "1. PaymentCompleted" --> T[(payments topic on Kafka brokers)]
+  T -- "3. reads" --> N[Notification service]
+  T -- "3. reads" --> A[Analytics service]`}
 />
 
-- Each service reads as its own [consumer group](card:consumer-groups), so all four get every event.
-- A topic is split into [partitions](card:partitions) spread over brokers, so reads and writes scale out.
+1. The Payment service, a producer, sends a `PaymentCompleted` event to the `payments` topic.
+2. A Kafka broker adds the event to the end of the topic's log and saves it to disk.
+3. The Notification service and the Analytics service, two consumers, each ask Kafka for new events and get this one. Each reads at its own speed and remembers its own place.
+4. The event stays in the topic after they read it, until the topic's retention time ends (see [log storage](card:log-storage)). A service that starts tomorrow can still read it.
+
+So Kafka sits between services as a shared, durable history of events. A topic is also split into parts called [partitions](card:partitions), so it can spread over many brokers; you will see that in the storage topic.
 
 ## Example
 
-An event has a key, a value, a timestamp and optional headers. OrderPlaced, keyed by orderId:
+This is what one `PaymentCompleted` event looks like inside Kafka:
 
 ```text
-key:       ord-1042
-value:     {"type":"OrderPlaced","orderId":"ord-1042","amount":500,"currency":"INR"}
+key:       order-101
+value:     {"type":"PaymentCompleted","orderId":"order-101","amount":500,"currency":"INR"}
 timestamp: 2026-10-20T10:15:00Z
-headers:   source=order-service
+headers:   source=payment-service
 ```
+
+What to notice:
+
+- The value carries the facts: what happened and the data a reader needs. Kafka stores it as bytes and does not look inside.
+- The key, here the order id, groups related events. All events with the same key go to the same partition and keep their order ([partition keys](card:partition-keys)).
+- The event is written in the past tense. It records a fact that already happened; it is not a command to another service.
+
+## Rules and defaults
+
+- **Readers pull:** consumers ask Kafka for new events; Kafka does not push them ([consumers](card:consumer-basics)).
+- **No reply:** a producer gets a confirmation from Kafka that the event was stored, never an answer from the readers.
+- **Five Java APIs:** Producer, Consumer, Admin, Streams and Connect (Kafka 4.3).
+
+## Not to be confused with
+
+A traditional message queue, such as RabbitMQ, hands each message to one consumer and deletes it once that consumer confirms it. Kafka keeps every event for the retention time, and every reading service gets all of them. Rule: a queue hands out work once; Kafka keeps a history that many can read. The full comparison is in [Kafka vs alternatives](card:kafka-vs-alternatives).
 
 ## Interview Qs
 
 ### What is Kafka?
 
-A distributed event streaming platform. Apps publish and subscribe to streams of events; Kafka stores them durably in partitioned, replicated topics, and they can be processed as they arrive or later.
+A distributed event streaming platform. Producers publish events to topics; Kafka stores them durably, split into partitions and copied across brokers; consumers read them at their own pace, now or later. It is used to move events between services and to process streams of events as they arrive.
 
 ### Why put Kafka between services instead of calling each one?
 
-The producer writes once and moves on. Each service reads when ready, a slow one does not slow checkout, new ones join without code changes, and events can be replayed. See [Kafka vs REST](compare:kafka-vs-rest).
+The producer writes once and does not wait. A slow or crashed reader does not slow the producer, because events wait in the topic. New readers join without any producer change, and events can be read again after a bug fix.
 
 ### What is Kafka used for?
 
-Messaging between services, website activity tracking, metrics, log aggregation, stream processing pipelines, event sourcing, and a commit log that keeps copies of data in sync.
+Messaging between services, website activity tracking, metrics, log aggregation, stream processing pipelines, event sourcing, and a commit log that keeps copies of data in sync. These are the main uses listed in the Kafka docs.

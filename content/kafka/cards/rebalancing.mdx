@@ -5,79 +5,133 @@ title: Rebalancing and Group Protocols
 topic: consumers
 level: intermediate
 heat: 3
-hook: "A rebalance moves partitions when members or partitions change; eager pauses the whole group, cooperative only the moved partitions."
+hook: "A rebalance re-divides a group's partitions when a member joins, leaves, dies or stalls; moved partitions pause until their new owner starts."
 points:
-  - { k: "Triggers", v: "join, leave, crash, a missed poll deadline, new partitions" }
-  - { k: "Cost", v: "processing pauses; uncommitted work is redone", kind: minus }
-  - { k: "Static membership", v: "group.instance.id: a quick restart keeps its partitions", kind: plus }
-  - { k: "Consumer protocol", v: "group.protocol=consumer (KIP-848): the broker assigns, step by step" }
-  - { k: "Client default", v: "group.protocol=classic in Kafka 4.3; consumer is opt-in", kind: default }
+  - { k: "Triggers", v: "a consumer joins, leaves, stops sending heartbeats, misses the poll deadline, or the topic gains partitions" }
+  - { k: "Cost", v: "moved partitions pause, and work done since the last commit is processed again", kind: minus }
+  - { k: "Commit on revoke", v: "commit in onPartitionsRevoked so the next owner starts exactly after your finished work", kind: plus }
+  - { k: "Static membership", v: "with group.instance.id, a consumer that restarts quickly keeps its partitions, with no rebalance", kind: plus }
+  - { k: "Protocol (Kafka 4.3)", v: "clients use the classic protocol by default; group.protocol=consumer (KIP-848) is opt-in", kind: default }
 trap:
   wrong: "A rebalance happens only when a consumer crashes."
-  right: "Also on a join, a clean leave, a missed max.poll.interval.ms or new partitions. A slow handler alone can cause one."
-sayIt: "When members join, leave, die or stall, the coordinator moves partitions. I use cooperative sticky assignment or the consumer protocol, static membership for restarts, and commit on revoke to limit duplicates."
-confusedWith: []
+  right: "It also happens when a consumer joins, leaves cleanly, misses max.poll.interval.ms, or the topic gets new partitions. A slow handler alone can cause one."
+  why: "Rebalancing is usually taught as failure handling, so people miss that scaling up, every deployment and a slow batch trigger it too."
+sayIt: "A rebalance re-divides partitions when group membership changes. To limit the pain I use cooperative rebalancing or the consumer protocol, so only moved partitions pause; static membership for restarts; and a commit in onPartitionsRevoked to limit duplicates."
+cheat:
+  idea: "A rebalance re-divides a group's partitions when members join, leave, die or stop polling in time. Moved partitions pause and restart at the committed offset."
+  remember: "Commit in onPartitionsRevoked, use cooperative or consumer protocol, and set group.instance.id for rolling restarts."
+buildsOn: [consumer-groups, offset-commits]
+scenarios:
+  - q: "A rolling deployment restarts three Notification instances one by one, and the group rebalances six times. How do you avoid that?"
+    a: "Give each instance a fixed group.instance.id (static membership). A restarted member that comes back before the session timeout keeps its partitions, so no rebalance happens. Cooperative rebalancing also helps, because only moved partitions pause."
+  - q: "One batch takes 7 minutes to process, with default settings. What happens?"
+    a: "The consumer misses max.poll.interval.ms (5 minutes), so it leaves the group and a rebalance gives its partitions to others. Its later commit fails, so the new owner processes the batch again. Lower max.poll.records or speed up the handler."
+confusedWith: [eager-vs-cooperative-rebalancing]
 tags: [rebalance, cooperative, static-membership, kip-848]
-visual: table
+visual: flow
 sources:
   - title: "ConsumerRebalanceListener (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/ConsumerRebalanceListener.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Consumer Rebalance Protocol (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/operations/consumer-rebalance-protocol/"
-    verifiedOn: "2026-10-20"
-  - title: "Consumer and Share Consumer Configs (Apache Kafka 4.3)"
+    verifiedOn: "2026-10-22"
+  - title: "Consumer and Share Consumer Configs: group.protocol, session.timeout.ms, partition.assignment.strategy (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/consumer-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Broker Configs: group.consumer.session.timeout.ms, group.consumer.heartbeat.interval.ms (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/broker-configs/"
+    verifiedOn: "2026-10-22"
   - title: "Design: static membership (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-22"
+  - title: "KIP-345: Introduce static membership protocol to reduce consumer rebalances"
+    url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-345%3A+Introduce+static+membership+protocol+to+reduce+consumer+rebalances"
     verifiedOn: "2026-10-20"
   - title: "KIP-429: Kafka Consumer Incremental Rebalance Protocol"
     url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-429%3A+Kafka+Consumer+Incremental+Rebalance+Protocol"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A rebalance is the moment a [consumer group](card:consumer-groups) re-decides which member owns which partition. It happens when the members change, or when the subscribed topic changes. Partitions that move to a new owner pause, and the new owner starts each one at the group's [committed offset](card:offset-commits). How the group runs a rebalance is set by its group protocol: the older classic protocol, or the newer consumer protocol.
+
 ## Why it exists
 
-Group members come and go, and each partition must always have exactly one owner. Someone has to hand out partitions again, without stopping the whole group for long.
+Every partition must always have exactly one owner in the group. If a Notification instance crashes, its partitions would never be read again unless someone hands them to a survivor. If you start a fourth instance, it would sit idle unless partitions are moved to it. Rebalancing does both. The price is a pause on the moved partitions and repeated work for records processed after the last commit.
 
 ## How it works
 
-<Compare id="eager-vs-cooperative-rebalancing" />
+<Mermaid
+  alt="Before: N1 owns P0 and P1, N2 owns P2 and P3. N3 joins. After the rebalance: N1 owns P0, N2 owns P1 and P2, N3 owns P3."
+  chart={`flowchart LR
+  subgraph Before
+    B1["N1: P0, P1"]
+    B2["N2: P2, P3"]
+  end
+  subgraph After["After N3 joins"]
+    A1["N1: P0"]
+    A2["N2: P1, P2"]
+    A3["N3: P3"]
+  end
+  Before --> After`}
+/>
 
-- Kafka 4.0 brokers run the consumer protocol (KIP-848): no global sync barrier; the broker assigns partitions.
-- With it, heartbeat, session timeout and assignor are broker settings; client assignor configs no longer apply.
-- Commit in onPartitionsRevoked, so the next owner starts at the right offset.
+1. Something changes: here, a third Notification instance, N3, joins. A crash, a clean shutdown or a missed poll deadline would start the same process.
+2. The group coordinator tells the members that the assignment must change.
+3. Partitions that will move are taken away. The client calls your `onPartitionsRevoked()` first, so you can commit the work you have finished.
+4. A new split is computed, by an assignor running in the clients (classic protocol) or by the broker (consumer protocol).
+5. Each new owner gets `onPartitionsAssigned()` and starts reading at the committed offset.
+
+In the old eager style, every member gives up all its partitions in step 3, so the whole group stops. In cooperative style, and in the consumer protocol, only the partitions that move are paused.
 
 ## Example
 
+The Notification service saves its progress just before a partition is taken away:
+
 ```java
 consumer.subscribe(List.of("payments"), new ConsumerRebalanceListener() {
-    public void onPartitionsRevoked(Collection<TopicPartition> parts) {
-        consumer.commitSync(processedOffsets);   // save progress before handing over
+    @Override
+    public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+        consumer.commitSync(processed);   // save progress before handing over
     }
-    public void onPartitionsAssigned(Collection<TopicPartition> parts) { }
+    @Override
+    public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+        System.out.println("Now reading " + partitions);
+    }
 });
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Session timeout (classic) | 45 s, session.timeout.ms | Kafka 4.3 consumer |
-| Heartbeat interval (classic) | 3 s, heartbeat.interval.ms | Kafka 4.3 consumer |
-| Assignors (classic) | RangeAssignor (used, eager), CooperativeStickyAssignor | Kafka 4.3 consumer |
+- `processed` is a map your loop keeps up to date: partition → offset of the last finished record + 1.
+- Both callbacks run inside your own `poll()` call, on the polling thread, so using `consumer` there is safe.
+- Without the commit on revoke, the next owner starts at the last periodic commit and repeats everything after it.
+- If partitions are lost instead, for example after a session timeout, Kafka calls `onPartitionsLost()`. Committing there would fail, because another member may already own them.
+
+## Rules and defaults
+
+- **Default protocol:** the Java client uses `group.protocol=classic` in Kafka 4.3. The consumer protocol (KIP-848) reached general availability in Kafka 4.0; it is enabled on the broker by default, but a Java client still opts in with `group.protocol=consumer`. It is expected to become the client default in a later release.
+- **Heartbeats (classic, Kafka 4.3):** the client sends a small "still alive" message, a heartbeat, every 3 s (`heartbeat.interval.ms`) from a background thread. If none arrives for `session.timeout.ms` (45 s), the member is removed.
+- **Classic assignors:** `partition.assignment.strategy` defaults to `RangeAssignor, CooperativeStickyAssignor`, so the group starts with the eager Range assignor. To switch to cooperative, list only `CooperativeStickyAssignor`, using a rolling restart.
+- **Consumer protocol settings:** the session timeout, heartbeat interval and assignor move to the broker (`group.consumer.session.timeout.ms` 45 s, `group.consumer.heartbeat.interval.ms` 5 s). The client settings for them are not supported.
+- **Static membership:** set a unique `group.instance.id` per instance. A second consumer with the same id is fenced with `FencedInstanceIdException`.
+
+## Not to be confused with
+
+Eager rebalancing takes every partition from every member, then hands them all out again. Cooperative rebalancing (Kafka 2.4, KIP-429) takes away only the partitions that change owner, in two rounds, so the rest keep working. Rule: eager = stop everyone; cooperative = move only what must move.
 
 ## Interview Qs
 
 ### What triggers a rebalance?
 
-A consumer joins or leaves, misses heartbeats for the session timeout, or does not call poll() within max.poll.interval.ms. Adding partitions, or a new topic matching a subscribed pattern, also triggers one.
+A consumer joins or leaves the group, stops sending heartbeats for the session timeout, or does not call poll() within max.poll.interval.ms. A change to the subscribed topics also triggers one, such as added partitions or a new topic that matches a subscribed pattern.
 
 ### How do you reduce rebalance pain?
 
-Use CooperativeStickyAssignor or group.protocol=consumer so only moved partitions pause. Set group.instance.id for rolling restarts. Keep each batch short, and commit in onPartitionsRevoked.
+Use CooperativeStickyAssignor or group.protocol=consumer, so only moved partitions pause. Set group.instance.id so rolling restarts do not rebalance. Keep each batch short, so the poll deadline is never missed. Commit in onPartitionsRevoked, so the next owner repeats as little as possible.
 
 ### What is static membership?
 
-A consumer with group.instance.id keeps its identity across restarts. If it returns within the session timeout, it gets its partitions back with no rebalance (KIP-345, since Kafka 2.3).
+A consumer with a group.instance.id keeps the same identity across restarts. If it comes back before the session timeout, it gets its old partitions back without a rebalance. It was added in Kafka 2.3 (KIP-345) to make rolling deployments cheap.

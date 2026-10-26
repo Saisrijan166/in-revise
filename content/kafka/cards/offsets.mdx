@@ -5,17 +5,28 @@ title: Offsets
 topic: storage
 level: beginner
 heat: 3
-hook: "An offset is a record's number inside one partition; orders-0 and orders-1 can both have an offset 5."
+hook: "An offset is an event's number inside one partition. A consumer group's progress is just one saved offset per partition: where to read next."
 points:
-  - { k: "Per partition", v: "a 64-bit number that grows with each record in that partition" }
-  - { k: "Never changes", v: "a record keeps its offset; compaction does not renumber" }
-  - { k: "Gaps are normal", v: "compacted records and hidden transaction markers leave gaps", kind: minus }
-  - { k: "Position", v: "the next offset a consumer will get: last seen + 1" }
-  - { k: "High watermark", v: "consumers get only records copied to every in-sync replica" }
+  - { k: "Per partition", v: "an offset numbers events inside one partition only; payments-0 and payments-1 can both have an offset 5" }
+  - { k: "Never changes", v: "an event keeps its offset for life; removing old events never renumbers the rest" }
+  - { k: "Gaps are normal", v: "compacted events and the markers written by transactions leave gaps: offset 5 may be followed by 7", kind: minus }
+  - { k: "Committed offset", v: "the group's saved progress for a partition: the offset it will read next after a restart" }
+  - { k: "Lag", v: "log-end offset minus committed offset: how many events the group has not processed yet" }
 trap:
-  wrong: "The offset is the event's id, so use it to find duplicates."
-  right: "An offset is unique only per partition, and a re-sent event gets a new offset. Deduplicate on a business id such as eventId."
-sayIt: "An offset is the position of a record inside one partition, so it is unique only with the topic and partition. A consumer's progress is the next offset to read. For identity I use a business id like orderId."
+  wrong: "The offset is the event's id, so use it to find duplicate payments."
+  right: "An offset is unique only inside one partition, and a payment event sent twice gets two offsets. Detect duplicates with a business id such as eventId."
+  why: "Offsets look like the auto-increment ids of a database table, and inside one partition each offset does point to exactly one event."
+sayIt: "An offset is the position of an event inside one partition, so it is unique only with the topic and partition. A consumer group's progress is the committed offset per partition: the next one to read. For identity I use a business id like eventId."
+cheat:
+  idea: "An offset is an event's position number inside one partition, starting at 0. A consumer group saves one offset per partition as its progress."
+  flow: "log-start → committed → log-end; lag = log-end minus committed"
+  remember: "An offset is not an event id: it is unique only per partition. Spot duplicates with eventId."
+buildsOn: [partitions]
+scenarios:
+  - q: "The Analytics group's committed offset for payments-0 is 5. It crashes and restarts. Which event does it read first in that partition?"
+    a: "The event at offset 5. The committed offset is the next one to read, not the last one read. If offset 5 no longer exists, for example because compaction removed it, it gets the next higher offset."
+  - q: "A network error makes the Payment service send the same PaymentCompleted event twice, and both copies are stored. Can the Notification service spot the duplicate by offset?"
+    a: "No. The two copies are two separate events, so they get two different offsets. The service must compare a business id carried in the event, such as eventId, to see that it already handled it."
 confusedWith: []
 tags: [offsets, consumer-position, high-watermark]
 visual: table
@@ -26,38 +37,79 @@ sources:
   - title: "Design: replication and log compaction (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/design/design/"
     verifiedOn: "2026-10-20"
-  - title: "Monitoring: LogStartOffset and LogEndOffset metrics (Apache Kafka 4.3)"
-    url: "https://kafka.apache.org/43/operations/monitoring/"
-    verifiedOn: "2026-10-20"
+  - title: "Basic Kafka Operations: checking consumer position (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Interview Questions (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An offset is the position number of an event inside one [partition](card:partitions). The first event in a partition gets offset 0, the next gets 1, and so on; each partition counts on its own. Consumers use offsets to track progress: a consumer group saves, for each partition, the offset of the next event it should read. That saved number is called the committed offset.
+
 ## Why it exists
 
-A consumer must know where it stopped. Kafka numbers each record within its partition, so progress is just one number per partition, not one acknowledgement per record.
+A consumer must know where it stopped, or after a restart it would read everything again or skip events. A queue tracks each message separately and removes it when done. Kafka keeps the events and numbers them in order, so a group's whole progress in a partition is one number. Different groups keep different numbers for the same partition and never disturb each other.
 
 ## How it works
 
-| Marker in orders-0 | Means | Example |
+| Marker in payments-0 | Means | Example |
 | --- | --- | --- |
-| Log-start offset | First record still kept | 0 |
-| Committed offset | Where the group restarts after a crash | 3 |
-| Position | Next record poll() returns | 5 |
-| High watermark | End of fully replicated records; reads stop here | 7 |
-| Log-end offset | Where the next write lands | 8 |
+| Log-start offset | The oldest event still kept | 0 |
+| Committed offset | Saved progress: where the group restarts | 3 |
+| Position | The next event this running consumer will get | 5 |
+| High watermark | Events below it are copied to every up-to-date copy of the partition; consumers read only below it | 7 |
+| Log-end offset | Where the next new event will be written | 8 |
 
-- Saving the position: [offset commits](card:offset-commits); log-end minus committed is [consumer lag](card:consumer-lag).
-- Moving the position back: [replay](card:replay).
-- read_committed consumers stop earlier, before open [transactions](card:kafka-transactions).
+1. The producer writes an event; the leader stores it at the log-end offset, and the log-end moves up by one.
+2. Once the copies on other brokers have it, the high watermark moves past it, and consumers may read it.
+3. A consumer reads from its position, and the position moves forward as it receives events.
+4. After processing, the consumer commits: it saves its position as the group's committed offset ([offset commits](card:offset-commits), later).
+5. After a crash, the group restarts from the committed offset, not from where it actually stopped.
+
+So the gap between committed offset and log-end offset is the work still to do, called [consumer lag](card:consumer-lag).
+
+## Example
+
+The Analytics group has read six payment events. Two more events then arrive, one in partition 0 and one in partition 2. Ask Kafka for the group's offsets:
+
+```bash
+bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group analytics
+```
+
+```text output
+GROUP           TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG             CONSUMER-ID     HOST            CLIENT-ID
+analytics       payments        0          2               3               1               -               -               -
+analytics       payments        1          2               2               0               -               -               -
+analytics       payments        2          2               3               1               -               -               -
+```
+
+What to notice:
+
+- `CURRENT-OFFSET` is the committed offset: in partition 0 the group has processed offsets 0 and 1 and will read offset 2 next.
+- `LAG` is `LOG-END-OFFSET` minus `CURRENT-OFFSET`: one unread event in partitions 0 and 2, none in partition 1.
+- Every partition shows offset 2 as the next to read: each partition counts on its own.
+- `CONSUMER-ID` is `-` because no Analytics consumer is running now. The offsets stay saved anyway.
+
+## Rules and defaults
+
+- **Identity:** topic + partition + offset together point to exactly one event.
+- **Offsets only grow:** a new event always gets a higher offset than the one before it.
+- **Missing offset:** if a consumer asks for an offset that was removed, it gets the next higher one that exists.
+- **Transactions:** a consumer set to `read_committed` stops even earlier, before any open [transaction](card:kafka-transactions) (later).
 
 ## Interview Qs
 
 ### Is an offset unique across a topic?
 
-No. Every partition counts from its own start, so offset 5 exists in orders-0 and orders-1. Topic, partition and offset together identify one record.
+No. Every partition counts from its own start, so offset 5 exists in payments-0 and in payments-1. Topic, partition and offset together identify one event. For business identity, use an id carried in the event, such as eventId.
+
+### What is the difference between the committed offset and the position?
+
+The position is where a running consumer is now: the next offset it will receive. The committed offset is the progress saved for the group. They differ until the consumer commits; after a crash, the group restarts from the committed offset, so events in between are read again.
 
 ### A consumer is at position 5. What has it read?
 
-Records 0 to 4 of that partition; it gets 5 next. If 5 was compacted away or is a transaction marker, it gets the next higher offset instead.
+Offsets 0 to 4 of that partition, and it gets offset 5 next. If offset 5 was compacted away or is a transaction marker, it gets the next higher offset instead.

@@ -1,5 +1,5 @@
 # Coverage: Kafka
-Reference: reference/kafka.md  ·  Last updated: 20-10-2026
+Reference: reference/kafka.md  ·  Last updated: 21-10-2026
 
 Every reference item (key list: the numbered sections, plus each question, pattern and "X vs Y" row inside them) appears in exactly
 one of Mapped, Corrected or Dropped. A section whose parts went to different places has one row here (Corrected wins over
@@ -269,3 +269,173 @@ Independently verified on 20-10-2026.
 | Reference item | Reason |
 |---|---|
 | (none) | |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass checked about 720 claims and fixed 4, removing none.
+
+### Unit basics
+
+**Added from the reference**
+
+- K0 / K2 mental model (producer → topic → partition → broker → consumer) → what-is-kafka How it works steps; topics Mermaid.
+- K1 terminology (event / record / message; producer; consumer) → what-is-kafka What it is and points; glossary `kafka-event` (new).
+- K3 "producer does not need to call every service" → what-is-kafka Why, trap, scenario 1.
+- K4.Q1 / K4.Q2 (many producers, many consumers) → topics point + Interview Q 1 + scenario 2.
+- K5 "how to guarantee order" → partitions trap and Interview Q 2 (new Q).
+- K6 "same key → same partition, provided the mapping stays compatible" → partition-keys scenario 1 (3 → 4 partitions moves order-101 from partition 1 to 2; computed with kafka-clients 4.3.1 murmur2).
+- K7 "P0 offset 5 and P1 offset 5 both exist" → offsets point 1 and Interview Q 1.
+- K20 retention flow (read → still exists → retention reached → segment deleted) → log-storage Mermaid + steps, trap.
+- K21 replay uses (bug recovery, new consumers) → replay Why, scenario 2, Interview Qs.
+- K32 key difference (retained vs removed) → kafka-vs-message-queue explain/example; what-is-kafka "Not to be confused with".
+- K33-K35 (REST, database, Redis) → kafka-vs-alternatives decision steps and Example table; explain/example/sayIt in each comparison.
+- K48 ZooKeeper vs KRaft → kraft What/Why/How steps; comparison explain/example.
+- K52 broker configs (num.partitions, default.replication.factor, listeners, retention, segments) → topics Rules, kafka-architecture Rules, log-storage Rules.
+- K53 log segments (deletion at segment granularity) → log-storage Interview Q 3 "Why segments?" (new).
+- K54 storage model (sequential append) → log-storage point "Fast writes".
+- K55 offset ≠ message id → offsets trap and scenario 2 (duplicate PaymentCompleted).
+- K57 partition ≠ broker, K58 RF ≠ partition count → partitions "Not to be confused with"; topic-vs-partition-vs-broker example row (3 partitions × RF 3 = 9 replicas).
+
+**Corrections**
+
+- kafka-architecture Example "What to notice": the draft idea that a missing advertised.listeners line simply falls back to listeners was not used for a 0.0.0.0 listener (the docs say 0.0.0.0 cannot be advertised); explained the Docker problem through an internal hostname instead. Source: https://kafka.apache.org/43/configuration/broker-configs/
+- log-storage: did not claim that the active segment is never deleted by retention (time retention can roll and delete it); only that compaction never touches the active segment. Deletion rule stated as "a segment goes when its newest event is older than retention.ms" per the Log implementation page. Source: https://kafka.apache.org/43/implementation/log/
+- log-storage: added the minimum segment.bytes of 1 MiB (1048576), confirmed by the topic-config page and by Kafka 4.3.1 rejecting segment.bytes=1000. Source: https://kafka.apache.org/43/configuration/topic-configs/
+- kraft: controller.quorum.voters is deprecated once kraft.version is 1 (dynamic quorum); every broker and controller sets controller.quorum.bootstrap.servers. Source: https://kafka.apache.org/43/operations/kraft/
+- replay: kafka-consumer-groups.sh in 4.3.1 warns that Kafka 5.0 will require --dry-run or --execute; examples now pass --dry-run explicitly. Also the real error when the group is active ("Assignments can only be reset if the group 'analytics' is inactive, but the current state is Stable."). Source: tool output (4.3.1) + https://kafka.apache.org/43/operations/basic-kafka-operations/
+- kafka-vs-alternatives: share groups stated as production-ready in Kafka 4.2. Source: https://kafka.apache.org/42/getting-started/upgrade/
+- kafka-vs-redis comparison: removed an unsourced "well under a millisecond" latency claim written during this pass.
+
+### Unit consumers
+
+**Added from the reference**
+
+- K8 pull-based (why pull) → consumer-basics (Why it exists, trap, Interview Q); long poll explained as a step.
+- K9 consumer → consumer-basics (What it is, Steps, Example).
+- K10/K11 consumer group and consumers vs partitions (4 partitions × 2 or 6 consumers) → consumer-groups (Mermaid, Steps, real CLI output with an idle third consumer, Interview Q).
+- K12 multiple groups / fan-out → consumer-groups (Why, step 5, scenario).
+- K13 consumer vs group, K56 topic vs group → consumer-groups "Not to be confused with" (rule line) and comparison consumer-vs-consumer-group.
+- K22 offset commit (auto vs manual) → offset-commits (timeline Mermaid, Example, trap with "commit last + 1"); comparison auto-commit-vs-manual-commit.
+- K28 consumer lag causes and fixes → consumer-lag (cause → fix table, five-step walk-through, real CLI output, Interview Qs). "CPU/memory/network" folded into slow processing; "scale infrastructure" left out as vague (as before).
+- K31 rebalancing example (C3 joins) and problems → rebalancing (before/after Mermaid with N3 joining, Why: pause + repeats).
+- K46 backpressure → consumer-lag (Why, point, Interview Q "How does Kafka handle backpressure?").
+- K50 consumer configs, K51 group.id → consumer-configs (table, start-up walk-through, Example) and consumer-groups (Rules: group.id has no default, required for subscribe()).
+- K64 "consumer dies → rebalance → another consumer gets partitions" → consumer-groups Interview Q "What happens when a consumer in a group dies?".
+- New common mistake: a unique group.id per instance copies work (consumer-groups).
+- New: onPartitionsLost() (rebalancing Example note; glossary).
+- New: consumer protocol moves session timeout, heartbeat and assignor to the broker (group.consumer.session.timeout.ms 45 s, group.consumer.heartbeat.interval.ms 5 s); default becomes consumer in Kafka 5.0 (rebalancing Rules).
+- New: default assignor list [RangeAssignor, CooperativeStickyAssignor] means the group starts eager; switch by listing only CooperativeStickyAssignor with a rolling restart (rebalancing Rules).
+- New: share groups explicit mode throws IllegalStateException if a record is not acknowledged before the next poll; implicit is the default; delivery limit minimum 2; small clusters must lower share.coordinator.state.topic.replication.factor and min.isr (share-groups).
+- New: max.poll.records sizing arithmetic (consumer-configs scenario).
+
+**Corrections**
+
+- Draft share-groups said "share.version feature controls it"; removed: the 4.3 upgrade notes only describe this for 4.1, and on a fresh 4.3.1 broker share.version was already 1. Source: https://kafka.apache.org/43/getting-started/upgrade/
+- Draft rebalancing bullet "with the consumer protocol, heartbeat, session timeout and assignor are broker settings" kept and made precise with the broker config names and defaults. Source: https://kafka.apache.org/43/operations/consumer-rebalance-protocol/ ; https://kafka.apache.org/43/configuration/broker-configs/
+- Draft commitAsync point said errors "are dropped"; reworded to "a failure is reported only to the callback you pass" (the javadoc excerpt read today did not confirm retry behaviour, so no retry claim is made).
+- Draft share-groups RENEW "since 4.2" no longer states a version (the 4.3 upgrade page does not mention it; the tree note still says 4.2, verified on 20-10-2026).
+
+### Unit ecosystem
+
+**Added from the reference**
+
+- K36 Kafka Connect (source vs sink, DB → Connect → Kafka → Connect → search/DB) → kafka-connect: What it is, Mermaid, points; new "why not poll with SELECT" Interview Q (Debezium blog).
+- K37 Kafka Streams (filter / transform / aggregate / join / window / stateful) → kafka-streams: What it is, How it works steps (stateless vs stateful), Rules (windows), Example re-keyed by method (repartition explained).
+- K38 Schema Registry (contract, compatibility, versioning, OrderEvent v1 → v2) → schema-registry-and-serialization: Why it exists (runtime break without a contract), sequence diagram, v1 → v2 as PaymentCompleted upiRef, BACKWARD / FORWARD / FULL upgrade order in Rules, "Why Avro or Protobuf instead of JSON" Interview Q.
+- K39 (serializer / deserializer flow) → schema-registry What it is (serializer / deserializer defined, linked to producer-basics).
+- K60 design formula (15 questions) → kafka-design-formula Mermaid + 6 grouped steps, each linked to its owner concept.
+- K61 scale example + key rule → kafka-design-formula Example (worked numbers) + points Partitions / Brokers / Consumer instances + scenario 1.
+- K62 reliability design → kafka-design-formula point "Durable default", scenario 2, Interview Q 3.
+- K63 performance optimisation (producer / Kafka / consumer levers) → kafka-performance-tuning lever table + step 5 (measure, change one lever).
+- K64 failure scenarios (broker, consumer, producer request, processing) → kafka-failure-scenarios table, 4-step answer method, crash timeline Example, scenarios.
+- K65 guarantees, K67 15 things, K-FINAL mental picture → kafka-playbook: Mermaid end-to-end picture of the payments example, rule table (Rules and defaults), Interview Qs.
+- K66 question list → kafka-playbook five-step answer order with a worked Example ("How does Kafka keep payment events in order?") and scenario 1 (consumer group in five steps).
+- I3 integration template (OrderProducer / OrderConsumer) → kafka-code-templates, re-based on the running example: PaymentEventProducer (key orderId, whenComplete), NotificationConsumer, DefaultErrorHandler bean, yml, console tools.
+- Owner-requested "Don't say / Say" table → kafka-playbook Common mistakes (7 bullets, each linked to its owner concept).
+
+**Corrections**
+
+- spring-kafka draft said the DLT suffix is "-dlt (.DLT before 3.3)". The Spring for Apache Kafka 4.1 docs document only `<topic>-dlt`, same partition; the historical ".DLT before 3.3" note could not be confirmed and was removed. Source: https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html
+- kafka-connect draft Debezium config had no plugin.name. Debezium 3.7's default plugin.name is decoderbufs, which must be installed separately; the example now sets pgoutput (built into PostgreSQL) and notes wal_level=logical, snapshot.mode=initial, and a FileConfigProvider for the password. Sources: Debezium PostgreSQL connector docs; Kafka 4.3 Configuration Providers.
+- kafka-code-templates and the Streams example re-based on the running example (topic payments, group notification, payments-dlt; output topic payment-counts-by-method). Console commands re-run on apache/kafka:4.3.1.
+- kafka-design-formula no longer restates "adding partitions moves keys"; it links to ordering-and-scaling, which owns that fact.
+- kafka-failure-scenarios "Consumer too slow" row now links to consumer-configs (owner of max.poll.interval.ms) instead of consumer-basics.
+- kafka-performance-tuning: memory rule phrased from the Kafka 4.3 design doc (page cache over in-heap cache: object overhead, GC); zero-copy not used with SSL re-checked.
+- kafka-playbook visual changed from table to flow (it now leads with a Mermaid picture).
+
+### Unit patterns
+
+### Unit playbook
+
+**Added from the reference**
+
+- K36 Kafka Connect (source vs sink, DB → Connect → Kafka → Connect → search/DB) → kafka-connect: What it is, Mermaid, points; new "why not poll with SELECT" Interview Q (Debezium blog).
+- K37 Kafka Streams (filter / transform / aggregate / join / window / stateful) → kafka-streams: What it is, How it works steps (stateless vs stateful), Rules (windows), Example re-keyed by method (repartition explained).
+- K38 Schema Registry (contract, compatibility, versioning, OrderEvent v1 → v2) → schema-registry-and-serialization: Why it exists (runtime break without a contract), sequence diagram, v1 → v2 as PaymentCompleted upiRef, BACKWARD / FORWARD / FULL upgrade order in Rules, "Why Avro or Protobuf instead of JSON" Interview Q.
+- K39 (serializer / deserializer flow) → schema-registry What it is (serializer / deserializer defined, linked to producer-basics).
+- K60 design formula (15 questions) → kafka-design-formula Mermaid + 6 grouped steps, each linked to its owner concept.
+- K61 scale example + key rule → kafka-design-formula Example (worked numbers) + points Partitions / Brokers / Consumer instances + scenario 1.
+- K62 reliability design → kafka-design-formula point "Durable default", scenario 2, Interview Q 3.
+- K63 performance optimisation (producer / Kafka / consumer levers) → kafka-performance-tuning lever table + step 5 (measure, change one lever).
+- K64 failure scenarios (broker, consumer, producer request, processing) → kafka-failure-scenarios table, 4-step answer method, crash timeline Example, scenarios.
+- K65 guarantees, K67 15 things, K-FINAL mental picture → kafka-playbook: Mermaid end-to-end picture of the payments example, rule table (Rules and defaults), Interview Qs.
+- K66 question list → kafka-playbook five-step answer order with a worked Example ("How does Kafka keep payment events in order?") and scenario 1 (consumer group in five steps).
+- I3 integration template (OrderProducer / OrderConsumer) → kafka-code-templates, re-based on the running example: PaymentEventProducer (key orderId, whenComplete), NotificationConsumer, DefaultErrorHandler bean, yml, console tools.
+- Owner-requested "Don't say / Say" table → kafka-playbook Common mistakes (7 bullets, each linked to its owner concept).
+
+**Corrections**
+
+- spring-kafka draft said the DLT suffix is "-dlt (.DLT before 3.3)". The Spring for Apache Kafka 4.1 docs document only `<topic>-dlt`, same partition; the historical ".DLT before 3.3" note could not be confirmed and was removed. Source: https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html
+- kafka-connect draft Debezium config had no plugin.name. Debezium 3.7's default plugin.name is decoderbufs, which must be installed separately; the example now sets pgoutput (built into PostgreSQL) and notes wal_level=logical, snapshot.mode=initial, and a FileConfigProvider for the password. Sources: Debezium PostgreSQL connector docs; Kafka 4.3 Configuration Providers.
+- kafka-code-templates and the Streams example re-based on the running example (topic payments, group notification, payments-dlt; output topic payment-counts-by-method). Console commands re-run on apache/kafka:4.3.1.
+- kafka-design-formula no longer restates "adding partitions moves keys"; it links to ordering-and-scaling, which owns that fact.
+- kafka-failure-scenarios "Consumer too slow" row now links to consumer-configs (owner of max.poll.interval.ms) instead of consumer-basics.
+- kafka-performance-tuning: memory rule phrased from the Kafka 4.3 design doc (page cache over in-heap cache: object overhead, GC); zero-copy not used with SSL re-checked.
+- kafka-playbook visual changed from table to flow (it now leads with a Mermaid picture).
+
+### Unit producers
+
+**Added from the reference**
+
+- K14 Producer (producer takes part in choosing the partition) → producer-basics, How it works step 3 (links partition-keys).
+- K15 acks + "interview answer" (acks=all with replication and min.insync.replicas) → producer-acks: new "Not to be confused with" (acks vs min.insync.replicas), sayIt, Interview Q.
+- K26/K27 batching benefits and the CPU vs network/storage trade-off → batching-and-compression Why it exists, points "The cost", Interview Q.
+- K39 (serializer flow, producer half) → producer-basics How it works step 2.
+- K49 producer config list → producer-configs (table; acks/batching/idempotence linked, not repeated).
+- K64 "Producer request fails → retry; idempotence avoids duplicate writes" → idempotent-producer Why it exists + scenario 1.
+- New teaching angles (verified): send() returns before the callback (shown by real output); callbacks run on the I/O thread; acks=0 record is still written but unconfirmed (offset -1, real output); explicit enable.idempotence turns conflicts into a ConfigException while an implicit one is silently disabled (real run); max.in.flight > 5 throws even with default idempotence (real run, ProducerConfig source); max.block.ms vs delivery.timeout.ms as two clocks; delivery.timeout.ms < linger.ms + request.timeout.ms fails construction (real run); Spring Boot 4.1 has no linger property, so linger.ms goes in spring.kafka.producer.properties[...]; Spring Boot defaults the serializers to StringSerializer and bootstrap-servers to localhost:9092.
+
+**Corrections**
+
+- Draft producer-basics example output and code: rerun on apache/kafka 4.3.1 with a 3-partition topic; output now shows "send() returned" before the callback line (partition 2, offset 0).
+- Draft idempotent-producer said "acks 0 or 1, or retries=0, quietly turn it off". Refined: only when enable.idempotence is not set explicitly; explicit true → ConfigException (ProducerConfig.java 4.3, verified by run).
+- producer-configs trap.why: retries default was 0 up to Kafka 2.0 and became Integer.MAX_VALUE in 2.1 with delivery.timeout.ms (KIP-91). Sources: kafka 2.0 ProducerConfig.java; kafka 2.1 docs/upgrade.html.
+- A cluster outage at send time: the observed failure is via the callback/Future after max.block.ms ("Topic payments not present in metadata after 60000 ms"), not a thrown exception; wording says "fails the send with a TimeoutException".
+
+### Unit reliability
+
+**Added from the reference**
+
+- K16/K17 Replication, leader and followers → `replication` (What it is, How it works, Interview Qs); K58 RF is not partition count → `replication` trap and Example notes.
+- K18 ISR, K19 min.insync.replicas, "common interview configuration" → `isr-and-min-insync` (table, points, trap, real NotEnoughReplicas run).
+- K23/K25 the three semantics, K24 "at-least-once + idempotent processing" → `delivery-semantics` (points, commit-order Example, Interview Q 2).
+- K62 reliability design → `delivery-semantics` Interview Q 3 (links each owner).
+- K40 Kafka transaction (read, process, write, commit, abort) → `kafka-transactions` (How it works steps, Example).
+- K47 fault tolerance (B1 fails, B2 leads) → `fault-tolerance` (Mermaid timeline, real crash run).
+- K41 DLT, K42 retry pattern ("avoid infinite immediate retries"), K43 poison message → `retries-and-dead-letter-topics` (points, Common mistakes, scenario 1, Interview Qs).
+- K44 ordering + scaling trade-off, K30 partition count → `ordering-and-scaling` (scenario 1, Example).
+- K24 idempotency (TX123, $100) → `idempotent-consumers` with the ₹500 running example; the "check, then process" flow made atomic.
+- K34 (part) dual write → `transactional-outbox` (rewritten on the running example: Payment service + PaymentCompleted keyed by orderId).
+
+**Corrections**
+
+- `replication` / `fault-tolerance`: the draft describe outputs were not from a run. Replaced with real output from a three-broker KRaft cluster (apache/kafka:4.3.1). Source: https://kafka.apache.org/43/operations/basic-kafka-operations/
+- `transactional-outbox`: the draft showed Debezium publishing to an "orders topic". Debezium 3.7's outbox router routes by `aggregatetype` to `outbox.event.<aggregatetype>` by default (renamable). Source: https://debezium.io/documentation/reference/stable/transformations/outbox-event-router.html
+- `transactional-outbox`: polling publisher / log tailing trade-offs restated to match the source exactly (polling: any SQL DB, ordering tricky; log tailing: accurate, database-specific). Source: https://microservices.io/patterns/data/polling-publisher.html , https://microservices.io/patterns/data/transaction-log-tailing.html
+- `idempotent-consumers`: the draft SQL relied on the app reading "0 rows" and rolling back; replaced with one atomic statement (data-modifying CTE) whose ledger insert depends on the dedupe insert. Source: https://www.postgresql.org/docs/current/queries-with.html
+- `retries-and-dead-letter-topics`: added the real default of Spring for Apache Kafka 4.1 (`FixedBackOff(0, 9)`: 10 attempts, no delay, then the record is only logged), the not-retryable exception list, DLT naming (`<topic>-dlt`, same partition, so DLT needs as many partitions) and that Boot wires a `DefaultErrorHandler` @Bean into the auto-configured factory. Source: https://docs.spring.io/spring-kafka/reference/kafka/annotation-error-handling.html
+- `kafka-transactions`: added "transactional.id implies idempotence", "transactions need 3 brokers by default", `transaction.max.timeout.ms` 15 min, the last stable offset, and the need to seek back after abort. Sources: Kafka 4.3 producer/consumer/broker configs, KafkaProducer javadoc.
+- `isr-and-min-insync`: added that consumers see a record only once it is on all ISR members and the ISR is at least min.insync.replicas (design doc), and ELR (Kafka 4.0; default for new clusters from 4.1). Sources: https://kafka.apache.org/43/design/design/ , https://kafka.apache.org/43/operations/eligible-leader-replicas/
+- `fault-tolerance`: added broker heartbeat interval (2 s) and fencing after broker.session.timeout.ms (9 s), auto.leader.rebalance.enable (true). Source: Kafka 4.3 broker configs.
+
+### Unit storage

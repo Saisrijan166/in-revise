@@ -5,16 +5,29 @@ title: "Designing with Kafka: The Formula"
 topic: playbook
 level: interview
 heat: 2
-hook: "Design in one order: events, topics, key, partitions, replication, groups, retention, failures, schemas, lag."
+hook: "Answer a Kafka design question in a fixed order: events, topics, key, partitions, durability, consumer groups, failures, retention, schemas, then lag."
 points:
-  - { k: "Partitions", v: "give parallelism" }
-  - { k: "Brokers", v: "give disk, network and memory capacity" }
-  - { k: "Consumer instances", v: "do the processing, up to one per partition per group" }
-  - { k: "Rates", v: "assume them to start, then measure with a load test", kind: minus }
+  - { k: "Start with events", v: "name each event and who publishes it before choosing any number of brokers or partitions" }
+  - { k: "Partitions", v: "give parallelism: in a consumer group each partition is read by only one consumer at a time" }
+  - { k: "Brokers", v: "give capacity: disk, network and memory, which must also carry every replica copy" }
+  - { k: "Consumer instances", v: "do the processing; add them up to the partition count, then add partitions" }
+  - { k: "Durable default", v: "replication factor 3, acks=all and min.insync.replicas=2 for events you cannot lose" }
+  - { k: "Rates", v: "assume per-partition and per-consumer rates to start, then replace them with a load test", kind: minus }
 trap:
   wrong: "Start with sizes: \"3 brokers and 100 partitions\"."
   right: "Start with the events and the order each needs. Partitions, replication and consumers follow from measured rates."
-sayIt: "I name the events and topics, key by the entity whose order matters, size partitions from measured rates, use RF 3, acks=all and min.insync 2, one group per service, retries with a DLT, idempotent consumers, and watch lag."
+  why: "Numbers sound concrete and confident, so candidates lead with them, before saying what the data is or what must stay in order."
+sayIt: "I name the events and topics, key by the entity whose order matters, size partitions from measured rates, use RF 3, acks=all and min.insync.replicas=2, one group per service, retries with a DLT, idempotent consumers, and alert on lag."
+cheat:
+  idea: "A fixed order for any Kafka design answer: events and topics, key, partitions from measured rates, durability, consumer groups, failure handling, retention, schemas, lag."
+  flow: "Events → key → partitions → durability → groups → failures → lag"
+  remember: "Partitions give parallelism, brokers give capacity, consumers do the work."
+buildsOn: [ordering-and-scaling, delivery-semantics, consumer-lag]
+scenarios:
+  - q: "Load tests show one partition takes 10 MB/s of writes, and one Notification consumer handles 2,000 events/s. You expect 40,000 events/s of 1 KB. How many partitions at least, and why?"
+    a: "20. Writes need 40 MB/s / 10 = 4 partitions, but consumers need 40,000 / 2,000 = 20 instances, and a group can use only one consumer per partition. Take the larger number, then add headroom for growth."
+  - q: "An interviewer asks how you would make payment events reliable. Which settings do you name first?"
+    a: "Replication factor 3, acks=all and min.insync.replicas=2, with the idempotent producer. Then at-least-once consumers that commit after processing, idempotent processing, retries with a dead letter topic, and an alert on lag."
 confusedWith: []
 tags: [design, scaling]
 visual: flow
@@ -36,49 +49,70 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The design formula is a fixed order of questions for "How would you use Kafka here?". Each question maps to a concept you have already met: events and topics, the partition key, partition count, replication and acks, consumer groups, retries, retention, schemas and lag. Walking through them in order turns everything learnt so far into one complete design answer.
+
 ## Why it exists
 
-"How would you use Kafka here?" has many parts. A fixed order keeps the answer complete.
+A Kafka design question has many moving parts. Without an order, candidates jump to "3 brokers, 100 partitions", forget what must stay in order, and never mention duplicates or lag. Interviewers then probe the gaps. A fixed order makes the answer complete, and each step gives a natural place to say a trade-off.
 
 ## How it works
 
-<Steps label="Designing the shop's events with Kafka">
-  <Step title="Events">Name each event and its publisher: OrderPlaced, PaymentCompleted.</Step>
-  <Step title="Topics">One [topic](card:topics) per stream: orders, payments.</Step>
-  <Step title="Key">Key by the entity whose order matters, here orderId ([keys](card:partition-keys)).</Step>
-  <Step title="Partitions">Size from measured rates, with room to grow ([partition count](card:ordering-and-scaling)).</Step>
-  <Step title="Durability">RF 3, acks=all, min.insync.replicas=2 ([replication](card:replication), [acks](card:producer-acks), [ISR](card:isr-and-min-insync)).</Step>
-  <Step title="Consumers">One [consumer group](card:consumer-groups) per service: payment-service, analytics.</Step>
-  <Step title="Retention">How long to keep, and who may [replay](card:replay) ([log storage](card:log-storage)).</Step>
-  <Step title="Failures">[Retry, then a DLT](card:retries-and-dead-letter-topics); [idempotent consumers](card:idempotent-consumers).</Step>
-  <Step title="Schemas">Versioned events with compatibility checks ([schemas](card:schema-registry-and-serialization)).</Step>
-  <Step title="Monitor">Alert when [consumer lag](card:consumer-lag) keeps growing.</Step>
-</Steps>
+<Mermaid
+  alt="Design order: name the events and topics, choose the key, size the partitions, set durability, give each service a consumer group, plan failures, then set retention, schemas and lag monitoring."
+  chart={`flowchart LR
+  E[Events and topics] --> K[Key]
+  K --> P[Partitions]
+  P --> D[Durability]
+  D --> G[Consumer groups]
+  G --> F[Failures]
+  F --> M[Retention, schemas, lag]`}
+/>
+
+1. Name each event and its publisher, such as `PaymentCompleted` from the Payment service, and give each stream its own [topic](card:topics).
+2. Choose the [key](card:partition-keys): the entity whose events must stay in order, here `orderId`.
+3. Size the [partitions](card:ordering-and-scaling) from measured rates, with room for one or two years of growth.
+4. Set durability: [replication factor](card:replication) 3, [acks=all](card:producer-acks) and [min.insync.replicas=2](card:isr-and-min-insync).
+5. Give each service its own [consumer group](card:consumer-groups), then plan failures: [retry, then a DLT](card:retries-and-dead-letter-topics), and [idempotent consumers](card:idempotent-consumers).
+6. Finish with [retention and replay](card:replay), [versioned schemas](card:schema-registry-and-serialization), and an alert when [consumer lag](card:consumer-lag) keeps growing.
 
 ## Example
 
-100K events/s; replace the assumed rates by measured ones:
+"Payments reach 100,000 events per second at a sale. How would you size Kafka?" The per-partition and per-consumer rates below are assumptions to replace with load-test numbers:
 
 ```text
 Target       100,000 events/s x 1 KB = about 100 MB/s in
-Assumed p    10 MB/s produced per partition  -> 100 / 10 = 10
-Assumed c    2,000 events/s per consumer     -> 100,000 / 2,000 = 50
-Partitions   max(10, 50) = 50, sized for 1-2 years of growth
+Assumed p    10 MB/s written per partition  -> 100 / 10 = 10
+Assumed c    2,000 events/s per consumer    -> 100,000 / 2,000 = 50
+Partitions   max(10, 50) = 50, plus headroom for 1-2 years of growth
 Consumers    up to 50 per group, one per partition
 Writes       RF 3 -> about 300 MB/s across the brokers
 Disk         100 MB/s x 7 days x 3 copies = about 181 TB
 ```
 
+What to notice:
+
+- The consumer side needs 50 partitions while the write side needs only 10. The slower side decides, because a group can use at most one consumer per partition.
+- Replication multiplies broker writes and disk by the replication factor, so brokers are sized for 300 MB/s, not 100.
+- Seven days of retention at this rate needs about 181 TB; shorter retention or compression shrinks it.
+
+## Rules and defaults
+
+- **Measure, do not guess:** `kafka-producer-perf-test.sh` and `kafka-consumer-perf-test.sh` ship with Kafka for load tests.
+- **Broker memory:** leave page cache for about 30 seconds of writes (write rate x 30).
+- **Headroom up front:** size partitions for growth now, because adding them later moves keys to new partitions ([ordering vs scaling](card:ordering-and-scaling)).
+
 ## Interview Qs
 
 ### The system receives 100K events per second. How would you scale Kafka?
 
-Measure per-partition rates; size partitions from them with headroom. Add brokers for disk and network times RF. One consumer per partition per group, batch and compress, load-test, watch lag.
+Measure per-partition and per-consumer rates, and size partitions from the slower side, with headroom. Add brokers for disk and network times the replication factor. Run one consumer per partition per group, batch and compress, load-test, and watch lag.
 
 ### How does Kafka achieve scalability?
 
-Partitions spread a topic over brokers, so clients use many brokers at once, and a group's consumers share them. Add brokers for capacity, partitions for parallelism.
+Partitions spread a topic over brokers, so producers and consumers use many brokers at once, and a group's consumers share the partitions. Add brokers for capacity and partitions for parallelism.
 
 ### How would you design a reliable event-driven architecture?
 
-Walk the steps above, then go deep on loss and duplicates: the [reliable recipe](card:delivery-semantics), the [outbox](card:transactional-outbox) to publish with the database write, and [idempotent consumers](card:idempotent-consumers).
+Walk the steps above, then go deep on loss and duplicates: RF 3, acks=all and min.insync.replicas=2 against loss; the [outbox](card:transactional-outbox) to publish together with the database write; at-least-once delivery with [idempotent consumers](card:idempotent-consumers) against duplicates; a DLT for poison records.

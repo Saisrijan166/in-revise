@@ -5,72 +5,138 @@ title: "Idempotent Producer"
 topic: producers
 level: intermediate
 heat: 2
-hook: "The broker tags each producer with an id and checks a sequence number per partition, so a retried batch is written only once."
+hook: "The broker gives each producer an id and numbers its batches per partition, so a retried batch that was already written is not written again."
 points:
-  - { k: "enable.idempotence", v: "true by default since Kafka 3.0", kind: default }
-  - { k: "Needs", v: "acks=all, retries > 0, max.in.flight ≤ 5" }
-  - { k: "Order", v: "kept even when batches are retried", kind: plus }
-  - { k: "One session", v: "a restarted producer gets a new id; no dedupe across it", kind: minus }
-  - { k: "App re-sends", v: "a second send() of the same event is a new record", kind: minus }
+  - { k: "Idempotent", v: "doing something twice has the same effect as doing it once; here, a retried batch is stored once" }
+  - { k: "On by default", v: "enable.idempotence is true by default since Kafka 3.0, and still in Kafka 4.3", kind: default }
+  - { k: "Requirements", v: "acks=all, retries above 0, and max.in.flight.requests.per.connection at most 5" }
+  - { k: "Order kept", v: "records of one partition stay in order even when a batch is retried", kind: plus }
+  - { k: "One session only", v: "a restarted producer gets a new producer id, so a batch sent before the restart is not deduplicated", kind: minus }
+  - { k: "App re-sends", v: "if your code calls send() twice for the same payment, Kafka stores two records", kind: minus }
 trap:
   wrong: "With the idempotent producer, Kafka is exactly-once end to end."
-  right: "It only stops duplicates from producer retries in one session. Consumers can still process a record twice, so they must be idempotent too."
-sayIt: "The idempotent producer adds a producer id and per-partition sequence numbers, so the broker drops retried duplicates and keeps order. It is on by default since Kafka 3.0, but it does not stop consumer duplicates."
+  right: "It only stops duplicates caused by producer retries within one session. Consumers can still process a record twice, so they must be idempotent too."
+  why: "The Kafka docs say idempotence gives \"exactly once\" delivery, and people miss that this covers only writing into the log, not the consumer side."
+sayIt: "The idempotent producer adds a producer id and per-partition sequence numbers, so the broker drops a retried batch it already has and keeps order. It is on by default since Kafka 3.0, but it does not stop app re-sends or consumer duplicates."
+cheat:
+  idea: "The broker tags each producer with an id and checks a sequence number per partition on every batch. A retried batch it has already written is not written again, and order is kept."
+  remember: "On by default since Kafka 3.0, but it covers producer retries only: consumers still need their own deduplication."
+buildsOn: [producer-basics, producer-acks, partitions]
+scenarios:
+  - q: "The Payment service sends a ₹500 PaymentCompleted event. The broker writes it, but the reply is lost in a network blip, so the producer retries. With default settings, how many copies are in the log?"
+    a: "One. Idempotence is on by default, so the retried batch carries the same producer id and sequence number. The broker sees it has already written that sequence and does not append it again."
+  - q: "A team sets acks=1 and leaves enable.idempotence unset. The producer starts without errors. Is it idempotent?"
+    a: "No. Idempotence needs acks=all, so the producer quietly turns it off and only logs it. If the team had set enable.idempotence=true explicitly, the producer would refuse to start with a ConfigException."
 confusedWith: [idempotent-producer-vs-idempotent-consumer]
 tags: [idempotence, retries, duplicates, producer]
 visual: flow
 sources:
   - title: "Producer Configs: enable.idempotence, max.in.flight.requests.per.connection (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/producer-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "KafkaProducer: idempotent producer (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/producer/KafkaProducer.html"
-    verifiedOn: "2026-10-20"
-  - title: "Upgrading to 4.0: producer changes (Apache Kafka 4.3)"
-    url: "https://kafka.apache.org/43/getting-started/upgrade/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "ProducerConfig.java: idempotence validation (Apache Kafka 4.3 source)"
+    url: "https://github.com/apache/kafka/blob/4.3/clients/src/main/java/org/apache/kafka/clients/producer/ProducerConfig.java"
+    verifiedOn: "2026-10-22"
+  - title: "Design: message delivery semantics (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/design/design/"
+    verifiedOn: "2026-10-22"
   - title: "KIP-98: Exactly Once Delivery and Transactional Messaging"
     url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An operation is idempotent when doing it twice has the same effect as doing it once. The idempotent producer is a producer whose retries can never put the same batch into the log twice. When it starts, the broker side gives it a producer ID (PID). Every batch it sends to a partition carries a sequence number that goes up by one each time, so the leader can tell a new batch from a repeat of one it already has.
+
 ## Why it exists
 
-A producer that gets no reply resends. If the first write had landed, the log would hold the payment twice. Idempotence lets the broker spot that retry and drop it.
+The producer retries when it gets no reply in time. But "no reply" does not mean "not written": the broker may have stored the batch and the reply got lost on the way back. Without idempotence the retry is appended again, and the `payments` topic now holds the ₹500 payment twice, so the Notification service may send two receipts. Retries can also reorder records when several requests are in flight. Idempotence removes both problems inside Kafka, at almost no cost.
 
 ## How it works
 
 <Mermaid
-  alt="Payment Service (producer id 7) sends a batch with sequence 0 to the leader of payments-0. The ack is lost, so it retries with sequence 0; the broker already has it and does not write it again."
+  alt="The Payment service, with producer id 7, sends a batch with sequence 0 to the leader of payments-2. The leader writes it, but the reply is lost. The producer retries the same batch with sequence 0. The leader sees it already wrote sequence 0 from producer 7, does not write it again, and replies with success."
   chart={`sequenceDiagram
-  participant P as Payment Service (PID 7)
-  participant B as Leader of payments-0
+  participant P as Payment service (PID 7)
+  participant B as Leader of payments-2
   P->>B: batch, seq 0
-  B--xP: ack lost
+  B->>B: append to log
+  B--xP: reply lost
   P->>B: retry: batch, seq 0
-  B-->>P: seq 0 already written: no second copy`}
+  B-->>P: seq 0 already written: success, no second copy`}
 />
 
-- `acks` 0 or 1, or `retries=0`, quietly turn it off; max.in.flight above 5 throws a `ConfigException` since Kafka 4.0. Set `enable.idempotence=true` to make every conflict an error.
-- Atomic writes across partitions, with consumer offsets: [transactions](card:kafka-transactions).
+1. When the producer starts, it gets a producer ID that is unique to this producer session.
+2. For each partition, it numbers its batches: 0, 1, 2 and so on.
+3. The leader remembers, per producer and partition, the sequence numbers it has recently written.
+4. A batch with a number it already has is a retry: the leader does not append it again, and answers with success.
+5. A batch whose number skips ahead means an earlier one is missing, so the leader rejects it as out of order and nothing is written out of sequence.
 
-## Defaults
+So the key is the pair (producer ID, sequence number): together they identify each batch exactly.
+
+## Example
+
+The Payment service asks for idempotence explicitly but also sets `acks=1`. The producer refuses to start:
+
+```java
+var props = new Properties();
+props.put("bootstrap.servers", "localhost:9092");
+props.put("key.serializer", StringSerializer.class.getName());
+props.put("value.serializer", StringSerializer.class.getName());
+props.put("enable.idempotence", "true");   // asked for explicitly
+props.put("acks", "1");                    // conflicts: idempotence needs acks=all
+try (var producer = new KafkaProducer<String, String>(props)) {
+    System.out.println("producer created");
+} catch (ConfigException e) {
+    System.out.println("ConfigException: " + e.getMessage());
+}
+```
+
+```text output
+ConfigException: Must set acks to all in order to use the idempotent producer. Otherwise we cannot guarantee idempotence.
+```
+
+What to notice:
+
+- Setting `enable.idempotence=true` explicitly turns a conflict into a startup error, so you find it before production.
+- Remove the `enable.idempotence` line and the same code prints `producer created`: idempotence is then quietly switched off, and retries can duplicate payments.
+- Remove the `acks` line too and you keep the defaults, `acks=all` with idempotence on, which is what a payment service wants.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| `enable.idempotence` | `true` (since 3.0) | Kafka 4.3 producer |
+| `enable.idempotence` | `true` (since Kafka 3.0) | Kafka 4.3 producer |
 | `max.in.flight.requests.per.connection` | 5 | Kafka 4.3 producer |
+
+- **Requirements:** `acks=all`, `retries` above 0, and `max.in.flight.requests.per.connection` of 5 or less.
+- **Quiet switch-off:** if `acks` or `retries` conflict and you did not set `enable.idempotence` yourself, the producer turns idempotence off and only logs it. If you set it to `true`, it throws a `ConfigException`.
+- **In-flight above 5:** with idempotence on, a value above 5 throws a `ConfigException` at startup, because the broker keeps state for only the last 5 batches of each producer.
+- **Transactions:** setting `transactional.id` turns idempotence on as well; atomic writes across partitions are [Kafka transactions](card:kafka-transactions).
+
+## Not to be confused with
+
+The idempotent producer stops duplicate **writes** caused by producer retries; the broker does the work. An [idempotent consumer](card:idempotent-consumers) stops duplicate **effects**: your code skips an event it has already handled, using its own database. Rule: idempotent producer = clean log; idempotent consumer = each payment handled once.
+
+## Common mistakes
+
+- **"Kafka will drop it if my code sends the same event again."** A second `send()` is a new record with a new sequence number, so both are stored. Only the producer's own retries are deduplicated.
+- **"A restarted producer continues where it stopped."** It gets a new producer ID, so a batch it sent just before the crash and sends again after restart is not caught.
 
 ## Interview Qs
 
 ### What is an idempotent producer?
 
-A producer whose retries cannot create duplicates. The broker gives it a producer id; each batch carries a sequence number per partition, and the broker drops a batch it has already written. It also keeps order during retries.
+A producer whose retries cannot create duplicates in the log. The broker gives it a producer ID; each batch carries a sequence number per partition, and the leader does not append a batch it has already written. It also keeps records in order when batches are retried. It is on by default since Kafka 3.0.
 
-### Does the idempotent producer give exactly-once?
+### Does the idempotent producer give exactly-once processing?
 
-Only for writes from one producer session into the log. It does not catch an application sending the same event twice or a consumer processing a record twice. For consumers, see [idempotent consumers](card:idempotent-consumers).
+No. It only protects writes from one producer session into the log. It does not catch an application that sends the same event twice, or a consumer that processes a record twice after a crash. For the consumer side you need [idempotent consumers](card:idempotent-consumers) or transactions.
 
 ### Why must max.in.flight.requests.per.connection be 5 or less?
 
-The broker keeps only the last 5 batches of each producer, so it could not check older in-flight batches for duplicates.
+The broker keeps deduplication state for only the last 5 batches of each producer. With more requests in flight, an older batch could be retried after its state was dropped, and the broker could no longer check it for duplicates or order.

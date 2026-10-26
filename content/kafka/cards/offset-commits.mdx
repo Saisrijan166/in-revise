@@ -5,70 +5,122 @@ title: Committing Offsets
 topic: consumers
 level: intermediate
 heat: 3
-hook: "A commit saves the next offset to read, per partition, so a restarted consumer resumes where the group left off."
+hook: "A commit saves, per partition, the next offset the group should read, so a restarted or new consumer resumes there instead of starting over."
 points:
-  - { k: "Committed offset", v: "the next record to read: last processed + 1" }
-  - { k: "Commit after processing", v: "a crash then replays records instead of losing them", kind: plus }
-  - { k: "Per partition", v: "stored by the group coordinator in __consumer_offsets" }
-  - { k: "commitSync()", v: "blocks until it succeeds or hits an unrecoverable error" }
-  - { k: "commitAsync()", v: "does not block; errors go to a callback or are dropped", kind: minus }
+  - { k: "Committed offset", v: "the next record the group should read in that partition: the last processed offset + 1" }
+  - { k: "Where it lives", v: "per group and partition, in the internal topic __consumer_offsets, written by the group coordinator" }
+  - { k: "Auto commit", v: "on by default in Kafka 4.3: the client commits the offsets returned by poll() every 5 seconds", kind: default }
+  - { k: "Commit after processing", v: "a crash then makes some records run twice, but never skips one", kind: plus }
+  - { k: "commitSync()", v: "blocks until the commit succeeds or fails with an error that cannot be retried" }
+  - { k: "commitAsync()", v: "returns at once; a failure is reported only to the callback you pass", kind: minus }
 trap:
   wrong: "After processing offsets 0 to 3, commit offset 3."
   right: "Commit 4, the next offset to read. Committing 3 makes record 3 run again after a restart."
-sayIt: "I turn off auto commit and commit after processing: commitAsync in the loop, commitSync on shutdown. The committed offset is the next one to read, so a crash means duplicates, not loss."
-confusedWith: [at-most-once-vs-at-least-once-vs-exactly-once]
+  why: "We say we have read up to 3, so committing 3 feels natural. Kafka's rule of storing the next offset to read is easy to miss."
+sayIt: "The committed offset is the next one the group reads, saved per partition in __consumer_offsets. I turn off auto commit and commit after processing, commitAsync in the loop and commitSync on shutdown, so a crash gives duplicates, not loss."
+cheat:
+  idea: "Committing saves how far a group has got in each partition: the next offset to read. A restarted or new owner starts there."
+  flow: "poll 0–3 → process → commit 4 → crash → resume at 4"
+  remember: "Commit after processing: a crash then repeats records instead of losing them. Commit last processed + 1."
+buildsOn: [offsets, consumer-groups]
+scenarios:
+  - q: "Auto commit is on. The consumer hands each record to a thread pool and polls again at once. It crashes while the pool is still working. What can go wrong?"
+    a: "Records can be lost. The next poll() may have committed offsets for records the pool had not finished, so after the restart the group starts past them. Turn off auto commit and commit only finished work."
+  - q: "After a restart, the Notification service sent three customers a second message. Commits run after processing. Why?"
+    a: "The service processed those records but crashed before the next commit, so the group resumed at the last committed offset and read them again. Commit-after-processing gives duplicates, not loss; the handler must cope with repeats."
+confusedWith: [auto-commit-vs-manual-commit, at-most-once-vs-at-least-once-vs-exactly-once]
 tags: [offset-commit, auto-commit, commitSync, commitAsync]
-visual: table
+visual: flow
 sources:
-  - title: "KafkaConsumer: offsets, consumer position and manual offset control (Apache Kafka 4.3 javadoc)"
+  - title: "KafkaConsumer: offsets and consumer position, manual offset control (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html"
-    verifiedOn: "2026-10-20"
-  - title: "Consumer and Share Consumer Configs (Apache Kafka 4.3)"
+    verifiedOn: "2026-10-22"
+  - title: "Consumer and Share Consumer Configs: enable.auto.commit, auto.commit.interval.ms (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/consumer-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Distribution: consumer offset tracking (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/implementation/distribution/"
     verifiedOn: "2026-10-20"
+  - title: "Broker Configs: offsets.topic.num.partitions, offsets.topic.replication.factor (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/broker-configs/"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+Committing an offset means telling Kafka how far a consumer group has got in one partition. You learnt in [offsets](card:offsets) that a consumer's position is the next offset it will read. The position lives only in the consumer's memory; a commit saves it. Kafka keeps one committed offset per group and partition, in an internal topic called `__consumer_offsets`.
 
 ## Why it exists
 
-Consumers crash and partitions move. Kafka knows how far a group got only if the group commits it, so the next owner resumes without skipping or redoing much.
+If the Notification service restarts, its in-memory position is gone. Without a saved offset, the new consumer would either skip everything sent while it was down or read the whole partition again. With a commit, it resumes where the group stopped. The same happens when a partition moves to another member of the [group](card:consumer-groups). When you commit decides what a crash costs: lost records or repeated ones.
 
 ## How it works
 
-<Compare id="auto-commit-vs-manual-commit" />
+<Mermaid
+  alt="Timeline for partition payments-0. The consumer polls records 0 to 3, processes them and commits 4. It then processes 4 to 6 and crashes before the next commit. The new owner resumes at 4, so 4, 5 and 6 are processed twice."
+  chart={`flowchart LR
+  A["poll 0-3"] --> B[process 0-3]
+  B --> C["commit 4"]
+  C --> D["process 4-6"]
+  D --> E[crash before commit]
+  E --> F["new owner resumes at 4"]`}
+/>
 
-- Auto commit saves what poll() returned, every 5 s; with async hand-off it can commit ahead of the work and lose records.
-- Common pattern: commitAsync() in the loop, then commitSync() before close().
-- Which guarantee this gives is [delivery semantics](card:delivery-semantics); commit on revoke is in [rebalancing](card:rebalancing).
+1. `poll()` returns records 0 to 3 of `payments-0`, and the consumer's position moves to 4.
+2. The Notification service processes all four records.
+3. It commits 4, the next offset to read. With auto commit the client does this on a timer; with manual commit your code calls `commitSync()` or `commitAsync()`.
+4. The group coordinator stores (notification-service, payments-0) = 4 in `__consumer_offsets`.
+5. The service processes 4 to 6 and crashes before its next commit. The next owner starts at 4, so 4, 5 and 6 run twice.
+
+So commit after processing: the worst case is a repeat, never a gap.
 
 ## Example
 
-```text
-payments partition 0:   0  1  2  3 | 4  5  6
-processed 0-3, commit 4   -> stored for (payment-service, payments-0) = 4
-processed 4-6, crash before the next commit
-restart -> resume at 4    -> 4, 5, 6 run twice (make the handler idempotent)
+The Notification service commits by hand: quickly inside the loop, and once more, safely, before it stops.
+
+```java
+props.put("enable.auto.commit", "false");   // the app decides when to commit
+try {
+    while (running) {
+        for (var rec : consumer.poll(Duration.ofMillis(500))) {
+            process(rec);                    // send the notification
+        }
+        consumer.commitAsync();              // fast, does not block the loop
+    }
+} finally {
+    consumer.commitSync();                   // final commit before leaving
+    consumer.close();
+}
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Auto commit | on (enable.auto.commit=true) | Kafka 4.3 consumer |
-| Auto commit interval | 5 s (auto.commit.interval.ms) | Kafka 4.3 consumer |
+- `commitAsync()` with no arguments commits the offsets of the records the last `poll()` returned. It runs only after the whole batch is processed, so nothing is committed early.
+- `commitAsync()` does not wait for the broker. If one fails, the next commit in the loop usually covers it.
+- `commitSync()` in `finally` waits for the answer, so the last progress is saved before the consumer leaves.
+- To commit one record, pass a map: `commitSync(Map.of(partition, new OffsetAndMetadata(rec.offset() + 1)))`. Note the `+ 1`.
+
+## Rules and defaults
+
+- **Auto commit (Kafka 4.3):** `enable.auto.commit=true` and `auto.commit.interval.ms=5000` by default.
+- **When auto commit is safe:** only if you finish every record from one `poll()` before the next call. If records go to other threads, the commit can run ahead of the work and lose records.
+- **Only members commit:** a consumer that has left the group, for example after missing `max.poll.interval.ms`, cannot commit; it may get `CommitFailedException`.
+- **`__consumer_offsets`:** 50 partitions and replication factor 3 by default (Kafka 4.3 broker settings).
+
+## Not to be confused with
+
+The position is the next offset `poll()` will return; it moves on every poll and lives in memory. The committed offset is the saved copy that a restarted or new owner starts from. Rule: position = where this consumer is now; committed = where the group restarts.
 
 ## Interview Qs
 
 ### What does the committed offset mean?
 
-It is the offset of the next record the group will read in that partition. After processing 0 to 3 you commit 4. After a restart or rebalance, the owner starts there.
+It is the offset of the next record the group will read in that partition. After processing 0 to 3 you commit 4. After a restart or a rebalance, the partition's owner starts reading there.
 
 ### Is auto commit safe?
 
-Only if every record from a poll is processed before the next poll. With async hand-off, the commit can run ahead and a crash loses records. For payments, commit manually after processing and make the handler [idempotent](card:idempotent-consumers).
+Only when every record from a poll is processed before the next poll. If the code hands records to other threads, the commit can run ahead, and a crash loses records. For payments, turn it off, commit after processing, and make the handler safe to run twice; idempotent consumers, later in this course, show how.
 
 ### commitSync or commitAsync?
 
-commitSync blocks until the commit succeeds or fails for good. commitAsync returns at once and reports through a callback. Use async in the loop for speed and sync on shutdown for the final commit.
+commitSync blocks until the commit succeeds or fails for good, which slows the loop. commitAsync returns at once and reports through a callback. Use commitAsync inside the loop for speed, and commitSync on shutdown or before giving up partitions, when the result must be certain.

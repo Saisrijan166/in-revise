@@ -5,17 +5,28 @@ title: Kafka Failure Scenarios
 topic: playbook
 level: interview
 heat: 2
-hook: "For every failure, say what Kafka does on its own and what your code must do; the second half is what interviewers test."
+hook: "For every failure, say what Kafka does on its own and what your code must do. The second half is what interviewers test."
 points:
-  - { k: "Broker dies", v: "a new leader from the ISR; clients refresh metadata and retry", kind: plus }
-  - { k: "Consumer dies", v: "rebalance; uncommitted records are read again", kind: minus }
-  - { k: "Send times out", v: "retries until delivery.timeout.ms; idempotence stops duplicates" }
-  - { k: "Bad record", v: "retry with backoff, then a dead letter topic" }
-  - { k: "Controller quorum", v: "Kafka 4.3 KRaft: 3 controllers survive 1 loss, 5 survive 2", kind: default }
+  - { k: "Broker dies", v: "each partition it led gets a new leader from its ISR; clients refresh metadata and retry", kind: plus }
+  - { k: "Consumer dies", v: "its partitions move to another member, which re-reads every record after the last committed offset", kind: minus }
+  - { k: "Send times out", v: "the producer retries until delivery.timeout.ms; the idempotent producer stops duplicate writes" }
+  - { k: "Processing fails", v: "Kafka does nothing: your code retries with backoff, then parks the record in a dead letter topic" }
+  - { k: "Controller quorum", v: "in Kafka 4.3 KRaft, 3 controllers survive 1 loss and 5 survive 2: a majority must stay alive", kind: default }
 trap:
   wrong: "A consumer crash loses the records it was processing."
   right: "If you commit only after processing, nothing is lost: the next owner reads them again. Expect duplicates, not loss."
-sayIt: "A broker dies: a new leader comes from the ISR and clients retry. A consumer dies: its partitions move and uncommitted records come again, so consumers are idempotent. Bad records: retry, then a DLT."
+  why: "The crashed process clearly never finished those records, so it feels as if they are gone, but they still sit in the log after the committed offset."
+sayIt: "A broker dies: a new leader comes from the ISR and clients retry. A consumer dies: its partitions move and uncommitted records come again, so consumers are idempotent. A record keeps failing: retry with backoff, then a DLT."
+cheat:
+  idea: "For each failure, say what Kafka repairs by itself and what your code must handle. Kafka moves leaders and partitions; your code handles repeats and bad records."
+  flow: "Failure → what Kafka does → what is lost or repeated → what your code does"
+  remember: "Commit after processing: a consumer crash causes repeats, not loss."
+buildsOn: [fault-tolerance, rebalancing, retries-and-dead-letter-topics]
+scenarios:
+  - q: "A Notification instance polls 100 payment records, sends 60 receipts, then crashes before committing. What does the customer see, and how do you fix it?"
+    a: "Duplicate receipts for those 60 orders. Another member takes the partition and starts from the last committed offset, so all 100 come again. Fix it with an idempotent consumer: store each processed eventId and skip ones already done."
+  - q: "One payment event has malformed JSON. The listener retries it forever in place. What happens to the other payments in that partition?"
+    a: "They wait. A partition is read in order, so a poison record retried in place blocks everything behind it and lag grows. Treat it as a permanent error: send it to the dead letter topic at once and move on."
 confusedWith: []
 tags: [failures, fault-tolerance, operations]
 visual: table
@@ -34,9 +45,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Failure scenarios are the "what happens if this breaks?" questions asked about every part of a Kafka system: a broker, the controllers, a producer's send, a consumer, or one bad record. Each answer has two halves. Kafka heals some failures by itself, such as electing a new leader. Others, such as duplicates or a record that never processes, are your code's job.
+
 ## Why it exists
 
-Interviewers ask "what if this fails?" for every part. Kafka heals some failures itself; the rest are your code's job.
+Kafka is chosen because it survives failures, so interviewers test whether you know exactly how far that goes. "Kafka is fault tolerant" is not an answer. The strong answer names what Kafka does, what is lost or repeated, and what you added, such as idempotent consumers or a dead letter topic.
 
 ## How it works
 
@@ -46,19 +61,49 @@ Interviewers ask "what if this fails?" for every part. Kafka heals some failures
 | [All in-sync replicas lost](card:fault-tolerance) | Keeps the partition offline (unclean election off) | Bring a replica back, or accept loss |
 | [Controller majority lost](card:kraft) | No new leaders or metadata changes | Run 3 or 5 controllers apart |
 | [Consumer crashes](card:rebalancing) | Moves its partitions after the session timeout | Make processing idempotent |
-| [Consumer too slow](card:consumer-basics) | Removes it after max.poll.interval.ms | Process faster or poll fewer records |
-| [Send times out](card:idempotent-producer) | Retries until delivery.timeout.ms | Keep idempotence on; handle the final error |
-| [Processing fails](card:retries-and-dead-letter-topics) | Nothing; the next poll() moves past it | Retry in code, then DLT; commit after |
-| [Poison record](card:retries-and-dead-letter-topics) | Same failure on every retry | Park it in the DLT and move on |
+| [Consumer too slow](card:consumer-configs) | Removes it after `max.poll.interval.ms` | Process faster or poll fewer records |
+| [Send times out](card:idempotent-producer) | Retries until `delivery.timeout.ms` | Keep idempotence on; handle the final error |
+| [Processing fails](card:retries-and-dead-letter-topics) | Nothing; the next poll moves past it | Retry, then DLT; commit after |
+| [Poison record](card:retries-and-dead-letter-topics) | Same failure on every retry | Park it in the DLT at once |
 
-- Commit only after processing, and a consumer crash causes repeats, not loss ([why](card:delivery-semantics)).
+1. Name what failed: a broker, the controllers, the producer, a consumer, or one record.
+2. Say what Kafka does by itself, such as electing a leader or moving partitions.
+3. Say what this means for the data: lost, repeated, delayed or blocked.
+4. Say what your code adds: idempotent processing, retries with backoff, a dead letter topic, or an alert.
+
+## Example
+
+The Notification service runs two instances. Instance 2 crashes in the middle of a batch:
+
+```text
+1. notification-2 polls payments-1, offsets 500-599; last commit: 500
+2. it sends receipts for 500-559, then its JVM crashes (no clean shutdown)
+3. no heartbeat for the session timeout: the group removes it
+4. rebalance: payments-1 moves to notification-1
+5. notification-1 starts at the committed offset 500 and reads 500-599 again
+```
+
+What to notice:
+
+- Nothing is lost: the commit still pointed at 500, so every unfinished record is read again.
+- Records 500-559 are processed twice. Without an [idempotent consumer](card:idempotent-consumers), 60 customers get two receipts.
+- Had the service committed before sending the receipts, a crash would skip records instead: at-most-once.
+
+## Common mistakes
+
+- **"acks=all means no failure can lose data."** If every in-sync replica of a partition is lost and someone enables unclean leader election, committed records can be dropped.
+- **"A slow consumer is a dead consumer."** A consumer still sending heartbeats is removed only when it fails to call `poll()` within `max.poll.interval.ms`.
 
 ## Interview Qs
 
 ### What happens when a Kafka broker goes down?
 
-Each partition it led gets a new leader from its ISR, and producers and consumers refresh metadata and retry. With RF 3 and min.insync.replicas=2, writes with acks=all go on with one broker down.
+Each partition it led gets a new leader from its ISR, and producers and consumers refresh metadata and retry. With RF 3 and `min.insync.replicas=2`, writes with `acks=all` go on with one broker down.
+
+### What happens when a consumer crashes mid-batch?
+
+After the session timeout the group removes it and rebalances; another member takes its partitions and starts from the last committed offset. Records processed but not committed come again, so processing must be idempotent.
 
 ### What happens if every in-sync replica of a partition fails?
 
-By default the partition stays offline until a safe replica returns, so no committed record is lost. Turning on unclean leader election brings it back sooner, but may drop committed records ([details](card:fault-tolerance)).
+By default the partition stays offline until a replica that was in sync returns, so no committed record is lost. Turning on unclean leader election brings it back sooner, but may drop committed records ([details](card:fault-tolerance)).

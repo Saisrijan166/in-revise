@@ -5,16 +5,29 @@ title: "Schema Registry and Event Schemas"
 topic: ecosystem
 level: intermediate
 heat: 2
-hook: "Kafka stores only bytes. A schema registry keeps versioned event schemas and refuses a new version that would break readers."
+hook: "Kafka stores only bytes. A schema registry keeps every version of an event's schema and refuses a new version that would break the services reading it."
 points:
-  - { k: "Separate product", v: "Confluent Schema Registry runs beside the brokers, not in Kafka" }
-  - { k: "Schema ID", v: "each record carries a small ID, not the whole schema", kind: plus }
-  - { k: "Formats", v: "Avro or Protobuf (compact binary), JSON Schema (JSON text)" }
-  - { k: "BACKWARD order", v: "upgrade consumers first, then producers", kind: minus }
+  - { k: "Schema", v: "the agreed shape of an event: its field names and types, for example orderId as a string" }
+  - { k: "Separate product", v: "Confluent Schema Registry runs as its own service beside the brokers; Apache Kafka has no registry" }
+  - { k: "Schema ID", v: "each record carries a small schema ID, not the whole schema, and readers fetch the schema by that ID", kind: plus }
+  - { k: "Formats", v: "Avro and Protobuf are compact binary formats; JSON Schema checks plain JSON text" }
+  - { k: "Default mode", v: "BACKWARD in Confluent Schema Registry 8.x: new readers must read old data", kind: default }
+  - { k: "Upgrade order", v: "under BACKWARD, upgrade the consumers first, then let producers write the new version", kind: minus }
 trap:
   wrong: "The Kafka broker rejects records that do not match the schema."
-  right: "Apache Kafka brokers never read schemas; the serializer and registry check them. Only licensed Confluent Server adds broker-side ID checks."
-sayIt: "Kafka sees only bytes, so we keep event schemas in a registry. The serializer registers the schema and sends its ID with each record; the registry rejects incompatible versions. I add only fields with defaults."
+  right: "Apache Kafka brokers never read schemas; the producer's serializer and the registry check them. Only licensed Confluent Server adds broker-side ID checks."
+  why: "Databases reject rows that break the table's schema, so people expect Kafka to guard its topics the same way."
+sayIt: "Kafka sees only bytes, so we keep event schemas in a registry. The serializer registers the schema and sends its ID with each record, and the registry rejects incompatible versions. I evolve events by adding fields with defaults."
+cheat:
+  idea: "A schema registry stores versioned event schemas outside Kafka. The producer's serializer registers the schema and puts its small ID in each record; consumers fetch the schema by that ID."
+  flow: "Serializer → registry check → schema ID + bytes → deserializer"
+  remember: "Default BACKWARD: add fields only with a default, and upgrade consumers first."
+buildsOn: [producer-basics, consumer-basics]
+scenarios:
+  - q: "Under the default BACKWARD mode, the Payment team adds a field upiRef to PaymentCompleted with no default value. What does the registry do, and why?"
+    a: "It rejects the new version. A reader using the new schema could not fill upiRef when it reads an old record that lacks it. Adding the field with a default, such as null, makes the change compatible."
+  - q: "A producer team changes amountPaise from long to string and deploys at once, with no registry. What breaks?"
+    a: "Every consumer that decodes amountPaise as a number fails at runtime on the new records, possibly hours later. Kafka stored the bytes without checking. A registry would have refused the incompatible version at the producer."
 confusedWith: []
 tags: [schema-registry, avro, protobuf, schema-evolution]
 visual: flow
@@ -27,28 +40,49 @@ sources:
     verifiedOn: "2026-10-20"
   - title: "Schema Evolution and Compatibility (Confluent Platform 8.x)"
     url: "https://docs.confluent.io/platform/current/schema-registry/fundamentals/schema-evolution.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Formats, Serializers and Deserializers: wire format, auto-registration (Confluent Platform 8.x)"
+    url: "https://docs.confluent.io/platform/current/schema-registry/fundamentals/serdes-develop/index.html"
+    verifiedOn: "2026-10-22"
   - title: "Kafka Interview Questions: Schema Registry (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A schema is the agreed shape of an event: its fields and their types. A schema registry is a separate service that stores each event's schema with every version it has had. The producer's [serializer](card:producer-basics), which turns an object into bytes, checks the schema against the registry before sending. The consumer's deserializer uses the registry to turn the bytes back into an object. The common one is Confluent Schema Registry.
+
 ## Why it exists
 
-Producers and consumers deploy separately. Without a shared contract, one changed field breaks every reader at runtime, and Kafka itself cannot notice.
+Kafka treats every value as plain bytes and never looks inside. The Payment service and the Notification service deploy on different days. If the Payment team renames a field or changes its type, nothing stops the deploy, and every consumer fails at runtime when the new records arrive. A registry turns that runtime failure into a rejected change at the producer, before any bad record is written.
 
 ## How it works
 
-<Steps label="Sending and reading a PaymentCompleted record">
-  <Step title="Register">The producer's serializer registers or looks up the schema under the subject payments-value.</Step>
-  <Step title="Check">The registry accepts a new version only if it passes the subject's compatibility mode, then returns the schema ID.</Step>
-  <Step title="Send">The record holds the schema ID plus the encoded bytes.</Step>
-  <Step title="Read">The consumer's deserializer fetches the schema by that ID and decodes the record.</Step>
-</Steps>
+<Mermaid
+  alt="The Payment service's serializer registers the PaymentCompleted schema with the registry, which checks compatibility and returns schema ID 7. The producer sends the ID plus the encoded bytes to the payments topic. The Notification service's deserializer reads ID 7, fetches that schema from the registry and decodes the record."
+  chart={`sequenceDiagram
+  participant P as Payment serializer
+  participant R as Schema registry
+  participant K as payments topic
+  participant N as Notification deserializer
+  P->>R: register schema (subject payments-value)
+  R-->>P: compatible, schema ID 7
+  P->>K: ID 7 + encoded bytes
+  K->>N: record
+  N->>R: get schema 7
+  N->>N: decode`}
+/>
 
-- Serializer settings belong to the producer: see [producer basics](card:producer-basics).
+1. A subject is one version history. By default it is the topic name plus `-key` or `-value`, so `payments-value`.
+2. On send, the serializer registers its schema if it is new; the registry checks it against the subject's earlier version.
+3. A compatible schema gets an ID; an incompatible one is refused, and the send fails at the producer.
+4. By default the record value starts with one version byte (0) and the 4-byte schema ID, then the encoded data, so the schema itself is never repeated in each record.
+5. The consumer fetches the schema for that ID and decodes with it.
 
 ## Example
+
+Version 2 of the `PaymentCompleted` Avro schema adds `upiRef`, and the producer points its serializer at the registry:
 
 ```json
 {
@@ -63,22 +97,44 @@ Producers and consumers deploy separately. Without a shared contract, one change
 }
 ```
 
-Version 2 adds upiRef with a default, so it passes BACKWARD: new readers see null in old ₹500 records.
+```properties
+value.serializer=io.confluent.kafka.serializers.KafkaAvroSerializer
+schema.registry.url=http://schema-registry:8081
+```
 
-## Defaults
+What to notice:
+
+- `upiRef` has `"default": null`, so a reader using version 2 can still read old version 1 records: it fills in null. That makes the change BACKWARD compatible.
+- Remove the default and the registry rejects version 2, because new readers could not fill `upiRef` in old records.
+- `KafkaAvroSerializer` talks to the registry at `schema.registry.url`; the consumer needs the matching deserializer and the same URL.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Compatibility mode | BACKWARD | Confluent Schema Registry 8.x |
-| Subject name | topic name plus -key or -value (TopicNameStrategy) | Confluent serializers 8.x |
-| Schema storage | the _schemas topic, one partition | Confluent Schema Registry 8.x |
+| Compatibility mode | BACKWARD, checked against the latest version only | Confluent Schema Registry 8.x |
+| Subject name | topic name plus `-key` or `-value` | Confluent serializers 8.x |
+| Registering schemas | serializers register new schemas automatically | Confluent serializers 8.x |
+| Schema storage | the `_schemas` topic, one partition | Confluent Schema Registry 8.x |
+
+- **BACKWARD:** new readers can read old data. Adding a field with a default and deleting a field are allowed; upgrade consumers first.
+- **FORWARD:** old readers can read new data. Upgrade producers first.
+- **FULL:** both at once, so producers and consumers can upgrade in any order. A `_TRANSITIVE` mode checks against every earlier version, not just the latest.
+
+## Common mistakes
+
+- **"JSON needs no schema."** Plain JSON still has an implied shape that consumers rely on. Without a registry, a renamed field is found only when a consumer breaks.
 
 ## Interview Qs
 
 ### What does a schema registry give you that Kafka does not?
 
-Kafka treats keys and values as bytes. A registry stores versioned schemas, gives each an ID that records carry, and rejects incompatible changes, so producers and consumers can change at different times.
+Kafka treats keys and values as bytes. A registry stores versioned schemas, gives each an ID that records carry, and rejects incompatible changes at the producer. So producers and consumers can deploy at different times without breaking each other.
 
 ### Which changes are safe under BACKWARD compatibility?
 
-Adding a field with a default, and deleting a field. Adding a field without a default breaks it, because new readers cannot fill it in old records.
+Adding a field with a default, and deleting a field. Adding a field without a default breaks it, because new readers cannot fill it in old records. Under BACKWARD you upgrade consumers before producers.
+
+### Why Avro or Protobuf instead of plain JSON?
+
+Both are compact binary formats with a strict schema, so records are smaller and every field has a known type. JSON repeats field names in every record and has no built-in contract; JSON Schema adds the contract but not the compact size.

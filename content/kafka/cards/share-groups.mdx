@@ -5,70 +5,120 @@ title: "Share Groups: Queues for Kafka"
 topic: consumers
 level: interview
 heat: 2
-hook: "A share group lets many consumers read the same partitions and acknowledge each record: queue-style work in Kafka 4.2+."
+hook: "In a share group, many consumers read the same partitions and acknowledge each record on its own: queue-style work in Kafka, production-ready since 4.2."
 points:
-  - { k: "Status", v: "preview in Kafka 4.1; production-ready since 4.2 (KIP-932)" }
-  - { k: "Consumers > partitions", v: "allowed: members share partitions", kind: plus }
-  - { k: "Acquisition lock", v: "30 s per record by default (Kafka 4.3), then it can go elsewhere", kind: default }
-  - { k: "Delivery count", v: "at most 5 delivery attempts per record by default (Kafka 4.3)", kind: default }
-  - { k: "No ordering", v: "records can be processed out of order", kind: minus }
+  - { k: "Status", v: "preview in Kafka 4.1; production-ready since Kafka 4.2 (KIP-932, Queues for Kafka)" }
+  - { k: "Consumers > partitions", v: "allowed: several members of one share group read the same partition", kind: plus }
+  - { k: "Acquisition lock", v: "a delivered record is locked to one consumer for 30 s by default (Kafka 4.3), then offered again", kind: default }
+  - { k: "Per-record result", v: "each record is accepted, released for another try, or rejected for good" }
+  - { k: "Delivery limit", v: "after 5 delivery attempts by default (Kafka 4.3), Kafka stops delivering that record", kind: default }
+  - { k: "No ordering", v: "records can finish in any order, so do not use it where order matters", kind: minus }
 trap:
-  wrong: "Kafka can never act as a queue; consumers beyond the partition count are always idle."
+  wrong: "Kafka can never act as a queue: consumers beyond the partition count are always idle."
   right: "Since Kafka 4.2, share groups let consumers outnumber partitions and acknowledge records one by one."
-sayIt: "For a work queue where order does not matter, I use a share group: consumers share partitions, each record is locked, then accepted, released or rejected, and delivery attempts are capped."
-confusedWith: [kafka-vs-message-queue]
+  why: "This was true for most of Kafka's history, and most interview material was written before Kafka 4.2."
+sayIt: "For a work queue where order does not matter, I use a share group: consumers share partitions, each record is locked to one consumer, then accepted, released or rejected, and delivery attempts are capped."
+cheat:
+  idea: "A share group is a queue-style group: many consumers read the same partitions, and each record is locked to one consumer and acknowledged on its own."
+  flow: "poll (lock record) → process → ACCEPT / RELEASE / REJECT"
+  remember: "Scales past the partition count, but gives no ordering. Production-ready since Kafka 4.2."
+buildsOn: [consumer-groups, offset-commits]
+scenarios:
+  - q: "Sending a payment email fails because the email API is briefly down. The share consumer acknowledges the record with RELEASE. What happens next?"
+    a: "The record becomes available again and is delivered on a later poll, possibly to another consumer. Its delivery count goes up by one. If it keeps failing until the limit (5 by default), Kafka stops delivering it."
+  - q: "Should the Notification service move to a share group if customers must get 'payment started' before 'payment completed' for the same order?"
+    a: "No. A share group does not keep order, so the two records could be processed in either order by different consumers. A consumer group keeps order within a partition, and keying by orderId keeps one order's records together."
+confusedWith: [consumer-group-vs-share-group, kafka-vs-message-queue]
 tags: [share-groups, queues, kip-932]
-visual: table
+visual: flow
 sources:
   - title: "Design: the share consumer (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/design/design/"
-    verifiedOn: "2026-10-20"
-  - title: "KafkaShareConsumer (Apache Kafka 4.3 javadoc)"
+    verifiedOn: "2026-10-22"
+  - title: "KafkaShareConsumer: acknowledgement modes and AcknowledgeType (Apache Kafka 4.3 javadoc)"
     url: "https://kafka.apache.org/43/javadoc/org/apache/kafka/clients/consumer/KafkaShareConsumer.html"
-    verifiedOn: "2026-10-20"
-  - title: "Upgrading: notable changes in 4.1 and 4.2 (Apache Kafka 4.3)"
+    verifiedOn: "2026-10-22"
+  - title: "Upgrading: notable changes in 4.1, 4.2 and 4.3 (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/getting-started/upgrade/"
-    verifiedOn: "2026-10-20"
-  - title: "Group Configs (Apache Kafka 4.3)"
+    verifiedOn: "2026-10-22"
+  - title: "Group Configs: share.record.lock.duration.ms, share.delivery.count.limit (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/configuration/group-configs/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Broker Configs: share.coordinator.state.topic.replication.factor (Apache Kafka 4.3)"
+    url: "https://kafka.apache.org/43/configuration/broker-configs/"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+A share group is a second kind of group in which several consumers read the same partition at the same time. It was added by KIP-932, "Queues for Kafka". Instead of one committed offset per partition, each record gets its own result: accepted, released for another try, or rejected. Consumers use `KafkaShareConsumer`. Share groups were a preview in Kafka 4.1 and are production-ready since Kafka 4.2.
 
 ## Why it exists
 
-Some work, like sending order emails, needs no order but must scale past the partition count. Consumer groups cannot do that, so Kafka added share groups.
+In a [consumer group](card:consumer-groups), a partition has one owner, so a 4-partition topic can keep only 4 consumers busy. One slow record also holds up every record behind it in that partition. Some work does not need order: sending a receipt email for each payment is independent of every other email. For such work you want 20 workers on 4 partitions and a retry per record. Before share groups, that meant adding partitions or running a separate queue system.
 
 ## How it works
 
-<Compare id="consumer-group-vs-share-group" />
+<Mermaid
+  alt="One partition P0 of the payments topic is read by three consumers of the share group email-workers at the same time. Each consumer gets different records, and each record is locked to one consumer until it is acknowledged."
+  chart={`flowchart LR
+  P0[payments P0] -- "record 10, locked" --> W1[worker 1]
+  P0 -- "record 11, locked" --> W2[worker 2]
+  P0 -- "record 12, locked" --> W3[worker 3]`}
+/>
 
-- Acknowledge types: ACCEPT (done), RELEASE (try again), REJECT (unprocessable, no retry), RENEW (still working, since 4.2).
-- State lives in the internal topic __share_group_state: 3 replicas by default, so 3 brokers or a config change.
-- The share.version feature (kafka-features.sh) controls it; Spring support: [Spring for Apache Kafka](card:spring-kafka).
+1. Several workers create a `KafkaShareConsumer` with the same `group.id` and subscribe to `payments`.
+2. On `poll()`, the broker gives each worker a batch of records and locks each record to that worker for a time limit, the acquisition lock. While it is locked, no other member gets it.
+3. The worker processes each record and acknowledges it: ACCEPT (done), RELEASE (could not do it now; try again) or REJECT (can never be processed; do not deliver again). RENEW extends the lock when the work takes longer.
+4. The next `poll()` or a commit sends the acknowledgements to Kafka.
+5. A released record, or one whose lock ran out because the worker crashed, is delivered again. Each delivery is counted, and at the limit Kafka stops delivering it.
+
+So a share group behaves like a queue on top of the same topic.
 
 ## Example
 
+Email workers send a receipt per payment and decide each record's result themselves:
+
 ```java
-props.put("group.id", "notification-service");
+props.put("group.id", "email-workers");
 props.put("share.acknowledgement.mode", "explicit");
 try (var consumer = new KafkaShareConsumer<String, String>(props)) {
-    consumer.subscribe(List.of("orders"));
+    consumer.subscribe(List.of("payments"));
     while (running) {
         for (var rec : consumer.poll(Duration.ofMillis(500))) {
-            boolean sent = sendEmail(rec.value());   // OrderPlaced -> email
+            boolean sent = sendEmail(rec.value());
             consumer.acknowledge(rec, sent ? AcknowledgeType.ACCEPT : AcknowledgeType.RELEASE);
         }
-        consumer.commitSync();
+        consumer.commitSync();   // send the acknowledgements to Kafka
     }
 }
 ```
+
+What to notice:
+
+- `explicit` mode makes you acknowledge every record before the next `poll()`; forgetting one throws `IllegalStateException`.
+- A failed email gets RELEASE, so the record comes back later, maybe to another worker. A record that can never work, like a malformed payload, should get REJECT instead.
+- There is no offset arithmetic: progress is tracked per record, not as one number per partition.
+- Remove the `share.acknowledgement.mode` line and the default, `implicit`, applies: the next `poll()` or commit accepts the whole batch.
+
+## Rules and defaults
+
+- **Lock time (Kafka 4.3):** 30 s by default, set by the group config `share.record.lock.duration.ms`.
+- **Delivery limit (Kafka 4.3):** `share.delivery.count.limit` is 5 by default; the minimum is 2.
+- **Ordering:** none across records. Within one poll, records from one partition come in offset order, but redeliveries and other workers break that.
+- **State topic:** share progress is stored in the internal topic `__share_group_state`, which needs 3 brokers by default. On a smaller cluster, lower `share.coordinator.state.topic.replication.factor` and `share.coordinator.state.topic.min.isr` before using share groups.
+- **Threads:** `KafkaShareConsumer` is not thread-safe either; only `wakeup()` is safe from another thread.
+
+## Not to be confused with
+
+A consumer group gives each partition one owner and keeps the order inside it; progress is one committed offset per partition. A share group lets many members read one partition with no order; progress is one result per record. Rule: ordered event stream = consumer group; independent jobs that must scale = share group.
 
 ## Interview Qs
 
 ### Can Kafka act as a queue?
 
-Yes, since Kafka 4.2, with share groups. Consumers share partitions, can outnumber them, and acknowledge each record. Ordering is not guaranteed, so use them for independent jobs, not ordered event streams.
+Yes, since Kafka 4.2, with share groups. Consumers share partitions, can outnumber them, and acknowledge each record. Failed records are redelivered up to a limit. Ordering is not guaranteed, so use them for independent jobs, not for ordered event streams.
 
 ### What happens if a share consumer crashes in the middle of a record?
 
-Its acquisition lock runs out and the record goes to another consumer. Every attempt is counted; when the delivery limit is reached, Kafka stops delivering that record.
+Its acquisition lock runs out, 30 seconds by default, and the record becomes available to another consumer in the group. The attempt is counted. When the delivery limit is reached, Kafka stops delivering that record, so one bad record cannot loop forever.

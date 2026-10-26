@@ -5,60 +5,112 @@ title: Kafka Performance Tuning
 topic: playbook
 level: intermediate
 heat: 2
-hook: "Kafka is fast because it writes to disk in order and lets the OS cache and send bytes; you tune batches, partitions, consumers."
+hook: "Kafka is fast because it writes to disk in order and lets the OS cache and send the bytes. You tune batches, partitions and consumers, and measure each change."
 points:
-  - { k: "Sequential disk", v: "appends and linear reads, no random seeks", kind: plus }
-  - { k: "Page cache", v: "the OS caches the log, not a big cache in the JVM heap" }
-  - { k: "Zero-copy", v: "sendfile moves bytes from page cache straight to the socket" }
-  - { k: "Batches", v: "compressed by the producer, kept and sent to consumers compressed" }
-  - { k: "TLS on", v: "no sendfile: encryption runs in user space and costs CPU", kind: minus }
+  - { k: "Sequential disk", v: "Kafka only appends to the end of a log and reads forward, so the disk never has to jump around", kind: plus }
+  - { k: "Page cache", v: "the operating system keeps recent log data in memory, so Kafka needs no big cache in the JVM heap" }
+  - { k: "Zero-copy", v: "sendfile moves bytes from the page cache straight to the network socket, skipping the application" }
+  - { k: "Compressed batches", v: "the producer compresses a batch once; the broker stores and sends it still compressed" }
+  - { k: "No fsync per write", v: "by default Kafka lets the OS flush to disk; durability comes from replicas on other brokers" }
+  - { k: "TLS on", v: "no zero-copy: encryption runs in the application, so it costs CPU", kind: minus }
 trap:
   wrong: "Kafka is fast because it keeps all data in memory."
   right: "It writes everything to disk in order and leans on the OS page cache; zero-copy then sends cached bytes to the network."
-sayIt: "Kafka appends to disk in order, lets the OS page cache hold hot data, serves it with zero-copy, and moves compressed batches. To tune: batch and compress, enough partitions, no hot keys, then watch lag."
+  why: "Very fast systems such as Redis do keep data in memory, so people assume Kafka's speed comes from the same trick."
+sayIt: "Kafka appends to disk in order, lets the OS page cache hold hot data, serves it with zero-copy, and moves compressed batches. To tune: batch and compress, enough partitions, no hot keys, then measure and watch lag."
+cheat:
+  idea: "Kafka is fast because it appends to disk in order, leaves caching to the operating system's page cache, sends cached bytes with zero-copy, and keeps batches compressed end to end."
+  remember: "Not in-memory: sequential disk plus page cache. Tune one lever at a time and measure."
+buildsOn: [batching-and-compression, log-storage, consumer-lag]
+scenarios:
+  - q: "Analytics consumers read payments as they arrive, and the broker's disks show almost no reads. Is the monitoring broken?"
+    a: "No. Consumers that keep up read records that were just written, which are still in the OS page cache. The broker serves them from memory, so the disks see almost no reads."
+  - q: "The security team turns on TLS for all clients, and broker CPU rises. Why?"
+    a: "With TLS the broker must encrypt the bytes in the application before sending, so it can no longer hand file data straight from the page cache to the socket with zero-copy. Encryption costs CPU."
 confusedWith: []
 tags: [performance, throughput, page-cache, zero-copy]
 visual: table
 sources:
   - title: "Design: persistence, efficiency and end-to-end batch compression (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/design/design/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Hardware and OS: disks, flush and page cache (Apache Kafka 4.3 docs)"
     url: "https://kafka.apache.org/43/operations/hardware-and-os/"
     verifiedOn: "2026-10-20"
+  - title: "Upgrading to 4.2.0: kafka-producer-perf-test.sh --bootstrap-server and --command-property (Apache Kafka 4.3 docs)"
+    url: "https://kafka.apache.org/43/getting-started/upgrade/"
+    verifiedOn: "2026-10-22"
   - title: "Kafka interview questions: zero-copy (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/apache-kafka/kafka-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Performance tuning is two things for Kafka. First, knowing why Kafka is already fast, a very common interview question. Second, knowing which settings to change when it is not fast enough. The page cache is memory the operating system uses to keep recently read or written file data. Zero-copy is the OS sending file bytes to the network without copying them through the application.
+
 ## Why it exists
 
-Interviewers ask why Kafka is fast and how to make it faster. Both answers are short lists of levers, each explained in its own concept.
+Kafka handles very high event rates on ordinary disks, which surprises people who think "disk is slow". Interviewers ask why, and then how you would make a slow pipeline faster. Without a clear list of levers, people turn random knobs, or add consumers that sit idle. Each lever below lives in its own concept; this one shows them together.
 
 ## How it works
 
 | Where | Lever | Owner |
 |---|---|---|
-| Producer | Bigger batches, some linger.ms, compression | [Batching](card:batching-and-compression) |
-| Producer | acks: speed against safety | [acks](card:producer-acks) |
-| Producer | Async send() with a callback, not get() per record | [Producers](card:producer-basics) |
+| Producer | Bigger batches, some `linger.ms`, compression | [Batching](card:batching-and-compression) |
+| Producer | `acks`: speed against safety | [acks](card:producer-acks) |
+| Producer | Async `send()` with a callback, not `get()` per record | [Producers](card:producer-basics) |
 | Topic | Enough partitions, no hot keys | [Count](card:ordering-and-scaling), [hot keys](card:partition-keys) |
 | Broker | More brokers, several fast drives | [Brokers](card:kafka-architecture) |
 | Consumer | Fetch and poll sizes | [Consumer configs](card:consumer-configs) |
 | Consumer | More instances, batched downstream writes | [Lag](card:consumer-lag) |
 
-- Append-only [segments](card:log-storage) keep disk access sequential.
-- Caught-up consumers read from the page cache, so the disks see almost no reads.
+1. A producer sends a compressed batch, and the broker appends it to the end of a [log segment](card:log-storage): a sequential write, with no seeking.
+2. The OS keeps that new data in the page cache, so it is in memory without Kafka managing a cache.
+3. A consumer that keeps up asks for those records soon after; the broker finds them in the page cache, not on disk.
+4. The broker uses zero-copy (`sendfile`) to send the bytes from the page cache to the socket, still compressed.
+5. To make it faster, find the bottleneck from lag and metrics, change one lever from the table, and measure again.
+
+## Example
+
+Before and after each change, measure. Kafka ships a load-test tool; here it sends 50,000 one-KB records to `payments` at 5,000 per second:
+
+```bash
+kafka-producer-perf-test.sh --bootstrap-server localhost:9092 --topic payments \
+  --num-records 50000 --record-size 1000 --throughput 5000 \
+  --command-property acks=all compression.type=lz4
+```
+
+```text output
+24977 records sent, 4992.4 records/sec (4.76 MB/sec), 765.7 ms avg latency, 1333.0 ms max latency.
+50000 records sent, 4957.366647 records/sec (4.73 MB/sec), 395.47 ms avg latency, 1333.00 ms max latency, 123 ms 50th, 1195 ms 95th, 1258 ms 99th, 1307 ms 99.9th.
+```
+
+What to notice:
+
+- The early lines are progress reports; the last line is the summary: throughput, average latency and latency percentiles.
+- The run reached the target of about 5,000 records per second. The 99th percentile, 1258 ms, is what slow requests feel like; watch it, not only the average.
+- These numbers come from one small test container; on your cluster they will differ. Change one setting, such as `linger.ms` or the codec, and run again.
+
+## Rules and defaults
+
+- **Flushing:** by default Kafka does not force an fsync on each write; the OS flushes, and replication protects against a lost broker.
+- **Zero-copy and TLS:** zero-copy is not used on TLS connections, because the bytes must be encrypted in the application first.
+- **Memory:** Kafka relies on the page cache, which can use all free memory, instead of caching data in the JVM heap, where objects take extra space and garbage collection slows down. Leave the OS plenty of free memory.
+
+## Common mistakes
+
+- **"Add consumers to go faster."** Consumers beyond the partition count sit idle. Check lag per partition and the downstream calls first.
 
 ## Interview Qs
 
 ### Why is Kafka so fast?
 
-Sequential appends to disk, the OS page cache instead of a JVM cache, zero-copy sendfile from cache to socket, and batches that stay compressed from producer to consumer.
+Sequential appends to disk, the OS page cache instead of a cache in the JVM, zero-copy `sendfile` from cache to socket, and batches that stay compressed from producer to consumer.
 
 ### What is zero-copy, and when does Kafka not use it?
 
-The broker asks the OS to send file bytes from the page cache straight to the network socket, skipping copies into the application. Kafka cannot use it when TLS is on, because encryption runs in user space.
+The broker asks the OS to send file bytes from the page cache straight to the network socket, skipping copies into the application. Kafka cannot use it when TLS is on, because encryption runs in the application.
 
 ### Does Kafka need fsync on every write to be durable?
 

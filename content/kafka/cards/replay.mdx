@@ -5,16 +5,28 @@ title: "Replay: Reading Old Events Again"
 topic: storage
 level: intermediate
 heat: 2
-hook: "Replay means moving a group's offset back to read kept records again; the broker simply serves what is asked for."
+hook: "Replay means moving a consumer group's offsets back so it reads kept events again. The broker resends nothing; the group just starts reading from an earlier offset."
 points:
-  - { k: "Why it works", v: "records stay after reading, and each group owns its offsets" }
-  - { k: "Other groups", v: "unaffected: payment-service keeps its own offsets", kind: plus }
-  - { k: "Only within retention", v: "records already deleted cannot be replayed", kind: minus }
-  - { k: "Side effects repeat", v: "emails and refunds run again unless consumers are idempotent", kind: minus }
+  - { k: "Why it works", v: "events stay after reading, and each consumer group keeps its own offsets" }
+  - { k: "Other groups unaffected", v: "moving Analytics back leaves the Notification group's offsets where they were", kind: plus }
+  - { k: "Only within retention", v: "events already removed by retention cannot be read again", kind: minus }
+  - { k: "Side effects repeat", v: "emails or refunds run again unless the consumer skips events it already handled", kind: minus }
+  - { k: "Group must be stopped", v: "kafka-consumer-groups.sh --reset-offsets refuses while the group has running members" }
 trap:
   wrong: "Replay is a broker feature that resends old messages to consumers."
-  right: "The broker pushes nothing. The consumer seeks, or the group's committed offsets are reset, and its next fetches start there."
-sayIt: "Kafka keeps records and each group stores its own offsets, so I can rewind one group with seek() or kafka-consumer-groups.sh --reset-offsets, within retention. Its consumers must be idempotent, as side effects run again."
+  right: "The broker pushes nothing. The consumer seeks in code, or the group's committed offsets are reset, and its next reads start there."
+  why: "The word replay sounds like the broker playing messages again, and push-based queues really do redeliver messages."
+sayIt: "Kafka keeps events and each group stores its own offsets, so I can rewind one group with seek() or kafka-consumer-groups.sh --reset-offsets, within retention. Its consumers must handle duplicates, because side effects run again."
+cheat:
+  idea: "Replay is reading kept events again by moving one group's offsets back, with seek() or --reset-offsets. Other groups are not affected."
+  flow: "Fix the bug → stop the group → reset offsets → start the group"
+  remember: "Replay works only within retention, and side effects such as emails run again unless the consumer is idempotent."
+buildsOn: [offsets, log-storage]
+scenarios:
+  - q: "You run --reset-offsets --execute for the analytics group while two Analytics instances are still running. What happens?"
+    a: "The tool refuses with 'Assignments can only be reset if the group analytics is inactive, but the current state is Stable.' Running members would overwrite the reset with their next commit. Stop every instance, reset, then start them again."
+  - q: "A new Fraud service must read all past payments. payments keeps 14 days. What can it read, and how does it start there?"
+    a: "Only the last 14 days; older events are gone. With a new group.id the group has no committed offsets, so auto.offset.reset decides where it starts; set it to earliest to begin at the oldest kept event."
 confusedWith: []
 tags: [replay, reprocessing, offsets]
 visual: table
@@ -24,46 +36,82 @@ sources:
     verifiedOn: "2026-10-20"
   - title: "Basic Kafka Operations: reset offsets of a consumer group (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/operations/basic-kafka-operations/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Design: the consumer position and rewinding (Apache Kafka 4.3)"
     url: "https://kafka.apache.org/43/design/design/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Replay means reading events again that a consumer group has already read. It works because Kafka keeps events after they are read ([log storage](card:log-storage)), and because a group's progress is only a committed [offset](card:offsets) per partition. Move that offset back, and the group's next reads start from the older events. Nothing changes in the topic itself.
+
 ## Why it exists
 
-A bug may have processed payments wrongly, or a new service needs past orders. Because Kafka keeps records after reading, a consumer can read them again instead of asking the producers to resend.
+A bug in the Analytics service counted yesterday's payments wrongly, or a new Fraud service needs past payments. Without replay you would ask the Payment service to send every event again, which it may not even be able to do. With Kafka the events are still there, so the reader rewinds and reads them again, and the producer does nothing.
 
 ## How it works
 
 | Way | How | Use it for |
 | --- | --- | --- |
 | `seek()`, `seekToBeginning()` | Consumer code sets its own position | A start-up rule in the app |
-| `offsetsForTimes()`, then `seek()` | Finds the first offset at or after a timestamp | Start from yesterday 00:00 |
-| `--reset-offsets` | CLI moves a stopped group: `--to-earliest`, `--to-datetime`, `--shift-by` | Reprocess after a bug fix |
-| A new `group.id` | Starts where `auto.offset.reset` says, e.g. earliest | Backfill a new service |
+| `offsetsForTimes()`, then `seek()` | Finds the first offset at or after a time | Start from 00:00 yesterday |
+| `--reset-offsets` | The CLI moves a stopped group's committed offsets | Reprocess after a bug fix |
+| A new `group.id` | No committed offsets, so `auto.offset.reset` picks the start | Backfill a new service |
 
-- Make the replaying consumer [idempotent](card:idempotent-consumers): emails and payments must not repeat.
-- `auto.offset.reset` is explained in [consumer configs](card:consumer-configs).
+For a reprocess after a bug fix, the CLI way runs like this:
+
+1. Deploy the fixed Analytics code, but keep it stopped.
+2. Stop every Analytics instance, so the group has no running members.
+3. Preview the reset with `--dry-run` to see the new offsets.
+4. Apply it with `--execute`. The group's committed offsets now point to older events.
+5. Start the instances. They fetch from the new offsets and process those events again.
 
 ## Example
 
-```bash
-# Stop every analytics instance first. Without --execute this only previews.
-bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group analytics \
-  --topic payments --reset-offsets --to-datetime 2026-10-19T00:00:00.000
+Preview moving the Analytics group back to the first payment event of 22-10-2026:
 
-# Apply it, then start the instances again
+```bash
 bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --group analytics \
-  --topic payments --reset-offsets --to-datetime 2026-10-19T00:00:00.000 --execute
+  --topic payments --reset-offsets --to-datetime 2026-10-22T00:00:00.000 --dry-run
 ```
+
+```text output
+GROUP           TOPIC           PARTITION  NEW-OFFSET
+analytics       payments        0          0
+analytics       payments        2          0
+analytics       payments        1          0
+```
+
+What to notice:
+
+- `NEW-OFFSET` is where each partition would restart. All events in this test topic are from that day, so every partition goes back to offset 0.
+- `--dry-run` changes nothing. Replace it with `--execute` to apply the move.
+- Only the `analytics` group moves. The Notification group's offsets stay where they are.
+- Other moves: `--to-earliest` (oldest kept event) and `--shift-by -1` (one event back in each partition).
+
+## Rules and defaults
+
+- **Inactive group:** the reset works only when no member of the group is running.
+- **Preview by default (Kafka 4.3):** without `--execute` the tool only shows the new offsets. It warns that Kafka 5.0 will require `--dry-run` or `--execute`, so always write one.
+- **Retention limit:** you can replay only events that are still kept; a time before the oldest kept event starts at the oldest one.
+- **New groups:** `auto.offset.reset` decides where a group without committed offsets starts ([consumer configs](card:consumer-configs), later).
+
+## Common mistakes
+
+- **Replaying into a consumer with side effects.** A replay sends every email or refund again. Make the consumer [idempotent](card:idempotent-consumers) first, so it skips events it has already handled.
+- **Expecting a replay of last month with 7-day retention.** Deleted segments are gone. For a full current state, keep a compacted topic; for long history, raise retention or use tiered storage.
 
 ## Interview Qs
 
 ### How would you reprocess yesterday's payments after fixing a bug?
 
-Deploy the fix, stop the group, reset its offsets with --to-datetime, then restart. Only that group rereads; others are untouched. The consumer must be idempotent so ₹500 is not charged or mailed twice.
+Deploy the fix, stop every instance of the group, reset its offsets with `--to-datetime`, then start it again. Only that group rereads; other groups are untouched. The consumer must be idempotent, so a ₹500 payment is not counted, charged or mailed twice.
 
-### Can a new service read all past orders?
+### Can a new service read all past events?
 
-Only what retention still keeps. A new group.id with auto.offset.reset=earliest starts at the oldest kept record. For the full current state, keep a compacted topic.
+Only what retention still keeps. A new `group.id` with `auto.offset.reset=earliest` starts at the oldest kept event. If the service needs the current state of every key rather than the full history, keep a compacted topic.
+
+### Does replaying affect other consumers?
+
+No. Each consumer group has its own committed offsets, and the events in the topic do not change. Rewinding the Analytics group leaves the Notification group exactly where it was.

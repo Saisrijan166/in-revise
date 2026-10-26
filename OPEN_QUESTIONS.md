@@ -697,3 +697,47 @@ The owner approved the Spring Boot pilot, both the concept rewrite (section Q) a
 - **Correction:** a Gateway API HTTPRoute backend with weight > 0 takes all traffic when it is the only non-zero weight; weight 0 forwards none. The draft was wrong.
 - **Runs:** outputs come from throwaway kind clusters (unique `inrv-` names, deleted after). Some behaviour rests on docs only where a cluster could not start (the host's inotify limit blocks a 4th concurrent cluster).
 - **To watch:** Gateway API v1.7 is at rc.1; Helm 3 reaches end of life 10-02-2027; IPVS proxy mode is off by default from 1.40.
+
+### R9. Design Patterns
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 37 | 15 | ~200 | ~650 / 3 / 0 | ~9 min |
+
+- **Order:** pattern basics, then SOLID, then creational, structural, behavioural (split into algorithms/requests and events/object-structures), then patterns in real apps, then choosing a pattern.
+- **Running example:** one payment domain reused across patterns (Strategy for card/UPI/wallet, Factory for gateway clients, Adapter for a third-party SDK, Decorator for logging/retry, Observer for notifications, State for PENDING→PAID→REFUNDED, Builder for PaymentRequest, Chain of Responsibility for fraud/limit/KYC checks, Template Method, Command for refunds, Proxy for caching, Singleton for config). Every runnable example compiled and ran on JDK 21.
+- **Baseline:** GoF (1994) for the 23 patterns, Robert C. Martin for SOLID, Spring Framework 7.0 / Spring Boot 4.1 for the "patterns in Spring" concept.
+- **Corrections worth knowing:**
+  - Spring's several-constructors fallback uses the "primary/default (often no-argument) constructor", not strictly the no-argument one.
+- **Verification:** 650 claims checked across three passes; the only fixes were that wording, a cheat-card trim and a grammar slip. The content was accurate.
+
+### R10. AWS
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 45 | 24 | ~290 | ~755 / 4 / 0 | ~11 min |
+
+- **Order:** cloud and AWS basics, then networking (moved up, because compute and databases live in VPC subnets), then compute, storage, databases, security, messaging/integration, operations.
+- **Running example:** deploying the Spring Boot payment service on AWS (VPC with public/private subnets across 2 AZs, ALB → ECS Fargate, RDS Multi-AZ, ElastiCache, S3 behind CloudFront, SQS/SNS, IAM task roles, Secrets Manager, CloudWatch).
+- **Code:** Java examples compile against AWS SDK for Java v2 (2.30.18). No AWS account here, so there are no live output panels; CLI, IAM policies and CloudFormation/CDK are checked against the docs only. Prices are never stated as numbers.
+- **Corrections worth knowing:**
+  - S3's max object size is 48.8 TiB.
+  - Rolling deployments have no default bake time.
+  - IAM default is implicit deny; a guardrail (SCP/RCP) grants nothing.
+- **Not pinned down:** the EventBridge enhanced Custom Event Bus is confirmed real (subscribers, 1–365-day retention, replay, FIFO, dedup) but its exact GA date and Region availability could not be confirmed; the text says "launched in 2026".
+- **Dated facts to re-check:** AWS SDK v1 reached end of support 31-12-2025; X-Ray SDK entered maintenance mode 25-02-2026 (use OpenTelemetry); ECS built-in blue/green launched 17-07-2025.
+
+### R11. Kafka
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 41 | 16 | ~240 | ~720 / 4 / 0 | ~9.7 min |
+
+- **Baseline:** Apache Kafka 4.3 (KRaft only; ZooKeeper removed in 4.0), Spring for Apache Kafka 4.x, Java 25.
+- **Running example:** payment events — a Payment service produces `PaymentCompleted` to a `payments` topic keyed by orderId; a Notification service and an Analytics service read it in their own consumer groups; the classic failures (duplicate event, poison message, slow consumer, lag). CLI and Java output panels come from real runs on single- and three-broker Kafka 4.3 clusters in Docker (all `inrv-` containers removed).
+- **Corrections worth knowing:**
+  - Several output panels were replaced with real runs (perf-test percentiles, the partition-shrink `InvalidPartitionsException` message).
+  - Dropped an unverified "since Kafka 4.0" on the in-flight>5 idempotence ConfigException.
+  - The new consumer group protocol (KIP-848) is GA in 4.0, broker-side with client opt-in, planned default in 5.0.
+- **Not re-confirmed:** CooperativeStickyAssignor is attributed to Kafka 2.4 from secondary sources; whether share groups are on by default in a new 4.2/4.3 cluster (the content makes no claim).
+- **Newer than baseline, left out:** kafka-clients 4.4.0 is on Maven Central; whether 4.1-upgraded clusters get Eligible Leader Replicas by default.
