@@ -5,17 +5,28 @@ title: "HTTP Basics: Requests, Methods and Status Codes"
 topic: application
 level: beginner
 heat: 3
-hook: "A request is a method, a path, headers and maybe a body; the response is a status code, headers and maybe a body."
+hook: "A request is a method, a path, headers and maybe a body; the response is a status code, headers and maybe a body. That is the whole shape of HTTP."
 points:
-  - { k: "Stateless", v: "each request is understood alone; cookies or tokens carry state" }
-  - { k: "Safe", v: "read-only by definition: GET, HEAD, OPTIONS" }
-  - { k: "Idempotent", v: "repeat gives the same effect: PUT, DELETE and the safe methods" }
-  - { k: "PUT vs PATCH", v: "PUT replaces the whole resource; PATCH sends changes" }
-  - { k: "502 / 503 / 504", v: "bad upstream reply / overloaded or down / upstream too slow" }
+  - { k: "Stateless", v: "the server treats each request on its own; cookies or tokens carry who you are" }
+  - { k: "Safe method", v: "read-only, changes nothing on the server: GET, HEAD, OPTIONS" }
+  - { k: "Idempotent method", v: "sending it again lands in the same state: GET, PUT, DELETE, HEAD, OPTIONS" }
+  - { k: "PUT vs PATCH", v: "PUT replaces the whole resource; PATCH sends only the fields to change" }
+  - { k: "401 vs 403", v: "401 means no valid login; 403 means logged in but not allowed" }
+  - { k: "502/503/504", v: "bad reply from the app / app overloaded or down / app too slow for the proxy" }
 trap:
-  wrong: "401 means you are logged in but not allowed."
-  right: "401 means no valid credentials. 403 means the server understood and refuses: logged in, but no permission."
-sayIt: "HTTP is stateless request and response. GET, HEAD and OPTIONS are safe; PUT and DELETE are idempotent; POST is neither. 401 is not authenticated, 403 is authenticated but not allowed."
+  wrong: "401 means you are logged in but not allowed to do this."
+  right: "401 means the server has no valid credentials for you (log in). 403 means you are logged in, the server understood, and still refuses (no permission)."
+  why: "Both are about access, so the two get swapped. The split is about which step failed: 401 is authentication (who are you), 403 is authorisation (are you allowed)."
+sayIt: "HTTP is a stateless request and response. GET, HEAD and OPTIONS are safe; GET, PUT, DELETE, HEAD and OPTIONS are idempotent; POST is neither. 401 means not authenticated, 403 means authenticated but not permitted."
+cheat:
+  idea: "HTTP is a stateless request (method, path, headers, body) and response (status, headers, body). Methods carry intent; status codes say what happened."
+  remember: "Safe = read-only (GET, HEAD, OPTIONS). Idempotent = same result if repeated (adds PUT, DELETE). 401 = not logged in; 403 = logged in but not allowed."
+buildsOn: [dns, tcp-and-udp]
+scenarios:
+  - q: "A client sends the same PUT /orders/42 request twice because the first reply was lost. Is that safe? What about the same POST /orders twice?"
+    a: "PUT is idempotent: it sets order 42 to the same body, so twice leaves the same state. POST is not idempotent: it tends to create a new order each time, so a retried POST can make two orders. That is why retrying POST needs an idempotency key."
+  - q: "An API returns 403 for a logged-in user trying to delete another user's order. Would 401 be correct instead?"
+    a: "No. 401 means the request had no valid credentials, so the user should log in. Here the user is logged in and understood, but lacks permission, which is exactly 403. Returning 401 would wrongly tell them to log in again."
 confusedWith: []
 tags: [http, methods, status-codes]
 visual: table
@@ -34,24 +45,34 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+HTTP is the language a client and a server use to talk over the web. The client sends a request: a method (what to do), a path (which resource), headers (extra details) and sometimes a body (data). The server sends a response: a status code (what happened), headers and sometimes a body. Once [DNS](card:dns) has found the server's IP and a connection is open, every exchange between browser and payment server is one HTTP request and one response.
+
 ## Why it exists
 
-Clients and servers written by different people need one shared way to ask for a resource, say what happened, and describe the content.
+Clients and servers are written by different people in different languages, and they still need to understand each other. Without a shared format, every pair of programs would invent its own way to ask for data and report results, and nothing would interoperate. HTTP fixes one simple shape, so any client can call any server: the method says the intent, the status code says the outcome, and headers describe the content. That shared agreement is what makes the web work.
 
 ## How it works
 
-| Method | Safe | Idempotent | Cacheable |
+The method tells the server your intent, and two properties decide how it may be retried and cached.
+
+| Method | Safe (read-only) | Idempotent (repeat is same) | Usually cacheable |
 |---|---|---|---|
 | GET, HEAD | Yes | Yes | Yes |
 | OPTIONS | Yes | Yes | No |
 | PUT, DELETE | No | Yes | No |
 | POST, PATCH | No | No | Rarely |
 
-- Status classes: 2xx success, 3xx redirect, 4xx client mistake, 5xx server failure.
-- Know 200, 201, 204, 301, 302, 304, 400, 404, 409 (conflict), 429 (rate limited), 500.
-- Retrying a POST safely needs an [idempotency key](card:network-failures).
+1. The client picks a method for its intent: GET to read, POST to create, PUT to replace, PATCH to change part, DELETE to remove.
+2. The server does the work and returns a status code: 2xx success, 3xx redirect, 4xx the client's mistake, 5xx the server's failure.
+3. The client reads the status to decide what to do next: 200 use the body, 301 follow the new location, 404 the resource is gone, 429 slow down and retry later.
+
+So the key is that method plus status code carry the meaning; the body is just the data.
 
 ## Example
+
+A GET request for one order, and the response. This is the running payment example, over plain HTTP:
 
 ```text
 GET /orders/42 HTTP/1.1
@@ -63,21 +84,41 @@ HTTP/1.1 200 OK
 Content-Type: application/json
 Cache-Control: private, max-age=60
 
-{"id": 42, "total": "₹1,499", "status": "PAID"}
+{"id": 42, "total": "1499.00", "status": "PAID"}
 ```
 
-[Cache-Control](card:caching-and-cdn) says who may store the answer, and for how long.
+What to notice:
+
+- The request's first line is method, path and version; the `Host` header names which site on that IP (one server can host many).
+- `Authorization: Bearer ...` carries the token, because HTTP is stateless and the server would otherwise not know who is asking.
+- `Cache-Control: private, max-age=60` is the server telling the client it may reuse this answer for 60 seconds; [HTTP caching](card:caching-and-cdn) builds on this header.
+- Change the method to DELETE and the same path means "remove order 42"; the path is the resource, the method is the intent.
+
+## Rules and defaults
+
+- **Stateless:** the server keeps no memory of past requests. State is carried by the client on each request, usually a session id in a `Cookie` or a token in `Authorization`.
+- **Status classes:** 2xx success, 3xx redirect, 4xx client error, 5xx server error. Worth knowing: 200, 201 (created), 204 (no content), 301/302 (redirect), 304 (not modified), 400, 401, 403, 404, 409 (conflict), 429 (rate limited), 500.
+- **Retrying POST is not automatically safe:** POST is not idempotent, so a blind retry can create duplicates. Use an [idempotency key](card:network-failures) when you must retry it.
+
+## Not to be confused with
+
+- **Safe vs idempotent:** safe means the request changes nothing (read-only). Idempotent means repeating it leaves the same state, even if the first call did change something. GET is both; DELETE is idempotent but not safe (it changes state, but deleting twice ends the same).
+- **401 vs 403:** 401 is authentication (the server does not know who you are, log in). 403 is authorisation (it knows you and refuses).
+
+## Common mistakes
+
+- **"PUT and PATCH are the same, both update."** PUT replaces the whole resource with the body you send, so a missing field is cleared. PATCH sends only the fields to change. PUT is idempotent; PATCH like "add one item" is not (RFC 5789).
 
 ## Interview Qs
 
 ### Is PUT idempotent? Is PATCH?
 
-PUT replaces the resource, so sending it twice leaves the same state. PATCH applies changes like "add one item", so a repeat can differ; RFC 5789 calls it not idempotent, though a patch can be written to be.
+PUT replaces the resource with the body, so sending it twice leaves the same final state: it is idempotent. PATCH sends a change, which can be relative like "add one item", so a repeat can differ. RFC 5789 says PATCH is not idempotent by default, though a specific patch can be written to be.
 
-### 502 vs 503 vs 504?
+### What is the difference between 401 and 403?
 
-502: a proxy got an invalid reply from the app. 503: the server is overloaded or in maintenance, maybe with Retry-After. 504: a proxy gave up waiting for the app. See [load balancers](card:load-balancers-and-proxies).
+401 Unauthorized means the request has no valid credentials: the client should authenticate (log in). 403 Forbidden means the server understood and the client is authenticated, but is not permitted to do this, and logging in again will not help. In short: 401 is about who you are, 403 is about what you may do.
 
-### HTTP is stateless, so how does login work?
+### HTTP is stateless, so how does a logged-in session work?
 
-After login the server sends a session id in Set-Cookie, or a token. The client sends it on every request (Cookie or Authorization), and the server looks up who it is.
+After login the server sends a session id in `Set-Cookie`, or issues a token. The client stores it and sends it back on every request (`Cookie` or `Authorization`). The server looks it up to know who is calling. The protocol stays stateless; the client carries the identity each time.

@@ -5,17 +5,29 @@ title: "DNS: How a Name Becomes an IP"
 topic: application
 level: beginner
 heat: 3
-hook: "Ask a resolver for api.shop.example; it walks root, TLD and the authoritative server, then caches the IP for its TTL."
+hook: "You type api.shop.example; before any connection, DNS turns that name into an IP address like 203.0.113.10, so the computer knows where to send packets."
 points:
-  - { k: "Recursive resolver", v: "does the whole lookup and caches answers" }
-  - { k: "Recursive vs iterative", v: "resolver returns a final answer; root and TLD only refer onward" }
-  - { k: "TTL", v: "seconds an answer may be cached: low for fast failover, high for fewer lookups" }
-  - { k: "Port 53", v: "UDP for most queries; TCP for big answers and zone transfers", kind: default }
-  - { k: "System design", v: "weighted, latency, geo and failover routing; Kubernetes service discovery", kind: plus }
+  - { k: "Why names", v: "people and config use names; packets need IP addresses, so DNS maps one to the other" }
+  - { k: "Recursive resolver", v: "the one server that does the whole lookup for you and caches the answer" }
+  - { k: "Recursive vs iterative", v: "resolver returns the final IP; root and TLD servers only point to the next server" }
+  - { k: "TTL", v: "seconds an answer may be cached; low TTL means faster change, more lookups", kind: default }
+  - { k: "Port 53", v: "UDP for most queries; TCP for answers too big for one UDP packet and for zone transfers", kind: default }
+  - { k: "Layer", v: "DNS is an application-layer protocol; it runs over UDP or TCP, it is not Layer 3" }
 trap:
-  wrong: "DNS is a Layer 3 protocol because it gives you an IP address."
-  right: "DNS is an application-layer protocol: the app sends a query over UDP or TCP, gets an IP, then connects to it."
-sayIt: "The OS asks a recursive resolver. On a miss it asks root, then the TLD, then the authoritative server, and caches the answer for its TTL. DNS uses port 53, mostly UDP."
+  wrong: "DNS is a Layer 3 protocol because it hands you an IP address."
+  right: "DNS is an application-layer protocol. Your app sends a DNS query over UDP or TCP and gets an IP back; it then uses that IP at Layer 3."
+  why: "The answer is an IP address, and IP lives at Layer 3, so people assume the protocol that returns it must be Layer 3 too. But DNS is just a normal request and response that happens to carry an address."
+sayIt: "The OS asks a recursive resolver. On a cache miss the resolver asks a root server, then the TLD server, then the authoritative server, and caches the final IP for its TTL. DNS uses port 53, mostly over UDP."
+cheat:
+  idea: "DNS turns a name like api.shop.example into an IP address before connecting. A recursive resolver walks root, TLD and authoritative servers, then caches it."
+  flow: "Resolver cache → root → TLD → authoritative → IP, then cached"
+  remember: "A record change is not instant: old answers stay cached until their TTL expires. Lower the TTL before a move."
+buildsOn: [ip-addressing, tcp-and-udp]
+scenarios:
+  - q: "You change the IP in a DNS record, but some users still reach the old server an hour later. Why, and how do you avoid it next time?"
+    a: "Resolvers cached the old answer and keep returning it until its TTL expires. There is no push to clear caches. Next time, lower the TTL (say to 60 seconds) well before the change, so caches drop the old value quickly."
+  - q: "A DNS answer is too large to fit in one UDP packet. What happens?"
+    a: "The server sends a short reply with the truncated (TC) flag set. The client then retries the same query over TCP on port 53, which can carry a large answer. Every DNS implementation must support TCP for this reason (RFC 7766)."
 confusedWith: [tcp-vs-udp]
 tags: [dns, caching]
 visual: flow
@@ -37,14 +49,18 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+DNS (the Domain Name System) is the phone book of the internet: it turns a name like `api.shop.example` into an IP address like `203.0.113.10`. A packet can only be sent to an IP address, not to a name (see [IP addresses](card:ip-addressing)), so before your client connects to the payment server, it does a DNS lookup to find that address. DNS is a normal request and response carried over [UDP or TCP](card:tcp-and-udp) on port 53.
+
 ## Why it exists
 
-People and configs use names, but IP needs addresses. A name also lets a service move to new IPs without clients changing.
+If there were no DNS, you would have to hard-code IP addresses everywhere. That hurts twice: addresses are hard to remember, and the moment a service moves to a new server with a new IP, every client breaks and must be updated. A name adds one layer of indirection: clients remember the name, and you can repoint the name to a new IP whenever you like. DNS also lets one name return different IPs for load spreading and failover.
 
 ## How it works
 
 <Mermaid
-  alt="The app asks the recursive resolver. Root refers it to the .example TLD, which refers it to the shop.example authoritative server, which answers 203.0.113.10, TTL 300."
+  alt="The app asks the recursive resolver for api.shop.example. The resolver asks a root server, which refers it to the .example TLD servers. The TLD refers it to the shop.example authoritative server, which answers 203.0.113.10 with TTL 300. The resolver caches and returns it."
   chart={`sequenceDiagram
   participant C as App and OS cache
   participant R as Recursive resolver
@@ -61,26 +77,55 @@ People and configs use names, but IP needs addresses. A name also lets a service
   R-->>C: 203.0.113.10 (cached)`}
 />
 
-- Each hop checks its cache first; most lookups never reach the root.
-- Record types: see the [record list](card:dns-records).
+1. The app asks its recursive resolver for the A record of `api.shop.example`. The resolver's job is to return a final answer.
+2. If the resolver has the answer cached and the TTL has not expired, it returns it at once, and the walk below is skipped.
+3. On a miss, the resolver asks a root server. The root does not know the IP; it refers the resolver to the servers for the `.example` top-level domain (TLD).
+4. The resolver asks the `.example` TLD server, which refers it down to the authoritative server for `shop.example`.
+5. The authoritative server holds the real record and answers `203.0.113.10` with a TTL. The resolver caches that answer for the TTL and returns it.
+
+So the key is caching at every level: most lookups are answered from a cache and never reach the root.
 
 ## Example
 
+Two commands show the answer and the walk. The record types are listed under the [DNS records](card:dns-records) node.
+
 ```bash
-dig +noall +answer api.shop.example A    # the answer and its remaining TTL
-dig +trace api.shop.example              # walk root, TLD, authoritative yourself
+dig +noall +answer api.shop.example A    # show the final answer and its remaining TTL
+dig +trace api.shop.example              # walk root, TLD and authoritative yourself
 ```
+
+What to notice:
+
+- `+noall +answer` prints only the answer line, including the TTL that is counting down; refresh it and the TTL shrinks, which proves the answer is cached.
+- `+trace` skips the resolver's cache and does the recursive walk itself, so you see the root, then the TLD, then the authoritative server referring down, step by step.
+- Change `A` to `AAAA` to ask for an IPv6 address, or `MX` for the mail servers of that name.
+
+## Rules and defaults
+
+- **Port and transport:** DNS uses port 53. Queries go over UDP by default; the client switches to TCP when the UDP answer is truncated, and TCP is also used for zone transfers.
+- **TTL:** set per record by the zone owner. A low TTL makes changes take effect quickly but causes more lookups; a high TTL caches longer but makes changes slow to spread.
+- **CNAME at the apex is not allowed:** a name with a CNAME may hold no other records, but the zone apex (`shop.example`) must hold SOA and NS records, so you cannot put a CNAME there. Use an A or AAAA record.
+- **In system design:** one name can map to many IPs, and managed DNS (such as Amazon Route 53) can route by weight, latency, geography or health, which gives failover and load spreading. Kubernetes gives every Service an internal DNS name for discovery.
+
+## Not to be confused with
+
+- **DNS vs the connection itself:** DNS only finds the IP. The actual [TCP connection](card:tcp-and-udp) and the HTTP request happen afterwards, to that IP.
+- **TTL in DNS vs TTL in an IP packet:** the DNS TTL is a number of seconds an answer may be cached. The IP packet TTL is a hop count that drops by one at each router. Same word, different meaning.
+
+## Common mistakes
+
+- **"DNS 'propagation' is the network copying my record around."** Nothing is pushed. A change spreads only as old cached answers expire. The slowest users are behind a resolver that cached the old value, and they wait out its TTL.
 
 ## Interview Qs
 
 ### You changed a DNS record but some users still reach the old IP. Why?
 
-Resolvers keep the cached old answer until its TTL runs out. "Propagation" is just caches expiring; lower the TTL well before a planned move.
+Resolvers cached the old answer and keep returning it until its TTL runs out; nothing clears caches early. The fix is to lower the TTL (for example to 60 seconds) well before a planned change, so caches drop the old value quickly, then move the record.
 
 ### Why can a CNAME not sit at the zone apex?
 
-A CNAME name may hold no other records, but the apex (shop.example) must hold SOA and NS records. Use A or AAAA there.
+A name that has a CNAME record is allowed to hold no other records. But the zone apex, such as `shop.example`, must hold SOA and NS records to exist as a zone. A CNAME there would conflict with those required records, so you use an A or AAAA record at the apex instead.
 
-### When does DNS use TCP?
+### When does DNS use TCP instead of UDP?
 
-For answers too big for UDP (the truncated flag makes the client retry), for zone transfers, or when a client simply prefers it. Every DNS implementation must support TCP (RFC 7766).
+When a UDP answer is too big and comes back truncated, the client retries over TCP; for zone transfers between name servers; or when a client simply prefers TCP. Every DNS implementation must support TCP (RFC 7766), so you cannot block TCP port 53 and expect DNS to keep working.

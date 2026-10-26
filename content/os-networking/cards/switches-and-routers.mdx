@@ -5,17 +5,28 @@ title: "Switches, Routers, ARP and Firewalls"
 topic: network-layers
 level: intermediate
 heat: 2
-hook: "A switch moves frames inside one network by MAC address; a router moves packets between networks by IP, hop by hop."
+hook: "A switch moves frames inside one network by MAC address; a router moves packets between networks by IP address, hop by hop."
 points:
-  - { k: "MAC address", v: "48-bit hardware address, used only on the local link" }
-  - { k: "ARP", v: "broadcast 'who has this IP?'; the owner replies with its MAC" }
-  - { k: "Default gateway", v: "the router a host sends to for every other network" }
-  - { k: "Longest prefix match", v: "a router uses the most specific route that matches" }
-  - { k: "Firewall layers", v: "packet filter: IP, port, protocol; WAF: reads the HTTP request" }
+  - { k: "MAC address", v: "a 48-bit hardware address that identifies a device on the local link only" }
+  - { k: "ARP", v: "a host broadcasts 'who has this IP?' on the link; the owner replies with its MAC address" }
+  - { k: "Default gateway", v: "the router a host sends to for any destination outside its own network" }
+  - { k: "Longest prefix match", v: "a router forwards using the most specific route in its table that matches the destination" }
+  - { k: "Firewall layers", v: "a packet filter checks IP, port and protocol; a WAF (layer 7) reads the HTTP request itself" }
 trap:
   wrong: "My laptop's MAC address travels with the packet all the way to the server."
-  right: "The MAC addresses change at every hop. Only the IP addresses go end to end, unless NAT rewrites them."
-sayIt: "A switch forwards frames inside a LAN using a learned MAC table. A router joins networks and picks the next hop by longest prefix match. ARP finds the MAC for a local IP; the gateway takes the rest."
+  right: "The MAC addresses are rewritten at every hop. Only the IP addresses go end to end, unless NAT rewrites them."
+  why: "People picture one envelope going the whole way. In reality each router strips the old frame and builds a new one with the next hop's MACs, so only the IP survives across hops."
+sayIt: "A switch forwards frames inside a LAN using a learned MAC table. A router joins networks and picks the next hop by longest prefix match. ARP finds the MAC for a local IP; the default gateway takes everything else."
+cheat:
+  idea: "A switch forwards frames inside one LAN by MAC address (layer 2). A router forwards packets between networks by IP address (layer 3), by longest prefix match."
+  flow: "local IP → ARP → MAC → switch; remote IP → gateway → router hops"
+  remember: "MACs change every hop; the IP alone goes end to end, unless NAT rewrites it."
+buildsOn: [osi-model, ip-addressing]
+scenarios:
+  - q: "Your laptop sends a packet to a server on the other side of the world. By the time it arrives, what has changed in the frame and what has not?"
+    a: "The source and destination MAC addresses have been rewritten at every router hop, so they name the last and next device on that link only. The destination IP is unchanged end to end; the source IP changes only if a NAT device rewrote it."
+  - q: "A host wants to reach 8.8.8.8, which is not on its own subnet. What does it do with the packet, and why not ARP for 8.8.8.8 directly?"
+    a: "It sends the packet to its default gateway's MAC, because 8.8.8.8 is on another network and ARP only works on the local link. The gateway (a router) then forwards it towards 8.8.8.8 by longest prefix match, hop by hop."
 confusedWith: [l4-vs-l7-load-balancer]
 tags: [switch, router, arp, firewall, icmp]
 visual: table
@@ -34,39 +45,68 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A switch and a router are the two boxes that move traffic, each at a different [layer](card:osi-model). A switch works at layer 2: it forwards frames inside one local network using MAC addresses, the hardware address burned into each device. A router works at layer 3: it forwards packets between different networks using [IP addresses](card:ip-addressing). ARP (Address Resolution Protocol) is the helper that finds the MAC address for an IP on the local link, and a firewall is the box that allows or blocks traffic by rules.
+
 ## Why it exists
 
-No single cable joins every device on Earth. Switches join devices into one local network; routers join networks into the Internet.
+No single cable can join every device on Earth, and MAC addresses only work on one link, so you cannot address a far-away host by MAC. Switches solve the local problem: they join nearby devices into one network and deliver frames fast by MAC. Routers solve the distance problem: they join separate networks and pass a packet from one to the next by IP until it reaches a network that holds the destination.
 
 ## How it works
 
+The comparison shows the split between the two devices.
+
 <Compare id="switch-vs-router" />
 
-- A switch learns which MAC sits behind which port from source addresses, and floods frames for unknown MACs.
-- With no matching route, not even a default, a router drops the packet and returns ICMP "destination unreachable".
-- Load balancers by layer: [L4 vs L7](compare:l4-vs-l7-load-balancer).
+1. To reach a host on its own network, a sender uses ARP: it broadcasts "who has this IP?" and the owner replies with its MAC.
+2. A switch learns which MAC sits behind which port from the source address of frames it sees, and forwards by that table; for an unknown MAC it floods the frame to all other ports.
+3. To reach a host on another network, the sender instead sends the packet to its default gateway's MAC.
+4. The router looks up the destination IP by longest prefix match (the most specific matching route) and forwards to the next hop, rewriting the frame's MAC addresses.
+5. If no route matches, not even a default route, the router drops the packet and returns an ICMP "destination unreachable" message.
 
 ## Example
 
-Our laptop calls the shop API at 203.0.113.5. The frame's MACs change per hop; the IPs do not, except where NAT rewrites the source.
+The laptop calls the shop API at 203.0.113.5. Watch the MAC addresses change per hop while the IPs stay the same, except where NAT rewrites the source.
 
 ```text
 Hop                      Ethernet src -> dst       IP src -> dst
-laptop -> home router    laptop -> router MAC      192.168.0.140 -> 203.0.113.5
-home router (NAT)        router -> ISP MAC         198.51.100.7  -> 203.0.113.5
-last router -> LB        router -> LB MAC          198.51.100.7  -> 203.0.113.5
+laptop -> home router    laptop MAC -> router MAC  192.168.0.140 -> 203.0.113.5
+home router (NAT)        router MAC -> ISP MAC     198.51.100.7  -> 203.0.113.5
+last router -> LB        router MAC -> LB MAC      198.51.100.7  -> 203.0.113.5
 ```
+
+What to notice:
+
+- The destination IP `203.0.113.5` is identical on every line: the IP addresses travel end to end.
+- The Ethernet MAC addresses are different on every line, because each router builds a fresh frame for the next link.
+- The source IP changes once, at the home router, because NAT rewrote the private `192.168.0.140` to the public `198.51.100.7`. Without NAT the source IP would stay constant too.
+
+## Rules and defaults
+
+- **Switch (layer 2):** forwards by destination MAC, learns MAC-to-port mappings from source addresses, floods frames for unknown MACs. A hub (layer 1) is the older device that simply repeats bits to every port.
+- **Router (layer 3):** forwards by destination IP using longest prefix match; drops and sends ICMP unreachable when no route matches.
+- **ARP:** works only on the local link; IPv6 uses Neighbor Discovery for the same job.
+- **Firewall layers:** a packet filter allows or blocks by IP, port and protocol (often tracking connection state); a WAF works at layer 7 and inspects HTTP to block patterns such as SQL injection.
+
+## Not to be confused with
+
+A **switch** connects devices within one network by MAC and cannot leave that network. A **router** connects different networks by IP and is how you reach anything outside your subnet. Rule: switch = inside one LAN by MAC; router = between networks by IP.
+
+## Common mistakes
+
+- **"A router and a switch are basically the same box."** They work at different layers and read different addresses: the switch reads MAC (layer 2) and stays within one network, the router reads IP (layer 3) and moves between networks. Many home "routers" combine both plus NAT and Wi-Fi in one unit, which hides the distinction.
 
 ## Interview Qs
 
 ### What is ARP?
 
-Address Resolution Protocol finds the MAC for an IP on the local network. The host broadcasts "who has 192.168.0.1?", the owner replies with its MAC, and the answer is cached. IPv6 uses Neighbor Discovery instead.
+Address Resolution Protocol finds the MAC address for an IP on the local network. The host broadcasts "who has 192.168.0.1?" on the link, the owner replies with its MAC, and the answer is cached for a while. It is needed because frames are delivered by MAC, but programs address hosts by IP. IPv6 uses Neighbor Discovery instead.
 
 ### How do ping and traceroute work?
 
-Ping sends ICMP echo requests and waits for echo replies. Traceroute sends probes with TTL 1, 2, 3 and so on; each router that drops one at zero sends back ICMP time exceeded, revealing the path.
+Ping sends ICMP echo requests and waits for echo replies, measuring round-trip time. Traceroute sends probes with TTL set to 1, then 2, then 3; each router that drops a probe when the TTL reaches zero returns an ICMP "time exceeded", which reveals that hop. Together they map the path and find where it breaks.
 
-### Packet-filter firewall vs WAF?
+### What is the difference between a packet-filter firewall and a WAF?
 
-A packet filter allows or blocks by IP, port and protocol, often tracking connection state. A WAF works at layer 7: it reads HTTP requests and blocks patterns such as SQL injection.
+A packet-filter firewall allows or blocks traffic by IP address, port and protocol, and often tracks connection state. A WAF (Web Application Firewall) works at layer 7: it reads the HTTP request and blocks application attacks such as SQL injection or cross-site scripting, which a packet filter cannot see.

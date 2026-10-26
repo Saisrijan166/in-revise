@@ -5,26 +5,40 @@ title: TCP vs UDP
 topic: transport
 level: beginner
 heat: 3
-hook: "TCP gives a reliable, ordered byte stream over a connection; UDP sends separate datagrams with no promises."
+hook: "TCP gives a reliable, ordered stream of bytes over a set-up connection. UDP just fires off separate messages with no promise they arrive."
 points:
-  - { k: "TCP", v: "connection first; bytes arrive once, in order; lost data is resent" }
-  - { k: "UDP", v: "no connection; datagrams may be lost, duplicated or reordered" }
-  - { k: "Byte stream", v: "TCP keeps no message boundaries: the app must frame messages", kind: minus }
-  - { k: "Datagram", v: "UDP: each receive returns exactly one datagram", kind: plus }
-  - { k: "On UDP", v: "most DNS queries, live voice and video, QUIC" }
+  - { k: "TCP", v: "sets up a connection first; bytes arrive once, in order; anything lost is resent for you" }
+  - { k: "UDP", v: "no connection; each message may be lost, duplicated or arrive out of order, and you are not told" }
+  - { k: "Byte stream", v: "TCP keeps no message boundaries, so your code must mark where each message ends", kind: minus }
+  - { k: "Datagram", v: "with UDP each receive returns exactly one message, the way it was sent", kind: plus }
+  - { k: "Runs on UDP", v: "most DNS queries, live voice and video, and QUIC (the transport under HTTP/3)" }
 trap:
-  wrong: "UDP is always faster, so pick it for speed."
-  right: "UDP only skips the work. The app must add what it needs; QUIC adds reliability back on top of UDP."
-sayIt: "TCP sets up a connection and delivers a reliable, ordered byte stream with flow and congestion control. UDP sends independent datagrams with no delivery or order promise; the app handles loss."
+  wrong: "UDP is always faster, so pick it when you want speed."
+  right: "UDP is only lighter because it does less. If your data must arrive in order, you have to rebuild that work yourself; QUIC does exactly that on top of UDP."
+  why: "People see UDP has a smaller header and no handshake and read that as free speed, forgetting that TCP's extra work is the delivery and ordering their app would otherwise have to do by hand."
+sayIt: "TCP sets up a connection and delivers a reliable, ordered byte stream, with flow and congestion control built in. UDP sends independent datagrams with no delivery or order guarantee, so the application handles any loss itself."
 confusedWith: []
 tags: [tcp, udp, transport]
 visual: table
+cheat:
+  idea: "The two transport protocols above IP. TCP gives a reliable, ordered byte stream over a connection; UDP sends datagrams with no delivery or order promise."
+  flow: "App → TCP (reliable stream) or UDP (fire and forget) → IP"
+  remember: "Default to TCP; pick UDP only when late data is useless, or when QUIC adds reliability itself."
+buildsOn: [ports-and-sockets, tcp-ip-model]
+scenarios:
+  - q: "Your server sends \"order:42;\" and then \"order:43;\" on one TCP connection. The client calls read() once. What might it get?"
+    a: "It can get \"order:42;order:43;\" in a single read, because TCP is one byte stream with no message boundaries. The client must split on the \";\" (or a length prefix). If it assumes one read equals one message, it will mix the two orders together."
+  - q: "You are building live video calls. Reliable TCP or UDP, and why?"
+    a: "UDP. In a live call a frame that arrives late is useless, so there is no point making TCP wait and resend it; a dropped frame is better than a stalled picture. UDP skips the resends, and the app smooths over the gaps."
 sources:
   - title: "RFC 9293: Transmission Control Protocol (2.2 Key TCP concepts, 3.7 Segmentation)"
     url: "https://www.rfc-editor.org/rfc/rfc9293"
     verifiedOn: "2026-10-20"
-  - title: "udp(7): UDP protocol for IPv4 (Linux man-pages)"
-    url: "https://man7.org/linux/man-pages/man7/udp.7.html"
+  - title: "RFC 768: User Datagram Protocol"
+    url: "https://www.rfc-editor.org/rfc/rfc768"
+    verifiedOn: "2026-10-20"
+  - title: "RFC 8085: UDP Usage Guidelines (3.1 Congestion control)"
+    url: "https://www.rfc-editor.org/rfc/rfc8085"
     verifiedOn: "2026-10-20"
   - title: "RFC 7766: DNS Transport over TCP, Implementation Requirements"
     url: "https://www.rfc-editor.org/rfc/rfc7766"
@@ -32,36 +46,40 @@ sources:
   - title: "RFC 9000: QUIC, a UDP-based multiplexed and secure transport (1 Overview)"
     url: "https://www.rfc-editor.org/rfc/rfc9000"
     verifiedOn: "2026-10-20"
-  - title: "UDP (MDN Web Docs glossary)"
-    url: "https://developer.mozilla.org/en-US/docs/Glossary/UDP"
-    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+TCP and UDP are the two transport protocols that run on top of [IP](card:tcp-ip-model). Both add [ports](card:ports-and-sockets) so the data reaches the right program on a host. The difference is what else they add. TCP first sets up a connection, then gives a reliable, ordered stream of bytes: everything arrives once, in order, and anything lost is resent automatically. UDP adds almost nothing: it sends each message (a datagram) on its own, with no setup and no promise that it arrives, once, or in order.
 
 ## Why it exists
 
-Apps need a choice: full reliability built into the transport (TCP), or a thin, quick path that adds little more than ports and a checksum (UDP).
+Different applications need different things, and the network can lose, reorder or duplicate packets. A web page or file transfer must be exact, so it wants the transport to hide all of that and hand over clean, ordered data: that is TCP. A live voice call cannot wait for a lost packet to be resent, because by then that moment of audio is already in the past; it would rather drop the gap and move on. So the transport layer offers both: TCP for correctness, UDP for a thin, fast path the application controls itself.
 
 ## How it works
 
 <Compare id="tcp-vs-udp" />
 
-- TCP's machinery: the [handshake](card:tcp-handshake), [ACKs and resends](card:tcp-reliability), [flow and congestion control](card:flow-and-congestion-control).
-- [DNS](card:dns) uses UDP for most queries, but servers must also support TCP, for large answers and zone transfers (RFC 7766).
-- QUIC, the transport under [HTTP/3](card:http-versions), rebuilds reliability and congestion control on top of UDP.
+1. The application picks a protocol when it opens a [socket](card:ports-and-sockets): a stream socket for TCP, a datagram socket for UDP.
+2. For TCP, the two ends run a [handshake](card:tcp-handshake) to agree to talk; UDP skips this and the first `send` goes straight out.
+3. On TCP, your writes become one continuous byte stream: the sender may merge or split them, and the receiver reads bytes, not messages. On UDP, each `send` is one datagram and each `receive` returns exactly that datagram.
+4. TCP tracks every byte and [resends what is lost](card:tcp-reliability), with [flow and congestion control](card:flow-and-congestion-control) deciding how fast to send. UDP does none of this, so if the app needs it, the app must add it.
+
+So the key is that TCP trades extra work and one round trip of setup for delivery you can trust, while UDP hands you raw datagrams and leaves the guarantees to you.
 
 ## Example
 
-Two writes on one TCP connection come out as one read (Java, localhost):
+On one TCP connection, two separate writes can arrive in a single read, which shows there are no message boundaries.
 
 ```java
 try (var server = new ServerSocket(8080);
      var client = new Socket("localhost", 8080);
      var conn = server.accept()) {
-    client.getOutputStream().write("order:42;".getBytes());   // send 1
-    client.getOutputStream().write("order:43;".getBytes());   // send 2
-    Thread.sleep(100);                       // both writes reach the buffer
+    client.getOutputStream().write("order:42;".getBytes());   // write 1
+    client.getOutputStream().write("order:43;".getBytes());   // write 2
+    Thread.sleep(100);                                         // let both reach the buffer
     byte[] buf = new byte[100];
-    int n = conn.getInputStream().read(buf);  // one read
+    int n = conn.getInputStream().read(buf);                   // one read
     System.out.println(n + " bytes: " + new String(buf, 0, n));
 }
 ```
@@ -70,18 +88,38 @@ try (var server = new ServerSocket(8080);
 18 bytes: order:42;order:43;
 ```
 
-The `;` is the framing. Real protocols use a delimiter or a length prefix.
+What to notice:
+
+- Two `write` calls came back in one `read`: TCP joined them into one stream, so a read is not a message.
+- The `;` is doing the framing: the client knows where each order ends only because of that delimiter. Real protocols use a delimiter or a length prefix.
+- If this were UDP, the two `send` calls would arrive as two datagrams, each received whole and separately, but either one could also be silently lost.
+
+## Rules and defaults
+
+- **TCP header:** 20 bytes without options; it carries sequence and acknowledgement numbers, the window and flags (RFC 9293).
+- **UDP header:** 8 bytes: source port, destination port, length and checksum, and nothing else (RFC 768).
+- **DNS:** most queries go over UDP, but every DNS server must also support TCP, for answers too large for one datagram and for zone transfers (RFC 7766).
+- **UDP apps should add congestion control:** RFC 8085 tells applications on UDP to limit their own sending rate, because the transport will not.
+
+## Not to be confused with
+
+A byte stream and a datagram are the real split. A byte stream (TCP) is a continuous flow of bytes with no edges, so the receiver must find message boundaries itself. A datagram (UDP) is one self-contained message that arrives whole or not at all. Rule: TCP = one ordered stream you must frame; UDP = separate messages that may go missing.
+
+## Common mistakes
+
+- **"TCP is slow and UDP is fast, full stop."** TCP's cost is the handshake and the resends, which buy you delivery and order. On a clean link TCP is fast too; UDP is only faster because the app is doing less, or doing without.
+- **"A TCP read returns one message."** It returns whatever bytes are available, which may be part of a message or several messages joined. TCP is a [byte stream](term:byte-stream), so you must frame messages yourself.
 
 ## Interview Qs
 
 ### When would you choose UDP over TCP?
 
-When late data is worse than lost data: live voice and video, where waiting for a resend is not an option. Also when the protocol adds its own reliability, as QUIC does.
+When late data is worse than lost data, such as live voice and video, where waiting for a resend would stall the stream. Also when the protocol adds its own reliability on top of UDP, as QUIC does for HTTP/3. For normal request-response APIs, TCP is the default.
 
 ### Is TCP message-based?
 
-No, it is a byte stream. Two sends can arrive in one read, or one send in two reads. The app must mark where each message ends.
+No. TCP is a byte stream with no message boundaries. Two sends can arrive in one read, or one send can arrive in two reads. The application must mark where each message ends, usually with a delimiter or a length prefix, and reassemble messages itself.
 
 ### Why does DNS mostly use UDP?
 
-A small query and answer fit in one datagram, so no handshake is needed. Large answers and zone transfers go over TCP, which every DNS server must support.
+A small query and its answer each fit in one datagram, so UDP avoids the cost of a handshake for a single quick exchange. Large answers and zone transfers do not fit, so they use TCP, which every DNS server is required to support as well.

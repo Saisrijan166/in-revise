@@ -5,17 +5,29 @@ title: Race Conditions and Atomic Operations
 topic: concurrency
 level: intermediate
 heat: 3
-hook: "A race: threads share data, at least one writes, and the result depends on which thread runs first."
+hook: "A race condition: two threads use the same data, at least one writes, and the final result depends on which thread happens to run first."
 points:
-  - { k: "count++", v: "read, add, write: another thread can run in between", kind: minus }
-  - { k: "Check-then-act", v: "two requests both see stock 1, and both sell the last item" }
-  - { k: "Compare-and-swap", v: "write only if the value is unchanged; else re-read and retry", kind: plus }
-  - { k: "Seen in", v: "hit counters, rate limiters, shared caches, job queues" }
-  - { k: "Several instances", v: "a fix inside one JVM does not reach the other servers", kind: minus }
+  - { k: "count++", v: "is read, then add, then write; another thread can run in the gap and one update is lost", kind: minus }
+  - { k: "Check-then-act", v: "two requests both see stock = 1, both decide to sell, and both sell the last item", kind: minus }
+  - { k: "Critical section", v: "the few lines that touch the shared data; only one thread may run them at a time" }
+  - { k: "Atomic operation", v: "a step the hardware does in one go, so no other thread can see it half-done", kind: plus }
+  - { k: "Compare-and-swap", v: "write the new value only if the old one is unchanged; else re-read and retry", kind: plus }
+  - { k: "Many instances", v: "a fix inside one JVM does not reach the other servers; guard the data in the database", kind: minus }
 trap:
-  wrong: "count++ is one statement, so it is thread-safe."
-  right: "It is read, add, write: two threads read the same value and one update is lost. Use a lock or AtomicInteger."
-sayIt: "A race condition is when threads share data, at least one writes, and the result depends on timing. I make the step atomic: a lock, an atomic class, or one conditional SQL update."
+  wrong: "count++ is a single statement, so it is thread-safe."
+  right: "count++ is read, add, write. Two threads can read the same value, and one update is lost. Use a lock or AtomicInteger."
+  why: "It is one line in the source, so people assume it is one step for the CPU; the compiler turns it into three machine steps."
+sayIt: "A race condition is when threads share data, at least one writes, and the result depends on timing. I make the update atomic: a lock, an atomic class, or one conditional SQL update done in a single step."
+cheat:
+  idea: "A race condition is when two threads touch the same data, at least one writes, and the result depends on who runs first. Updates get lost or decisions double."
+  flow: "A reads → B reads same value → both write → one update lost"
+  remember: "count++ is read-add-write, not one step. Make it atomic: a lock, an atomic class, or a conditional UPDATE."
+buildsOn: [concurrency-and-parallelism, threads]
+scenarios:
+  - q: "Two threads each run count++ one hundred thousand times on a shared int starting at 0. What is the final value?"
+    a: "Something less than 200000, and it changes each run. count++ is read, add, write; sometimes both threads read the same value and one increment is overwritten. Only an AtomicInteger or a lock guarantees 200000."
+  - q: "Is every race condition also a Java data race?"
+    a: "No. A data race is two accesses to one variable, one a write, with no happens-before order. A check-then-act bug can use two separate atomic calls, each ordered, yet still race on the logic. So you can have a race condition with no data race."
 confusedWith: []
 tags: [race-condition, atomicity, cas]
 visual: table
@@ -37,11 +49,17 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A race condition is a bug that appears when two threads use the same data at the same time, at least one of them writes to it, and the final result depends on the order in which they happen to run. Threads share memory, and the OS can [switch between them](card:context-switching) in the middle of an update, so the steps of one thread can interleave with the steps of another. When that interleaving changes the answer, you have a race.
+
 ## Why it exists
 
-Threads share memory, and the scheduler can switch them mid-step. Without rules, two updates interleave and one is lost.
+The problem is that an update you write as one line is often several steps for the CPU. `count++` reads the value, adds one, and writes it back. If two threads do this on a shared counter, both can read the same old value, and one increment is overwritten, so the count is too low. The same thing happens when two requests both check "is stock left?" and both act on the answer, selling the last item twice. Naming these critical sections, and making them atomic, is what stops the lost update.
 
 ## How it works
+
+The table follows two threads running `count++` on a shared counter.
 
 | Step | Thread A | Thread B | count |
 |---|---|---|---|
@@ -50,12 +68,16 @@ Threads share memory, and the scheduler can switch them mid-step. Without rules,
 | 3 | adds 1, writes 1 | | 1 |
 | 4 | | adds 1, writes 1 | 1, not 2 |
 
-- Fixes: a [lock](card:locks) around the [critical section](card:critical-section), an atomic operation, or no shared mutable data.
-- Races depend on timing: they appear under load and hide in tests.
+1. Thread A reads the counter as 0.
+2. Before A writes, the OS switches to Thread B, which also reads 0.
+3. A writes 1, then B writes 1 as well.
+4. Two increments ran, but the counter is 1, not 2: one update is lost.
+
+So the key is to let only one thread run those steps at a time (a [lock](card:locks)), or to do the whole read-add-write as one atomic step.
 
 ## Example
 
-Example run, two threads:
+Two threads each add to a plain `int` and to an `AtomicInteger` a hundred thousand times. One is a race, the other is safe.
 
 ```java
 static int plain = 0;
@@ -73,16 +95,37 @@ public static void main(String[] args) throws InterruptedException {
 ```
 
 ```text output
-plain  = 166973
+plain  = 193862
 atomic = 200000
 ```
+
+What to notice:
+
+- `plain` should be 200000 but comes out lower, and the number changes each run: that is the race, with lost updates.
+- `atomic.incrementAndGet()` does read-add-write as one atomic step, so no update is lost and the total is exactly 200000.
+- The race only shows under real concurrency; a single-threaded run or a light test would print 200000 and hide the bug.
+
+## Rules and defaults
+
+- **A race needs three things:** shared data, concurrent access, and at least one writer. Two threads only reading cannot race.
+- **Atomic classes:** `AtomicInteger`, `AtomicLong` and friends in `java.util.concurrent.atomic` make one variable's update atomic without a lock.
+- **Compare-and-swap (CAS):** atomic classes use it under the hood; it writes only if the value is unchanged, else it re-reads and retries in a loop.
+- **Across servers:** a lock or atomic class guards one JVM only. For a shared total, make the database do the check and change in one step, such as `UPDATE stock SET qty = qty - 1 WHERE id = 42 AND qty > 0`.
+
+## Not to be confused with
+
+A race condition is a timing bug in the logic: the outcome depends on thread order. A [data race](card:data-race) is the narrower memory-model term for two accesses to one variable, one a write, with no happens-before order. Rule: every data race can cause a race condition, but a race condition can exist with no data race, for example a check-then-act built from two separate atomic calls.
+
+## Common mistakes
+
+- **"Making each step thread-safe makes the whole thing thread-safe."** Two atomic calls, a check and then an act, are each safe alone but still race: another thread can change the value between them. Guard the check and the act together, in one lock or one conditional update.
 
 ## Interview Qs
 
 ### Two users buy the last item at the same time. How do you stop selling it twice?
 
-Make check and update one database step: `UPDATE stock SET qty = qty - 1 WHERE id = 7 AND qty > 0`, and expect one changed row. Under Read Committed (the default), PostgreSQL re-checks the WHERE on the newest row.
+Make the check and the update one database step: `UPDATE stock SET qty = qty - 1 WHERE id = 42 AND qty > 0`, and treat "zero rows changed" as sold out. Under Read Committed, PostgreSQL's default, the database re-checks the WHERE against the latest row, so only one update succeeds.
 
-### Race condition vs data race?
+### What is the difference between a race condition and a data race?
 
-A data race (Java memory model) is two accesses to one variable, one a write, with no happens-before order. A race condition is a timing bug; check-then-act on two atomic calls has one without a data race.
+A data race, in the Java memory model, is two accesses to one variable where at least one writes and there is no happens-before order between them. A race condition is a broader timing bug. Check-then-act on two atomic calls has a race condition but no data race, because each call is individually ordered.

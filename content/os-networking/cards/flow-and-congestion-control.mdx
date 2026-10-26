@@ -5,20 +5,32 @@ title: Flow Control vs Congestion Control
 topic: transport
 level: intermediate
 heat: 3
-hook: "Flow control protects the receiver; congestion control protects the network. The sender obeys the smaller window."
+hook: "TCP keeps two speed limits: one so it does not overrun the slow receiver, one so it does not overload the network. It obeys the smaller of the two."
 points:
-  - { k: "rwnd", v: "receiver's free buffer, advertised in every ACK" }
-  - { k: "Zero window", v: "receiver is full: the sender pauses and probes" }
-  - { k: "cwnd", v: "sender's own estimate of what the path can carry" }
-  - { k: "In flight", v: "at most min(rwnd, cwnd) unacknowledged bytes" }
-  - { k: "Initial cwnd", v: "up to 10 segments (RFC 6928)", kind: default }
+  - { k: "Flow control", v: "stops a fast sender overrunning a slow receiver; it protects the receiver's buffer" }
+  - { k: "rwnd", v: "the receive window: free buffer the receiver advertises in every ACK it sends back" }
+  - { k: "Zero window", v: "rwnd of 0 means the receiver is full, so the sender pauses and sends small probes" }
+  - { k: "Congestion control", v: "stops senders overloading the routers in between; it protects the network" }
+  - { k: "cwnd", v: "the congestion window: the sender's own guess of how much the path can carry" }
+  - { k: "In flight", v: "unacknowledged bytes are capped at min(rwnd, cwnd), so the stricter limit wins" }
 trap:
   wrong: "A zero receive window means the network is congested."
-  right: "A zero window means the receiving app reads too slowly. Congestion shows up as loss or delay on the path."
-sayIt: "Flow control stops a fast sender overrunning a slow receiver: the receiver advertises rwnd. Congestion control stops senders overloading the network: the sender sizes cwnd from loss or delay. It sends the smaller."
+  right: "A zero window means the receiving application is reading too slowly, so its buffer filled. Congestion shows up instead as loss or rising delay on the path."
+  why: "Both end in the sender slowing down, so people lump them together. But rwnd is set by the receiver and sent in the header, while congestion is inferred by the sender from loss; they are different signals with different fixes."
+sayIt: "Flow control stops a fast sender overrunning a slow receiver: the receiver advertises rwnd, its free buffer. Congestion control stops senders overloading the network: the sender sizes cwnd from loss or delay. TCP sends at most min(rwnd, cwnd)."
 confusedWith: []
 tags: [tcp, flow-control, congestion-control]
 visual: table
+cheat:
+  idea: "TCP has two limits on how much data it may leave unacknowledged: rwnd protects the receiver's buffer, cwnd protects the network. It sends at most the smaller."
+  flow: "slow start (cwnd doubles per RTT) → congestion avoidance (+1 per RTT) → loss: cut cwnd"
+  remember: "Flow control = receiver (rwnd); congestion = network (cwnd); in flight ≤ min(rwnd, cwnd)."
+buildsOn: [tcp-reliability]
+scenarios:
+  - q: "A transfer over a fast link is crawling, and the receiver keeps advertising a tiny rwnd. Where is the problem?"
+    a: "On the receiving side, not the network. A small rwnd means the receiving application is draining its socket buffer slowly, so there is little free space to accept more. Reading faster, or a bigger receive buffer, lets rwnd grow; changing the network would not help."
+  - q: "Why is the very first request on a brand-new TCP connection often slower than later ones?"
+    a: "Slow start. cwnd begins small (about 10 segments) and only doubles each round trip, so early on the sender may send far less than the link allows. After a few round trips cwnd grows, which is why reusing a warm connection avoids paying this again."
 sources:
   - title: "RFC 9293: Transmission Control Protocol (3.1 Window field, 3.8.6 Managing the window)"
     url: "https://www.rfc-editor.org/rfc/rfc9293"
@@ -37,42 +49,72 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Flow control and congestion control are the two mechanisms that decide how fast [TCP](card:tcp-and-udp) may send. Flow control protects the receiver: it stops a fast sender filling up the receiver's buffer faster than the receiving application can read it. Congestion control protects the network: it stops the sender pushing more data into the routers and links on the path than they can carry. Each one is a limit on how many bytes the sender may have unacknowledged at once, and TCP always obeys whichever limit is smaller.
+
 ## Why it exists
 
-A fast sender can overflow the receiver's buffer, or the routers in between. These are two different limits, so TCP keeps two windows.
+The [resending machinery](card:tcp-reliability) makes TCP reliable but says nothing about pace, and sending as fast as possible breaks two different things. A slow receiver, perhaps a small device or a busy application, would have its buffer overflow and start dropping data it had already accepted. Separately, if every sender blasted at full speed, router queues on the shared path would overflow and drop packets for everyone, a collapse that gets worse as everyone resends. These are two distinct limits, one at the far end and one in the middle, so TCP tracks them with two separate windows.
 
 ## How it works
 
 <Compare id="flow-vs-congestion-control" />
 
-- **Slow start:** cwnd grows by about one segment per ACK, so it roughly doubles each round trip, up to ssthresh.
-- **Congestion avoidance:** then about one more segment per round trip; on loss, cut cwnd (AIMD).
-- Reno halves cwnd on loss; CUBIC, the usual Linux default, cuts it to 0.7 and regrows along a cubic curve.
+1. The receiver advertises its free buffer as rwnd in every ACK; if the application stops reading, rwnd shrinks, and at zero the sender pauses and sends small probes until space opens.
+2. The sender keeps its own congestion window, cwnd, as a guess of what the path can carry; it starts small on a new connection.
+3. In slow start, cwnd grows by about one segment per ACK, so it roughly doubles each round trip, until it reaches a threshold called ssthresh.
+4. After that, in congestion avoidance, cwnd grows by only about one segment per round trip, probing gently for more room.
+5. On a sign of congestion (loss), the sender cuts cwnd sharply and climbs again. This grow-then-cut pattern is AIMD, and it draws the familiar sawtooth.
+
+So the key is that the sender may have at most `min(rwnd, cwnd)` bytes unacknowledged: the receiver's limit and the network's limit, whichever bites first.
 
 ## Example
 
-A Reno-style sawtooth, with ssthresh at 80 segments:
+A Reno-style run, with the threshold ssthresh at 80 segments, shows the sawtooth in cwnd.
 
 ```text
 round trip:  1   2   3   4   5   6   7   8   9
 cwnd:       10  20  40  80  81  82  83  41  42
-            slow start ---| +1 per trip -| loss: halve, then +1 again
+            |-- slow start --|-- +1 each trip --|  loss: halve, then +1 again
 ```
 
-## Defaults
+What to notice:
+
+- Rounds 1-4 double cwnd each trip: that is slow start, growing fast until it hits ssthresh at 80.
+- Rounds 5-7 add only one segment per trip: congestion avoidance, probing carefully for more capacity.
+- At round 8 a loss cuts cwnd roughly in half (classic Reno), and growth begins again; CUBIC, the usual Linux default, instead cuts to about 0.7 and regrows along a cubic curve.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Initial cwnd | min(10 × MSS, max(2 × MSS, 14,600 bytes)) | RFC 6928 |
-| Algorithm | set by kernel config; cubic on mainstream distros | Linux `net.ipv4.tcp_congestion_control` |
-| Slow start after idle | 1: cwnd is reset after an idle period | Linux `net.ipv4.tcp_slow_start_after_idle` |
+| Initial cwnd | min(10 × MSS, max(2 × MSS, 14600 bytes)) | RFC 6928 |
+| Congestion algorithm | Set by kernel config; CUBIC on mainstream distros | Linux `net.ipv4.tcp_congestion_control` |
+| Slow start after idle | On: cwnd is reset to the initial window after an idle period | Linux `net.ipv4.tcp_slow_start_after_idle` (default 1) |
+
+- **rwnd is carried in the header:** it is the 16-bit window field in every TCP segment (scaled up by the window-scale option), so flow control needs no inference (RFC 9293).
+- **cwnd is never sent on the wire:** it lives only in the sender and is estimated from loss or delay, so congestion control is a guess that different algorithms (Reno, CUBIC, BBR) make differently.
+
+## Not to be confused with
+
+rwnd and cwnd are the two windows people mix up. rwnd is set by the receiver and tells the sender how much buffer space is free. cwnd is set by the sender and estimates how much the network can take. Rule: rwnd protects the receiver and comes from the header; cwnd protects the network and is inferred by the sender.
+
+## Common mistakes
+
+- **"A stalled transfer means the network is congested."** It can equally be flow control: a zero rwnd from a slow-reading receiver pauses the sender just as firmly. Check which window is the limit before blaming the path.
+- **"Bigger buffers always mean faster transfers."** Past the bandwidth-delay product, extra buffering mainly adds queueing delay (bufferbloat); throughput is still capped by `min(rwnd, cwnd)` and the path.
 
 ## Interview Qs
 
 ### What is the difference between rwnd and cwnd?
 
-The receiver sets rwnd: how much free buffer it has. The sender sets cwnd: how much it thinks the network can carry. The sender keeps at most the smaller amount unacknowledged.
+rwnd, the receive window, is set by the receiver and advertised in every ACK: it is how much free buffer the receiver has. cwnd, the congestion window, is set by the sender and estimates how much the network can carry. The sender keeps at most the smaller of the two unacknowledged, so the stricter limit controls the rate.
 
 ### Why is a brand-new connection slow, and what do backends do about it?
 
-Slow start begins with a small cwnd and grows each round trip. Reuse warm connections ([pools, keep-alive](card:connection-pooling)); long links need large windows, see [bandwidth-delay product](card:latency-and-bandwidth).
+Slow start begins with a small cwnd and only doubles it each round trip, so early sending is throttled regardless of the link speed. Backends avoid repaying this by reusing warm connections with [keep-alive and pools](card:connection-pooling); long fast links also need large windows, sized by the [bandwidth-delay product](card:latency-and-bandwidth).
+
+### How does TCP react when it sees packet loss?
+
+It treats loss as a sign of congestion and reduces cwnd, then grows again. Classic Reno halves cwnd; CUBIC, the common Linux default, cuts it to about 0.7 and regrows along a cubic curve. This additive-increase, multiplicative-decrease (AIMD) behaviour is what keeps many TCP flows sharing a link roughly fairly.

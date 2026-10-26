@@ -1,5 +1,5 @@
 # Coverage: OS & Networking
-Reference: reference/os-networking.md  ·  Last updated: 20-10-2026
+Reference: reference/os-networking.md  ·  Last updated: 21-10-2026
 
 Every reference item (key list: the numbered sections, plus each question, pattern and "X vs Y" row inside them) appears in exactly
 one of Mapped, Corrected or Dropped. A section whose parts went to different places has one row here (Corrected wins over
@@ -450,3 +450,17 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | E36. "Cloud networks heavily use VPCs, subnets, security groups, routing" list | cut: duplicate of tree nodes vpc-subnets, security-group, routing-table |
 | E52 "can improve performance for many workloads" (generic sentence) | cut: duplicate: replaced by the concrete Interview Q on fewer connections |
 | L2.7 (part). FTP as a layer 7 example | cut: rare today; four examples are enough |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass checked about 450 claims and fixed 1, removing none.
+
+### Unit network-layers
+
+**Added from the reference**
+
+- (none new) All reference points for L0-L19, N10-N13, E34-E41 were already present in the verified v2 draft. The v3 rewrite only expanded the explanations (What it is, Why we need it, numbered How it works, What to notice, Rules and defaults, cheat cards, scenarios); no new facts introduced.
+
+**Corrections**
+
+- (none) All facts kept from the verified draft (verifiedOn 2026-10-20). No fact changed, so no new source needed.

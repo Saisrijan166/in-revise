@@ -5,17 +5,29 @@ title: Load Balancers and Reverse Proxies
 topic: system-design-bridge
 level: intermediate
 heat: 3
-hook: "Many identical servers sit behind one address; the load balancer spreads requests and skips the sick ones."
+hook: "Put many identical servers behind one address; the load balancer spreads requests across them and stops sending traffic to any server that is down."
 points:
-  - { k: "Scale out", v: "add instances behind one name instead of one bigger box", kind: plus }
-  - { k: "Health checks", v: "a failing server gets no traffic until it passes again" }
-  - { k: "Stateless servers", v: "keep sessions in a shared store, so any instance can answer" }
-  - { k: "Default method", v: "nginx and AWS ALB: round robin", kind: default }
-  - { k: "Not a single point", v: "run the LB in pairs, or managed across zones", kind: minus }
+  - { k: "Load balancer", v: "one machine that receives all requests and forwards each to one of several backend servers", kind: key }
+  - { k: "Scale out", v: "add more backend servers behind the same name instead of buying one bigger machine", kind: plus }
+  - { k: "Health checks", v: "a server that fails the probe gets no new requests until it passes again", kind: plus }
+  - { k: "Stateless servers", v: "keep session data in a shared store so any server can answer any user", kind: key }
+  - { k: "Default algorithm", v: "nginx and AWS ALB send requests in turn, one each: round robin", kind: default }
+  - { k: "Pair them up", v: "run two or more load balancers, or a managed one across zones, so it is not a single point of failure", kind: minus }
 trap:
   wrong: "A reverse proxy and a load balancer are the same thing."
-  right: "They overlap: Nginx as a reverse proxy can load-balance, but an L4 load balancer only forwards connections and never reads HTTP."
-sayIt: "A load balancer spreads requests over identical servers and skips unhealthy ones. L4 routes connections by IP and port; L7 reads HTTP, routes by host or path, and usually terminates TLS."
+  right: "A reverse proxy is any server standing in front of your backends; load balancing is one job it does. An L4 load balancer just forwards connections."
+  why: "Nginx is often both at once, so people meet the two ideas in the same tool and assume they are one word for one thing."
+sayIt: "A load balancer spreads requests over identical servers and skips the unhealthy ones. An L4 one routes by IP and port; an L7 one reads the HTTP request, routes by host or path, and usually terminates TLS."
+cheat:
+  idea: "One entry point in front of several identical servers. It forwards each request to one of them and drops any server that fails its health probe."
+  flow: "Request → load balancer → one healthy backend → reply"
+  remember: "L4 routes by IP and port, per connection; L7 reads HTTP and routes by host or path."
+buildsOn: [ports-and-sockets, tls-https]
+scenarios:
+  - q: "You have one app server and it is maxed out during a sale. Users also see errors when you restart it to deploy. What do you add, and what must change in the app?"
+    a: "Put a load balancer in front and run several identical app servers. The app must become stateless: store sessions in a shared store, not in server memory. Then one server can restart while the others answer, and you add capacity by adding servers."
+  - q: "Requests need routing by URL path: /images to one group, /api to another. Would you use an L4 or an L7 load balancer?"
+    a: "L7. Only a layer-7 load balancer reads the HTTP request, so it can see the path and route on it. An L4 one sees only IP and port, so it cannot tell /images from /api."
 confusedWith: [forward-vs-reverse-proxy]
 tags: [load-balancer, reverse-proxy, scaling]
 visual: flow
@@ -31,14 +43,18 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A load balancer is one machine that sits in front of several identical backend servers. Clients send every request to it, and it forwards each to one of the servers. It also runs a [health check](card:lb-health-check): a small repeated probe of each server. When a server stops answering the probe, the load balancer stops sending it traffic. A [reverse proxy](card:reverse-proxy) is the wider idea: any server that stands in front of your backends and speaks to clients for them. Load balancing is one job it can do.
+
 ## Why it exists
 
-One server has a ceiling and is a single point of failure. A load balancer puts many servers behind one address, so you add capacity and survive a crash.
+One server has a ceiling: at some traffic it runs out of CPU or memory and slows down or crashes. It is also a single point of failure, so if it dies the whole site is down, and you cannot restart it to deploy without downtime. Running several identical servers fixes both, but then clients would need to know all their addresses and pick one. A load balancer gives clients one address and makes that choice for them, so you can add servers and lose one without clients noticing.
 
 ## How it works
 
 <Mermaid
-  alt="Clients call api.shop.example over HTTPS. The load balancer sends requests to app instances 1 and 2. Instance 3 failed its health check, so it gets no traffic. All instances use PostgreSQL."
+  alt="Clients call api.shop.example over HTTPS to one load balancer. The load balancer forwards requests to app server 1 and app server 2. App server 3 failed its health check, so it receives no traffic. The healthy servers all read and write the same PostgreSQL database."
   chart={`flowchart LR
   C([Clients]) -- "HTTPS api.shop.example" --> LB[Load balancer]
   LB --> A1[App 1]
@@ -48,39 +64,65 @@ One server has a ceiling and is a single point of failure. A load balancer puts 
   A2 --> DB`}
 />
 
-<Compare id="l4-vs-l7-load-balancer" />
+1. Every client connects to one name, `api.shop.example`, which points at the load balancer.
+2. The load balancer keeps a list of backend servers and an algorithm for choosing one; by default it takes them in turn (round robin).
+3. In the background it probes each server, for example by requesting `/actuator/health` every few seconds.
+4. When a request arrives, it picks the next healthy server and forwards the request there.
+5. If a server fails its probe, the load balancer drops it from the pool and keeps using the rest, until it passes again.
 
-- [Health checks](card:lb-health-check): active probes of a path like `/actuator/health`, or passive marking after real requests fail.
-- A [reverse proxy](card:reverse-proxy) also does [TLS termination](card:tls-termination), compression and caching, and hides backend addresses.
-- 502 and 504 come from the proxy: bad or late upstream reply ([status codes](card:http-basics)).
+So the key is that clients see one stable address, and the load balancer hides how many servers are behind it and which ones are alive.
 
 ## Example
 
+This nginx config is a payment API behind three servers. Nginx here is both a reverse proxy (it ends TLS and forwards HTTP) and a load balancer (it spreads requests).
+
 ```nginx
-upstream orders_api {
-    least_conn;                          # default: round robin
-    server 10.0.1.11:8080 weight=2;      # bigger box, double share
+upstream payments_api {
+    server 10.0.1.11:8080 weight=2;       # bigger box, gets a double share
     server 10.0.1.12:8080;
     server 10.0.1.13:8080 max_fails=3 fail_timeout=30s;
 }
 server {
-    listen 443 ssl;                      # TLS ends here
+    listen 443 ssl;                       # TLS is terminated here
     server_name api.shop.example;
     ssl_certificate shop.crt; ssl_certificate_key shop.key;
-    location /orders/ { proxy_pass http://orders_api; }
+    location /payments/ { proxy_pass http://payments_api; }
 }
 ```
 
+What to notice:
+
+- `upstream payments_api` is the pool of backend servers; `proxy_pass` forwards matching requests to that pool.
+- `weight=2` makes the first server receive twice as many requests as the others, which fits a larger machine.
+- `max_fails=3 fail_timeout=30s` is a passive health check: after 3 failed requests nginx stops using that server for 30 seconds.
+- `listen 443 ssl` with a certificate means nginx ends the encrypted connection ([TLS termination](card:tls-termination)) and forwards plain HTTP to the backends, so they do not each need the certificate.
+
+## Rules and defaults
+
+- **Default algorithm:** nginx and AWS ALB use round robin (each server in turn) unless you configure another, such as least connections.
+- **One address, many servers:** clients only ever see the load balancer's address; backend addresses stay private.
+- **Not a single point of failure:** run at least two load balancers, or use a managed one spread across availability zones. An AWS ALB requires at least two subnets in two zones.
+- **502 and 504 come from the proxy:** a 502 means the backend gave a bad reply, a 504 means it was too slow. These are reported by the load balancer, not the app.
+
+## Not to be confused with
+
+A [forward proxy](card:forward-proxy) acts for a group of clients and the client chooses it; it hides the clients. A [reverse proxy](card:reverse-proxy) acts for servers and the site owner sets it up; it hides the backends. A load balancer is a reverse proxy whose main job is spreading load. Rule: forward proxy speaks for clients, reverse proxy speaks for servers, load balancing is one thing a reverse proxy does.
+
+## Common mistakes
+
+- **"Pin each user to one server (sticky sessions) so their session is kept."** If that server dies, those users lose their session, and traffic goes uneven. Keep session data in a shared store or a signed token, so any server can serve any user.
+- **"The backend reports 502 errors."** A 502 or 504 is reported by the load balancer about the backend: a bad or slow upstream reply. Look at the backend's own logs to find the real cause.
+
 ## Interview Qs
 
-### L4 or L7 load balancer: which would you choose?
+### When would you choose an L7 load balancer over an L4 one?
 
-L7 when routing needs the host, path or headers, or cookie stickiness. L4 for raw speed, non-HTTP traffic or end-to-end TLS. Big setups chain both: L4 in front of L7.
-
-### Why avoid sticky sessions?
-
-If the pinned server dies, its users lose their session, and load gets uneven. Keep session state in a shared store or a token instead.
+Choose L7 when routing depends on the HTTP request: the host, path, headers, or a session cookie, or when you want it to terminate TLS. Choose L4 for raw speed, for non-HTTP traffic, or when you need the TLS connection to reach the backend unbroken. Large systems chain both: L4 in front of L7.
 
 ### How do you stop the load balancer itself being a single point of failure?
 
-Run at least two nodes, or a managed load balancer across availability zones (an AWS ALB needs two).
+Run at least two of them, or use a managed load balancer that the cloud spreads across availability zones. One address can map to several load balancer nodes through DNS or a virtual IP, so if one node dies the others keep serving. An AWS ALB needs subnets in at least two zones for this reason.
+
+### Why should servers behind a load balancer be stateless?
+
+Because the load balancer can send a user's next request to any server. If a server kept the session in its own memory, that request could land on a server that has never seen the user. Keeping session state in a shared store or a token lets every server answer every request, and lets you add or lose servers freely.

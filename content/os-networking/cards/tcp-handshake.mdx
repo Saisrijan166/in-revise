@@ -5,19 +5,31 @@ title: TCP Handshake, Close and TIME_WAIT
 topic: transport
 level: intermediate
 heat: 3
-hook: "SYN, SYN-ACK, ACK: each side sends its starting sequence number and sees it confirmed. It costs one round trip."
+hook: "Before any data, TCP does a three-step handshake: SYN, SYN-ACK, ACK. Each side sends its starting byte number and sees the other confirm it. It costs one round trip."
 points:
-  - { k: "Purpose", v: "both sides agree to talk and swap initial sequence numbers (ISNs)" }
-  - { k: "Cost", v: "1 round trip before the first request byte", kind: minus }
-  - { k: "Close", v: "each side sends FIN and gets an ACK; one side may half-close" }
-  - { k: "TIME_WAIT", v: "the side that closes first waits; 60 s on Linux", kind: default }
+  - { k: "Three steps", v: "SYN from the client, SYN-ACK from the server, ACK from the client; then data may flow" }
+  - { k: "What it agrees", v: "both sides exchange their initial sequence number (ISN), the byte number counting starts from" }
+  - { k: "Cost", v: "one full round trip of waiting before the first request byte can be sent", kind: minus }
+  - { k: "Close", v: "each direction is closed by a FIN that the other side ACKs, so it takes up to four messages" }
+  - { k: "TIME_WAIT", v: "the side that closes first waits before reusing the port; 60 s on Linux", kind: default }
 trap:
-  wrong: "Two steps would do: the client sends SYN and the server answers."
-  right: "Then the server never learns the client got its ISN, and an old delayed SYN could open a false connection."
-sayIt: "Client SYN with its ISN, server SYN-ACK with its own ISN acknowledging the client's, client ACK. Three messages, because each side must send its ISN and see it acknowledged."
+  wrong: "Two steps would be enough: the client sends SYN and the server replies."
+  right: "With only two steps the server never learns the client received its sequence number, and a stale delayed SYN from an old connection could open a false one."
+  why: "A two-step exchange looks complete because the client clearly reached the server. People forget it is symmetric: the server's own sequence number must also be acknowledged, and the third step is what rejects a stale duplicate SYN."
+sayIt: "The client sends SYN with its ISN, the server replies SYN-ACK with its own ISN while acknowledging the client's, and the client sends the final ACK. Three messages, because each side must send its sequence number and see it acknowledged."
 confusedWith: []
 tags: [tcp, handshake, time-wait]
 visual: flow
+cheat:
+  idea: "TCP opens a connection with a three-step handshake (SYN, SYN-ACK, ACK) so both sides exchange and confirm their starting byte numbers before any data is sent."
+  flow: "SYN → SYN-ACK → ACK → data → FIN/ACK each way → TIME_WAIT"
+  remember: "Three steps because each side must send its sequence number and see it acknowledged; costs one round trip."
+buildsOn: [tcp-and-udp]
+scenarios:
+  - q: "Your busy client machine shows tens of thousands of sockets in TIME_WAIT. Is this a bug, and what would you change?"
+    a: "Not in itself; TIME_WAIT is normal on whichever side closes first. But that many means a new connection per request, which can exhaust ephemeral ports. The fix is to stop opening a fresh connection each time: reuse connections with HTTP keep-alive or a connection pool."
+  - q: "A connection attempt to a port where nothing is listening comes back instantly with \"connection refused\". What did the server send?"
+    a: "An RST (reset). Instead of a SYN-ACK, the host replies with RST because no socket is listening on that port, so the handshake never starts and the client fails fast rather than timing out."
 sources:
   - title: "RFC 9293: Transmission Control Protocol (3.4.1 ISN selection, 3.5 Establishing, 3.6 Closing)"
     url: "https://www.rfc-editor.org/rfc/rfc9293"
@@ -33,14 +45,18 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The TCP handshake is the short exchange that opens a [TCP](card:tcp-and-udp) connection before any application data is sent. It takes three messages, which is why it is called the three-way handshake: the client sends a SYN, the server replies with a SYN-ACK, and the client sends a final ACK. Its job is to let both sides agree to talk and exchange their initial sequence number (ISN), the byte number each side will start counting from. A matching exchange of FIN messages closes the connection.
+
 ## Why it exists
 
-Before data flows, both ends must know the other is there and agree where byte numbering starts, so they can spot lost, repeated or stale segments.
+The network can lose, delay or duplicate packets, so a connection cannot just start sending and assume the other side is there and in step. If it did, an old SYN left over from a previous connection could arrive late and be mistaken for a new request, opening a connection nobody asked for. The handshake removes this: each side picks a fresh starting sequence number and refuses to proceed until it sees the other side acknowledge that exact number. By the time data flows, both ends have proven they are present and have agreed where byte numbering begins.
 
 ## How it works
 
 <Mermaid
-  alt="Open: SYN seq=x, SYN-ACK seq=y ack=x+1, ACK ack=y+1. Close: a FIN and an ACK each way, then the client waits in TIME_WAIT."
+  alt="Open: client sends SYN with seq=x; server replies SYN-ACK with seq=y and ack=x+1; client sends ACK with ack=y+1, which may carry the first request. Then data flows both ways. Close: client FIN, server ACK, server FIN, client ACK, then the client sits in TIME_WAIT before closing."
   chart={`sequenceDiagram
   participant C as Client
   participant S as api.shop.example
@@ -55,27 +71,61 @@ Before data flows, both ends must know the other is there and agree where byte n
   Note over C: TIME_WAIT, then closed`}
 />
 
-- **TIME_WAIT** re-ACKs a repeated FIN and lets late segments from the old connection die out.
-- **RST** aborts a connection at once; it also answers a SYN to a port nobody listens on.
-- **SYN flood:** fake SYNs fill the queue of half-open connections; Linux then falls back to SYN cookies.
+1. The client sends a SYN carrying its initial sequence number, `x`.
+2. The server replies with one segment that is both a SYN (its own initial sequence number, `y`) and an ACK of the client's (`ack = x+1`).
+3. The client sends the final ACK (`ack = y+1`). The connection is now open, and this ACK may already carry the first request bytes.
+4. To close, each direction is shut separately: one side sends a FIN, the other ACKs it, and the same happens the other way, so a full close is up to four messages.
+5. The side that sent the first FIN enters TIME_WAIT and waits a short while before the port can be reused, so that late segments from the old connection die out.
 
-## Defaults
+So the key is that three steps, not two, are the minimum for each side to send its sequence number and have the other confirm it.
+
+## Example
+
+The handshake is invisible in code: one `connect` call runs all three steps for you.
+
+```java
+// Client side: this single line performs SYN, SYN-ACK, ACK before it returns.
+try (var socket = new Socket("api.shop.example", 443)) {
+    socket.getOutputStream().write("GET /orders/42\r\n".getBytes());
+    // ... read the reply ...
+}   // closing the socket starts the FIN / ACK exchange
+```
+
+What to notice:
+
+- `new Socket(host, port)` does not return until the three-way handshake has completed, so the one round trip of setup is spent inside this call.
+- Only after `connect` returns can the first request byte go out; this is why a brand-new connection always pays one extra round trip before any response.
+- Closing the socket (here at the end of the try block) sends the FIN that begins the close, and this client becomes the side that holds TIME_WAIT.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| TIME_WAIT length | 60 s (constant TCP_TIMEWAIT_LEN, not a sysctl) | Linux |
-| SYN cookies | 1: sent only when the SYN queue overflows | Linux `net.ipv4.tcp_syncookies` |
+| TIME_WAIT length | 60 s (the constant `TCP_TIMEWAIT_LEN`, not a tunable sysctl) | Linux |
+| SYN cookies | On-demand: used only when the SYN queue overflows | Linux `net.ipv4.tcp_syncookies` (default 1) |
+
+- **RST aborts at once:** a reset ends a connection immediately and is also the reply to a SYN sent to a port with no listener.
+- **SYN flood defence:** an attacker can flood half-open connections with fake SYNs; when the queue overflows, Linux switches to SYN cookies, encoding the connection state in the SYN-ACK sequence number instead of storing it (RFC 4987).
+
+## Not to be confused with
+
+Opening and closing are different exchanges. The open is a three-way handshake (SYN, SYN-ACK, ACK) because the server's SYN and ACK ride in one segment. The close takes up to four messages, because each direction is ended by its own FIN and ACK and either side may stop sending while still receiving (a half-close). Rule: open = three messages; graceful close = a FIN each way.
+
+## Common mistakes
+
+- **"TIME_WAIT is a leak to get rid of."** It is deliberate: it lets a repeated FIN be re-acknowledged and lets stray old segments expire before the port is reused. The real fix for a pile-up is fewer connections (keep-alive, pooling), not removing TIME_WAIT.
+- **"The handshake carries no data."** The client's final ACK, and later TCP Fast Open, can carry request bytes, so setup and the first request need not be fully separate round trips.
 
 ## Interview Qs
 
 ### Why three steps and not two?
 
-Each side must send its ISN and see it acknowledged. The server's SYN and ACK share one segment, so it takes three. With two, the server cannot tell a fresh SYN from an old duplicate.
+Each side must send its initial sequence number and see it acknowledged. The server's SYN and its ACK of the client fit in one segment, so the minimum is three messages. With only two, the server could not tell a fresh SYN from an old delayed duplicate, and could open a connection the client never wanted.
 
-### A client shows thousands of TIME_WAIT sockets. Is that a bug?
+### A client shows thousands of sockets in TIME_WAIT. Is that a bug?
 
-No, TIME_WAIT is normal on the side that closes first. Thousands mean a new connection per request, which can use up [ephemeral ports](card:ports-and-sockets). Reuse connections with keep-alive or a [pool](card:connection-pooling).
+Not by itself; TIME_WAIT is normal on the side that closes first. Thousands of them usually mean the client opens a new connection per request, which can exhaust [ephemeral ports](card:ports-and-sockets). The fix is to reuse connections with HTTP keep-alive or a [connection pool](card:connection-pooling).
 
-### What are SYN cookies?
+### What are SYN cookies, and when are they used?
 
-The server stops storing half-open connections. It packs their state into the SYN-ACK's sequence number and rebuilds it from the client's final ACK.
+They defend against SYN floods. Instead of storing state for every half-open connection, the server encodes that state into the SYN-ACK's sequence number and rebuilds it from the client's final ACK. Linux turns them on automatically only when the SYN queue overflows.

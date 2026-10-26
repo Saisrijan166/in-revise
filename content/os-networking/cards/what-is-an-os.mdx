@@ -5,17 +5,28 @@ title: "What an OS Does: Kernel, Modes and System Calls"
 topic: os-basics
 level: beginner
 heat: 3
-hook: "Your code runs in user mode; to touch files, sockets or devices it asks the kernel through a system call."
+hook: "Your program runs in a restricted mode; to touch a file, a network socket or a device, it must ask the kernel through a system call."
 points:
-  - { k: "Kernel", v: "core of the OS: shares CPU, memory, devices and files among processes" }
-  - { k: "User mode", v: "app code; the CPU blocks privileged instructions" }
-  - { k: "Kernel mode", v: "full hardware access; entered by a syscall, exception or interrupt" }
-  - { k: "System call", v: "the controlled door in: openat, read, write, fork, execve" }
-  - { k: "Library call", v: "println or printf runs in user space, then calls write()" }
+  - { k: "Kernel", v: "the core program of the OS; it shares the CPU, memory, devices and files among all running programs" }
+  - { k: "User mode", v: "the restricted mode your app runs in; the CPU refuses to run privileged instructions here", kind: minus }
+  - { k: "Kernel mode", v: "the privileged mode the kernel runs in; every instruction and every device is allowed" }
+  - { k: "System call", v: "the one controlled way into the kernel, such as open, read, write or fork" }
+  - { k: "Library call", v: "a plain user-space function like println; it does the work, then may make a system call such as write" }
 trap:
-  wrong: "A system call is a context switch."
-  right: "A system call is a mode switch: the same thread enters the kernel and returns. A context switch changes which thread runs."
-sayIt: "The kernel owns the hardware. Apps run in user mode and ask it for I/O, memory or new processes through system calls, which trap into kernel mode, do the checked work and return."
+  wrong: "A system call switches to another thread, so it is a context switch."
+  right: "A system call is a mode switch: the same thread crosses into the kernel and returns. A context switch is when the kernel changes which thread the CPU runs."
+  why: "Both sound like the CPU is changing what it does, and both go through the kernel, so people merge them. But a syscall keeps running your thread; only a context switch swaps the thread out."
+sayIt: "The kernel owns the hardware. My app runs in user mode and asks the kernel for I/O, memory or new processes through system calls, which cross into kernel mode, do the checked work and return."
+cheat:
+  idea: "The kernel is the core of the OS and owns the hardware. Apps run in restricted user mode and ask the kernel for privileged work, such as file or network access."
+  flow: "App (user mode) → system call → kernel (kernel mode) → hardware"
+  remember: "A system call is a mode switch into the kernel and back, on the same thread; not a context switch."
+buildsOn: []
+scenarios:
+  - q: "Your Java code calls System.out.println(\"hi\"). Which parts run in user mode and which in kernel mode?"
+    a: "println, and the JVM and C library under it, all run in user mode. They format the bytes, then make the write system call. Only inside write does the CPU switch to kernel mode, so the kernel can put the bytes on the terminal, after which it returns to your thread in user mode."
+  - q: "Why can a buggy app crash itself but not the whole machine, while a kernel bug can?"
+    a: "The app runs in user mode, where the CPU blocks privileged instructions and the app can reach only its own memory, so a crash stays inside it. The kernel runs in kernel mode with full hardware access, so a bug there can corrupt anything and stop the machine."
 confusedWith: []
 tags: [kernel, system-call, user-mode, kernel-mode, interrupt]
 visual: table
@@ -34,21 +45,31 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An operating system (OS) is the software that sits between your programs and the hardware. Its core is the **kernel**: the one program that controls the CPU, memory, disks and network cards, and shares them among every program that is running. Your own code does not touch hardware directly. It runs in a restricted CPU mode called **user mode**, and when it needs something privileged, it asks the kernel through a **system call**.
+
 ## Why it exists
 
-Many programs share one CPU, memory and disk. The OS gives each a safe virtual view and checks every hardware request, so one program cannot break another.
+Many programs run on one machine and share one CPU, one block of memory and one disk. If every program could drive the hardware itself, one buggy program could overwrite another's memory or crash the disk. So the CPU offers two modes. In user mode it refuses dangerous instructions, so an app can only ask; in kernel mode the kernel does the dangerous work after checking it. That is how the OS keeps programs isolated and the machine safe.
 
 ## How it works
 
+The table shows the two modes side by side; the key difference is what each one is allowed to do.
+
 <Compare id="user-mode-vs-kernel-mode" />
 
-- Path: app code, then a library (glibc, the JVM), then a trap instruction, then the kernel, then return-from-trap.
-- [Interrupts](card:interrupt) come from devices; [traps](card:trap) come from the running instruction: a syscall, divide by zero, a [page fault](card:paging-and-page-faults).
-- Linux is a [monolithic kernel](card:monolithic-kernel); a [microkernel](card:microkernel) runs the file system and other services as user-mode servers.
+1. Your program runs normally in user mode until it needs the hardware, for example to read a file.
+2. It calls a library function such as `read`; the library puts the request in CPU registers and runs a special **trap** instruction.
+3. The trap switches the CPU into kernel mode and jumps to the kernel's handler for that system call.
+4. The kernel checks that the request is allowed, does the work, and runs a return-from-trap instruction that switches back to user mode.
+5. Your program continues on the same thread, right after the `read` call, now with the data.
+
+So the key is that the kernel is the only code that touches the hardware, and a system call is the single guarded door your program uses to reach it.
 
 ## Example
 
-The Spring Boot JVM reads files and sockets the same way. A local run (library-loading lines cut):
+Running `cat` to print a file makes exactly these system calls. `strace` lists the system calls a program makes; here it reads a file and writes it to the screen (library-loading lines cut).
 
 ```bash
 strace -e trace=openat,read,write,close cat order.txt > /dev/null
@@ -60,21 +81,30 @@ read(3, "order 42 total 1499\n", 131072) = 20
 write(1, "order 42 total 1499\n", 20)   = 20
 read(3, "", 131072)                     = 0
 close(3)                                = 0
-close(1)                                = 0
-close(2)                                = 0
-+++ exited with 0 +++
 ```
+
+What to notice:
+
+- `openat` asks the kernel to open the file and returns `3`, a small integer the program now uses to refer to the open file.
+- `read` copies the file's bytes into the program; the `20` is how many bytes it got. The second `read` returns `0`, which means the end of the file.
+- `write` to `1` (the screen) hands the bytes back to the kernel to display. Every line here is the program crossing into the kernel and back; between the lines it runs in user mode.
+
+## Rules and defaults
+
+- **Two things enter the kernel, not one:** a system call (your program asks), and an [interrupt](card:interrupt) (a device such as the timer or disk signals the CPU). A [trap](card:trap) is the CPU entering the kernel because of the running instruction, such as a system call or a divide by zero.
+- **Privileged instructions are blocked in user mode:** the CPU raises an exception instead of running them, so an app cannot drive devices or reach another program's memory.
+- **Kernel designs differ:** Linux is a [monolithic kernel](card:monolithic-kernel) (all OS services run in kernel mode, which is fast but one bug can crash everything); a [microkernel](card:microkernel) keeps the kernel tiny and runs services such as the file system as user-mode programs.
 
 ## Interview Qs
 
-### What is a system call?
+### What is a system call, and how is it different from a normal function call?
 
-A controlled entry into the kernel. The library puts the call number and arguments in registers and traps to kernel mode; the kernel checks and does the work, then returns the result or an error.
+A normal function call stays in user mode. A system call is a request into the kernel: the library puts the call number and arguments in registers and runs a trap instruction, which switches the CPU to kernel mode. The kernel checks the request, does the privileged work and returns the result or an error.
 
-### Why have user mode and kernel mode?
+### Why do CPUs have user mode and kernel mode at all?
 
-So a buggy or hostile program cannot drive devices or read another process's memory. The CPU refuses privileged instructions in user mode; only kernel code, entered through traps, may run them.
+So one program cannot drive devices or read another program's memory. In user mode the CPU blocks privileged instructions and limits which memory the program can reach, so a bug or an attack stays contained. Only kernel code, entered through a trap, is allowed to run those instructions.
 
-### Monolithic kernel vs microkernel?
+### What is the difference between a monolithic kernel and a microkernel?
 
-Monolithic (Linux): all OS services run in kernel mode, fast but one bug can crash everything. Microkernel (Minix, QNX, L4): a small kernel passes messages to services running as user-mode processes.
+In a monolithic kernel (Linux) all OS services, such as the file system and drivers, run together in kernel mode; this is fast, but one bug can crash the whole system. A microkernel (Minix, QNX, seL4) keeps the kernel small and runs most services as user-mode processes that talk by messages, trading some speed for stronger isolation.

@@ -5,18 +5,30 @@ title: Stack and Heap Memory
 topic: memory
 level: beginner
 heat: 3
-hook: "Each thread's stack holds one frame per active call; the shared heap holds the objects that outlive a call."
+hook: "A thread's stack holds one frame per active method call and vanishes on return; the shared heap holds the objects that must outlive a call."
 points:
-  - { k: "Frame", v: "pushed on a call, popped on return; holds locals" }
-  - { k: "Java", v: "locals and references on the stack; objects and arrays on the heap" }
-  - { k: "-Xss", v: "thread stack size: 1024 KB on Linux x64 (JDK 25)", kind: default }
-  - { k: "Max heap", v: "-Xmx; if unset, about 25% of available RAM (JDK 25)", kind: default }
-  - { k: "Leak with a GC", v: "objects you still reference can never be collected", kind: minus }
+  - { k: "Stack frame", v: "pushed when a method is called, popped when it returns; holds that call's locals" }
+  - { k: "Stack is per thread", v: "each thread has its own stack; the heap is one store shared by all" }
+  - { k: "Java rule", v: "local variables and references live on the stack; objects and arrays live on the heap" }
+  - { k: "-Xss default", v: "one thread's stack is 1024 KB on Linux x64 (JDK 25)", kind: default }
+  - { k: "Max heap default", v: "set by -Xmx; if unset, about 25% of available RAM (JDK 25)", kind: default }
+  - { k: "Leak despite GC", v: "an object you still reference, such as in a growing static map, is never collected", kind: minus }
 trap:
-  wrong: "An object created inside a method lives on that method's stack."
-  right: "Only the reference is a local on the stack. The object is on the heap and lives while anything still references it."
-sayIt: "Every thread has its own stack of frames for method calls and locals, freed on return. Objects live on the shared heap; in Java the garbage collector frees them once nothing references them."
-confusedWith: []
+  wrong: "An object created inside a method lives on that method's stack and dies when the method returns."
+  right: "Only the reference is a local on the stack. The object is on the heap and lives as long as anything still references it, even after the method returns."
+  why: "The object is written and used inside the method, so it feels local; people forget that `new` puts the object on the shared heap and the method only holds a pointer to it."
+sayIt: "Every thread has its own stack of frames for method calls and locals, freed automatically on return. Objects live on the shared heap; in Java the garbage collector frees them once nothing references them, so a reference you forget becomes a leak."
+cheat:
+  idea: "Each thread has a private stack of frames (locals and call bookkeeping), freed on return. The heap is one shared store for objects that outlive the call."
+  flow: "call → push frame → return → pop frame; new → object on heap"
+  remember: "Stack is per thread and auto-freed; heap is shared, freed by free()/GC. A local holds a reference; the object is on it."
+buildsOn: [threads]
+scenarios:
+  - q: "A method does `Order o = new Order();` and returns `o`. Where does the Order object live, and is it still valid after the method returns?"
+    a: "The Order object is on the heap; `o` is just a reference on the stack. When the method returns, its frame (and the reference `o`) is popped, but the object stays on the heap because the returned reference still points to it. It is collected only once nothing references it."
+  - q: "A long-running server keeps adding entries to a static HashMap and never removes them. Memory grows until it crashes, even though Java has a garbage collector. Why?"
+    a: "The garbage collector only frees objects that are unreachable. The static map is always reachable and still references every entry, so none of them can be collected. This is a memory leak, and it ends in an OutOfMemoryError on the heap."
+confusedWith: [stack-vs-heap]
 tags: [stack, heap, jvm, garbage-collection]
 visual: table
 sources:
@@ -34,31 +46,43 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Within one process, memory for running code is kept in two main areas. The stack is a per-thread area that grows and shrinks as methods are called and return: each call gets a frame holding that call's local variables. The heap is a single area, shared by all the process's [threads](card:threads), where objects and arrays live. In Java you never place things by hand: locals and references go on the stack, and `new` puts the object on the heap.
+
 ## Why it exists
 
-A method call needs scratch space that vanishes on return, while some data, like the order a request loads, must outlive the call and be shared.
+A method needs scratch space for its locals that should disappear the moment it returns, and nothing manages that better than a stack: push a frame on call, pop it on return, no cleanup code. But some data must outlive the call that created it, for example the `Order` object a request builds and then passes to other methods. That data goes on the heap, where it stays alive as long as something references it.
 
 ## How it works
 
 <Compare id="stack-vs-heap" />
 
-- `main()` → `getOrder(42)` → `toJson()`: three frames on that thread's stack; the `Order` object (total ₹1,499) sits on the heap.
-- The JVM heap is not the whole process: metaspace and every thread stack are native memory outside it.
-- 10,000 platform threads need 10,000 stacks; see [thread pools](card:thread-pools).
+Follow a call chain `main()` → `getOrder(42)` → `toJson()`:
+
+1. Calling `main()` pushes its frame onto the thread's stack.
+2. `main()` calls `getOrder(42)`, which pushes a second frame holding the local `id = 42`.
+3. `getOrder` does `new Order(...)`: the `Order` object (total ₹1,499) is created on the heap, and the frame holds only a reference to it.
+4. `getOrder` calls `toJson()`, pushing a third frame; when `toJson()` returns, its frame is popped.
+5. When `getOrder` returns the reference, its frame is popped too, but the `Order` object stays on the heap because the returned reference still points to it.
+
+So the stack unwinds automatically call by call, while heap objects live until nothing references them.
 
 ## Example
 
-Recursion with no base case adds a frame per call until the stack is full (example run, default -Xss):
+Endless recursion pushes one frame per call until the stack is full, which shows the stack's fixed size (run with the default `-Xss`).
 
 ```java
 public class Deep {
     static int depth = 0;
 
-    static void down() { depth++; down(); }   // one new frame per call
+    static void down() { depth++; down(); }   // one new frame per call, never returns
 
     public static void main(String[] args) {
         try { down(); }
-        catch (StackOverflowError e) { System.out.println("StackOverflowError at depth ~" + depth / 1000 * 1000); }
+        catch (StackOverflowError e) {
+            System.out.println("StackOverflowError at depth ~" + depth / 1000 * 1000);
+        }
     }
 }
 ```
@@ -67,16 +91,29 @@ public class Deep {
 StackOverflowError at depth ~22000
 ```
 
+What to notice:
+
+- `down()` never returns, so each call leaves its frame on the stack; after about 22,000 frames the 1024 KB stack is full and the JVM throws `StackOverflowError`.
+- The error is about the stack, not the heap: the program barely uses any heap. A real `OutOfMemoryError` would instead mean the heap is full.
+- A larger `-Xss` would push the depth higher but not make recursion infinite; the fix is usually a base case or an iterative loop.
+
+## Rules and defaults
+
+- **Thread stack size (`-Xss`):** 1024 KB on Linux x64 in JDK 25. Every thread, including each platform thread you start, gets its own stack of this size, so 10,000 platform threads reserve about 10 GB of stacks; see [thread pools](card:thread-pools).
+- **Max heap (`-Xmx`):** if you do not set it, the JVM uses about 25% of available RAM (`MaxRAMPercentage`) in JDK 25.
+- **The JVM heap is not the whole process:** metaspace (class metadata) and every thread stack are native memory outside the heap, so a process can run out of memory even with heap to spare.
+- **Freeing:** stack frames are freed automatically on return; heap objects are freed by the garbage collector in Java, and by `free()` in C.
+
 ## Interview Qs
 
 ### StackOverflowError vs OutOfMemoryError?
 
-StackOverflowError: one thread's stack is full, usually from deep or endless recursion. OutOfMemoryError: the heap (or metaspace) cannot fit a new allocation, from too much live data or a leak.
+StackOverflowError means one thread's stack is full, almost always from deep or endless recursion. OutOfMemoryError means the heap (or metaspace) cannot fit a new allocation, from too much live data or a leak. One is about call depth on a single thread; the other is about total live objects.
 
-### Java has a garbage collector. How can it leak memory?
+### Java has a garbage collector. How can it still leak memory?
 
-The collector frees only unreachable objects. A static map or cache that keeps growing still references its entries, so they are never freed and the heap fills up.
+The collector frees only objects that are unreachable. If you keep a reference, for example in a static map or cache that only grows, the objects stay reachable and can never be freed, so the heap fills up and eventually throws OutOfMemoryError. The fix is to drop references you no longer need.
 
-### Manual memory vs garbage collection?
+### How is manual memory management different from garbage collection?
 
-In C, you call malloc and free; forgetting free leaks, and using memory after free is a dangling pointer. A garbage collector frees unreachable objects for you, at the cost of GC work.
+In C you call `malloc` to allocate and `free` to release; forgetting `free` leaks memory, and using memory after `free` is a dangling pointer. A garbage collector frees unreachable objects for you, which removes those two bug classes at the cost of CPU spent on GC and less control over timing.

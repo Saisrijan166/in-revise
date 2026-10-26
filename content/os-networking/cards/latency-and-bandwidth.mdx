@@ -5,17 +5,29 @@ title: Latency, Bandwidth and Throughput
 topic: system-design-bridge
 level: beginner
 heat: 3
-hook: "Latency is how long, bandwidth is how wide, throughput is how much really got through."
+hook: "Latency is how long one request takes, bandwidth is the most data a link can carry per second, and throughput is how much data really got through."
 points:
-  - { k: "RTT", v: "there and back once; a new TCP or TLS 1.3 handshake costs one" }
-  - { k: "Distance", v: "far users wait longer; a CDN moves content closer", kind: minus }
-  - { k: "Calls add up", v: "sequential calls A → B → C → DB add their latencies", kind: minus }
-  - { k: "p99", v: "99% of requests take this long or less; averages hide the slow 1%" }
-  - { k: "Throughput ≤ bandwidth", v: "the slowest link or stage caps it" }
+  - { k: "Latency", v: "the time for one request to go and come back, measured in milliseconds", kind: key }
+  - { k: "Bandwidth", v: "the most data a link can carry per second, its maximum rate, in Mbps or Gbps", kind: key }
+  - { k: "Throughput", v: "the data or work actually completed per second; always at or below bandwidth", kind: key }
+  - { k: "RTT", v: "one round trip, there and back once; a new TCP or TLS 1.3 handshake costs one RTT each", kind: key }
+  - { k: "Chained calls add up", v: "sequential calls A then B then C then database add their latencies together", kind: minus }
+  - { k: "p99", v: "99% of requests finish within this time; the average hides the slow 1% that users notice", kind: key }
 trap:
   wrong: "Buy more bandwidth and every API call gets faster."
-  right: "Small calls wait on round trips, not on capacity. Cut round trips and distance; bandwidth helps big transfers."
-sayIt: "Latency is how long one request takes, bandwidth is the link's maximum rate, and throughput is what you actually get. Small API calls are latency-bound, so I cut round trips and distance and watch p99."
+  right: "Small API calls wait on round trips, not on capacity, so more bandwidth does not help them. Cut round trips and distance; bandwidth helps only large transfers."
+  why: "People picture the network as a pipe, so a wider pipe seems to make everything faster, but a small request barely fills the pipe and is limited by how far it must travel."
+sayIt: "Latency is how long one request takes, bandwidth is the link's maximum rate, and throughput is what you actually get. Small API calls are latency-bound, so I cut round trips and distance and watch p99, not the average."
+cheat:
+  idea: "Latency is how long one trip takes; bandwidth is the link's maximum rate; throughput is the data really moved per second. Small calls are latency-bound, big transfers bandwidth-bound."
+  flow: "Request time = distance + handshakes + server work + query"
+  remember: "More bandwidth will not speed small calls; cut round trips and distance. Watch p99, not the mean."
+buildsOn: [tcp-handshake, tls-https]
+scenarios:
+  - q: "An API call from India to a server in the US is slow, but the link has plenty of spare bandwidth. Would upgrading the bandwidth help? What would?"
+    a: "No. The call is small, so it barely uses the bandwidth; its time is mostly the long distance and the handshakes, which is latency. Serve it from a nearer region or a CDN, reuse the connection to skip handshakes, and avoid long chains of sequential calls."
+  - q: "Your dashboard shows an average response time of 80 ms, but users complain the site feels slow. What should you look at instead?"
+    a: "The p99, the time 99% of requests stay within. The average hides a slow tail, and at scale a request touching many servers is likely to hit at least one slow one. The tail is what users actually feel, so track and cut p99."
 confusedWith: []
 tags: [latency, bandwidth, performance]
 visual: table
@@ -31,40 +43,61 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+These three words describe speed, and interviews mix them up. Latency is how long one request takes to travel there and back, measured in milliseconds. Bandwidth is the most data a link can carry per second, its top rate, measured in Mbps or Gbps. Throughput is how much data or work actually got through per second, always at or below the bandwidth because of distance, lost packets and slow stages. A useful unit is the round trip time (RTT): one message going and a reply coming back.
+
 ## Why it exists
 
-Every performance question uses these three words. Mixing them up leads to the wrong fix, like buying bandwidth for a round-trip problem.
+Every performance question turns on these three, and confusing them leads to the wrong fix. If you treat a latency problem as a bandwidth problem, you pay for a faster link and the small API calls stay exactly as slow, because they were never limited by the link's capacity. Telling the three apart tells you what to change: shorten the path and cut round trips for latency, buy a faster link for a bandwidth-bound transfer, and remove the slowest stage to raise throughput.
 
 ## How it works
 
 <Compare id="latency-vs-bandwidth-vs-throughput" />
 
-- A new HTTPS connection spends round trips before any data: [DNS](card:dns), [TCP](card:tcp-handshake), [TLS 1.3](card:tls-https).
-- Fan-out: if 1 call in 100 is slow, a request touching 100 servers hits a slow one 63% of the time (1 − 0.99¹⁰⁰).
-- Long, fast links need many bytes in flight: the [bandwidth-delay product](card:bandwidth-delay-product).
+1. A new HTTPS request spends several round trips before any data moves: a [DNS](card:dns) lookup, the [TCP handshake](card:tcp-handshake), and the [TLS 1.3](card:tls-https) handshake, each one RTT.
+2. Only after those does the actual `GET` go out and the reply come back, adding the server's own work time.
+3. Sequential calls add up: if one request calls service A, then B, then the database, its latency is the sum of all three.
+4. At scale the slow tail dominates: if 1 call in 100 is slow, a request that fans out to 100 servers hits a slow one about 63% of the time (1 minus 0.99 to the power 100).
+
+So the key is that small calls are decided by round trips and distance, while only large transfers are decided by bandwidth.
 
 ## Example
 
+This counts the time before the first byte of the body, assuming each step is one 100 ms round trip on a fresh HTTPS connection with nothing cached.
+
 ```text
-Assume each step is one 100 ms round trip (new HTTPS, nothing cached)
 DNS lookup           1 RTT    100 ms
 TCP handshake        1 RTT    100 ms
 TLS 1.3 handshake    1 RTT    100 ms
-GET /orders/42       1 RTT    100 ms + server time
-Total                ~400 ms before the first byte of the body
-Reused connection    ~100 ms  (only the last line)
+GET /payments/42     1 RTT    100 ms + server time
+Total                ~400 ms  before the first body byte
+Reused connection    ~100 ms  (only the last line runs)
 ```
+
+What to notice:
+
+- Three of the four round trips are setup (DNS, TCP, TLS), not the request itself, so most of the 400 ms is spent before any useful data.
+- Reusing an existing connection skips the first three steps and cuts the time to about 100 ms, which is why keep-alive and connection pooling matter.
+- None of this is about bandwidth: the payload is tiny, so a faster link would not change the total.
+- A far-away server makes every RTT larger, which is why a nearer region or a [CDN](card:caching-and-cdn) helps.
+
+## Rules and defaults
+
+- **Throughput is capped by bandwidth:** you can never push more per second than the slowest link allows, and packet loss or a slow stage lowers it further.
+- **Latency is bound by distance and hops:** light and signals take time over distance, and each router and queue adds delay, so a shorter path is lower latency.
+- **Long fast links need many bytes in flight:** to use a high-bandwidth, high-latency link fully, enough data must be unacknowledged at once (the [bandwidth-delay product](card:bandwidth-delay-product)).
 
 ## Interview Qs
 
-### Latency vs bandwidth?
+### What is the difference between latency and bandwidth?
 
-Latency is delay: how long data takes to arrive. Bandwidth is capacity: how many bits per second the link can carry. A link can have huge bandwidth and still high latency.
+Latency is delay: how long data takes to arrive, in milliseconds. Bandwidth is capacity: how many bits per second the link can carry at most. They are independent, so a link can have huge bandwidth and still high latency (a satellite link), or low bandwidth and low latency (a short, thin wire). Small requests feel latency; large transfers feel bandwidth.
 
-### Why track p99, not the average?
+### Why track p99 rather than the average response time?
 
-The average hides the slow tail. At scale, a request that fans out to many servers is likely to hit at least one slow one, so the tail decides what users feel.
+The average blends everyone together and hides the slow tail, but users feel the slow requests. At scale a request that fans out to many servers is likely to hit at least one slow one, so the tail decides the real experience. p99, the time 99% of requests stay within, exposes that tail so you can fix it.
 
-### How do you cut latency for users far away?
+### How do you cut latency for users who are far away?
 
-Serve from closer (a [CDN](card:caching-and-cdn) or a nearer region), reuse connections, use protocols with fewer round trips, and avoid long chains of sequential calls.
+Move the work closer: serve static content from a [CDN](card:caching-and-cdn) and run servers in a nearer region. Reuse connections so you skip the DNS, TCP and TLS round trips, prefer protocols with fewer round trips, and avoid long chains of sequential calls that add their latencies together.

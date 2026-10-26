@@ -7,15 +7,27 @@ level: intermediate
 heat: 3
 hook: "Deadlock: threads wait on each other in a cycle, so none can move. Break any one of the four conditions and it cannot happen."
 points:
-  - { k: "Mutual exclusion", v: "one holder per resource; hard to remove" }
-  - { k: "Hold and wait", v: "holds one lock, waits for another; fix: take all at once" }
-  - { k: "No preemption", v: "a lock cannot be taken away; fix: tryLock, back off, retry" }
-  - { k: "Circular wait", v: "T1 waits for T2, T2 for T1; fix: one global lock order", kind: plus }
-  - { k: "Java", v: "the JVM does not break deadlocks; threads hang for good", kind: minus }
+  - { k: "Mutual exclusion", v: "a resource has one holder at a time; usually cannot be removed" }
+  - { k: "Hold and wait", v: "a thread keeps one lock while waiting for another; fix: take all locks at once" }
+  - { k: "No preemption", v: "a held lock cannot be taken away; fix: tryLock with a timeout, back off and retry" }
+  - { k: "Circular wait", v: "T1 waits on T2 while T2 waits on T1; fix: make every thread take locks in one global order", kind: plus }
+  - { k: "All four needed", v: "a deadlock needs all four conditions together; removing one prevents it", kind: default }
+  - { k: "Java does not help", v: "the JVM does not detect or break deadlocks; the threads hang for good", kind: minus }
 trap:
-  wrong: "Any one of the four conditions is enough for a deadlock."
-  right: "All four must hold together. Removing one, usually circular wait through lock ordering, prevents deadlock."
-sayIt: "A deadlock is a cycle of threads, each holding a lock the next one needs. All four Coffman conditions hold. I take locks in one fixed order, use tryLock with timeouts, and keep transactions short."
+  wrong: "Any one of the four conditions is enough to cause a deadlock."
+  right: "All four must hold at the same time. Removing one, usually circular wait through a fixed lock order, prevents deadlock."
+  why: "Each condition sounds dangerous on its own, so people assume one is enough; they are necessary together, not individually sufficient."
+sayIt: "A deadlock is a cycle of threads, each holding a lock the next one needs, so all four Coffman conditions hold at once. I take locks in one fixed order, use tryLock with timeouts, and keep transactions short."
+cheat:
+  idea: "A deadlock is a cycle of threads, each holding a lock that the next thread in the cycle needs. Nothing crashes; the threads just hang forever."
+  flow: "T1 holds L1, wants L2 — T2 holds L2, wants L1 — neither can proceed"
+  remember: "All four Coffman conditions must hold together. Break circular wait: make every thread take locks in one global order."
+buildsOn: [locks, semaphores]
+scenarios:
+  - q: "Thread 1 locks account A then wants account B; thread 2 locks account B then wants account A. What happens, and does the JVM recover?"
+    a: "They deadlock: each holds one lock and waits for the other, forming a cycle. The JVM does not detect or break it, so both threads hang forever. The fix is to make both threads lock the lower account id first, removing the circular wait."
+  - q: "Two PostgreSQL transactions deadlock on row locks. What does the database do that the JVM does not?"
+    a: "PostgreSQL has a deadlock detector. After deadlock_timeout (1 s by default in version 18) it looks for a cycle in the waits, picks one transaction as the victim, and aborts it with an error. The application catches that error and retries the transaction."
 confusedWith: [deadlock-vs-starvation-vs-livelock]
 tags: [deadlock, lock-ordering]
 visual: flow
@@ -37,51 +49,74 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A deadlock is a state where a group of threads are all stuck waiting for each other, so none of them can go on. Each thread holds a [lock](card:locks) that another thread in the group needs, and is itself waiting for a lock that another holds. The waiting forms a cycle with no way out. Nothing crashes and no error appears; the threads simply freeze, and any request they are serving hangs.
+
 ## Why it exists
 
-Code holding one lock that asks for another freezes for good if another thread does the reverse. Nothing crashes; requests hang.
+The problem appears as soon as a thread holds one lock and asks for a second. If one thread takes lock A then wants lock B, while another takes lock B then wants lock A, each ends up waiting for a lock the other is holding, and neither will ever release. This is easy to write by accident: two methods lock the same two objects in opposite orders. The value in naming the four conditions that make it possible is that breaking any one of them makes deadlock impossible.
 
 ## How it works
 
 <Mermaid
-  alt="Thread 1 holds L1 and wants L2; Thread 2 holds L2 and wants L1: a cycle."
+  alt="Thread 1 holds lock L1 and wants L2; Thread 2 holds lock L2 and wants L1, forming a cycle."
   chart={`flowchart LR
   T1["Thread 1 holds L1"] -- "wants L2" --> T2["Thread 2 holds L2"]
   T2 -- "wants L1" --> T1`}
 />
 
-- Prevent: break one condition. [Lock ordering](card:lock-ordering) is the usual fix.
-- Avoid: the [Banker's algorithm](card:bankers-algorithm) grants a request only if all can still finish; rarely used.
-- Detect: find a cycle in the [wait-for graph](card:wait-for-graph) and abort one; PostgreSQL does this.
+1. Thread 1 acquires lock L1; Thread 2 acquires lock L2.
+2. Thread 1 now asks for L2, which Thread 2 holds, so Thread 1 waits.
+3. Thread 2 now asks for L1, which Thread 1 holds, so Thread 2 waits.
+4. Each waits for the other; the cycle never breaks and both threads hang.
+
+So the key is the cycle in step 4: remove the chance of a cycle (a fixed lock order) and the deadlock cannot form.
 
 ## Example
+
+Both threads lock the lower account id first, so the cycle can never form and the transfers finish.
 
 ```java
 record Account(int id) {}
 
 static void transfer(Account from, Account to) {
-    Account first = from.id() < to.id() ? from : to;   // lower id first
+    Account first = from.id() < to.id() ? from : to;   // always lock lower id first
     Account second = (first == from) ? to : from;
-    synchronized (first) { synchronized (second) { /* move ₹1,499 */ } }
+    synchronized (first) { synchronized (second) { /* move the money */ } }
 }
 // two threads: transfer(a, b) and transfer(b, a), 100,000 times each
 System.out.println("both done, no deadlock");
 ```
 
-```text output
-both done, no deadlock
-```
+What to notice:
+
+- Both calls lock the lower id first, so they request the two locks in the same order and never form a cycle.
+- Remove the ordering and lock `from` then `to` directly, and `transfer(a,b)` with `transfer(b,a)` can deadlock within a few iterations.
+- This breaks the circular-wait condition; the other three conditions still hold, which is enough to make deadlock impossible.
+
+## Rules and defaults
+
+- **Four Coffman conditions:** mutual exclusion, hold-and-wait, no preemption, and circular wait. All four must hold at once for a deadlock.
+- **Prevention:** break one condition; a single global [lock order](card:lock-ordering) is the usual, cheapest fix for circular wait.
+- **Avoidance:** the [Banker's algorithm](card:bankers-algorithm) grants a request only if everyone can still finish; it is rarely used in practice.
+- **Detection:** find a cycle in the [wait-for graph](card:wait-for-graph) and abort one thread. PostgreSQL does this after `deadlock_timeout` (1 s by default, version 18).
+- **The JVM:** does not detect or break deadlocks; stuck threads stay stuck until the process is killed.
+
+## Not to be confused with
+
+In a deadlock the threads are blocked in a cycle and nobody progresses. In [starvation](card:thread-starvation) one unlucky thread keeps being passed over while others run fine. In a [livelock](card:livelock) threads are not blocked at all but keep reacting to each other and still get nothing done. Rule: deadlock is stuck and idle, livelock is busy but stuck, starvation is one thread stuck while the rest move.
 
 ## Interview Qs
 
 ### How would you prevent deadlocks?
 
-Take locks in one global order, such as by account id. Use `tryLock` with a timeout and back off. In the database, update rows in the same order everywhere.
+Take locks in one global order everywhere, such as by account id, which removes circular wait. Use `tryLock` with a timeout so a thread backs off instead of waiting forever. Keep critical sections and transactions short. In the database, update rows in the same order in every code path.
 
 ### What does PostgreSQL do when two transactions deadlock?
 
-After `deadlock_timeout` (1 s by default in PostgreSQL 18) it checks for a cycle and aborts one transaction, which the app should retry.
+It runs a deadlock detector. After `deadlock_timeout`, 1 second by default in PostgreSQL 18, it checks the waits for a cycle, picks one transaction as the victim, and aborts it with a deadlock error. The application should catch that error and retry the aborted transaction.
 
-### Can services deadlock?
+### Can services deadlock, not just threads?
 
-Yes: A waits for B while B waits for A, or each holds a lock the other needs. Use timeouts on every call, locks that expire (leases), and one lock order across services.
+Yes. Service A waits on a response from B while B waits on A, or each holds a resource the other needs. The cure is the same shape: put a timeout on every call, use locks that expire on their own (leases), and apply one lock order across services.

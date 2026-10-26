@@ -5,17 +5,28 @@ title: Context Switching
 topic: os-basics
 level: intermediate
 heat: 3
-hook: "A context switch saves one thread's registers and loads another's so the core can run it; useful work stops meanwhile."
+hook: "A context switch saves the running thread's registers and loads another thread's, so the core can run that one instead. No useful work happens during the switch."
 points:
-  - { k: "Saved state", v: "registers, program counter, stack pointer, kept by the kernel" }
-  - { k: "Voluntary", v: "the thread blocks on I/O or a lock, or sleeps" }
-  - { k: "Involuntary", v: "its time slice ends, or the kernel preempts it for another thread" }
-  - { k: "Process switch", v: "also swaps the page table, so the TLB may be flushed", kind: minus }
-  - { k: "Hidden cost", v: "the next thread starts with cold caches and TLB", kind: minus }
+  - { k: "What is saved", v: "the thread's registers, program counter and stack pointer, kept in the thread's record" }
+  - { k: "Voluntary switch", v: "the running thread gives up the CPU itself, by blocking on I/O or a lock, or by sleeping" }
+  - { k: "Involuntary switch", v: "the kernel takes the CPU away, because the time slice ended or a higher-priority thread became ready" }
+  - { k: "Process switch is costlier", v: "switching to a thread of another process also swaps the page table, which can flush the TLB", kind: minus }
+  - { k: "Hidden cost", v: "the next thread starts with cold CPU caches and TLB, so it runs slowly until they refill", kind: minus }
 trap:
-  wrong: "A context switch only costs saving and loading a few registers."
-  right: "It also has an indirect cost: the next thread finds cold CPU caches and TLB entries and runs slowly until they warm up."
-sayIt: "The kernel saves the running thread's registers and program counter and restores another's, on a timer tick, a block or a wake-up. Many runnable threads mean many switches and cold caches, so we bound them."
+  wrong: "A context switch only costs the time to save and load a few registers."
+  right: "That direct cost is small. The bigger, hidden cost is that the next thread finds cold CPU caches and TLB entries, so it runs slowly until they warm up again."
+  why: "Saving registers is the visible part, so people stop there. The cache and TLB cost is invisible in the switch itself and only shows up as slower code afterwards."
+sayIt: "On a timer tick, a block or a wake-up, the kernel saves the running thread's registers and program counter and restores another thread's. Many runnable threads mean many switches and cold caches, so we bound how many run at once."
+cheat:
+  idea: "A context switch is the kernel saving one thread's CPU state and loading another's, so the core runs a different thread. The switch itself does no useful work."
+  flow: "Save A's registers → pick B → restore B's → B resumes"
+  remember: "The real cost is not the registers but the cold caches and TLB the next thread inherits; many runnable threads mean constant switching."
+buildsOn: [threads]
+scenarios:
+  - q: "A server runs fine with 50 busy threads but gets slower when you raise it to 5,000. Each thread is doing real CPU work. Why does more threads make it slower here?"
+    a: "The machine still has a fixed number of cores, so only that many threads run at any instant. The other thousands are runnable and waiting, so the kernel keeps switching between them. Each switch costs save and restore time, scheduler work, and a cold cache and TLB for the next thread, so most CPU time goes to switching instead of the actual work."
+  - q: "Is a system call a context switch? Explain."
+    a: "No. A system call is a mode switch: the same thread crosses into the kernel and returns, still the running thread the whole time. A context switch is when the kernel stops running one thread and starts another. A system call can lead to a context switch, for example if it blocks on I/O, but the call itself is not one."
 confusedWith: [process-vs-thread]
 tags: [context-switch, overhead]
 visual: flow
@@ -34,27 +45,31 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A **context switch** is the moment the kernel stops running one [thread](card:threads) on a CPU core and starts running another. A core can run only one thread at a time, so to share it the kernel saves the current thread's state (its registers, program counter and stack pointer) and loads the next thread's saved state. The "context" is that saved state. The switch itself is pure overhead: during it the core does the OS's bookkeeping, not the program's work.
+
 ## Why it exists
 
-One CPU runs one thread at a time. To share it among many threads, the kernel must pause one and resume another unnoticed.
+A single core runs one thread at a time, but a machine usually has far more runnable threads than cores. To share the core and keep the system responsive, the kernel must be able to pause one thread and resume another so smoothly that neither notices. Without context switching, a thread would hold its core until it finished, and one long task could freeze everything else. The switch is the mechanism that makes many threads look like they run together.
 
 ## How it works
 
+One context switch is a short, fixed sequence inside the kernel.
+
 <Steps label="One context switch">
-  <Step title="Trigger">A timer interrupt, a blocking call or a wake-up enters the kernel.</Step>
-  <Step title="Save">The kernel stores thread A's registers, program counter and stack pointer.</Step>
-  <Step title="Pick">The [scheduler](card:cpu-scheduling) chooses the next ready thread, B.</Step>
-  <Step title="Restore">It loads B's saved state; for another process it also switches the page table.</Step>
-  <Step title="Resume">Return-from-trap continues B where it stopped.</Step>
+  <Step title="Trigger">A timer interrupt, a blocking system call or a wake-up enters the kernel and interrupts thread A.</Step>
+  <Step title="Save">The kernel stores thread A's registers, program counter and stack pointer into A's record.</Step>
+  <Step title="Pick">The scheduler (you will see this in [CPU scheduling](card:cpu-scheduling)) chooses the next ready thread, B.</Step>
+  <Step title="Restore">The kernel loads B's saved state; if B is in another process, it also switches the page table.</Step>
+  <Step title="Resume">A return-from-trap continues thread B exactly where it last stopped.</Step>
 </Steps>
 
-- A system call alone is a [mode switch](card:what-is-an-os), not a context switch.
-- Thousands of runnable threads mean constant switching; [thread pools](card:thread-pools) bound them.
-- Why caches and the TLB matter: [memory hierarchy](card:memory-hierarchy), [paging](card:paging-and-page-faults).
+So the key is that every switch spends real time saving and restoring state, and leaves the new thread with caches that belong to the old one.
 
 ## Example
 
-A sleeper yields; a busy loop gets preempted. Example run (counts vary):
+A sleeping task gives up the CPU voluntarily; a busy loop is forced off it. These lines read each process's switch counters from `/proc` (counts vary).
 
 ```bash
 sleep 5 & sleep 1; grep ctxt /proc/$!/status
@@ -68,16 +83,29 @@ voluntary_ctxt_switches:	0
 nonvoluntary_ctxt_switches:	10
 ```
 
+What to notice:
+
+- `sleep` has a voluntary switch and no involuntary ones: it blocked itself by sleeping, so it gave up the CPU on its own.
+- The busy loop (`while :`) never blocks, so all its switches are involuntary: the kernel kept taking the core away when each time slice ended.
+- The counts show the two causes of switching directly: a thread either yields the CPU or has it taken.
+
+## Rules and defaults
+
+- **A system call is not a context switch:** it is a [mode switch](card:what-is-an-os) on the same thread. A switch only happens when the kernel changes which thread runs.
+- **Thread switch versus process switch:** switching between threads of one process keeps the page table and TLB valid; switching to another process changes the page table and can flush the TLB, so it is costlier.
+- **Only runnable threads cause switching:** a thread blocked on I/O costs memory (its stack) but does not add to the switching load, because it is not asking for the CPU.
+- **Bound the count:** thousands of runnable threads mean constant switching, so servers use [thread pools](card:thread-pools) to cap how many run at once.
+
 ## Interview Qs
 
-### What happens during a context switch?
+### What exactly happens during a context switch?
 
-The kernel saves the current thread's registers, program counter and stack pointer, picks the next thread, restores its state and, for another process, switches the page table. The new thread then resumes.
+The kernel saves the current thread's registers, program counter and stack pointer into that thread's record, asks the scheduler for the next ready thread, and loads its saved state. If the next thread is in a different process, it also switches the page table. A return-from-trap then resumes the chosen thread where it had stopped.
 
-### Why is a thread switch cheaper than a process switch?
+### Why is switching between threads of one process cheaper than switching between processes?
 
-Threads of one process share an address space, so the page table and TLB entries stay valid. A process switch changes the page table, which can flush the TLB.
+Threads of one process share one address space, so the page table stays the same and the TLB entries remain valid. A process switch changes the page table, which usually flushes the TLB, so the new process starts with slow address translations until the TLB refills.
 
-### Why do too many threads slow a server?
+### Why can too many threads make a server slower, not faster?
 
-A CPU runs one thread at a time. Extra runnable threads add switches, scheduler work and cold caches, and each platform thread holds its own stack. Bounding threads keeps the CPU on real work.
+A core runs one thread at a time, so extra runnable threads do not add parallelism; they add switching. Each switch costs save and restore time, scheduler work and a cold cache and TLB for the next thread, and each platform thread also holds its own stack. Bounding the number of threads keeps the CPU spending its time on real work.

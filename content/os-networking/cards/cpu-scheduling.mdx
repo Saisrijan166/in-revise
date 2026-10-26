@@ -5,17 +5,27 @@ title: CPU Scheduling Algorithms
 topic: os-basics
 level: intermediate
 heat: 2
-hook: "The scheduler picks which ready thread runs next and for how long, trading turnaround, response time and fairness."
+hook: "When many threads are ready but a core is free, the scheduler picks which one runs next and for how long, trading average wait, responsiveness and fairness."
 points:
-  - { k: "Turnaround", v: "finish minus arrival; SJF is best when all jobs arrive together" }
-  - { k: "Response time", v: "first run minus arrival; round robin keeps it low" }
-  - { k: "Starvation", v: "a job never runs because others always win; fix with aging", kind: minus }
-  - { k: "Preemptive", v: "almost every modern scheduler can stop a running job" }
-  - { k: "Linux", v: "moved from CFS to EEVDF starting in Linux 6.6", kind: default }
+  - { k: "Turnaround time", v: "finish minus arrival; shortest job first gives the best average when all jobs arrive together" }
+  - { k: "Response time", v: "first-run time minus arrival time; round robin keeps it low by giving everyone a turn quickly" }
+  - { k: "Starvation", v: "a ready job never runs because others are always chosen first; aging raises its priority as it waits", kind: minus }
+  - { k: "Preemptive", v: "almost every general-purpose scheduler can stop a running job to run another" }
+  - { k: "Linux EEVDF", v: "Linux's default scheduler, which replaced CFS starting in Linux 6.6", kind: default }
 trap:
-  wrong: "A tiny round-robin time slice is always better: everyone gets the CPU sooner."
-  right: "Too small and context switches eat the CPU; too large and response suffers, like FCFS. The slice must outweigh the switch cost."
-sayIt: "FCFS is simple but short jobs wait behind long ones. SJF gives the best average turnaround but needs job lengths and can starve long jobs. Round robin is fair and responsive. Linux uses EEVDF since 6.6."
+  wrong: "A smaller round-robin time slice is always better, because everyone gets the CPU sooner."
+  right: "Too small and context switches eat the CPU; too large and it behaves like FCFS. Make the slice large enough that real work outweighs the switch cost."
+  why: "Short slices clearly improve fairness and response, so people assume shorter is strictly better and forget that each turn ends in a context switch, which is not free."
+sayIt: "FCFS is simple but short jobs wait behind long ones. SJF gives the best average turnaround but needs job lengths and can starve long jobs. Round robin is fair and responsive. Linux has used EEVDF since 6.6."
+cheat:
+  idea: "The CPU scheduler decides which ready thread runs next and for how long. Different algorithms optimise different goals: average wait, response time, or fairness."
+  remember: "SJF gives the best average turnaround but can starve long jobs; round robin is fair and responsive; real kernels like Linux (EEVDF) mix these ideas."
+buildsOn: [context-switching]
+scenarios:
+  - q: "Three jobs arrive at once: one 100 ms report and two 10 ms API calls. Under FCFS (arrival order: report first) versus shortest-job-first, what is the average waiting time?"
+    a: "FCFS runs the report first, so the two API calls wait 100 ms and 110 ms, giving waits of 0, 100, 110, an average of 70 ms. SJF runs the two short calls first, so waits are 0, 10, 20, an average of 10 ms. SJF wins because it does not trap short jobs behind the long one, which is the convoy effect."
+  - q: "A low-priority logging thread never seems to run on a busy server using strict priority scheduling. What is happening and how do you fix it?"
+    a: "It is starving: higher-priority threads are always ready, so the scheduler never picks the low-priority one. The fix is aging: the scheduler raises a job's priority the longer it has waited, so the logging thread eventually outranks the busy work and runs."
 confusedWith: [preemptive-vs-non-preemptive]
 tags: [scheduling, round-robin, starvation]
 visual: table
@@ -37,41 +47,64 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+**CPU scheduling** is how the kernel decides which ready thread to run next on a free core, and for how long, when more threads are ready than there are cores. The part that decides is the **scheduler**. A **scheduling algorithm** is the rule it uses. Each rule optimises a different goal: some aim for the lowest average wait, some for the fastest first response, some for fairness, and no single rule is best at all three.
+
 ## Why it exists
 
-Many threads are ready, but a CPU runs one at a time. The order decides how long users wait and whether some jobs ever run.
+A core runs one thread at a time, but many threads are usually ready at once. Some order has to be chosen, and the order decides real outcomes: how long each user waits for a reply, and whether some jobs ever run at all. A careless rule lets one long job block many short ones, or lets a busy stream of high-priority work freeze a low-priority task forever. A good scheduler balances these so the system feels fast and fair.
 
 ## How it works
 
+The common textbook algorithms differ in which job they pick next, whether they can interrupt a running job (preemptive), and what goes wrong with each.
+
 | Algorithm | Runs next | Preemptive | Watch out |
 |---|---|---|---|
-| FCFS | Earliest arrival | No | Convoy effect: short jobs stuck behind a long one |
-| SJF | Shortest job | No | Needs job lengths; long jobs can starve |
-| SRTF | Shortest remaining time | Yes | Same, plus more switches |
-| Priority | Highest priority | Either | Starvation; fix with aging |
-| Round robin | Next in turn, one time slice each | Yes | Slice size is a trade-off |
+| FCFS | The earliest to arrive | No | Convoy effect: short jobs stuck behind a long one |
+| SJF | The shortest job | No | Needs to know job lengths; long jobs can starve |
+| SRTF | The shortest remaining time | Yes | Same, plus more context switches |
+| Priority | The highest priority | Either | Starvation; fix with aging |
+| Round robin | The next in turn, one time slice each | Yes | The slice size is a trade-off |
 
-- Real schedulers mix ideas: [MLFQ](card:mlfq) moves jobs between priority queues by behaviour; Linux uses [EEVDF](card:eevdf).
+1. Jobs become ready and join the scheduler's queue.
+2. The scheduler applies its rule to pick one and runs it, either to completion (non-preemptive) or until its slice ends or a better job appears (preemptive).
+3. A preempted or finished job leaves the core, and the scheduler picks again.
+
+So the key is that the rule you pick decides who waits and whether anyone starves. Real kernels mix these ideas: an [MLFQ](card:mlfq) moves jobs between priority queues by how they behave, and Linux uses [EEVDF](card:eevdf).
 
 ## Example
 
-Three jobs arrive together: a 100 ms report and two 10 ms API calls. Waiting time is the start time:
+Three jobs arrive together: one 100 ms report and two 10 ms API calls. A job's waiting time is when it first starts, so the order of execution decides the average.
 
 ```text
 FCFS  report, api1, api2   waits 0, 100, 110 ms   average 70 ms
-SJF   api1, api2, report   waits 0, 10, 20 ms     average 10 ms
+SJF   api1, api2, report   waits 0,  10,  20 ms   average 10 ms
 ```
+
+What to notice:
+
+- FCFS keeps the arrival order, so both quick API calls sit behind the long report and wait about 100 ms each. That is the convoy effect.
+- SJF runs the two short jobs first, so they barely wait and the average drops from 70 ms to 10 ms.
+- SJF needs to know, or guess, how long each job will take; if it guesses wrong, or a long job keeps getting pushed back by new short ones, that long job can starve.
+
+## Rules and defaults
+
+- **Preemptive is the norm:** general-purpose kernels preempt, so no single thread can hold a core forever; purely non-preemptive scheduling fits only batch jobs or code trusted to yield.
+- **Time slice is a trade-off:** a round-robin slice too short wastes the CPU on context switches; too long and response time suffers like FCFS.
+- **Aging prevents starvation:** raising a waiting job's priority over time guarantees it eventually runs under priority scheduling.
+- **Linux default:** EEVDF since Linux 6.6; of the tasks owed CPU time, it runs the one with the earliest virtual deadline first.
 
 ## Interview Qs
 
-### Preemptive vs non-preemptive scheduling?
+### What is the difference between preemptive and non-preemptive scheduling?
 
-Non-preemptive lets a job keep the CPU until it finishes, blocks or yields. Preemptive can take it away, for example when a timer interrupt ends its slice. Servers and desktops use preemptive scheduling.
+Non-preemptive scheduling lets a job keep the CPU until it finishes, blocks or yields on its own. Preemptive scheduling can take the CPU away, for example when a timer interrupt ends the job's time slice or a higher-priority job becomes ready. Servers and desktops use preemptive scheduling so one job cannot freeze the system.
 
 ### What are starvation and aging?
 
-Starvation: a ready job never gets the CPU because others always win, as with low priorities under strict priority scheduling. Aging raises a job's priority the longer it waits, so it eventually runs.
+Starvation is when a ready job never gets the CPU because others are always chosen first, as a low-priority job can under strict priority scheduling. Aging fixes it: the scheduler raises a job's priority the longer it has been waiting, so its priority eventually rises high enough that it runs.
 
 ### What is the convoy effect?
 
-Under FCFS, short jobs queue behind one long job, so the average wait shoots up.
+Under FCFS, when one long job arrives first, all the short jobs behind it must wait for it to finish, even though each is quick. This pushes the average waiting time far up. It is the main argument against plain FCFS and for shortest-job-first or round-robin scheduling.

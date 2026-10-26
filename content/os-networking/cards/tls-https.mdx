@@ -5,17 +5,28 @@ title: "HTTPS and TLS 1.3"
 topic: application
 level: intermediate
 heat: 3
-hook: "HTTPS is HTTP over TLS: the certificate proves the server's name, a key exchange agrees session keys, and those keys encrypt the data."
+hook: "HTTPS is HTTP wrapped in TLS: a certificate proves the server's name, a key exchange agrees secret keys, and those keys encrypt every byte after."
 points:
-  - { k: "TLS gives", v: "confidentiality, integrity, server authentication (client: optional)" }
-  - { k: "Certificate", v: "server name + public key, signed by a CA, checked up to a trusted root" }
-  - { k: "Handshake", v: "TLS 1.3: 1 round trip; 0-RTT resumption data can be replayed", kind: minus }
-  - { k: "ECDHE", v: "fresh keys per connection give forward secrecy", kind: plus }
-  - { k: "Versions", v: "TLS 1.3 (RFC 9846, formerly RFC 8446); TLS 1.0 and 1.1 deprecated", kind: default }
+  - { k: "What TLS gives", v: "privacy (nobody can read it), integrity (nobody can change it), server identity (it is really that site)" }
+  - { k: "Certificate", v: "the server's name plus its public key, signed by a CA, checked up to a trusted root" }
+  - { k: "Handshake cost", v: "TLS 1.3 sets up in 1 round trip; 0-RTT resumption is faster but its early data can be replayed", kind: minus }
+  - { k: "ECDHE", v: "fresh key-exchange keys per connection give forward secrecy", kind: plus }
+  - { k: "Versions", v: "use TLS 1.3 (RFC 9846, was RFC 8446); TLS 1.0 and 1.1 are deprecated (RFC 8996)", kind: default }
 trap:
-  wrong: "TLS encrypts your data with the server's public key."
-  right: "Asymmetric crypto only proves identity and agrees keys (ECDHE). Fast symmetric session keys, such as AES-GCM, encrypt the data."
-sayIt: "The client sends a key share; the server replies with its key share, certificate, a signature and Finished. Both derive session keys, and AES-GCM or ChaCha20 encrypts the data. TLS 1.3 needs one round trip."
+  wrong: "TLS encrypts your data with the server's public key from its certificate."
+  right: "The public key only proves identity and helps agree a shared secret (ECDHE). Fast symmetric keys, such as AES-GCM, actually encrypt the data."
+  why: "The certificate carries a public key, so people assume that key encrypts the traffic. Public-key crypto is too slow for bulk data; it is used once in the handshake, then a symmetric key takes over."
+sayIt: "The client sends its key share and the server name; the server replies with its key share, its certificate, a signature and Finished. Both derive the same session keys, then AES-GCM or ChaCha20 encrypts the data. TLS 1.3 needs one round trip."
+cheat:
+  idea: "HTTPS is HTTP over TLS. TLS authenticates the server with a CA-signed certificate, agrees keys with ECDHE, then encrypts all data with a symmetric cipher."
+  flow: "ClientHello → ServerHello + Certificate + Finished → derive keys → encrypted HTTP"
+  remember: "Asymmetric crypto proves identity and agrees the key once; symmetric keys (AES-GCM) encrypt the data. TLS 1.3 = 1 RTT."
+buildsOn: [tcp-handshake, http-basics]
+scenarios:
+  - q: "You run a payment API over plain HTTP on public Wi-Fi. What can an attacker on the same network do, and which of those does HTTPS stop?"
+    a: "On plain HTTP they can read the card data, change the amount in flight, and run a fake server pretending to be your API. HTTPS stops all three: encryption hides the data (privacy), a MAC detects tampering (integrity), and the CA-signed certificate proves the server is really yours (authentication)."
+  - q: "The server's private key leaks a year after some traffic was recorded. With TLS 1.3 and ECDHE, can that old traffic be decrypted?"
+    a: "No. Each connection used fresh ECDHE keys that were thrown away after the handshake, and the long-term private key only signed the handshake, it did not derive the session keys. So a later key leak cannot decrypt recorded traffic. This property is forward secrecy."
 confusedWith: [symmetric-vs-asymmetric-encryption]
 tags: [tls, https, security]
 visual: flow
@@ -37,14 +48,18 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+HTTPS is plain [HTTP](card:http-basics) carried inside TLS, a layer that encrypts the connection. TLS gives three things: privacy (no one on the path can read the bytes), integrity (no one can change them without being caught), and server authentication (the client can prove it is really talking to `api.shop.example`, not an impostor). It sits between HTTP and [TCP](card:tcp-handshake): HTTP hands its bytes to TLS, TLS encrypts them, and TCP carries them.
+
 ## Why it exists
 
-Plain HTTP can be read and changed by anyone on the path, and a fake server can pretend to be api.shop.example.
+Plain HTTP travels in the open. Anyone on the path, such as another user on the same Wi-Fi or a router in between, can read the card number, quietly change the amount, or stand up a fake server that pretends to be your payment API. For anything private or valuable, that is unacceptable. TLS closes all three holes at once: it encrypts the data so it cannot be read, protects it so tampering is detected, and uses a certificate so the client knows the server is genuine.
 
 ## How it works
 
 <Mermaid
-  alt="TLS 1.3 handshake. The client sends ClientHello with its key share and the server name. The server replies with ServerHello and its key share, then, encrypted, its Certificate, CertificateVerify and Finished. The client sends Finished, then the encrypted GET /orders/42."
+  alt="TLS 1.3 handshake. The client sends ClientHello with its key share and the server name (SNI). The server replies with ServerHello and its key share, then sends, encrypted, its Certificate, CertificateVerify and Finished. The client sends Finished, then the encrypted GET request."
   chart={`sequenceDiagram
   participant C as Client
   participant S as api.shop.example
@@ -55,20 +70,57 @@ Plain HTTP can be read and changed by anyone on the path, and a fake server can 
   C->>S: GET /orders/42 (session keys)`}
 />
 
-- The client checks the chain: each certificate signed by the next, up to a trusted root, valid dates, matching name.
-- TLS sits between HTTP and TCP; "OSI Layer 6" is a loose fit. In HTTP/3 it runs inside [QUIC](card:http-versions).
-- Load balancers often end TLS: see [TLS termination](card:load-balancers-and-proxies).
+1. The client sends ClientHello with its ECDHE key share and the server name it wants (SNI).
+2. The server replies with ServerHello and its own key share. From the two key shares, both sides now compute the same secret, without ever sending it.
+3. The server sends its certificate, a signature over the handshake (CertificateVerify) that proves it owns the certificate's private key, and Finished, all encrypted with the new keys.
+4. The client validates the certificate chain (see the next step), sends its own Finished, and the handshake is done in one round trip.
+5. From here, a fast symmetric cipher such as AES-GCM encrypts every HTTP request and response.
+
+So the key is the split of jobs: asymmetric crypto authenticates and agrees the secret once; symmetric crypto does the bulk encryption.
+
+## Example
+
+The client checks the server's certificate chain before trusting it. This is what browsers do silently:
+
+```text
+Leaf:          CN = api.shop.example   (signed by Intermediate)
+Intermediate:  CN = Example CA R3      (signed by Root)
+Root:          CN = Example Root CA    (in the OS/browser trust store)
+```
+
+What to notice:
+
+- Each certificate is signed by the next one up, forming a chain; the client follows it until it reaches a root it already trusts on the device.
+- The leaf's name must match the host the client asked for (`api.shop.example`), and the dates must be current; a mismatch or expiry fails the handshake with a warning.
+- If the chain does not end at a trusted root, the client refuses the connection, which is what stops a random server from faking your site.
+
+## Rules and defaults
+
+- **Versions:** use TLS 1.3 (RFC 9846, which obsoletes the earlier RFC 8446). TLS 1.0 and 1.1 are deprecated (RFC 8996) and should be off.
+- **Layer:** TLS sits between HTTP and TCP. Calling it "OSI Layer 6" is a loose fit, not exact. In HTTP/3 it runs inside [QUIC](card:http-versions) instead of over TCP.
+- **One IP, many sites:** the client puts the hostname in the ClientHello (the SNI extension), so the server can pick the right certificate when one IP serves many domains.
+- **TLS termination:** load balancers often end TLS at the edge and talk plain HTTP to backends inside the network; see [load balancers](card:load-balancers-and-proxies).
+- **0-RTT resumption:** TLS 1.3 can send data on the first flight when resuming, which is fast, but that early data can be replayed, so it is unsafe for non-idempotent requests.
+
+## Not to be confused with
+
+- **Encryption vs authentication:** encryption hides the data (symmetric keys). Authentication proves identity (the certificate and signature). TLS does both, but they are separate jobs.
+- **TLS vs HTTPS:** TLS is the general encryption layer; HTTPS is specifically HTTP running over TLS. The same TLS also secures SMTP, database connections and more.
+
+## Common mistakes
+
+- **"A valid certificate means the site is safe."** It only proves the connection is encrypted and the name matches the certificate. A phishing site can get a valid certificate for its own look-alike name. The certificate proves identity and privacy, not trustworthiness.
 
 ## Interview Qs
 
-### Why does TLS use both asymmetric and symmetric crypto?
+### Why does TLS use both asymmetric and symmetric cryptography?
 
-Asymmetric crypto lets strangers agree a secret and prove identity, but it is slow. So the handshake uses it once, and fast symmetric keys encrypt everything after.
+Asymmetric (public-key) crypto lets two strangers agree a shared secret and lets the server prove its identity, but it is slow. Symmetric crypto is fast but needs a shared key first. So TLS uses asymmetric crypto once in the handshake to authenticate and agree a key, then switches to a fast symmetric cipher to encrypt all the actual data.
 
-### What is forward secrecy?
+### What is forward secrecy, and how does TLS 1.3 give it?
 
-Each connection uses fresh ECDHE keys that are thrown away. If the server's private key leaks later, recorded old traffic still cannot be decrypted.
+Forward secrecy means that if the server's long-term private key leaks later, previously recorded traffic still cannot be decrypted. TLS 1.3 gives it by always using ephemeral ECDHE: each connection generates fresh key-exchange keys that are discarded after the handshake, and the long-term key only signs, so it never derives the session keys.
 
-### How can one IP serve HTTPS for many domains?
+### How can one IP address serve HTTPS for many different domains?
 
-The client puts the hostname in the ClientHello (the SNI extension). The server reads it and picks the matching certificate.
+The client includes the hostname it wants in the ClientHello, in the SNI extension, which is sent before encryption begins. The server reads SNI and presents the certificate for that specific domain. Without SNI, the server would not know which certificate to send on a shared IP.

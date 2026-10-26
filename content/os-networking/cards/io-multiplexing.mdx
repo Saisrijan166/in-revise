@@ -5,16 +5,28 @@ title: "I/O Multiplexing, epoll and Event Loops"
 topic: io
 level: intermediate
 heat: 3
-hook: "One thread asks the kernel which of many sockets are ready, then serves only those. That loop is how Nginx and Node.js scale."
+hook: "One thread asks the kernel which of its many sockets are ready, then serves only those. That loop is how Nginx and Node.js hold tens of thousands of connections."
 points:
-  - { k: "Multiplexing", v: "one thread waits on many fds and wakes when any is ready" }
-  - { k: "Ready, not done", v: "the loop still reads the data itself, on a non-blocking fd" }
-  - { k: "epoll (Linux)", v: "register each fd once; epoll_wait returns only the ready ones", kind: plus }
-  - { k: "Golden rule", v: "never block or run long CPU work inside a callback", kind: minus }
+  - { k: "Multiplexing", v: "one thread registers many sockets and the kernel wakes it when any of them is ready" }
+  - { k: "Ready, not done", v: "the kernel only says which fds are readable; the loop still does the read itself on a non-blocking fd" }
+  - { k: "epoll (Linux)", v: "register each fd once; epoll_wait returns only the ready fds, so cost does not grow with idle fds", kind: plus }
+  - { k: "select limit", v: "select watches only fds numbered below 1024 with glibc, and rescans the whole set each call", kind: minus }
+  - { k: "Golden rule", v: "never block or run long CPU work in a callback; one thread runs them all, so it stalls every connection", kind: minus }
 trap:
   wrong: "Node.js has one thread, so it can only wait on one I/O operation at a time."
-  right: "One thread runs the callbacks, but thousands of sockets wait in the kernel at once; file I/O goes to a worker pool."
-sayIt: "With I/O multiplexing, one thread registers many sockets with epoll, waits, and handles only the ready ones in an event loop. It scales to thousands of connections as long as no callback blocks."
+  right: "One thread runs the callbacks, but thousands of sockets wait together in the kernel; slow file I/O is handed to a worker pool."
+  why: "People hear single-threaded and picture one blocking call after another. The waiting actually happens in the kernel for all sockets at once, not in the thread."
+sayIt: "I/O multiplexing lets one thread register many non-blocking sockets with epoll, wait once, and handle only the ready ones in an event loop. It scales to tens of thousands of connections as long as no callback blocks the loop."
+cheat:
+  idea: "One thread watches many sockets at once. It registers them with the kernel, waits until some are ready, and runs a short callback for each ready one, then loops."
+  flow: "Register fds → epoll_wait sleeps → kernel returns ready fds → run each callback → repeat"
+  remember: "epoll returns only the ready fds, so idle connections are almost free. Never block inside a callback."
+buildsOn: [blocking-and-non-blocking-io, threads]
+scenarios:
+  - q: "A chat server must hold 50,000 connections, most of them idle at any moment. Why does an epoll event loop beat a thread per connection here?"
+    a: "Thread-per-connection would need about 50,000 threads, each with its own stack and context-switch cost, mostly to sit idle. An event loop keeps all 50,000 fds waiting in the kernel and uses one thread that wakes only for the handful that are ready, so memory and switching stay small."
+  - q: "Inside an event-loop callback you call a slow synchronous database driver that blocks for 200 ms. What happens to the other connections?"
+    a: "They all freeze for those 200 ms, because the single loop thread is stuck in your callback and cannot run any other callback. The fix is to use a non-blocking driver or move the blocking work to a worker pool, keeping callbacks short."
 confusedWith: [blocking-vs-non-blocking-io]
 tags: [io, epoll, event-loop, nginx, nodejs]
 visual: flow
@@ -36,37 +48,81 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+I/O multiplexing is one thread watching many connections at once and being told which are ready. "Multiplex" means many fds share one waiting thread. You put the sockets in [non-blocking](card:blocking-and-non-blocking-io) mode, hand their [file descriptors](card:files-and-file-descriptors) to a kernel call such as `epoll`, and the kernel sleeps the thread until one or more become readable or writable. The thread then runs a callback for each ready socket. That register-wait-dispatch cycle is an event loop, and it powers Nginx and Node.js.
+
 ## Why it exists
 
-A thread per connection wastes memory and switches when most connections sit idle. The [C10k problem](card:c10k-problem) asked how one server can hold 10,000 clients at once.
+The simple design is one thread per connection, but a thread that is only waiting still costs a stack (about 1 MB on Linux x64) and a [context switch](card:context-switching) each time it is scheduled. Hold 10,000 mostly idle clients and you pay for 10,000 threads doing nothing. This was named the [C10k problem](card:c10k-problem): how one server holds 10,000 clients at once. Multiplexing answers it by parking every connection in the kernel and using one thread that wakes only for the few that have data.
 
 ## How it works
 
 <Steps label="One turn of an event loop">
-<Step title="Register">Add each socket fd once with `epoll_ctl`.</Step>
-<Step title="Wait">`epoll_wait` sleeps until one or more fds are ready.</Step>
-<Step title="Dispatch">Run the callback for each ready fd: accept, read or write.</Step>
-<Step title="Repeat">Go back to waiting. A callback that blocks stalls every connection.</Step>
+<Step title="Register">Add each socket fd once with `epoll_ctl`. The kernel remembers them, so you do not re-list them every time.</Step>
+<Step title="Wait">Call `epoll_wait`. The thread sleeps until one or more registered fds are ready, or a timeout fires.</Step>
+<Step title="Dispatch">The kernel hands back only the ready fds. Run a short callback for each: accept a new client, read a request, or write a response.</Step>
+<Step title="Repeat">Go back to waiting. If a callback blocks or runs heavy CPU work, every other connection is stuck until it returns.</Step>
 </Steps>
+
+The three common kernel calls differ in how they scale:
 
 | API | Each call | Limit |
 |---|---|---|
-| `select` | passes and checks the whole fd set | fds below 1024 (glibc) |
-| `poll` | passes and checks the whole list | none fixed; slow at thousands |
-| `epoll` | returns only the ready fds | scales to many idle fds |
+| `select` | passes and rescans the whole fd set | fds below 1024 with glibc |
+| `poll` | passes and rescans the whole list | no fixed cap, but slow at thousands of fds |
+| `epoll` (Linux) | the fd list lives in the kernel; returns only the ready fds | scales to many idle fds |
 
-<Compare id="thread-per-request-vs-event-loop" />
+So the key is that `epoll`'s cost grows with the number of ready fds, not the total number of connections.
+
+## Example
+
+Java's NIO `Selector` is I/O multiplexing; on Linux it uses `epoll` underneath. One thread registers each channel and waits.
+
+```java
+Selector selector = Selector.open();
+server.configureBlocking(false);
+server.register(selector, SelectionKey.OP_ACCEPT);    // watch for new clients
+while (true) {
+    selector.select();                                // sleeps until a key is ready
+    for (SelectionKey key : selector.selectedKeys()) {
+        if (key.isAcceptable()) { /* accept a client */ }
+        if (key.isReadable())   { /* read a request  */ }
+    }
+    selector.selectedKeys().clear();
+}
+```
+
+What to notice:
+
+- `server.configureBlocking(false)` is required: `select()` only works with non-blocking channels, so a read never traps the single loop thread.
+- `selector.select()` is the wait step. It sleeps until at least one registered channel is ready, so an idle server uses no CPU.
+- The loop handles only the keys in `selectedKeys()`, the ready ones, then clears them. Forgetting to clear would re-process stale events.
+
+## Rules and defaults
+
+- **epoll triggering:** level-triggered is the default: while an fd still has unread data, every `epoll_wait` reports it again. Edge-triggered reports only new arrivals, so you must read until `EAGAIN` or leftover data goes unnoticed.
+- **Per-OS call:** `epoll` is Linux, `kqueue` is BSD and macOS, IOCP is Windows; Java's `Selector` picks the right one for you.
+- **Blocking is forbidden in callbacks:** one thread runs every callback, so a blocking call or long computation stalls all connections. Node.js moves file I/O and crypto to libuv's worker pool for this reason.
+- **Worker pool for CPU work:** multiplexing is for I/O-bound work; CPU-heavy work still needs real threads or separate processes.
+
+## Not to be confused with
+
+- **[Non-blocking I/O](card:blocking-and-non-blocking-io)** is the property of one socket: a call returns instead of waiting.
+- **I/O multiplexing** is the pattern that uses many non-blocking sockets: one thread waits on all of them with epoll.
+
+Rule: non-blocking makes one call not wait; multiplexing uses that to let one thread serve thousands of sockets.
 
 ## Interview Qs
 
-### select vs poll vs epoll?
+### What is the difference between select, poll and epoll?
 
-select and poll pass the whole fd list on every call and the kernel checks each one; select also stops at fd 1023 in glibc. epoll keeps the list in the kernel and returns only the ready fds.
+`select` and `poll` pass the whole fd list on every call and the kernel scans each one, so cost grows with total connections; `select` also ignores fds numbered 1024 and above with glibc. `epoll` keeps the registered fds in the kernel and returns only the ready ones, so it stays fast with tens of thousands of mostly idle connections.
 
 ### What happens if you block inside an event-loop callback?
 
-Every other connection on that loop waits, because one thread runs all callbacks. Move blocking or CPU-heavy work to a worker pool, as Node.js does with libuv's pool, and keep callbacks short.
+Every other connection on that loop waits, because one thread runs all callbacks and it is now stuck. The server appears frozen. The fix is to keep callbacks short and move blocking or CPU-heavy work to a worker pool, as Node.js does with libuv's thread pool for file I/O.
 
-### Level-triggered vs edge-triggered epoll?
+### What is the difference between level-triggered and edge-triggered epoll?
 
-Level-triggered, the default, keeps reporting an fd while data remains. Edge-triggered reports only new arrivals, so use non-blocking fds and read until EAGAIN, or the loop can wait forever on data already there.
+Level-triggered, the default, keeps reporting an fd on every wait while unread data remains, so it is easy to use. Edge-triggered reports only when new data arrives, which cuts wakeups but means you must read in a loop until `EAGAIN`, or data already sitting in the buffer is never noticed and the loop waits forever.

@@ -5,17 +5,28 @@ title: "Network Failures: Timeouts, Retries and Idempotency"
 topic: system-design-bridge
 level: interview
 heat: 3
-hook: "A timeout tells you nothing about whether the call ran, so every retry must be safe to repeat."
+hook: "When a call times out you do not know whether it ran or not, so every retry must be safe to repeat without doing the work twice."
 points:
-  - { k: "Timeout = unknown", v: "the work may have run; only the reply is missing", kind: minus }
-  - { k: "Two timeouts", v: "connect (reach the server) and request (get the reply)" }
-  - { k: "Retry rules", v: "only transient errors and idempotent calls, with a cap" }
-  - { k: "Backoff + jitter", v: "wait up to 100, 200, 400 ms, picked at random each time" }
-  - { k: "Idempotency key", v: "client sends a unique key; server replays the stored result", kind: plus }
+  - { k: "Timeout means unknown", v: "the server may have done the work; only the reply is missing, so you cannot assume it failed", kind: minus }
+  - { k: "Two timeouts", v: "a connect timeout (reach the server) and a request timeout (get the reply back)", kind: key }
+  - { k: "When to retry", v: "only transient errors, only idempotent calls (safe to repeat), and only up to a cap", kind: key }
+  - { k: "Backoff + jitter", v: "wait longer each try (100, 200, 400 ms) and add a random amount so clients do not retry together", kind: key }
+  - { k: "Idempotency key", v: "the client sends a unique key; on a retry the server replays the stored first result instead of redoing work", kind: plus }
 trap:
   wrong: "Retry immediately at every layer until the call works."
-  right: "Retries multiply: 3 tries at each of 5 layers is 243× load on the database. Retry at one layer, with backoff and jitter."
-sayIt: "On a timeout I do not know if the call ran. So I set connect and request timeouts, retry only idempotent calls with capped backoff and jitter, and make POSTs safe with an idempotency key."
+  right: "Retries multiply: 3 tries at each of 5 layers is up to 243 times the load on the database. Retry at one layer only, with backoff and jitter."
+  why: "Each layer retrying looks locally sensible, but the retries compound down the stack, so a struggling service gets buried under a storm of retries right when it is weakest."
+sayIt: "On a timeout I do not know if the call ran, so I set connect and request timeouts, retry only idempotent calls with capped backoff and jitter, and make a POST safe by sending an idempotency key the server uses to replay the first result."
+cheat:
+  idea: "A timeout does not tell you whether the work ran, so retries must be safe to repeat and must not pile up."
+  flow: "Timeout → idempotent? → retry with backoff + jitter, to a cap"
+  remember: "Make a POST safe to retry with an idempotency key: the server stores key-to-result and replays it. Retry at one layer."
+buildsOn: [tcp-handshake, connection-pooling]
+scenarios:
+  - q: "A client sends POST /payments, the server charges the card, but the 201 reply is lost on the way back. The client times out and retries. What happens, and how do you prevent a double charge?"
+    a: "Without protection the server charges again, because the retry looks like a brand-new request. The client should send an Idempotency-Key that it reuses on the retry; the server stores key to result on the first call and, seeing the same key, returns the stored result instead of charging again."
+  - q: "A downstream service is overloaded. Every one of your 1,000 clients retries the failed call at the same instant. Why does this make things worse, and what fixes it?"
+    a: "All the retries arrive together and hit the service again while it is already struggling, a thundering herd that can keep it down. Exponential backoff spreads retries out over time, and jitter adds a random delay so the clients do not line up on the same moment."
 confusedWith: []
 tags: [timeout, retry, idempotency]
 visual: flow
@@ -31,55 +42,80 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Over a network, calls can be slow, lost, or interrupted while the server itself stays up and running. This concept is the set of defences for that: a timeout, which gives up waiting after a set time; a retry, which sends the call again; and idempotency, which means a call is safe to repeat because doing it twice has the same effect as once. The hard part is that a timeout does not tell you whether the server did the work; only that the reply did not arrive in time.
+
 ## Why it exists
 
-Networks drop packets, slow down and split while servers stay up. Without timeouts and safe retries, one slow dependency hangs threads or charges twice.
+Networks drop packets, slow down, and split apart, and remote servers can be busy or restarting, all while your code is waiting for an answer. Without a timeout, one slow dependency makes a request wait forever, holding a [thread](card:thread-pools) and a [pooled connection](card:connection-pooling) until the whole server runs out of them. Without care around retries, a lost reply to a payment leads to a second charge, and retries at every layer pile up into a storm that buries a service that was only briefly slow. These defences keep one failure from spreading.
 
 ## How it works
 
 <Mermaid
-  alt="The client sends POST /payments. The server charges the card but its reply is lost. The client times out and retries, and the server charges again."
+  alt="The client sends POST /payments for 1499 rupees. The server charges the card, but its 201 Created reply is lost on the way back. The client times out, cannot tell whether the charge happened, and retries. Without an idempotency key the server charges the card a second time."
   chart={`sequenceDiagram
   participant C as Client
   participant S as Payments API
   C->>S: POST /payments (₹1,499)
   S->>S: charge the card
-  S-xC: 201 Created (lost)
+  S-xC: 201 Created (reply lost)
   Note over C: timeout: did it run?
   C->>S: retry POST /payments
   S->>S: charges again: double charge`}
 />
 
-- No timeout means waiting forever, holding a [thread](card:thread-pools) and a [pooled connection](card:connection-pooling).
-- With an idempotency key the server stores key → result; the retry gets the first result.
-- A [circuit breaker](card:circuit-breaker) stops calls for a while; a [partition](card:network-partition) forces a consistency trade-off.
+1. The client sends the request and starts two clocks: a connect timeout to reach the server, and a request timeout to get the reply.
+2. If a clock runs out, the client has no idea whether the server did the work; only that no reply came.
+3. It retries only if the error looks transient and the call is idempotent, and only up to a small cap.
+4. Before each retry it waits longer than the last time (exponential backoff) plus a random extra (jitter), so many clients do not retry at the same instant.
+5. For a call that is not naturally safe to repeat, like a payment, the client sends an idempotency key, and the server uses it to return the first result instead of doing the work again.
+
+So the key is: assume nothing on a timeout, retry carefully, and make repeats harmless.
 
 ## Example
 
+This Java client sets both timeouts and sends an idempotency key, so a retry of the same payment is safe.
+
 ```java
 HttpClient client = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(2))      // connect within 2 s
+        .connectTimeout(Duration.ofSeconds(2))      // reach the server within 2 s
         .build();
-String key = UUID.randomUUID().toString();          // reuse this key on every retry
+String key = UUID.randomUUID().toString();          // reuse this same key on every retry
 HttpRequest req = HttpRequest.newBuilder(URI.create("https://api.shop.example/payments"))
-        .timeout(Duration.ofSeconds(5))             // reply within 5 s
+        .timeout(Duration.ofSeconds(5))             // get the reply within 5 s
         .header("Idempotency-Key", key)
         .POST(HttpRequest.BodyPublishers.ofString("{\"orderId\":42,\"amount\":1499}"))
         .build();
-// on timeout: HttpConnectTimeoutException or HttpTimeoutException
+// a timeout throws HttpConnectTimeoutException (connect) or HttpTimeoutException (request)
 HttpResponse<String> res = client.send(req, HttpResponse.BodyHandlers.ofString());
 ```
+
+What to notice:
+
+- `connectTimeout` and the request `timeout` are separate: one bounds reaching the server, the other bounds waiting for the reply.
+- `key` is generated once and reused on every retry of this payment, so the server can recognise the retry as the same request.
+- With no timeout set, a stuck call would wait forever and tie up the calling thread and its connection.
+- `Idempotency-Key` is only an expired IETF draft, not a web standard, so the server must implement the store-and-replay logic itself.
+
+## Rules and defaults
+
+- **Set both timeouts:** always bound connect time and request time; a missing timeout defaults to waiting indefinitely.
+- **Retry only when safe:** retry transient errors (timeouts, 503) on idempotent calls (GET, PUT, DELETE), not on a plain POST, and cap the number of attempts.
+- **Backoff with jitter:** increase the wait each attempt and add randomness, as the AWS Builders' Library recommends, to avoid a retry storm.
+- **Idempotency key is app-level:** the server must store key to result and replay it; nothing in HTTP does this for you.
+- **Stronger tools:** a [circuit breaker](card:circuit-breaker) stops calling a failing service for a while; a [network partition](card:network-partition) forces a consistency-versus-availability choice.
 
 ## Interview Qs
 
 ### Why is a timeout not proof that the request failed?
 
-The server may have done the work and only the reply was lost. Retrying a non-idempotent call can repeat it: a second payment.
+Because the request and the reply travel separately. The server may have received the request, done the work, and only had its reply lost or delayed. So a timeout means "I did not hear back", not "it did not happen". Retrying a non-idempotent call on a timeout can repeat the work, for example charging a card twice.
 
 ### How do you make POST /payments safe to retry?
 
-Send a unique Idempotency-Key; the server stores key → result and answers a retry with the stored result. The header is only an expired IETF draft.
+Have the client send a unique `Idempotency-Key` header and reuse the same key on every retry. On the first call the server stores the key with its result; when it sees the same key again, it returns the stored result instead of charging again. The header is only an expired IETF draft, so the server implements the store-and-replay itself.
 
-### Why exponential backoff and jitter together?
+### Why use exponential backoff and jitter together?
 
-Backoff spaces out retries so a struggling server can recover. Jitter adds randomness so clients do not all retry at the same moment.
+Exponential backoff makes each retry wait longer than the last, which gives a struggling server time to recover instead of being hit again immediately. Jitter adds a random delay so that many clients, which all failed at the same moment, do not retry in sync and create a fresh spike. Backoff spaces retries out; jitter breaks their alignment.

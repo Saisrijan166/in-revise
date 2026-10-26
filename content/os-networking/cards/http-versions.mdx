@@ -5,17 +5,29 @@ title: "HTTP/1.1 vs HTTP/2 vs HTTP/3"
 topic: application
 level: intermediate
 heat: 3
-hook: "HTTP/1.1: one request at a time per connection. HTTP/2: many streams on one TCP connection. HTTP/3: streams over QUIC on UDP."
+hook: "HTTP/1.1 sends one request at a time per connection; HTTP/2 runs many streams on one TCP connection; HTTP/3 runs those streams over QUIC on UDP."
 points:
-  - { k: "Keep-alive", v: "HTTP/1.1 reuses a connection by default; Connection: close ends it", kind: default }
-  - { k: "HOL blocking, HTTP/1.1", v: "a slow response holds up the next one on that connection", kind: minus }
-  - { k: "HOL blocking, HTTP/2", v: "one lost TCP packet stalls every stream", kind: minus }
-  - { k: "HTTP/3", v: "a loss stalls only its own stream; TLS 1.3 is built into QUIC", kind: plus }
-  - { k: "UDP blocked", v: "clients fall back to HTTP/2 or HTTP/1.1 over TCP" }
+  - { k: "Keep-alive", v: "HTTP/1.1 reuses one TCP connection by default; Connection: close ends it", kind: default }
+  - { k: "HTTP/1.1 blocking", v: "on one connection a slow response holds up the next one behind it", kind: minus }
+  - { k: "HTTP/2 multiplexing", v: "many binary streams share one TCP connection, so requests do not wait in line", kind: plus }
+  - { k: "HTTP/2 TCP blocking", v: "streams share one TCP byte stream, so one lost packet stalls all of them", kind: minus }
+  - { k: "HTTP/3 over QUIC", v: "a lost packet stalls only its own stream; TLS 1.3 is built into QUIC", kind: plus }
+  - { k: "UDP blocked", v: "if UDP is blocked, the client falls back to HTTP/2 or HTTP/1.1 over TCP" }
 trap:
   wrong: "HTTP/2 removed head-of-line blocking."
-  right: "Only at the HTTP level. Its streams share one TCP byte stream, so a lost packet still stalls all of them. HTTP/3 fixes that."
-sayIt: "HTTP/1.1 reuses connections but serves one request at a time on each. HTTP/2 multiplexes binary streams over one TCP connection with HPACK. HTTP/3 runs over QUIC on UDP, so a lost packet blocks only one stream."
+  right: "HTTP/2 removed it at the HTTP level, but its streams share one TCP byte stream, so one lost packet still stalls every stream. HTTP/3 fixes this with QUIC."
+  why: "HTTP/2 does end the per-request queue of HTTP/1.1, so the blocking seems gone. The blocking just moves down: TCP must deliver bytes in order, so a single lost packet holds back all the streams riding on it."
+sayIt: "HTTP/1.1 reuses a connection but serves one request at a time on it. HTTP/2 multiplexes binary streams over one TCP connection and compresses headers with HPACK. HTTP/3 runs over QUIC on UDP, so a lost packet blocks only one stream and setup takes one round trip."
+cheat:
+  idea: "Three versions, same HTTP semantics. HTTP/1.1 sends one request per connection; HTTP/2 multiplexes streams on one TCP connection; HTTP/3 moves them to QUIC on UDP."
+  flow: "HTTP/1.1 (serial) → HTTP/2 (TCP multiplexed) → HTTP/3 (QUIC on UDP)"
+  remember: "HTTP/2 ends HTTP-level head-of-line blocking but not TCP-level: one lost packet stalls all streams. HTTP/3 (QUIC) fixes it."
+buildsOn: [http-basics, tcp-and-udp]
+scenarios:
+  - q: "On a lossy mobile network, HTTP/2 feels slow even though it multiplexes. What is happening, and would HTTP/3 help?"
+    a: "All HTTP/2 streams ride one TCP connection, which must deliver bytes in order. One lost packet makes TCP hold back every stream until the retransmission arrives, so they all stall together. HTTP/3 over QUIC recovers loss per stream, so only the affected stream waits; the others keep flowing. So yes, HTTP/3 helps here."
+  - q: "Your site moved from HTTP/1.1 to HTTP/2. A colleague still splits images across img1, img2, img3 subdomains (domain sharding). Keep it?"
+    a: "Drop it. Sharding existed to get around HTTP/1.1 opening only about six connections per origin. HTTP/2 multiplexes everything on one connection, so extra domains only add DNS lookups and connections and can hurt. One origin is better."
 confusedWith: []
 tags: [http2, http3, quic]
 visual: table
@@ -35,32 +47,52 @@ sources:
   - title: "Connection management in HTTP/1.x (MDN)"
     url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Connection_management_in_HTTP_1.x"
     verifiedOn: "2026-10-20"
+  - title: "Removing HTTP/2 Server Push from Chrome (Chrome developers)"
+    url: "https://developer.chrome.com/blog/removing-push"
+    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+HTTP/1.1, HTTP/2 and HTTP/3 are three versions of the same protocol. They carry the same [requests, methods and status codes](card:http-basics); what changes is how the bytes travel over the network. HTTP/1.1 is text and sends one request at a time on a connection. HTTP/2 packs requests into binary streams that share one connection. HTTP/3 keeps those streams but moves them off TCP onto QUIC, a transport that runs over [UDP](card:tcp-and-udp).
 
 ## Why it exists
 
-Pages and APIs make many requests at once. Opening a connection per request is slow, and waiting in line on one connection is slow too.
+One web page or API screen makes dozens of requests. With HTTP/1.1 each connection handles one request at a time, so the browser either waits in line or opens about six connections per site, which is wasteful and still slow. HTTP/2 lets all those requests share one connection at once, cutting handshakes and sockets. But they still share one TCP stream, so a single lost packet stalls them all; HTTP/3 removes that last bottleneck by giving each stream its own loss recovery.
 
 ## How it works
 
 <Compare id="http1-vs-http2-vs-http3" />
 
-- Client and server agree the version in the TLS handshake with [ALPN](card:alpn); servers advertise HTTP/3 with [Alt-Svc](card:alt-svc).
-- QUIC [connection IDs](card:connection-migration) keep a connection alive when a phone moves from Wi-Fi to mobile data.
+1. The client and server agree the version during the TLS handshake using ALPN; the server can advertise HTTP/3 with an [Alt-Svc](card:alt-svc) header so the next connection tries QUIC.
+2. HTTP/1.1 reuses one TCP connection but runs requests serially; a slow response blocks the next one (head-of-line blocking at the HTTP level).
+3. HTTP/2 splits each request into a binary stream and interleaves many streams on one TCP connection, so none waits for another at the HTTP level. It also shrinks repeated headers with HPACK.
+4. HTTP/3 carries streams over QUIC, which recovers lost packets per stream, so a loss stalls only its own stream; QUIC also folds in TLS 1.3, so a fresh connection sets up in one round trip.
 
-## Defaults
+So the key is where blocking can still happen: HTTP/1.1 at the request level, HTTP/2 at the TCP level, HTTP/3 only within one stream.
 
-| What | Default | Where |
-|---|---|---|
-| Persistent connections | On | HTTP/1.1 (RFC 9112) |
-| Parallel connections per origin | About 6 | Browsers over HTTP/1.1 (MDN) |
+## Rules and defaults
+
+- **Persistent connections:** on by default in HTTP/1.1 (RFC 9112); `Connection: close` opts out. Browsers open about six parallel connections per origin over HTTP/1.1.
+- **Multiplexing:** HTTP/2 and HTTP/3 use one connection with many streams, so domain sharding and spriting (HTTP/1.1 workarounds) no longer help.
+- **Server push is effectively gone:** HTTP/2 server push was disabled by default in Chrome 106 and other Chromium browsers; use `103 Early Hints` to preload instead.
+- **Fallback:** HTTP/3 needs UDP. If a network blocks UDP, clients fall back to HTTP/2 or HTTP/1.1 over TCP, so you keep TCP serving too.
+
+## Not to be confused with
+
+- **HTTP-level vs TCP-level head-of-line blocking:** HTTP/1.1 blocks because responses queue on the connection. HTTP/2 fixes that, but TCP must deliver bytes in order, so one lost packet still blocks all streams at the TCP level. HTTP/3 solves the TCP-level case with QUIC.
+- **QUIC vs HTTP/3:** QUIC is the transport (streams, loss recovery, TLS 1.3) over UDP; HTTP/3 is HTTP mapped onto QUIC.
 
 ## Interview Qs
 
-### Why does HTTP/3 run over UDP?
+### Why does HTTP/3 run over UDP instead of a new transport?
 
-UDP already works across existing networks and systems. QUIC adds streams, loss recovery, congestion control and TLS 1.3 on top, with each stream recovering its own losses and setup in one round trip.
+TCP is baked into operating systems and middleboxes and is slow to change. UDP is a thin layer that already passes through existing networks, so QUIC is built on top of it in user space. QUIC then adds streams, per-stream loss recovery, congestion control and TLS 1.3, and can set up a connection in one round trip.
 
-### What does HTTP/2 change in a system design?
+### What does switching to HTTP/2 change in a system design?
 
-One connection per client instead of about six: fewer handshakes, fewer sockets on the load balancer, longer-lived connections. Domain sharding stops helping.
+Each client uses one long-lived connection instead of about six. That means fewer TCP and TLS handshakes, fewer open sockets on the load balancer, and better use of each connection. Old HTTP/1.1 tricks like domain sharding stop helping and should be removed, since they only add connections and DNS lookups.
+
+### HTTP/2 multiplexes, so why can it still feel slow on a bad network?
+
+Its streams all ride one TCP connection, and TCP delivers bytes strictly in order. If one packet is lost, TCP holds back every stream until the retransmission arrives, so all of them stall together. This is TCP-level head-of-line blocking. HTTP/3 avoids it by recovering loss per QUIC stream.

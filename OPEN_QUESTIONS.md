@@ -741,3 +741,27 @@ The owner approved the Spring Boot pilot, both the concept rewrite (section Q) a
   - The new consumer group protocol (KIP-848) is GA in 4.0, broker-side with client opt-in, planned default in 5.0.
 - **Not re-confirmed:** CooperativeStickyAssignor is attributed to Kafka 2.4 from secondary sources; whether share groups are on by default in a new 4.2/4.3 cluster (the content makes no claim).
 - **Newer than baseline, left out:** kafka-clients 4.4.0 is on Maven Central; whether 4.1-upgraded clusters get Eligible Leader Replicas by default.
+
+### R12. React & Frontend
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 39 | 18 | ~250 | ~656 / 0 / 0 | ~10 min |
+
+- **Order:** Web and Browser Basics first (how a page loads/renders, the DOM), then CSS, then JavaScript (two units), then React fundamentals, hooks, state/data/routing, performance, and Next.js/testing/playbook.
+- **Running example:** a small payments dashboard (PaymentList, PaymentRow, a status filter, a refund button, a create-payment form) reused across state, hooks, data fetching, performance and routing.
+- **Baseline:** React 19.3, Next.js 16.4, React Router 8, Vite 8, ECMAScript 2026. `codeLanguages: [jsx]`.
+- **Verification:** 656 claims checked across two passes; nothing was wrong. JS examples ran on Node; React/Next behaviour confirmed against react.dev, nextjs.org, TanStack and Testing Library docs (TanStack Query v5 defaults, React Compiler v1.0, useEffectEvent stable in 19.2, next/image priority→preload deprecation).
+- **Dated facts to re-check:** React Compiler v1.0 (07-10-2025); several library defaults move between versions.
+
+### R13. OS & Networking
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 40 | 21 | ~285 | ~450 / 2 / 0 | ~11 min |
+
+- **Order:** OS basics and processes, concurrency, memory, I/O/files/IPC, then network layers, TCP/UDP, HTTP/TLS/DNS, and networks in system design.
+- **Running example:** a payment server — a Java server socket handling clients on threads (thread-per-connection vs thread pool), reading/writing a log file, talking to a database over TCP, and the full journey of one POST /payments request down the stack (HTTP → TLS → TCP → IP) and back. Generic OS with Linux as the concrete example; this host's real processes/interfaces are never shown (commands run in a container).
+- **Protocol facts cite their RFC.** TLS 1.3 = RFC 9846 (confirmed via the IETF datatracker to obsolete RFC 8446 as the current spec; the tech note's "RFC 8446" baseline line is outdated and should be updated to 9846).
+- **Corrections:** HTTP/2 server push is disabled by default in Chrome 106 (not "removed").
+- **Run-dependent:** a StackOverflowError depth (~22,000) varies by run/JIT; the text hedges with "about".

@@ -5,17 +5,28 @@ title: "Processes: Life Cycle, fork and exec"
 topic: os-basics
 level: beginner
 heat: 3
-hook: "A process is a running program with its own address space, PID and open files; fork copies it, exec loads new code."
+hook: "A process is a running program: it has its own private memory, its own PID, and its own open files, kept separate from every other process."
 points:
-  - { k: "Program vs process", v: "a file on disk vs a running instance of it" }
-  - { k: "PCB", v: "the kernel's record: PID, state, saved registers, memory, open files" }
-  - { k: "fork()", v: "copies the caller; returns the child's PID to the parent, 0 to the child" }
-  - { k: "exec()", v: "replaces code, heap and stack in the same process; no return on success" }
-  - { k: "Copy-on-write", v: "after fork, pages stay shared until one side writes", kind: plus }
+  - { k: "Program vs process", v: "a program is a file on disk; a process is one running instance of that file, with live memory" }
+  - { k: "PCB", v: "the kernel's record of a process: its PID, state, saved registers, memory map and open files" }
+  - { k: "fork()", v: "a system call that creates a child copy of the caller; returns the child's PID to the parent, 0 in the child" }
+  - { k: "exec()", v: "a system call that replaces the current process's code and memory with a new program; the PID stays the same" }
+  - { k: "Copy-on-write", v: "after fork, parent and child share the same memory pages until one of them writes, which is then copied", kind: plus }
 trap:
-  wrong: "A zombie is a stuck process that you must kill -9."
-  right: "A zombie has already exited; its parent never called wait(). Fix or stop the parent, so init adopts and reaps it."
-sayIt: "A process is a program in execution with its own virtual memory, PID and open files. A shell starts one with fork then exec, and reaps it with wait."
+  wrong: "A zombie is a stuck process, so you kill -9 it to clear it."
+  right: "A zombie has already exited; it lingers only because its parent never called wait(). Fix or stop the parent, and init adopts and reaps it."
+  why: "The word zombie and the Z state sound like something still alive and stuck, so people try to kill it. But it is already dead; killing its parent is what frees it."
+sayIt: "A process is a program in execution, with its own virtual memory, PID and open files. On Unix a parent starts one with fork then exec, and later calls wait to collect its exit status."
+cheat:
+  idea: "A process is one running instance of a program, with its own private memory, PID and open files. The kernel isolates each process from the others."
+  flow: "fork (copy parent) → exec (load new program) → run → exit → wait (parent collects it)"
+  remember: "A zombie has already exited and waits to be reaped; the fix is its parent calling wait(), not kill -9."
+buildsOn: [what-is-an-os]
+scenarios:
+  - q: "Why does Unix start a new program with two calls, fork then exec, instead of one call that runs a program?"
+    a: "Because the gap between them is useful. After fork the child is a copy of the parent but has not loaded the new program yet, so it can adjust things first, such as redirecting its output to a file or changing directory, and then call exec. That is how a shell runs `java -jar app.jar > app.log`."
+  - q: "A child process finished a second ago but still shows in `ps` with state Z. What does that mean and how do you clear it?"
+    a: "It is a zombie: it has exited, but its parent has not called wait(), so the kernel keeps its PID and exit status for the parent to read. You clear it by making the parent call wait(), or by stopping the parent so init adopts and reaps the child. kill -9 on the zombie does nothing, because it is already dead."
 confusedWith: [process-vs-thread]
 tags: [process, fork, zombie]
 visual: flow
@@ -37,14 +48,20 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A **process** is a program while it is running. A program is just a file on disk; the moment the OS loads it and gives it memory and a CPU share, it becomes a process. Each process gets its own private [virtual memory](card:virtual-memory), its own process ID (**PID**), and its own set of open files, and the kernel keeps all of this separate from every other process. The kernel tracks each one in a record called the **process control block (PCB)**: its PID, state, saved registers and memory map.
+
 ## Why it exists
 
-Programs must not read or corrupt each other's memory. A process wraps one running program in its own address space.
+Many programs share one machine, and they must not read or corrupt each other's memory. If they all used the same memory, a bug in one could silently damage another, and a crash could take down everything. A process wraps one running program in its own private address space, so each one sees only its own data. That is the OS's main unit of isolation: three copies of a server run as three processes, and one crashing leaves the other two serving.
 
 ## How it works
 
+A process moves through a few states while it runs. The kernel keeps it ready, running or waiting, as shown here.
+
 <Mermaid
-  alt="Process states: New goes to Ready; the scheduler moves Ready to Running; a used-up slice sends it back to Ready; waiting for I/O makes it Blocked until the I/O is done, then Ready; on exit it is Terminated, a zombie until the parent calls wait."
+  alt="Process states. New goes to Ready. The scheduler moves Ready to Running. When its time slice ends, Running goes back to Ready. When it waits for I/O, Running goes to Blocked, and when the I/O is done it returns to Ready. On exit it becomes Terminated, a zombie until the parent calls wait."
   chart={`flowchart LR
   N([New]) --> R[Ready]
   R -- scheduled --> U[Running]
@@ -54,13 +71,17 @@ Programs must not read or corrupt each other's memory. A process wraps one runni
   U -- exits --> T([Terminated: zombie until wait])`}
 />
 
-- Memory: code, data, a [heap](card:stack-and-heap) and a stack per thread, isolated by [virtual memory](card:virtual-memory).
-- Three Spring Boot instances are three processes: one crashing leaves the others serving.
-- A [container](card:linux-container) is a process tree with its own namespaces and cgroup limits, sharing the host kernel.
+1. A parent process calls `fork`, and the kernel makes a child that is a copy of the parent, with a new PID.
+2. The child usually calls `exec`, which throws away the copied program and loads the real one it wants to run.
+3. The new program runs, moving between Ready, Running and Blocked as the [scheduler](card:cpu-scheduling) and its I/O allow.
+4. When it finishes, it exits and becomes a zombie: dead, but still holding its PID and exit status.
+5. The parent calls `wait`, reads the exit status and lets the kernel finally remove the child.
+
+So the key is that `fork` copies, `exec` replaces, and `wait` cleans up.
 
 ## Example
 
-A child exits but its parent never calls wait(). Example run (PIDs vary):
+A child can finish before its parent reaps it. This shell line starts a short `sleep 0.2` as the child of a longer `sleep 3`, then lists both after one second (PIDs vary between runs).
 
 ```bash
 (sleep 0.2 & exec sleep 3) &
@@ -73,12 +94,29 @@ sleep 1; ps -o pid,ppid,stat,cmd --ppid $! -p $!
  726510  726508 Z    [sleep] <defunct>
 ```
 
+What to notice:
+
+- The `Z` state and `<defunct>` mark the inner `sleep 0.2`: it has exited, but its parent `sleep 3` is still running and has not called `wait()`, so it lingers as a zombie.
+- The `S` process is the still-sleeping parent. The zombie holds only a PID and an exit status, not memory or CPU.
+- If the parent exited instead of sleeping, init (PID 1) would adopt the zombie and reap it at once, and it would vanish from the list.
+
+## Rules and defaults
+
+- **fork return value:** `fork` returns twice. The parent gets the child's PID (greater than 0), and the child gets 0, which is how each side knows who it is.
+- **exec keeps the PID:** a successful `exec` does not return, because the old program is gone; the PID, open files and parent stay the same.
+- **Memory is isolated, but shared cheaply at first:** after `fork`, parent and child share pages read-only via [copy-on-write](card:copy-on-write), and a page is copied only when one side writes to it.
+- **A [container](card:linux-container) is still just processes:** it is a process tree with its own [namespaces](term:namespace-linux) and [cgroup](term:cgroup) limits, all sharing the one host kernel, not a separate machine.
+
 ## Interview Qs
 
-### Why are fork and exec separate calls?
+### What is the difference between a program and a process?
 
-Between them the child can prepare the new program, for example redirect its output or change directory. That is how a shell runs `java -jar app.jar > app.log`.
+A program is a passive file on disk: code and data that does nothing by itself. A process is that program in execution, with its own memory, a PID, open files, a call stack and registers. One program can run as many processes at once, and each process is isolated from the others.
 
-### Zombie vs orphan?
+### What are a zombie process and an orphan process?
 
-A zombie has exited, but its parent has not called wait(), so its PID and exit status linger. An orphan is still running after its parent died; init (PID 1) or a subreaper adopts and later reaps it.
+A zombie has already exited, but its parent has not called `wait()`, so the kernel keeps its PID and exit status until the parent reads them. An orphan is the opposite: it is still running after its parent died, so init (PID 1) or a subreaper adopts it and will reap it when it exits.
+
+### Why does `fork` return two different values?
+
+It runs once but returns in two processes. In the parent it returns the new child's PID, so the parent can later `wait` for that exact child. In the child it returns 0. Code checks the return value to branch: 0 means "I am the child", a positive number means "I am the parent".

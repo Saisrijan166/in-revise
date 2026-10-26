@@ -7,14 +7,25 @@ level: intermediate
 heat: 3
 hook: "A thread pool feeds tasks from a queue to N reusable workers, so a spike cannot create unlimited threads."
 points:
-  - { k: "Reuse", v: "no new thread per request; workers take the next task", kind: plus }
-  - { k: "Bound", v: "at most N tasks run at once; the rest wait or are rejected" }
-  - { k: "CPU-bound", v: "about one thread per core; more threads add no throughput" }
-  - { k: "I/O-bound", v: "more threads than cores, since most of them are waiting" }
+  - { k: "Reuse", v: "no new thread per request; a free worker takes the next task from the queue", kind: plus }
+  - { k: "Bound", v: "at most N tasks run at once; the rest wait in the queue or are rejected" }
+  - { k: "CPU-bound", v: "about one thread per core; more threads add no throughput, only switching" }
+  - { k: "I/O-bound", v: "more threads than cores, since most of them are waiting on I/O, not using the CPU" }
 trap:
   wrong: "Executors.newFixedThreadPool(n) protects the server from overload."
-  right: "It caps threads, not work: its queue is unbounded, so tasks pile up. Use a bounded queue and a rejection policy."
-sayIt: "A pool reuses a fixed set of threads fed from a queue, so concurrency is bounded. I size it near the core count for CPU work, larger for I/O, and bound the queue."
+  right: "It caps threads, not work: its queue is unbounded, so tasks pile up and memory grows. Use a bounded queue and a rejection policy."
+  why: "People read 'fixed' as a hard limit on everything, but only the thread count is fixed; the waiting queue has no limit, so overload shows up as memory growth, not as rejected work."
+sayIt: "A pool reuses a fixed set of threads fed from a queue, so concurrency is bounded. I size it near the core count for CPU work, larger for I/O, and bound the queue with a rejection policy."
+cheat:
+  idea: "A thread pool keeps N reusable worker threads fed from a task queue, so a traffic spike reuses threads instead of creating unlimited new ones."
+  flow: "Task → queue → free worker runs it → worker returns for the next"
+  remember: "newFixedThreadPool caps threads, not work: its queue is unbounded. Bound the queue and set a rejection policy."
+buildsOn: [threads, context-switching]
+scenarios:
+  - q: "A pool has 10 threads on 10 cores and 100 CPU-heavy tasks arrive. Roughly how many run at once, and does adding 100 more threads help?"
+    a: "About 10 run at once; the other 90 wait in the queue. Adding threads does not help CPU-bound work: there are only 10 cores, so more threads just add context switches and cache misses while the same 10 cores do the work."
+  - q: "You use Executors.newFixedThreadPool(50) and traffic doubles beyond what 50 threads can clear. What happens to memory, and why?"
+    a: "Memory grows and can run out. The thread count stays at 50, but the pool's queue is unbounded, so unfinished tasks pile up in it without limit. A bounded queue with a rejection policy would shed load instead of hoarding it."
 confusedWith: [thread-per-request-vs-event-loop]
 tags: [thread-pool, executor, tomcat]
 visual: flow
@@ -33,28 +44,35 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A thread pool is a fixed set of [worker threads](card:threads) that take their work from a shared task queue. You submit a task, it waits in the queue, and the next free worker runs it, then comes back for another. The pool creates the threads once and reuses them, instead of starting a new thread for each piece of work.
+
 ## Why it exists
 
-A thread per request costs creation time, a stack each and more [context switches](card:context-switching); a spike can exhaust memory.
+Our payment server could start one thread per incoming request. Each thread costs creation time, a stack of its own, and more [context switches](card:context-switching), and a traffic spike would create thousands of threads at once and exhaust memory. A pool fixes the number of threads: a spike just makes tasks wait in the queue, so the server stays up and uses a known amount of memory instead of melting down.
 
 ## How it works
 
 <Mermaid
-  alt="Requests enter a bounded task queue; workers 1 to N take tasks from it. When it is full, new tasks are rejected or run by the caller."
+  alt="Requests enter a bounded task queue; workers 1 to N take tasks from it. When the queue is full, new tasks are rejected or run by the caller."
   chart={`flowchart LR
-  R1([GET /orders/42]) --> Q[[Bounded task queue]]
+  R1([POST /payments]) --> Q[[Bounded task queue]]
   Q --> W1[Worker 1]
   Q --> WN[Worker N]
   Q -. full .-> X[Reject or caller runs]`}
 />
 
-- 100 threads on 10 CPUs: at most 10 run at once; the rest wait.
-- Full queue: AbortPolicy (default) throws; CallerRunsPolicy makes the caller run it, slowing senders.
-- Java 21+ [virtual threads](card:virtual-thread): one per task, never pooled; cap scarce resources with [semaphores](card:semaphores).
+1. The server submits each request as a task to the pool instead of running it on a new thread.
+2. If a worker is free, it takes the task at once; otherwise the task waits in the queue.
+3. A worker runs one task to completion, then returns to the queue for the next, so the N threads are reused forever.
+4. If the queue is bounded and full, the pool applies its rejection policy: the default `AbortPolicy` throws, while `CallerRunsPolicy` makes the submitting thread run the task, which slows the senders down.
+
+So the key is that N bounds how many run at once, and the queue policy bounds how much waiting work you allow.
 
 ## Example
 
-Two workers, four orders (example run; order varies):
+A pool of two workers runs four payment tasks; only two run at a time, and the threads are reused.
 
 ```java
 import java.util.concurrent.*;
@@ -62,8 +80,8 @@ public class Main {
     public static void main(String[] args) {
         try (ExecutorService pool = Executors.newFixedThreadPool(2)) {  // 2 reusable workers
             for (int id = 41; id <= 44; id++) {
-                int order = id;
-                pool.submit(() -> System.out.println("order " + order + " on " + Thread.currentThread().getName()));
+                int payment = id;
+                pool.submit(() -> System.out.println("payment " + payment + " on " + Thread.currentThread().getName()));
             }
         }                                                  // close() waits for queued tasks
     }
@@ -71,25 +89,40 @@ public class Main {
 ```
 
 ```text output
-order 41 on pool-1-thread-1
-order 42 on pool-1-thread-2
-order 44 on pool-1-thread-2
-order 43 on pool-1-thread-1
+payment 41 on pool-1-thread-1
+payment 42 on pool-1-thread-2
+payment 43 on pool-1-thread-1
+payment 44 on pool-1-thread-2
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Max request threads | 200 | Spring Boot 4.1, `server.tomcat.threads.max` |
-| Virtual threads | off | Spring Boot 4.1, `spring.threads.virtual.enabled` |
+- Only two thread names appear (`pool-1-thread-1` and `pool-1-thread-2`), even for four tasks: the two workers are reused, not four threads created.
+- The order varies between runs, because the two workers race for the next task; a pool gives no ordering guarantee.
+- `newFixedThreadPool(2)` uses an unbounded queue, so all four tasks are accepted at once. Under real load that queue can grow without limit.
+- The try-with-resources `close()` waits for the queued tasks to finish before the program exits.
+
+## Rules and defaults
+
+- **Fixed pool queue:** `Executors.newFixedThreadPool(n)` uses an unbounded `LinkedBlockingQueue`, so tasks never get rejected; they accumulate in memory. For overload protection, build a `ThreadPoolExecutor` with a bounded queue.
+- **Rejection policy:** the default is `AbortPolicy`, which throws `RejectedExecutionException` when a bounded queue is full. `CallerRunsPolicy` instead runs the task on the caller, applying back-pressure.
+- **Max request threads:** 200 by default in Spring Boot 4.1 (`server.tomcat.threads.max`).
+- **Virtual threads:** off by default in Spring Boot 4.1 (`spring.threads.virtual.enabled`); when on, each request runs on its own virtual thread instead of a pooled platform thread.
+
+## Not to be confused with
+
+A thread pool is one way to run concurrent work; an event loop is another. A pool blocks a worker thread per in-progress task, while an event loop uses a few threads and callbacks. Rule: pool = one thread per running task; event loop = a few threads watching many sockets.
 
 ## Interview Qs
 
 ### How do you size a thread pool?
 
-CPU-bound: about the core count. I/O-bound: by Little's Law, in-flight work = throughput × latency (200 requests/s × 50 ms = 10). Then measure CPU, queue length and latency.
+For CPU-bound work, about the core count, since more threads cannot do more CPU work. For I/O-bound work, use Little's Law: in-flight work equals throughput times latency (200 requests/s times 50 ms is about 10), because most threads are waiting. Then measure CPU use, queue length and latency and adjust.
+
+### Why can a fixed thread pool still run the server out of memory?
+
+Because `newFixedThreadPool` fixes only the thread count; its task queue is unbounded. When tasks arrive faster than the threads clear them, the queue grows without limit and consumes memory. A bounded queue with a rejection policy sheds the excess instead.
 
 ### Do virtual threads make thread pools obsolete?
 
-Mostly, for blocking request code. Limits move to scarce resources, such as database connections, via a semaphore or a [connection pool](card:connection-pooling).
+Mostly, for blocking request code: Java 21 virtual threads are cheap, so you can give each request its own instead of pooling. The limit then moves to scarce resources such as database connections, which you still cap with a [semaphore](card:semaphores) or a [connection pool](card:connection-pooling).

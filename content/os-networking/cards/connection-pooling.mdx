@@ -5,17 +5,29 @@ title: Connection Pooling
 topic: system-design-bridge
 level: intermediate
 heat: 3
-hook: "Open a few connections once, then borrow, use and return them; never open one per request."
+hook: "Open a few database connections once and keep them; each request borrows one, uses it and returns it, instead of opening a fresh connection every time."
 points:
-  - { k: "Why", v: "a new connection costs TCP, TLS and login round trips" }
-  - { k: "maximumPoolSize", v: "HikariCP default 10 (the pool Spring Boot 4.1 picks)", kind: default }
-  - { k: "connectionTimeout", v: "HikariCP waits 30 s for a free connection, then fails", kind: default }
-  - { k: "max_connections", v: "PostgreSQL 18 default: typically 100", kind: default }
-  - { k: "Budget", v: "instances × pool size must stay under max_connections", kind: minus }
+  - { k: "Connection pool", v: "a set of open database connections the app keeps ready to lend out and reuse", kind: key }
+  - { k: "Why reuse", v: "opening a connection costs a TCP handshake, often TLS, and a database login before the first query", kind: key }
+  - { k: "maximumPoolSize", v: "HikariCP opens at most 10 connections by default (the pool Spring Boot 4.1 uses)", kind: default }
+  - { k: "connectionTimeout", v: "HikariCP waits 30 seconds for a free connection, then throws an error", kind: default }
+  - { k: "max_connections", v: "PostgreSQL 18 accepts about 100 connections in total by default", kind: default }
+  - { k: "Budget", v: "all app instances times their pool size must stay under the database's max_connections", kind: minus }
 trap:
-  wrong: "Requests time out waiting for connections, so raise the pool to 1,000."
-  right: "A huge pool overloads the database. Keep the pool small, shorten transactions, and let extra threads wait."
-sayIt: "Opening a database connection costs round trips and server work, so the app keeps a small pool and reuses connections. All instances together must fit under the database's max_connections."
+  wrong: "Requests time out waiting for a connection, so make the pool very large, say 1,000."
+  right: "A huge pool overloads the database and makes things slower. Keep the pool small, shorten the work each connection does, and let extra threads wait briefly."
+  why: "More connections feels like more capacity, but the database can only run so many queries at once, so past that point extra connections just add contention."
+sayIt: "Opening a database connection costs round trips and server work, so the app keeps a small pool and reuses connections. All instances together must fit under the database's max_connections, so I keep pools small and fix slow queries rather than growing the pool."
+cheat:
+  idea: "A small set of open database connections the app reuses. A request borrows one, runs its SQL, and returns it, so no request opens a new one."
+  flow: "Borrow idle connection → run SQL → return it → next reuses it"
+  remember: "Keep the pool small. Instances times pool size must stay under max_connections (PostgreSQL 18: ~100)."
+buildsOn: [tcp-handshake, thread-pools]
+scenarios:
+  - q: "Under load, every request hangs for 30 seconds and then fails with a connection-timeout error. The pool size is 10. What is happening and what do you fix first?"
+    a: "The pool is exhausted: all 10 connections are held by slow queries, long transactions, or a leak. New requests wait up to connectionTimeout and then fail. Fix the slow work and any leak first; only raise the pool after that, and keep it within the database's max_connections."
+  - q: "You run 20 app instances, each with a pool of 10, against one PostgreSQL with the default max_connections. What goes wrong?"
+    a: "20 times 10 is 200 connections, but PostgreSQL's default is about 100, so once more than ten instances are busy the database refuses new connections. Shrink the pools, or put PgBouncer in front to share a smaller set of real connections."
 confusedWith: []
 tags: [connection-pool, hikaricp, postgresql]
 visual: flow
@@ -34,24 +46,34 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A connection pool is a small set of database connections the app opens ahead of time and keeps ready. When a request needs the database it borrows one connection from the pool, runs its queries, and returns the connection; the connection stays open for the next request. The app never opens a connection per request. In a Java app on Spring Boot 4.1 this pool is HikariCP, created for you.
+
 ## Why it exists
 
-A new database connection needs a [TCP handshake](card:tcp-handshake), often [TLS](card:tls-https), and a login before the first query. Paying that on every request wastes time on both sides.
+Opening a new database connection is expensive: it needs a [TCP handshake](card:tcp-handshake), often a [TLS](card:tls-https) handshake, and a login before the first query can run, and each of those is a round trip. If every request opened its own connection, it would pay all that cost before doing any work, and the database would waste effort setting connections up and tearing them down. A pool pays that cost once per connection and then reuses it, so requests go straight to querying. It also caps how many connections the app can open, which protects the database.
 
 ## How it works
 
-<Steps label="One request with a pool of 10">
-  <Step title="Borrow">The request thread takes an idle, already-open connection.</Step>
-  <Step title="Use">It runs its SQL on PostgreSQL.</Step>
-  <Step title="Return">It gives the connection back; it stays open for the next request.</Step>
-  <Step title="Pool empty">All 10 are busy: the thread waits up to connectionTimeout, then gets an error.</Step>
+<Steps label="One request using a pool of 10 connections">
+  <Step title="Borrow">The request's thread takes an idle, already-open connection from the pool.</Step>
+  <Step title="Use">It runs its SQL on PostgreSQL over that connection.</Step>
+  <Step title="Return">It hands the connection back to the pool; the connection stays open.</Step>
+  <Step title="Reuse">The next request borrows the same connection and pays no setup cost.</Step>
+  <Step title="Pool empty">If all 10 are busy, a new request waits up to connectionTimeout, then gets an error.</Step>
 </Steps>
 
-- Worked budget: 10 instances × 10 = 100, already PostgreSQL's default; more instances need smaller pools or [PgBouncer](card:pgbouncer).
-- Small beats big: a pool near what the database can run in parallel, with extra threads waiting.
-- HTTP clients pool too: keep-alive reuses TCP connections ([HTTP versions](card:http-versions)).
+1. At startup the pool opens a few connections and keeps them idle.
+2. Each request borrows one, uses it, and returns it, as in the steps above.
+3. The pool limits the total to `maximumPoolSize`, so the database never sees more than that from this instance.
+4. You size the whole system by a budget: the number of app instances times each pool's size must stay under the database's `max_connections`.
+
+So the key is reuse within a capped, small pool: fast requests and a protected database.
 
 ## Example
+
+This is the pool configuration for the payment service. Spring Boot reads these properties and builds the HikariCP pool.
 
 ```properties
 # application.properties (Spring Boot 4.1, HikariCP)
@@ -60,24 +82,39 @@ spring.datasource.hikari.connection-timeout=30000
 spring.datasource.hikari.max-lifetime=1800000
 ```
 
-## Defaults
+What to notice:
+
+- `maximum-pool-size=10` caps this instance at 10 connections; ten such instances already reach PostgreSQL's default of about 100, so this is the number to watch when you scale out.
+- `connection-timeout=30000` (milliseconds) is how long a request waits for a free connection before failing; a request hanging exactly this long points to pool exhaustion.
+- `max-lifetime=1800000` retires a connection after 30 minutes, so stale connections are replaced before the database or a firewall drops them.
+- HTTP clients pool connections too: keep-alive reuses the same TCP connection for several requests ([HTTP versions](card:http-versions)).
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Maximum pool size | 10 | HikariCP `maximumPoolSize` |
-| Wait for a connection | 30 s | HikariCP `connectionTimeout` |
-| Database connection limit | typically 100 | PostgreSQL 18 `max_connections` |
+| Maximum connections in the pool | 10 | HikariCP `maximumPoolSize` |
+| Wait time for a free connection | 30 s | HikariCP `connectionTimeout` |
+| Total connections the database accepts | about 100 | PostgreSQL 18 `max_connections` |
+
+- **Small pools win:** a pool near the number of queries the database can run in parallel, with extra threads waiting briefly, beats a large pool that overloads the database.
+- **Shared budget:** when many instances outgrow `max_connections`, put [PgBouncer](card:pgbouncer) in front to multiplex many app connections onto fewer real ones.
+
+## Common mistakes
+
+- **"Set the pool huge so nothing ever waits."** Beyond what the database can run at once, extra connections only add contention and slow every query. Small and steady is faster.
+- **"The pool is the problem, so grow it."** Usually the real cause is slow queries, long transactions or a connection leak holding connections. Fix those first, then size the pool.
 
 ## Interview Qs
 
-### Why use a connection pool?
+### Why use a connection pool instead of opening a connection per request?
 
-To reuse open connections instead of paying the handshake, TLS and login cost on every request, and to cap how many connections reach the database.
+Opening a connection needs a TCP handshake, often TLS, and a database login, all before the first query. Paying that on every request is slow for the user and heavy for the database. A pool opens connections once and reuses them, so requests go straight to querying. It also caps how many connections the app can open.
 
-### Every request hangs waiting for a connection. What is wrong?
+### Every request hangs for the full timeout and then fails. What is wrong?
 
-Pool exhaustion: slow queries, long transactions or a leak hold the connections. Threads wait connectionTimeout and fail. Fix the slow work and leaks first, then size the pool.
+The pool is exhausted: all its connections are held, usually by slow queries, long transactions, or a connection leak. New requests wait up to `connectionTimeout` and then error. Fix the slow work and any leak first; growing the pool just pushes the load onto the database.
 
 ### How big should the pool be?
 
-Small. HikariCP's guide starts from (database CPU cores × 2) + effective disk spindles, then load tests. Its example: about 10 connections on a 4-core database for 3,000 users.
+Small. HikariCP's guide starts from roughly (database CPU cores times 2) plus the disk's effective spindles, then load tests from there. Its own example is about 10 connections on a 4-core database serving thousands of users. Crucially, all instances times their pool size must stay under the database's `max_connections`.

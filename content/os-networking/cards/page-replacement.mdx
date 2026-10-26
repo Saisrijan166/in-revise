@@ -5,17 +5,28 @@ title: Page Replacement and Thrashing
 topic: memory
 level: intermediate
 heat: 2
-hook: "When RAM is full, the OS evicts a victim page; a good policy keeps the pages you will need again soon."
+hook: "When RAM is full and a new page is needed, the OS must evict a victim page; a good policy evicts a page you will not need again soon."
 points:
-  - { k: "Victim", v: "a page fault needs a frame and none is free" }
-  - { k: "Dirty page", v: "must be written back to disk first; clean pages are cheaper to evict", kind: minus }
-  - { k: "Real kernels", v: "approximate LRU; Linux keeps active and inactive LRU lists" }
-  - { k: "Working set", v: "the pages a process is actively using" }
-  - { k: "Thrashing", v: "working sets exceed RAM: constant paging, little real work", kind: minus }
+  - { k: "Victim page", v: "the page chosen for eviction when a page fault needs a frame and none is free" }
+  - { k: "Dirty page cost", v: "a page changed in RAM must be written back to disk before eviction; a clean page can just be dropped", kind: minus }
+  - { k: "Real kernels", v: "approximate LRU rather than track it exactly; Linux keeps active and inactive page lists" }
+  - { k: "Working set", v: "the set of pages a process is actively using right now" }
+  - { k: "Thrashing", v: "working sets exceed RAM, so the system spends its time paging and does almost no real work", kind: minus }
 trap:
   wrong: "Giving a process more frames always means fewer page faults."
-  right: "Not with FIFO: Belady's anomaly. LRU never gets worse with more frames."
-sayIt: "On a page fault with no free frame, the OS picks a victim page. FIFO is simple, LRU is better, optimal is the benchmark, and real kernels approximate LRU. If working sets do not fit in RAM, the system thrashes."
+  right: "Usually yes, but not for FIFO: more frames can cause more faults (Belady's anomaly). LRU never gets worse when you add frames."
+  why: "It feels obvious that more memory can only help, and it holds for LRU and optimal, so people assume it is true for every policy, missing FIFO's anomaly."
+sayIt: "On a page fault with no free frame, the OS picks a victim page to evict. FIFO is simple, LRU is better, optimal is the unreachable benchmark, and real kernels approximate LRU. When the active working sets do not fit in RAM, the system thrashes and gets little done."
+cheat:
+  idea: "When RAM is full, a page fault must evict a victim page to free a frame. The policy decides which page leaves; a bad choice causes more slow disk reads."
+  flow: "page fault, no frame → pick victim → (if dirty) write back → load new page"
+  remember: "LRU is the practical goal (kernels approximate it). If working sets exceed RAM, the system thrashes."
+buildsOn: [paging-and-page-faults, virtual-memory]
+scenarios:
+  - q: "A page-replacement policy must evict one page, and it can choose between a clean page and a dirty page that were both last used at the same time. Which is cheaper to evict and why?"
+    a: "The clean page. A clean page matches its copy on disk, so the OS can simply drop it. A dirty page was changed in RAM, so the OS must first write it back to disk, which costs a disk write. Many real policies prefer to evict clean pages first for this reason."
+  - q: "A box runs fine, then you start a few more memory-hungry processes and throughput collapses while the disk light stays on constantly. CPU use is low. What is happening?"
+    a: "It is thrashing. The processes' combined working sets no longer fit in RAM, so almost every access causes a page fault that evicts a page another process needs next, which faults again. The system spends its time paging to and from disk, so the CPU is idle. The fix is more RAM or fewer processes."
 confusedWith: []
 tags: [page-replacement, lru, thrashing]
 visual: table
@@ -31,24 +42,33 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Page replacement is the OS's rule for choosing which page to throw out of RAM when RAM is full and a new page has to come in. The page that is thrown out is the victim. A replacement policy is the strategy that picks the victim, such as "evict the page used longest ago". This builds on [paging](card:paging-and-page-faults): a [major page fault](card:paging-and-page-faults) can only load its page once there is a free frame.
+
 ## Why it exists
 
-RAM holds only some of the pages in use. When a new page needs a frame, one must leave; a bad choice means more slow disk reads.
+RAM usually holds only some of the pages that processes are using, because the sum of their address spaces is larger than RAM. When a page that is not in RAM is touched, it needs a frame, and if every frame is taken, one page must leave. The choice matters: evict a page that is needed again immediately and it faults straight back in from disk, so a poor policy turns into a stream of slow disk reads.
 
 ## How it works
 
-| Policy | Evicts | In practice |
+| Policy | Which page it evicts | In practice |
 |---|---|---|
-| FIFO | The page loaded first | Simple, ignores use; suffers Belady's anomaly |
-| LRU | The least recently used page | Good; exact tracking is too costly |
-| Optimal | The page used farthest in the future | Needs the future: only a benchmark |
-| Clock | First page whose use bit is 0, clearing bits on the way | Cheap LRU approximation |
+| FIFO | The page loaded earliest | Simple, but ignores how pages are used; can suffer Belady's anomaly |
+| LRU | The least recently used page | Good results, but tracking exact use on every access is too costly |
+| Optimal | The page used farthest in the future | Needs to know the future, so it is only a benchmark |
+| Clock | The first page whose use bit is 0, clearing bits as it scans | A cheap approximation of LRU, used in real systems |
 
-- Swap space itself: [virtual memory](card:virtual-memory).
+1. A page fault occurs and there is no free frame.
+2. The policy selects a victim page using its rule (for example, least recently used).
+3. If the victim is dirty (changed since it was loaded), the OS writes it back to disk first; a clean page is simply dropped.
+4. The freed frame is given to the new page, which is loaded, and the faulting instruction retries.
+
+So the key is to pick a victim you will not need again soon; LRU approximates this by betting that recently used pages will be used again.
 
 ## Example
 
-Three frames, ten page references (F = fault):
+With three frames and the reference string `7 0 1 2 0 3 0 4 2 3`, the three policies fault a different number of times (F marks a fault).
 
 ```text
 refs     7 0 1 2 0 3 0 4 2 3
@@ -57,16 +77,30 @@ LRU      F F F F . F . F F F   8 faults
 Optimal  F F F F . F . F . .   6 faults
 ```
 
+What to notice:
+
+- All three start the same while frames are still empty; they only differ once a frame must be reused.
+- LRU beats FIFO because it keeps recently used pages (like page 0) that are referenced again, instead of evicting by load order.
+- Optimal is best because it alone can see the future references; no real OS can do this, so it is used only to judge how good a real policy is.
+
+## Rules and defaults
+
+- **When it runs:** only on a page fault that needs a frame and finds none free.
+- **Dirty vs clean:** a dirty victim costs a disk write before eviction; a clean victim is just discarded, so clean pages are cheaper to evict.
+- **Real kernels:** Linux does not track exact LRU; it approximates it with active and inactive page lists and reclaims from the inactive list.
+- **Belady's anomaly:** with FIFO, adding frames can increase faults. LRU and optimal are "stack" policies and never get worse with more frames.
+- **Thrashing:** if the combined working sets exceed RAM, paging dominates and real work stalls; fix it with more RAM, fewer processes, or less memory per process.
+
 ## Interview Qs
 
-### What is thrashing and how do you fix it?
+### What is thrashing, and how do you fix it?
 
-The processes' working sets do not fit in RAM, so the system spends its time paging and gets little done. Add RAM, run fewer processes, or reduce memory use.
+Thrashing is when processes' working sets do not fit in RAM, so the system spends almost all its time paging to and from disk and gets little real work done, with the CPU mostly idle. You fix it by adding RAM, running fewer processes at once, or reducing each process's memory use.
 
 ### What is Belady's anomaly?
 
-With FIFO, more frames can cause more faults. For 1 2 3 4 1 2 5 1 2 3 4 5, FIFO faults 9 times with 3 frames and 10 times with 4.
+Belady's anomaly is that with the FIFO policy, giving a process more frames can cause more page faults, not fewer. For the reference string 1 2 3 4 1 2 5 1 2 3 4 5, FIFO faults 9 times with 3 frames but 10 times with 4. LRU and optimal never show this.
 
-### Why not use the optimal policy?
+### Why not just use the optimal policy?
 
-It must know which page is used farthest in the future, which the OS cannot know. It is the yardstick for judging real policies.
+The optimal policy evicts the page that will be used farthest in the future, which requires knowing future accesses. A real OS cannot see the future, so optimal cannot be implemented. It is kept as the yardstick: real policies like LRU are judged by how close they come to it.

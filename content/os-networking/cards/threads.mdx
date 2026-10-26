@@ -5,17 +5,27 @@ title: Threads and Process vs Thread
 topic: os-basics
 level: beginner
 heat: 3
-hook: "A thread is one path of execution inside a process: its own stack and registers, but a shared heap and shared open files."
+hook: "A thread is one line of execution inside a process. It has its own stack and registers, but shares the heap, the code and the open files with the others."
 points:
-  - { k: "Shared", v: "heap, code, globals, open file descriptors, PID" }
-  - { k: "Private", v: "stack, registers, program counter, thread-local storage" }
-  - { k: "Cheaper", v: "no new address space or page tables to build or switch", kind: plus }
-  - { k: "Linux threads", v: "1:1: each pthread is a kernel scheduling entity made with clone()" }
-  - { k: "Virtual threads", v: "Java 21+: M:N, many virtual threads on a few OS threads" }
+  - { k: "Shared between threads", v: "the heap, the code, global variables, the open files, and the PID of the process they live in" }
+  - { k: "Private to each thread", v: "its own call stack, CPU registers, program counter, and thread-local storage" }
+  - { k: "Cheaper than a process", v: "making a thread needs no new address space or page tables, only a stack and registers", kind: plus }
+  - { k: "No isolation", v: "threads share memory, so one thread can corrupt another's data and a crash ends the whole process", kind: minus }
+  - { k: "Virtual threads", v: "since Java 21, many lightweight virtual threads run on a few OS threads, so blocking is cheap" }
 trap:
-  wrong: "Threads are isolated like processes, so one bad thread only hurts itself."
-  right: "Threads share memory: one can corrupt shared data, and a fatal signal such as a segfault ends the whole process."
-sayIt: "A process owns the address space and resources; threads are the paths that run inside it. They share the heap and files, so they are cheap and talk fast, but they need locks and give no isolation."
+  wrong: "Threads are isolated like processes, so one bad thread only harms itself."
+  right: "Threads share the process's memory: one can corrupt data another thread is using, and a fatal fault such as a segfault ends every thread in the process."
+  why: "People picture a thread as a mini process. But isolation is the one thing processes give and threads give up; sharing memory is exactly why threads are fast but dangerous."
+sayIt: "A process owns the memory and resources; threads are the paths of execution inside it. They share the heap and files, so they are cheap to create and quick to share data, but that same sharing means they need locks and give no isolation."
+cheat:
+  idea: "A thread is a path of execution inside a process. All threads of a process share its heap, code and open files, but each has its own stack and registers."
+  remember: "Threads share memory, so they are cheap and fast to coordinate but give no isolation: one bad thread can corrupt or crash the whole process."
+buildsOn: [processes]
+scenarios:
+  - q: "A web server gets three requests for the same cached order at once. Is it better to handle them as three processes or three threads, and why?"
+    a: "Three threads of one process. They share the heap, so all three read the same cached order with no copying and no inter-process messaging, and creating a thread is far cheaper than forking a process. The cost is that shared data they write to now needs locks. Processes would isolate them but waste memory and make sharing the cache slow."
+  - q: "One thread in your server divides by zero and the process dies, taking the other requests with it. Why did the other threads die too?"
+    a: "A fatal fault such as a division error or an invalid memory access raises a signal whose default action ends the whole process, and all its threads share that process. Threads give no isolation, so a crash in one is a crash for all. Separate processes would have contained it."
 confusedWith: []
 tags: [thread, multithreading, virtual-threads, process-vs-thread]
 visual: table
@@ -34,52 +44,74 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A **thread** is one path of execution inside a [process](card:processes). A process with one thread does one thing at a time; a process with several threads can make progress on several things, all inside the same memory. Every thread has its own call stack (where its local variables and current method calls live) and its own CPU registers, but all the threads of a process share the same heap, the same code and the same open files. So threads are the workers; the process is the shared workplace.
+
 ## Why it exists
 
-A process per request wastes memory and makes sharing data slow. Threads let one process work on many requests at once over one shared heap.
+A server that handled each request in its own process would pay a lot: a full private address space per request, and slow inter-process messaging whenever two requests need the same data, such as a shared cache. Threads remove both costs. One process can run many threads over one shared heap, so creating a worker is cheap and sharing data between workers is just reading the same memory. The price is that shared data now needs [locks](card:locks) to stay correct.
 
 ## How it works
 
+The comparison lays out what a process and a thread each own, which is the heart of this concept.
+
 <Compare id="process-vs-thread" />
 
-- Three requests to `/orders/42` can run on three threads of one JVM, reading the same cached order.
-- Thread states follow the [process states](card:processes); how many threads to run is [thread pools](card:thread-pools).
-- Models: 1:1 (kernel threads, Java platform threads), M:1 (old green threads), M:N ([virtual threads](card:virtual-thread)).
+1. A process starts with one thread, the one running `main`.
+2. The program asks for more threads; the kernel (or the Java runtime) creates each with its own stack and registers but points them at the same heap and code.
+3. The [scheduler](card:cpu-scheduling) runs the ready threads, switching between them, so they appear to run together.
+4. Each thread follows the same states as a process (Ready, Running, Blocked), but they all share the one address space, so switching between threads of one process is cheaper than switching between processes.
+
+So the key is that threads trade isolation for cheap, fast sharing inside one process.
 
 ## Example
 
-Two platform threads in one process (example run; the order can change):
+Two threads in one Java process print the process's PID. The PID is the same for both, which proves they live in one process (the two lines can print in either order).
 
 ```java
 public class Main {
     public static void main(String[] args) throws InterruptedException {
         Runnable request = () -> {
-            long pid = ProcessHandle.current().pid();        // local: on this thread's stack
+            long pid = ProcessHandle.current().pid();        // the process this thread runs in
             System.out.println(Thread.currentThread().getName() + " runs in PID " + pid);
         };
         Thread a = Thread.ofPlatform().name("req-1").start(request);
         Thread b = Thread.ofPlatform().name("req-2").start(request);
-        a.join();                                            // wait for both
+        a.join();                                            // wait for both to finish
         b.join();
     }
 }
 ```
 
 ```text output
-req-1 runs in PID 726710
-req-2 runs in PID 726710
+req-1 runs in PID 81199
+req-2 runs in PID 81199
 ```
+
+What to notice:
+
+- Both threads print the same PID, because a thread does not have its own PID; it shares the one of its process.
+- The thread name differs (`req-1`, `req-2`) because the name is per thread, not per process.
+- `join()` makes `main` wait for each thread; without it, `main` could end and the program exit before the threads print.
+
+## Rules and defaults
+
+- **Shared versus private:** the heap, code, globals and open file descriptors are shared across threads; the stack, registers, program counter and thread-local storage are private to each thread.
+- **Linux uses a 1:1 model:** each Java platform thread is one [kernel thread](card:kernel-thread) that the kernel schedules; they are made with the `clone` system call.
+- **Threading models:** 1:1 (kernel threads, Java platform threads), M:1 (old green threads), and M:N, where many [user threads](card:user-thread) run on a few kernel threads. Java 21's [virtual threads](card:virtual-thread) are the M:N case.
+- **A signal that kills acts per process:** a fatal fault ends all threads, because the signal disposition belongs to the process, not one thread.
 
 ## Interview Qs
 
-### Process vs thread?
+### What is the difference between a process and a thread?
 
-A process is an isolated running program with its own address space. A thread runs inside a process and shares its memory and files: cheaper to create and quicker to talk to, but a bug can hurt every thread.
+A process is an isolated running program with its own address space, PID and open files. A thread is a path of execution inside a process; it shares that memory and those files with the other threads. Threads are cheaper to create and faster to share data, but they give no isolation, so a bug in one thread can corrupt or crash all of them.
 
-### Why is a thread cheaper than a process?
+### Why is creating a thread cheaper than creating a process?
 
-Creating one needs no new address space or page tables. Switching between threads of the same process keeps the page table, so the TLB need not be flushed.
+Creating a process needs a new address space and new page tables, which the kernel must build. A thread reuses the process's address space, so it needs only a new stack and registers. Switching between threads of one process is also cheaper, because the page table stays the same, so the [TLB](card:tlb) need not be flushed.
 
-### User threads vs kernel threads?
+### What is the difference between a user thread and a kernel thread?
 
-The kernel schedules kernel threads. A runtime inside the process schedules user threads. Java virtual threads are user-mode threads that the JDK mounts on a few platform (carrier) threads.
+A kernel thread is scheduled directly by the kernel; on Linux each Java platform thread is one. A user thread is scheduled by a runtime inside the process, so the kernel does not see it separately. Java virtual threads are user-mode threads that the JDK runs on a small pool of platform (carrier) threads.

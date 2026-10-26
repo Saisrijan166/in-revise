@@ -5,17 +5,28 @@ title: Paging, Page Tables, TLB and Page Faults
 topic: memory
 level: intermediate
 heat: 3
-hook: "Memory is cut into fixed pages; the page table maps each page to a frame, the TLB caches that map, and a page fault fills a gap."
+hook: "Memory is cut into fixed-size pages; a page table maps each page to a RAM frame, the TLB caches that map, and a page fault fills in a page that is not there yet."
 points:
-  - { k: "Page size", v: "4 KiB on x86-64 Linux; huge pages 2 MiB (1 GiB if supported)", kind: default }
-  - { k: "Page table", v: "per process: page number → frame number + valid and permission bits" }
-  - { k: "TLB", v: "small CPU cache of recent translations; a miss walks the table" }
-  - { k: "Minor fault", v: "served without disk I/O, e.g. a fresh zeroed page", kind: plus }
-  - { k: "Major fault", v: "page must be read from disk: slow", kind: minus }
+  - { k: "Page size default", v: "4 KiB on x86-64 Linux; optional huge pages are 2 MiB (and 1 GiB if supported)", kind: default }
+  - { k: "Page table", v: "per process; maps each virtual page number to a frame number, plus valid and permission bits" }
+  - { k: "TLB", v: "a small CPU cache of recent page-to-frame translations; a miss means walking the page table" }
+  - { k: "Minor page fault", v: "resolved without disk I/O, such as handing out a fresh zeroed page", kind: plus }
+  - { k: "Major page fault", v: "the page must be read from disk first, which is slow", kind: minus }
 trap:
   wrong: "A page fault is an error that crashes the program."
-  right: "It is a normal trap: the kernel maps or loads the page and retries the instruction. Only an invalid access ends in SIGSEGV."
-sayIt: "The OS splits memory into pages. A per-process page table maps virtual pages to physical frames, and the TLB caches those lookups. Touching an unmapped page raises a page fault; the kernel loads or maps it and retries."
+  right: "A page fault is a normal trap to the kernel: it maps or loads the page and retries the instruction. Only an access to an invalid page ends in SIGSEGV."
+  why: "The word 'fault' sounds like a crash, and the one visible page fault most people meet is the fatal one (SIGSEGV), so the common harmless case is overlooked."
+sayIt: "The OS splits memory into fixed-size pages. A per-process page table maps virtual pages to physical frames, and the TLB caches those lookups so most translations are fast. Touching an unmapped page raises a page fault; the kernel loads or maps it and retries the instruction."
+cheat:
+  idea: "Memory is divided into fixed 4 KiB pages. A per-process page table maps each virtual page to a physical frame; the TLB caches recent mappings. A missing page faults."
+  flow: "virtual address → TLB → (miss) page table → (not present) page fault → retry"
+  remember: "A page fault is normal, not a crash: minor = no disk, major = read disk. SIGSEGV means an invalid page."
+buildsOn: [virtual-memory]
+scenarios:
+  - q: "A translation is a TLB hit on one access and a TLB miss on the next. What extra work does the miss cause, and why is a hit so much faster?"
+    a: "A hit gives the frame number straight from the small on-chip TLB, so the address is ready at once. A miss must walk the multi-level page table in RAM to find the entry (several memory reads), then cache it in the TLB. That is why keeping the working set small enough to fit the TLB matters."
+  - q: "Your service reads a file for the first time and the read is slow; reading the same bytes again is fast. In page-fault terms, what happened?"
+    a: "The first read caused a major page fault: the page was not in RAM, so the kernel read it from disk, which is slow. After that the page sits in RAM (the page cache), so the second access is a hit (or at most a minor fault) with no disk I/O."
 confusedWith: [paging-vs-segmentation]
 tags: [paging, tlb, page-fault]
 visual: flow
@@ -37,25 +48,29 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Paging is how [virtual memory](card:virtual-memory) is actually built. The OS cuts each process's address space into fixed-size blocks called pages, and cuts RAM into blocks of the same size called frames. A page table, one per process, records which frame holds each page. The TLB (Translation Lookaside Buffer) is a small cache inside the CPU that remembers recent page-to-frame mappings so the common translation is fast.
+
 ## Why it exists
 
-Giving each process one contiguous block of RAM wastes memory in gaps. Fixed-size pages can go in any free frame, and only touched pages need RAM.
+If you gave each process one contiguous block of RAM, you would waste memory in the gaps left between blocks and struggle to find a gap big enough when memory is busy. Fixed-size pages solve this: any page can go in any free frame, so there are no awkward gaps to fit. Paging also lets the OS give a process RAM only for the pages it actually touches, instead of all of its address space at once.
 
 ## How it works
 
 <Steps label="Translating one virtual address">
-<Step title="Split">The address becomes a virtual page number plus an offset inside the page.</Step>
-<Step title="TLB">A hit gives the frame number at once.</Step>
-<Step title="Page table">On a TLB miss, look up the page table and cache the entry in the TLB.</Step>
-<Step title="Page fault">Page not present: the kernel allocates or reads the page, updates the table and retries.</Step>
-<Step title="Combine">Frame number plus offset is the physical address.</Step>
+<Step title="Split the address">The virtual address is split into a virtual page number and an offset inside the page.</Step>
+<Step title="Check the TLB">The CPU looks up the page number in the TLB; a hit gives the frame number at once.</Step>
+<Step title="Walk the page table">On a TLB miss, the CPU reads the page table in RAM to find the frame, then caches that entry in the TLB.</Step>
+<Step title="Handle a page fault">If the page is not present in RAM, the CPU traps to the kernel, which allocates or reads the page, updates the table, and retries the instruction.</Step>
+<Step title="Combine">The frame number plus the offset gives the final physical address.</Step>
 </Steps>
 
-- Demand paging: a page gets RAM only when first touched.
-- Pages remove external fragmentation; the unused tail of a last page is internal fragmentation.
-- When RAM is full, a page must go: [page replacement](card:page-replacement).
+So the key is that most accesses are fast TLB hits, and the page table and page faults handle the rarer cases behind the scenes.
 
 ## Example
+
+This reads the page size and huge-page size of a Linux machine, the fixed block sizes paging works in.
 
 ```bash
 getconf PAGESIZE
@@ -67,16 +82,37 @@ grep Hugepagesize /proc/meminfo
 Hugepagesize:       2048 kB
 ```
 
+What to notice:
+
+- `PAGESIZE` is 4096 bytes (4 KiB), the standard page and frame size on x86-64 Linux, so all mapping happens in 4 KiB units.
+- `Hugepagesize` is 2048 kB (2 MiB): one huge page covers 512 normal pages with a single TLB entry, so huge pages stretch how much memory the TLB can cover.
+- These sizes are why a process's RSS always moves in multiples of 4 KiB.
+
+## Rules and defaults
+
+- **Page size:** 4 KiB on x86-64 Linux by default; huge pages are 2 MiB, or 1 GiB where the CPU supports them.
+- **Demand paging:** a page is given a real frame only when it is first touched, not when it is allocated.
+- **Fault types:** a minor fault is served without disk I/O (for example a fresh zeroed page or a page already in the page cache); a major fault must read the page from disk and is far slower.
+- **Fragmentation:** paging removes external fragmentation (no gaps between blocks), but the unused tail of the last page of an allocation is internal fragmentation.
+- **When RAM is full:** a new page needs a frame, so the OS must evict one; that choice is [page replacement](card:page-replacement).
+
+## Not to be confused with
+
+- **Paging:** memory is split into fixed-size pages, each placed in any free frame.
+- **[Segmentation](card:paging-vs-segmentation):** memory is split into variable-size segments that match logical parts such as code, heap and stack.
+
+Rule: paging = fixed-size blocks and a page table; segmentation = variable-size blocks sized to the program's logical parts.
+
 ## Interview Qs
 
-### Page table vs TLB?
+### What is the difference between a page table and a TLB?
 
-The page table is the full map from virtual pages to frames, kept in memory. The TLB is a small CPU cache of recent entries from it, so most translations skip the table walk.
+The page table is the full map from every virtual page to its frame, kept in RAM, one per process. The TLB is a small cache inside the CPU holding recently used entries from that table. Most translations hit the TLB and skip the slower page-table walk in memory.
 
 ### What happens on a page fault?
 
-The CPU traps to the kernel. If the page is valid, the kernel maps a page without disk I/O (minor) or reads it from disk (major), then retries. If not, the process gets SIGSEGV.
+The CPU traps to the kernel. If the page is valid but not in RAM, the kernel either maps a page with no disk I/O (minor fault) or reads it from disk (major fault), updates the page table, and retries the instruction. If the address is invalid, the process gets SIGSEGV instead.
 
-### Paging vs segmentation?
+### What is the difference between paging and segmentation?
 
-Paging uses fixed-size pages; segmentation uses variable-size segments such as code, heap and stack. See [Paging vs Segmentation](compare:paging-vs-segmentation).
+Paging uses fixed-size pages placed in any free frame, mapped by a page table. Segmentation uses variable-size segments, one per logical part like code or stack, each with a base and a bound. Modern x86-64 systems use paging; see [Paging vs Segmentation](compare:paging-vs-segmentation).

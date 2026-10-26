@@ -5,17 +5,29 @@ title: "Blocking vs Non-blocking, Sync vs Async I/O"
 topic: io
 level: intermediate
 heat: 3
-hook: "Blocking: the thread waits for the data. Non-blocking: the call returns at once. Async: the kernel does the job, then tells you."
+hook: "Blocking: the thread waits inside the call. Non-blocking: the call returns at once, ready or not. Async: the kernel does the whole job and tells you when it is done."
 points:
-  - { k: "Blocking", v: "read() sleeps until data arrives; one thread per waiting call" }
-  - { k: "Non-blocking", v: "O_NONBLOCK fd: read() fails at once with EAGAIN" }
-  - { k: "Sync vs async", v: "sync: you copy the data when ready; async: the kernel finishes, then tells you" }
-  - { k: "Regular files", v: "Linux ignores O_NONBLOCK on them; disk reads still block", kind: minus }
-  - { k: "io_uring", v: "Linux async I/O through shared rings, since Linux 5.1", kind: default }
+  - { k: "Blocking read()", v: "the thread sleeps inside the call until data arrives, so one wait ties up a thread" }
+  - { k: "Non-blocking read()", v: "on an O_NONBLOCK fd, if nothing is ready the call returns at once with EAGAIN" }
+  - { k: "Still synchronous", v: "non-blocking only skips the wait; your own thread still copies the data" }
+  - { k: "Async I/O", v: "you hand the read to the kernel, keep working, and it reports when finished" }
+  - { k: "Regular files", v: "Linux ignores O_NONBLOCK on normal disk files, so a file read can still block", kind: minus }
+  - { k: "io_uring", v: "Linux real async I/O through shared submit and complete rings, added in kernel 5.1", kind: default }
 trap:
-  wrong: "Non-blocking I/O is the same as async I/O, and it makes each request faster."
-  right: "Non-blocking only means the call will not wait; you still read the data yourself. It saves threads, not time per request."
-sayIt: "Blocking I/O parks the thread until data arrives. Non-blocking returns at once, so one thread can serve many sockets with epoll. Async I/O, like io_uring, does the whole job and reports when done."
+  wrong: "Non-blocking I/O is the same as async I/O, and switching to it makes each request faster."
+  right: "Non-blocking only means the call will not wait; your thread still reads the data itself. It saves threads under load, not time per request."
+  why: "Both avoid a stuck thread, so people lump them together. And non-blocking servers do handle more load, which is easy to mistake for each request being quicker."
+sayIt: "Blocking I/O parks the thread until data arrives, so you need a thread per waiting call. Non-blocking returns at once, so one thread can watch many sockets. Async I/O, like io_uring, hands the whole job to the kernel."
+cheat:
+  idea: "These describe how a thread waits for I/O. Blocking sleeps in the call until data is ready. Non-blocking returns at once if nothing is ready. Async hands the job to the kernel."
+  flow: "Blocking: wait → return. Non-blocking: EAGAIN → retry. Async: submit → kernel notifies"
+  remember: "Non-blocking is not async: your thread still copies the data. It saves threads, not time."
+buildsOn: [threads, thread-pools]
+scenarios:
+  - q: "A socket has no data yet. What does a blocking read() do, and what does a non-blocking read() do?"
+    a: "Blocking read() puts the thread to sleep inside the call and returns only when bytes arrive, so that thread can do nothing else meanwhile. Non-blocking read() returns straight away with the EAGAIN error, leaving the thread free to check other sockets and come back later."
+  - q: "You switch a REST endpoint from blocking to non-blocking I/O. A teammate expects each response to come back faster. Are they right?"
+    a: "No. The database and network take the same time either way, so one request is not quicker. The win is that the server now needs far fewer threads to hold the same number of waiting connections, so it survives higher concurrency without running out of threads."
 confusedWith: [thread-per-request-vs-event-loop]
 tags: [io, non-blocking, async]
 visual: table
@@ -37,34 +49,41 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+When your payment server reads from a socket, file or database connection, it must wait for the data. These terms name three ways of waiting. In **blocking** I/O the [thread](card:threads) stops inside the read call until the data is ready. In **non-blocking** I/O the call returns immediately, even if nothing has arrived yet. In **asynchronous** (async) I/O you ask the kernel to do the whole transfer in the background and tell you when it finishes. Blocking and non-blocking are both synchronous: your own thread still copies the data.
+
 ## Why it exists
 
-Backend work is mostly waiting: a database call takes milliseconds while the CPU sits idle ([concurrency](card:concurrency-and-parallelism)). How a thread waits decides how many threads you need.
+Backend work is mostly waiting. A database query might take a few milliseconds, during which the CPU has nothing to do. With blocking I/O, that one waiting call owns a whole thread, so 10,000 waiting connections need about 10,000 threads, and each thread costs memory and a [context switch](card:context-switching). Non-blocking and async I/O let one thread watch many connections, so the server holds far more connections on far fewer threads.
 
 ## How it works
 
-<Compare id="blocking-vs-non-blocking-io" />
+The key question: while the data is not ready, who waits, and who copies it when it is?
 
-| Model | The thread... | Linux example |
-|---|---|---|
-| Blocking, sync | sleeps inside the call until data is copied | plain `read()` |
-| Non-blocking, sync | gets EAGAIN, comes back later | `O_NONBLOCK` |
-| Readiness (multiplexed) | waits on many fds, then reads the ready ones | [epoll](card:io-multiplexing) |
-| Async completion | submits the work; the kernel reports when done | io_uring, POSIX aio |
+| Model | While no data is ready | Who copies the data | Linux example |
+|---|---|---|---|
+| Blocking, sync | the thread sleeps inside the call | your thread | plain `read()` |
+| Non-blocking, sync | the call returns `EAGAIN` at once | your thread | `read()` on an `O_NONBLOCK` fd |
+| Readiness (multiplexed) | one thread waits on many fds | your thread, for the ready fds | [epoll](card:io-multiplexing) |
+| Async completion | the kernel does the read in the background | the kernel | io_uring, POSIX aio |
 
-- The first three are synchronous: your thread still copies the data.
-- Java 21+ [virtual threads](card:thread-pools) make blocking code cheap again.
+1. With blocking I/O the thread calls `read()` and the kernel does not return until bytes are copied in. Simple, but the thread is stuck.
+2. With non-blocking I/O the same `read()` returns at once; if nothing is ready it returns `EAGAIN`, so the thread moves on and retries later.
+3. The first three rows are synchronous: your thread does the final copy. Only async I/O lets the kernel finish the transfer and then notify you.
+
+So the key is that non-blocking removes the wait but not your work; async removes the work too.
 
 ## Example
 
-In non-blocking mode a Java NIO read returns 0 bytes instead of waiting:
+In non-blocking mode a Java NIO read returns 0 bytes instead of waiting. The same channel, switched back to blocking, waits for the bytes.
 
 ```java
 var addr = new InetSocketAddress("localhost", 8080);
 try (var server = ServerSocketChannel.open().bind(addr);
      var client = SocketChannel.open(addr);
      var conn = server.accept()) {
-    conn.configureBlocking(false);                  // like O_NONBLOCK
+    conn.configureBlocking(false);                  // like setting O_NONBLOCK
     System.out.println("non-blocking read: " + conn.read(ByteBuffer.allocate(64)));
     conn.configureBlocking(true);                   // reads wait again
     client.write(ByteBuffer.wrap("GET /orders/42".getBytes()));
@@ -77,12 +96,42 @@ non-blocking read: 0
 blocking read: 14
 ```
 
+What to notice:
+
+- `configureBlocking(false)` is Java's way of setting `O_NONBLOCK`. The first `read()` finds no data, so it returns `0` straight away instead of waiting.
+- After `configureBlocking(true)` the channel blocks again, so the second `read()` waits until the 14 bytes of `GET /orders/42` arrive, then returns `14`.
+- A non-blocking read returning `0` does not mean the connection is closed; it means "nothing ready yet". You would normally come back to this fd when [epoll](card:io-multiplexing) says it is readable, instead of spinning on it.
+
+## Rules and defaults
+
+- **Default mode:** sockets and pipes are created in blocking mode; you turn on non-blocking yourself with `O_NONBLOCK` (Java: `configureBlocking(false)`).
+- **Non-blocking signal:** a non-blocking call that would have waited returns the `EAGAIN` error (also spelled `EWOULDBLOCK`), not real data.
+- **Regular files:** on Linux `O_NONBLOCK` has no effect on normal disk files; a read of a file can still block, so true non-blocking disk I/O needs async interfaces.
+- **Async on Linux:** `io_uring` (kernel 5.1, 2019) is the modern async interface, using shared submit and complete rings; the older POSIX `aio` is little used.
+- **Java note:** classic `java.io` streams block; `java.nio` channels can be non-blocking; Java 21 virtual threads make blocking code cheap again by parking the virtual thread, not an OS thread.
+
+## Not to be confused with
+
+- **Non-blocking** describes one call: it returns rather than waiting.
+- **Asynchronous** describes who finishes the work: the kernel does the whole operation and notifies you.
+- **[I/O multiplexing](card:io-multiplexing)** is the pattern of one thread watching many non-blocking fds with epoll.
+
+Rule: non-blocking = "do not wait on this call"; async = "the kernel completes it for me"; multiplexing = "one thread, many fds".
+
+## Common mistakes
+
+- **"A non-blocking read of 0 bytes means the client disconnected."** No. On a non-blocking socket, 0 or `EAGAIN` means nothing is ready yet; a real close shows up differently (end-of-stream, which in Java NIO is a read of `-1`).
+
 ## Interview Qs
 
-### Blocking vs non-blocking I/O?
+### What is the difference between blocking and non-blocking I/O?
 
-Blocking I/O makes the calling thread wait until the operation can complete. Non-blocking I/O returns at once, with EAGAIN if nothing is ready, so the thread can serve other work and come back when the fd is ready.
+Blocking I/O makes the calling thread wait inside the call until it can complete, so one waiting call ties up one thread. Non-blocking I/O returns at once; if nothing is ready it returns `EAGAIN`, so the thread is free to serve other work and come back when the fd is ready.
 
-### Is non-blocking the same as asynchronous?
+### Is non-blocking the same as asynchronous I/O?
 
-No. Non-blocking means the call does not wait; you still wait for readiness and copy the data yourself. Asynchronous I/O hands the whole operation to the kernel, which reports completion, as io_uring does.
+No. Non-blocking means a single call does not wait; your own thread still checks readiness and copies the data. Asynchronous I/O hands the whole operation to the kernel, which does the transfer in the background and reports completion, as `io_uring` does. Non-blocking is synchronous; only completion-based I/O is truly asynchronous.
+
+### Does switching to non-blocking I/O make requests faster?
+
+No. The database and network take the same time, so a single request is not quicker. The benefit is throughput under load: one thread can watch thousands of waiting sockets, so the server needs far fewer threads and survives much higher concurrency.

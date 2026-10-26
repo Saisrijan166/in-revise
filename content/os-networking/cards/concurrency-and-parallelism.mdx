@@ -5,16 +5,28 @@ title: Concurrency vs Parallelism
 topic: concurrency
 level: beginner
 heat: 3
-hook: "Concurrency: many tasks in progress, taking turns. Parallelism: many tasks running at the same instant on separate cores."
+hook: "Concurrency: many tasks are in progress and take turns on the CPU. Parallelism: many tasks run in the same instant, one per core."
 points:
-  - { k: "One CPU", v: "can be concurrent by switching tasks; never parallel" }
-  - { k: "Parallelism needs", v: "two or more cores, one task on each" }
-  - { k: "Why servers care", v: "requests mostly wait on I/O; other requests run meanwhile", kind: plus }
-  - { k: "Parallel limit", v: "no more threads run at once than there are logical CPUs" }
+  - { k: "Concurrency", v: "many tasks are in progress and share the CPU by taking turns; one core is enough" }
+  - { k: "Parallelism", v: "two or more tasks run in the very same instant, so it needs two or more cores" }
+  - { k: "One core", v: "can be concurrent (switch between tasks) but can never be parallel" }
+  - { k: "Why servers care", v: "a request mostly waits on the network or disk, so other requests run meanwhile", kind: plus }
+  - { k: "Parallel limit", v: "no more tasks run truly at once than the machine has logical CPUs", kind: minus }
 trap:
-  wrong: "Concurrency means tasks run at the same time."
-  right: "Not always. One core interleaving tasks is concurrency. Running at the same instant is parallelism, and it needs several cores."
-sayIt: "Concurrency is dealing with many tasks at once by interleaving them, even on one core. Parallelism is doing many at the same instant on several cores. Servers need concurrency because requests mostly wait."
+  wrong: "Concurrency means the tasks run at the same time."
+  right: "Not always. One core switching between tasks is concurrency; running in the same instant is parallelism, and that needs several cores."
+  why: "On everyday multi-core machines concurrency and parallelism usually happen together, so people treat the two words as one idea."
+sayIt: "Concurrency is handling many tasks at once by interleaving them, even on one core. Parallelism is running many in the same instant on several cores. A server needs concurrency first because requests mostly wait."
+cheat:
+  idea: "Concurrency is dealing with many tasks at once by letting them take turns on the CPU. Parallelism is running several of them in the same instant, one per core."
+  flow: "Many tasks → take turns (concurrency) → on several cores run at once (parallelism)"
+  remember: "One core can be concurrent but never parallel; a server needs concurrency because requests mostly wait."
+buildsOn: [threads, context-switching]
+scenarios:
+  - q: "Your payment server runs on a machine with one CPU core. Can it still handle 100 client connections at once?"
+    a: "Yes, through concurrency. The one core runs a bit of each connection in turn, so all 100 make progress. They never run in the same instant, but since each mostly waits on the database or network, taking turns is enough to keep them all moving."
+  - q: "You have 4 cores and a CPU-heavy job split into 8 threads. How many finish their work in the same instant?"
+    a: "At most 4, one per core. The other 4 are runnable but wait their turn. Adding more threads than cores does not add parallelism for CPU-bound work; it only adds switching between them."
 confusedWith: []
 tags: [concurrency, parallelism, multithreading]
 visual: table
@@ -33,29 +45,44 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Concurrency and parallelism are two ways a program deals with many tasks. Concurrency means many tasks are in progress at the same time and share the CPU by taking turns, so one core is enough. Parallelism means tasks run in the very same instant, each on its own core, so it needs more than one core. A [thread](card:threads) is the unit the CPU runs, and the OS switches between threads through [context switching](card:context-switching), which is what makes concurrency on one core possible.
+
 ## Why it exists
 
-A server handles many requests, and each spends most of its time waiting on the network or a disk. Serving them strictly one by one would leave the CPU idle.
+A payment server handles many requests, and each one spends most of its time waiting on the database or the network, not using the CPU. If the server served requests strictly one after another, the core would sit idle during every wait and almost no work would get done. Concurrency lets the core switch to another request during that wait, so many requests move forward on the same core. Parallelism goes further and uses extra cores to run CPU-heavy work in the same instant.
 
 ## How it works
 
 <Compare id="concurrency-vs-parallelism" />
 
-- While request A waits for PostgreSQL, the core runs request B: see [blocking I/O](card:blocking-and-non-blocking-io).
-- Concurrency brings shared data, and with it [race conditions](card:race-conditions).
+1. Request A starts, then asks PostgreSQL for a row and must wait for the answer.
+2. While A waits, the OS switches the core to request B, which runs its code.
+3. When A's row arrives, the OS switches back to A, which continues. This switching is concurrency, and it works on a single core.
+4. If the machine has a second core, B can run on it in the very same instant that A runs on the first core. That overlap is parallelism.
+
+So the key is: concurrency is about structure (many tasks in progress), parallelism is about execution (many tasks literally at once).
 
 ## Analogy
 
-<Analogy title="One cook, two cooks" limit="A cook chooses when to switch dishes; the OS scheduler switches threads without asking them.">
-One cook moving between three dishes keeps all of them going: concurrency. Two cooks each working on a dish at the same moment: parallelism.
+<Analogy title="One cook, two cooks" limit="A cook chooses when to switch dishes; the OS scheduler switches threads whenever it decides, without asking them.">
+One cook moving between three dishes keeps all of them going: that is concurrency on one core. Two cooks, each working a dish at the same moment, is parallelism on two cores.
 </Analogy>
+
+## Rules and defaults
+
+- **One core:** can run tasks concurrently but never in parallel; only one task uses it at any instant.
+- **True parallelism:** needs at least as many logical CPUs as tasks you want running at the same instant.
+- **Shared data:** concurrency lets tasks touch the same data, which creates [race conditions](card:race-conditions) that you must guard.
+- **I/O-bound work:** benefits from concurrency even on one core; **CPU-bound work** speeds up only with real parallelism, up to the number of cores.
 
 ## Interview Qs
 
 ### Can you have concurrency without parallelism?
 
-Yes. On one core the OS gives each thread a time slice in turn, so many threads make progress, but only one runs at any instant.
+Yes. On a single core the OS gives each thread a time slice in turn, so many threads make progress, but only one runs at any instant. That is concurrency with no parallelism. Parallelism needs several cores so threads can run in the same moment.
 
 ### Do more threads always make a program faster?
 
-No. CPU-bound work speeds up only until every core is busy; beyond that, threads take turns and add [context switches](card:context-switching). Sizing is in [thread pools](card:thread-pools).
+No. CPU-bound work speeds up only until every core is busy; beyond that, extra threads take turns and add [context switches](card:context-switching), which cost time. I/O-bound work gains more, because threads spend most time waiting. Sizing is covered in [thread pools](card:thread-pools).

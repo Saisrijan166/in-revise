@@ -5,17 +5,28 @@ title: "Real-time: Polling, SSE and WebSockets"
 topic: application
 level: intermediate
 heat: 2
-hook: "Polling asks again and again; SSE lets the server stream to the client; a WebSocket lets both sides send any time."
+hook: "Plain HTTP only answers when asked. To push live updates you poll again and again, let the server stream with SSE, or open a two-way WebSocket."
 points:
-  - { k: "Short polling", v: "a request every N seconds, often answered with nothing new", kind: minus }
-  - { k: "Long polling", v: "server holds the request until there is data or a timeout" }
-  - { k: "SSE", v: "text/event-stream over plain HTTP; EventSource reconnects by itself", kind: plus }
-  - { k: "WebSocket", v: "HTTP Upgrade, 101 Switching Protocols, then two-way frames on one TCP connection" }
-  - { k: "Cost", v: "each open connection holds a socket on one server", kind: minus }
+  - { k: "Short polling", v: "the client re-asks every few seconds; most answers carry nothing new, which wastes requests", kind: minus }
+  - { k: "Long polling", v: "the server holds each request open until there is news or a timeout, then the client re-asks" }
+  - { k: "SSE", v: "server streams text/event-stream on one HTTP response; the browser's EventSource reconnects by itself", kind: plus }
+  - { k: "WebSocket", v: "HTTP Upgrade gets a 101 reply, then both sides send frames any time on one TCP connection" }
+  - { k: "Cost", v: "every open connection holds a socket on one server, so a server can hold only so many", kind: minus }
 trap:
   wrong: "Live updates always need WebSockets."
-  right: "If only the server pushes (order status, notifications), SSE is simpler: plain HTTP with automatic reconnects. Use WebSockets when the client sends often too."
-sayIt: "Short polling repeats requests; long polling holds one until data arrives; SSE streams server-to-client over HTTP; WebSocket upgrades to a full-duplex connection. I pick SSE for one-way feeds, WebSocket for chat or games."
+  right: "If only the server pushes (order status, notifications), SSE is simpler: plain HTTP with automatic reconnects. Use WebSockets when the client also sends often."
+  why: "WebSockets are the famous real-time tool, so they get reached for by default. Many features only need one-way server push, where SSE is less code and works over ordinary HTTP."
+sayIt: "Short polling repeats requests; long polling holds one open until data arrives; SSE streams server-to-client over HTTP; a WebSocket upgrades to a full-duplex connection. I pick SSE for one-way feeds and a WebSocket for chat or games."
+cheat:
+  idea: "Four ways to get live updates over HTTP: short polling (ask repeatedly), long polling (hold the request), SSE (server streams one-way), WebSocket (both sides send any time)."
+  flow: "short poll → long poll → SSE (server only) → WebSocket (two-way)"
+  remember: "Server-only push? Use SSE: plain HTTP, auto-reconnect. Both sides talk often? Use a WebSocket."
+buildsOn: [http-basics, http-versions]
+scenarios:
+  - q: "You must show a live order status that the server updates. A teammate proposes WebSockets. What would you choose and why?"
+    a: "SSE. Only the server pushes here, and SSE does exactly that over ordinary HTTP, with the browser's EventSource reconnecting on its own and resuming via Last-Event-ID. A WebSocket would add a two-way protocol you do not need. Keep WebSockets for cases where the client also sends frequently, like chat."
+  - q: "Your chat app runs on three servers behind a load balancer. User A is connected to server 1, user B to server 2. A sends a message to B. What problem appears?"
+    a: "The connection is pinned to one server, so server 1 has A's socket but not B's. Server 1 cannot deliver to B directly. You need a shared channel between servers, such as a Redis pub/sub or a message broker, to fan the event out to whichever server holds B's connection."
 confusedWith: []
 tags: [websocket, sse, polling]
 visual: table
@@ -34,21 +45,28 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+These are four ways to get live updates over the web. Plain [HTTP](card:http-basics) is one-sided: the server only speaks when the client asks, so it cannot tell the client "your order just shipped" on its own. The four approaches work around that. Polling (short and long) has the client keep asking. Server-sent events (SSE) let the server stream a series of events down one open response. A WebSocket upgrades the connection so both sides can send messages at any time.
+
 ## Why it exists
 
-Plain HTTP only answers when the client asks. Chat, live order status and dashboards need the server to send news as soon as it happens.
+Features like chat, a live order tracker or a dashboard need the user to see new data the moment it happens on the server. With plain request and response, the client would have to guess when to ask, so it either asks too often (wasting requests on empty answers) or too rarely (showing stale data). These techniques remove the guessing: the server either holds the request until it has news, or keeps a channel open and sends updates as they occur.
 
 ## How it works
 
 <Compare id="polling-vs-sse-vs-websocket" />
 
-- A client stays on one server, so events made elsewhere must be fanned out to it (for example by pub/sub).
-- Each open connection costs a [file descriptor](card:files-and-file-descriptors); one server holds many with an [event loop](card:io-multiplexing).
-- Load balancers must allow long idle times: see [load balancers](card:load-balancers-and-proxies).
+1. Short polling: the client sends a request every few seconds. Most replies say "nothing new", so it is simple but wasteful.
+2. Long polling: the client sends a request and the server does not answer until it has data or a timeout; then the client immediately asks again. This cuts empty replies.
+3. SSE: the client opens one GET and the server keeps the response open, writing `data:` events over time as `text/event-stream`. Updates flow server-to-client only.
+4. WebSocket: the client sends an HTTP request with `Upgrade: websocket`; the server answers `101 Switching Protocols`, and the same TCP connection now carries frames both ways.
+
+So the key is direction and openness: polling keeps re-asking, SSE is one open one-way stream, a WebSocket is one open two-way channel.
 
 ## Example
 
-Order 42 status over SSE:
+Live order status over SSE. The client opens one request and the server streams events:
 
 ```text
 GET /orders/42/events HTTP/1.1
@@ -62,12 +80,34 @@ event: status
 data: {"order": 42, "status": "SHIPPED"}
 ```
 
+What to notice:
+
+- `Accept: text/event-stream` asks for a stream; the server answers with that content type and then keeps the response open instead of closing it.
+- Each event has fields: `data:` is the payload, `event:` names the type, and `id:` is a sequence number. If the connection drops, the browser reconnects and sends the last `id` in a `Last-Event-ID` header so the server resumes from there.
+- This is plain HTTP, so it passes through proxies and load balancers that handle normal requests, unlike a protocol upgrade.
+
+## Rules and defaults
+
+- **WebSocket start:** always begins as an HTTP/1.1 GET with `Upgrade: websocket` and a `Sec-WebSocket-Key`; the server must reply `101` with the matching `Sec-WebSocket-Accept`. `wss://` runs it over TLS.
+- **SSE reconnect:** the browser's `EventSource` reconnects automatically and resumes with `Last-Event-ID`; the server can set the wait with a `retry:` field.
+- **Connection cost:** each open connection holds a socket and a [file descriptor](card:files-and-file-descriptors) on one server; a single server handles many of them with an [event loop](card:io-multiplexing), but the count is still bounded.
+- **Scaling out:** a client is pinned to one server, so events created elsewhere must be fanned out (for example through pub/sub) to the server that holds the connection. Load balancers must also allow long idle times, or they drop the connection.
+
+## Not to be confused with
+
+- **SSE vs WebSocket:** SSE is one-way (server to client) over ordinary HTTP and reconnects itself. A WebSocket is two-way after an upgrade. Rule: server-only push → SSE; frequent two-way traffic → WebSocket.
+- **Long polling vs SSE:** long polling still ends each response and re-requests; SSE keeps one response open and streams many events down it.
+
 ## Interview Qs
 
 ### How does a WebSocket connection start?
 
-As an HTTP/1.1 GET with `Upgrade: websocket` and a `Sec-WebSocket-Key`. The server answers 101 Switching Protocols with `Sec-WebSocket-Accept`; then both sides exchange frames on that TCP connection (`wss://` adds TLS).
+It starts as a normal HTTP/1.1 GET with the headers `Upgrade: websocket` and `Sec-WebSocket-Key`. If the server agrees, it replies `101 Switching Protocols` with a matching `Sec-WebSocket-Accept`. After that, the same TCP connection is no longer HTTP: both sides exchange WebSocket frames in either direction. Using `wss://` runs the whole thing over TLS.
+
+### When would you choose SSE over WebSockets?
+
+When only the server needs to push and the client just listens: live notifications, an order-status feed, a dashboard. SSE runs over plain HTTP, the browser's EventSource reconnects and resumes on its own, and there is no extra protocol to manage. A WebSocket is worth its added complexity only when the client also sends messages often, as in chat or multiplayer games.
 
 ### What happens when an SSE connection drops?
 
-The browser's EventSource reconnects by itself and sends the last event id in `Last-Event-ID`, so the server can resume from there. The `retry:` field sets the wait.
+The browser's EventSource reconnects by itself. It sends the id of the last event it received in a `Last-Event-ID` request header, so the server can resume the stream from just after that event instead of replaying everything. The server can also suggest how long to wait before reconnecting using the `retry:` field in the stream.

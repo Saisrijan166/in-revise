@@ -5,20 +5,31 @@ title: How TCP Stays Reliable
 topic: transport
 level: intermediate
 heat: 2
-hook: "Every byte has a number; the receiver ACKs the next byte it expects, and the sender resends whatever stays unacknowledged."
+hook: "TCP numbers every byte it sends. The receiver keeps saying which byte it expects next, and the sender resends anything that is not acknowledged in time."
 points:
-  - { k: "Sequence number", v: "numbers bytes, not packets" }
-  - { k: "ACK number", v: "next byte expected; confirms everything before it (cumulative)" }
-  - { k: "Timeout (RTO)", v: "no ACK in time: resend, and double the timer" }
-  - { k: "3 duplicate ACKs", v: "fast retransmit, without waiting for the timer", kind: plus }
-  - { k: "Checksum", v: "a corrupted segment is dropped, then resent like a lost one" }
+  - { k: "Sequence number", v: "TCP numbers every byte it sends, not whole packets, so a gap is a range of byte numbers" }
+  - { k: "ACK number", v: "the next byte the receiver expects, which confirms every byte before it (a cumulative ACK)" }
+  - { k: "Timeout (RTO)", v: "if no ACK arrives in time, the sender resends the data and doubles the timer" }
+  - { k: "3 duplicate ACKs", v: "the same ACK three times signals a gap, so the sender resends at once (fast retransmit)", kind: plus }
+  - { k: "Checksum", v: "a corrupted segment fails its checksum and is dropped, then resent like a lost one" }
 trap:
-  wrong: "TCP numbers packets: packet 1, packet 2, packet 3."
-  right: "TCP numbers bytes. ACK 2001 means every byte up to 2000 arrived."
-sayIt: "TCP numbers every byte. The receiver sends cumulative ACKs for the next byte it expects and buffers out-of-order data. The sender resends on a timeout or after three duplicate ACKs."
-confusedWith: [flow-vs-congestion-control]
+  wrong: "TCP numbers packets: packet 1, packet 2, packet 3, and resends the missing packet number."
+  right: "TCP numbers bytes. An ACK of 2001 means every byte up to 2000 arrived, and a resend covers a byte range, not a packet number."
+  why: "Textbook diagrams draw neat labelled packets, so people picture a packet counter. TCP actually tracks a continuous byte stream, which is why one lost piece is described by its byte range."
+sayIt: "TCP numbers every byte. The receiver sends cumulative ACKs for the next byte it expects and buffers anything that arrives out of order. The sender resends on a timeout, or earlier after three duplicate ACKs."
+confusedWith: []
 tags: [tcp, retransmission, reliability]
 visual: flow
+cheat:
+  idea: "TCP makes an unreliable network reliable by numbering every byte, having the receiver acknowledge the next byte it expects, and resending anything left unacknowledged."
+  flow: "number bytes → cumulative ACK → missing? timeout or 3 dup-ACKs → resend"
+  remember: "ACK number = next byte expected, so it confirms everything before it; TCP numbers bytes, not packets."
+buildsOn: [tcp-and-udp, tcp-handshake]
+scenarios:
+  - q: "A sender sends bytes 1-1000, then 1001-2000, then 2001-3000. The middle chunk is lost. What ACKs come back, and what is resent?"
+    a: "The receiver ACKs 1001 for the first chunk. When 2001-3000 arrives out of order it still ACKs 1001 (the next byte it is missing) and buffers the later data. These duplicate ACK-1001s tell the sender byte 1001 is the gap, so it resends only 1001-2000, not the chunk after it."
+  - q: "Why is a cumulative ACK of 5001 useful even if some earlier ACKs were lost on the way back?"
+    a: "Because it confirms every byte up to 5000 at once. A later ACK makes earlier ones unnecessary, so a few lost ACKs do not force a resend as long as a later cumulative ACK gets through."
 sources:
   - title: "RFC 9293: Transmission Control Protocol (2.2 Key concepts, 3.4 Sequence numbers)"
     url: "https://www.rfc-editor.org/rfc/rfc9293"
@@ -32,19 +43,20 @@ sources:
   - title: "RFC 2018: TCP Selective Acknowledgment Options"
     url: "https://www.rfc-editor.org/rfc/rfc2018"
     verifiedOn: "2026-10-20"
-  - title: "Networking interview questions (GeeksforGeeks)"
-    url: "https://www.geeksforgeeks.org/computer-networks/networking-interview-questions/"
-    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+TCP reliability is the set of mechanisms that let TCP hand the application an exact, in-order copy of the bytes that were sent, even though the [IP](card:tcp-ip-model) layer under it can lose, corrupt, duplicate or reorder packets. It works by numbering every byte with a [sequence number](card:tcp-handshake), having the receiver acknowledge the next byte it still expects, and resending anything that is not acknowledged. These are the guarantees that [TCP has and UDP does not](card:tcp-and-udp).
 
 ## Why it exists
 
-Packets can be lost, corrupted or arrive out of order. TCP detects this and hands the app an exact, in-order byte stream.
+The network gives no promises: a packet can vanish, arrive twice, arrive out of order, or arrive with flipped bits. If the application had to cope with all of that itself, every program would reinvent the same fiddly, error-prone logic. TCP does it once, in the transport layer. It detects a missing or corrupted byte range and resends just that range, and it reorders what arrives early, so the program above simply reads a clean stream and never sees the mess underneath.
 
 ## How it works
 
 <Mermaid
-  alt="Sender sends bytes 1-1000 and gets ACK 1001. Bytes 1001-2000 are lost. Bytes 2001-3000, 3001-4000 and 4001-5000 each arrive and each gets a duplicate ACK 1001. After the third duplicate the sender resends 1001-2000, and the receiver answers ACK 5001."
+  alt="Sender sends bytes 1-1000 and gets ACK 1001. Bytes 1001-2000 are lost. Bytes 2001-3000, 3001-4000 and 4001-5000 each arrive and each triggers a duplicate ACK 1001. After the third duplicate the sender resends 1001-2000, and the receiver replies ACK 5001 because the later bytes were buffered."
   chart={`sequenceDiagram
   participant S as Sender
   participant R as Receiver
@@ -57,23 +69,60 @@ Packets can be lost, corrupted or arrive out of order. TCP detects this and hand
   R->>S: ACK 5001 (later bytes were buffered)`}
 />
 
-- **Sliding window:** many bytes can be in flight before an ACK; [flow and congestion control](card:flow-and-congestion-control) set how many.
-- **SACK** reports which blocks arrived, so only the gaps are resent.
-- One lost segment holds back later bytes from the app: TCP head-of-line blocking, see [HTTP versions](card:http-versions).
+1. The sender labels its data by byte: the first chunk is bytes 1-1000, the next 1001-2000, and so on.
+2. The receiver replies with the next byte it wants. After bytes 1-1000 it sends ACK 1001, meaning "I have everything up to 1000".
+3. When 1001-2000 is lost but later bytes arrive, the receiver keeps every out-of-order chunk in a buffer and keeps re-sending ACK 1001, because 1001 is still the first byte it is missing.
+4. The sender spots the loss one of two ways: the retransmission timer (RTO) runs out with no new ACK, or three duplicate ACKs arrive (fast retransmit). Three duplicates are quicker than waiting for the timer.
+5. The sender resends only the missing range, 1001-2000. The receiver now has a complete run and jumps its ACK forward to 5001, since the buffered bytes were waiting for exactly this gap.
 
-## Defaults
+So the key is that one cumulative ACK number describes all progress, and only the unacknowledged gap is resent.
+
+## Example
+
+The byte numbering shows up in a packet capture. These are two segments from one connection.
+
+```text
+seq=1       len=1000   -> carries bytes 1..1000
+(ack 1001 comes back: "give me byte 1001 next")
+seq=2001    len=1000   -> carries bytes 2001..3000, arrives before 1001..2000
+(ack is still 1001: the 1001..2000 gap is not filled yet)
+```
+
+What to notice:
+
+- `seq` is the number of the segment's first byte, so segment lengths tell you the byte ranges; TCP is counting bytes, not packets.
+- The second segment arrives before the missing one, yet the ACK stays at 1001: the receiver reports the first gap, not the highest byte it holds.
+- If the gap is never filled, the sender's RTO fires and it resends 1001-2000; nothing after it is resent, because the receiver already buffered that.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| Initial RTO | 1 s; after that, smoothed RTT + 4 × its variation | RFC 6298 |
+| Initial RTO | 1 s; then smoothed RTT plus four times its variation | RFC 6298 |
 | Fast retransmit trigger | 3 duplicate ACKs | RFC 5681 |
+
+- **SACK (selective acknowledgement):** an option where the receiver also reports which out-of-order blocks it holds, so the sender resends only the true gaps rather than everything after the first missing byte (RFC 2018).
+- **Head-of-line blocking:** because the stream is in order, one lost segment holds back all the bytes behind it from the application until it is resent; this is what [HTTP/2 over TCP suffers and HTTP/3 avoids](card:http-versions).
+
+## Not to be confused with
+
+Reliability and [flow or congestion control](card:flow-and-congestion-control) are different jobs. Reliability decides what to resend and when, so nothing is lost. Flow and congestion control decide how much to send at a time, so the receiver and the network are not overrun. Rule: retransmission = correctness; windows = pacing.
+
+## Common mistakes
+
+- **"A duplicate ACK means data was duplicated."** It means data arrived after a gap: the receiver re-sends the same "next byte I need" number. Three of them is the signal to fast-retransmit the missing range.
+- **"TCP resends from the lost point onward (go-back-N)."** With SACK, the receiver tells the sender exactly which blocks it already has, so only the gaps are resent, not everything after the loss.
 
 ## Interview Qs
 
-### How does TCP detect a lost segment?
+### How does TCP detect that a segment was lost?
 
-Two ways: the retransmission timer runs out with no ACK, or three duplicate ACKs arrive, meaning later data got through but one piece is missing. The second is faster.
+Two ways. The retransmission timer (RTO) runs out with no acknowledgement for the data, or three duplicate ACKs arrive, which means later bytes got through but one range is missing. The duplicate-ACK path (fast retransmit) is quicker, because it does not wait for the timer to expire.
 
 ### What do the sequence and acknowledgement numbers mean?
 
-The sequence number is the number of the segment's first byte. The acknowledgement number is the next byte the receiver expects, so it confirms every byte before it.
+The sequence number is the number of the first data byte in a segment, because TCP numbers every byte. The acknowledgement number is the next byte the receiver expects, so it confirms every byte before it at once. That is why it is called a cumulative acknowledgement.
+
+### What is head-of-line blocking in TCP?
+
+TCP delivers bytes strictly in order, so if one segment is lost, every byte that arrived after it must wait in a buffer until the gap is resent, even though it is already there. This delay is why HTTP/2, which multiplexes streams over one TCP connection, can stall, and why HTTP/3 moved to QUIC over UDP.

@@ -5,18 +5,30 @@ title: Semaphores and Producer-Consumer
 topic: concurrency
 level: intermediate
 heat: 3
-hook: "A semaphore is a counter of permits: acquire takes one or waits, release gives one back. It caps how many run at once."
+hook: "A semaphore is a counter of permits: acquire takes one or waits for one, release gives one back. It caps how many threads run at once."
 points:
-  - { k: "acquire (P, wait)", v: "take a permit; block while none is left" }
-  - { k: "release (V, signal)", v: "add a permit back; may wake a waiting thread" }
-  - { k: "Counting vs binary", v: "N permits limit concurrency; 1 permit acts like a lock" }
-  - { k: "Typical use", v: "at most N calls to a payment provider, or N DB connections", kind: plus }
-  - { k: "Java fairness", v: "new Semaphore(n) is non-fair; new Semaphore(n, true) is FIFO", kind: default }
+  - { k: "acquire (P, wait)", v: "take one permit; if none is left, the thread blocks until another releases one" }
+  - { k: "release (V, signal)", v: "give one permit back, which may wake a thread waiting in acquire" }
+  - { k: "Counting semaphore", v: "starts with N permits, so at most N threads run the guarded section at once" }
+  - { k: "Binary semaphore", v: "starts with 1 permit, so it acts like a lock but with no owner" }
+  - { k: "Typical use", v: "cap concurrent calls to a partner API, or the size of a connection pool", kind: plus }
+  - { k: "Java fairness", v: "new Semaphore(n) is non-fair; new Semaphore(n, true) hands permits out first-come-first-served", kind: default }
 trap:
-  wrong: "A binary semaphore is the same as a mutex."
-  right: "A mutex has an owner, and only it unlocks. A semaphore has no owner: any thread may release it, so it can also signal between threads."
-sayIt: "A semaphore holds N permits. A thread acquires one before using a limited resource and releases it in finally. A mutex protects a critical section and has an owner; a semaphore limits how many threads go in."
-confusedWith: []
+  wrong: "A binary semaphore is the same thing as a mutex."
+  right: "A mutex has an owner, so only the locking thread unlocks it. A semaphore has no owner: any thread may release a permit, so it can also signal between threads."
+  why: "A binary semaphore with 1 permit behaves like a lock in the simple case, so the ownership difference is easy to miss until it causes a bug."
+sayIt: "A semaphore holds N permits. A thread acquires one before using a limited resource and releases it in finally. A mutex protects a critical section and has an owner; a semaphore just limits how many threads go in."
+cheat:
+  idea: "A semaphore is a counter of permits. acquire takes one or waits; release gives one back. It caps how many threads use a resource."
+  flow: "N permits → acquire (wait if 0) → use resource → release → permit returns"
+  remember: "A mutex has an owner and guards one section; a semaphore has no owner and limits N users. Release in finally or lose a permit."
+buildsOn: [locks, threads]
+scenarios:
+  - q: "You start Semaphore(3) and launch 10 tasks that each acquire, sleep 50 ms, and release. How many run the sleep at the same time?"
+    a: "At most 3. The first three take the permits; the other seven block in acquire until a permit is released. As each task finishes and releases, a waiting task gets in, so no more than three are ever inside at once."
+  - q: "You forget to call release() after acquire(). What breaks, and when?"
+    a: "That permit is gone for good. The count drops by one permanently, so over time all permits leak and every thread blocks forever in acquire. That is why release must be in a finally block, so it runs even if the body throws."
+confusedWith: [mutex-vs-semaphore]
 tags: [semaphore, producer-consumer, bounded-buffer, concurrency-limit]
 visual: table
 sources:
@@ -34,28 +46,35 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A semaphore is a counter of permits that controls how many threads may use something at the same time. A thread calls `acquire` to take a permit before entering, and `release` to give it back when it leaves; if no permit is left, `acquire` makes the thread wait until one is freed. A [lock](card:locks) lets exactly one thread in; a semaphore lets up to N in, where N is the number of permits it starts with. Historically `acquire` is called P or wait, and `release` is called V or signal.
+
 ## Why it exists
 
-Some resources take N users, not one: a pool of 10 connections, or a partner API allowing 3 calls at once. A lock is too strict; no limit overloads them.
+Some resources serve a limited number of users at once, not just one. A connection pool might hold 10 connections, or a payment partner's API might allow only 3 calls in flight. A [lock](card:locks) is too strict: it would force these down to one user at a time and waste the rest. Having no limit is worse: the pool runs dry or the partner rejects the flood. A semaphore sets the dial exactly: start it with N permits, and it lets through at most N threads, queuing the others until a permit frees up.
 
 ## How it works
 
 <Compare id="mutex-vs-semaphore" />
 
-- [Producer-consumer](card:producer-consumer): a bounded buffer uses two counting semaphores (empty slots, full slots) and a mutex for the buffer.
-- In Java a `BlockingQueue` does this for you: `put` waits while full, `take` waits while empty.
-- A pool of connections is permits too: see [connection pooling](card:connection-pooling).
+1. The semaphore is created with N permits, for example 3 for a partner API.
+2. A thread calls `acquire`; if a permit is free the count drops by one and the thread continues, otherwise it blocks.
+3. The thread uses the limited resource while it holds the permit.
+4. The thread calls `release` in `finally`; the count goes back up, and one waiting thread is woken to acquire it.
+
+So the key is: the count never lets more than N threads past `acquire` at the same time.
 
 ## Example
 
-Example run: 10 tasks, 3 permits.
+Ten tasks share a semaphore of 3 permits, so no more than 3 ever run the slow call together.
 
 ```java
 Semaphore permits = new Semaphore(3);              // 3 calls at a time
 AtomicInteger inside = new AtomicInteger(), max = new AtomicInteger();
 try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {
     for (int i = 0; i < 10; i++) pool.submit(() -> {
-        permits.acquire();                         // wait for a permit
+        permits.acquire();                         // wait here for a permit
         try { max.accumulateAndGet(inside.incrementAndGet(), Math::max);
               Thread.sleep(50); }                  // the slow remote call
         finally { inside.decrementAndGet(); permits.release(); }
@@ -69,12 +88,34 @@ System.out.println("most at once: " + max.get());
 most at once: 3
 ```
 
+What to notice:
+
+- `max` tracks the highest number of tasks inside at any moment, and it never passes 3 because the semaphore only hands out 3 permits.
+- `release()` is in `finally`, so a permit always returns even if `sleep` is interrupted; a missed release would shrink the limit permanently.
+- Change `new Semaphore(3)` to `new Semaphore(10)` and all 10 run at once; the semaphore is the only thing holding the number down.
+
+## Rules and defaults
+
+- **Permits:** a semaphore starts with a fixed number N; `acquire` lowers the count, `release` raises it. A binary semaphore uses N = 1.
+- **No owner:** unlike a mutex, any thread may `release`, so `acquire` and `release` can be in different threads to signal between them.
+- **Fairness:** `new Semaphore(n)` is non-fair by default (Java 25); pass `true` for first-come-first-served order.
+- **Release in finally:** a missed `release` leaks a permit for good; over time the limit falls to zero and all threads block.
+- **Higher-level tools:** a `BlockingQueue` or a connection pool wraps this pattern, so you rarely use raw semaphores in Java application code.
+
+## Not to be confused with
+
+A [mutex](card:locks) protects one critical section and has an owner, so only the locking thread unlocks it. A semaphore holds a count and limits how many threads enter, with no owner. Rule: reach for a mutex to protect shared data, and for a semaphore to cap how many threads use a limited resource at once.
+
+## Common mistakes
+
+- **"A connection pool on three servers with Semaphore(3) means three total connections."** Each JVM has its own semaphore and its own 3 permits, so the real total is nine. A shared limit must live in a store that all instances see, such as the database or Redis.
+
 ## Interview Qs
 
-### Our API runs on three instances. Each uses Semaphore(3) for a partner API. How many calls can reach the partner at once?
+### Three instances of your API each use Semaphore(3) for a partner API. How many calls can reach the partner at once?
 
-Nine. A semaphore lives inside one JVM, so each instance has its own 3 permits. For one total limit, the count must live in a store that all instances share.
+Nine. A semaphore lives inside one JVM, so each of the three instances has its own 3 permits, and they do not coordinate. For one total limit of 3 across the fleet, the count must live in a shared store such as Redis, not in each process's memory.
 
 ### What are the drawbacks of semaphores?
 
-They are easy to misuse. A missed `release()` loses a permit for good, so release in `finally`. Taking them in the wrong order can deadlock, and with no owner nobody can tell which thread forgot. A `BlockingQueue` or a pool hides this.
+They are easy to misuse. A missed `release()` leaks a permit for good, so release in `finally`. Acquiring several in the wrong order can deadlock, and because a semaphore has no owner, nobody can tell which thread forgot to release. A `BlockingQueue` or a pool hides most of this risk.

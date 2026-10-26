@@ -5,17 +5,29 @@ title: Memory Hierarchy and CPU Caches
 topic: memory
 level: beginner
 heat: 2
-hook: "Small and fast at the top, big and slow at the bottom: the CPU keeps hot data in caches right next to the core."
+hook: "Memory is a stack of levels: small and fast at the top, big and slow at the bottom. The CPU keeps hot data in caches right next to the core."
 points:
-  - { k: "Order", v: "registers, L1, L2, L3, RAM, SSD, HDD" }
-  - { k: "Who shares", v: "L1 and L2 usually per core; L3 usually shared by all cores" }
-  - { k: "Cache line", v: "data moves in 64-byte blocks on Intel Core and Xeon CPUs", kind: default }
-  - { k: "Locality", v: "reuse data soon (temporal); use its neighbours (spatial)" }
-  - { k: "Backend rule", v: "scan contiguous data and keep hot data in RAM", kind: plus }
+  - { k: "Order", v: "from fast to slow: registers, L1, L2, L3 caches, RAM, SSD, HDD" }
+  - { k: "Who shares a cache", v: "L1 and L2 are usually per CPU core; L3 is usually shared by all cores" }
+  - { k: "Cache line", v: "a read copies a 64-byte block, not one byte, on Intel Core and Xeon CPUs", kind: default }
+  - { k: "Temporal locality", v: "data used now is likely used again soon, so the cache keeps it" }
+  - { k: "Spatial locality", v: "data near what you used is likely used next, so the line brings neighbours" }
+  - { k: "Backend rule", v: "scan contiguous data and keep hot data in RAM to stay in fast levels", kind: plus }
 trap:
   wrong: "A CPU cache miss means the data is read from disk."
-  right: "A miss goes one level down: L2, L3, then RAM. Disk comes in only when the page is not in RAM at all (a major page fault)."
-sayIt: "Memory is a hierarchy: registers, L1, L2, L3, RAM, then disk, each bigger and slower. Caches work because programs reuse data and touch nearby data, so good locality makes code fast."
+  right: "A cache miss just goes one level down: L1 to L2, L2 to L3, L3 to RAM. Disk is involved only when a page is not in RAM at all (a major page fault)."
+  why: "People lump all slow memory together as 'disk', but there are several cache levels and then RAM between the core and the disk, each far faster than the one below."
+sayIt: "Memory is a hierarchy: registers, L1, L2, L3, RAM, then disk, each level bigger and slower. Caches work because programs reuse data (temporal locality) and touch nearby data (spatial locality), so good locality keeps code fast."
+cheat:
+  idea: "Memory is layered from fast and small (registers, L1, L2, L3 caches) to slow and big (RAM, SSD, HDD). The CPU keeps recently used data in caches near the core."
+  flow: "registers → L1 → L2 → L3 → RAM → SSD → HDD"
+  remember: "Caches pay off through locality: reuse data soon, and touch data next to it. A miss drops one level, not straight to disk."
+buildsOn: []
+scenarios:
+  - q: "You loop over a 1 million element array and add up the values. A colleague stores the same numbers in a linked list and loops over that. Why is the array version much faster?"
+    a: "Array elements sit next to each other, so one 64-byte cache line brings several at once (spatial locality) and the next few reads are cache hits. List nodes can be anywhere in RAM, so each step is likely a cache miss that waits for memory."
+  - q: "Two threads each write to a different counter, but the two counters sit in the same 64-byte cache line. Throughput is poor. Why?"
+    a: "This is false sharing. Each write invalidates the whole line in the other core's cache, so the line keeps bouncing between cores even though the threads never touch the same variable. Padding the counters into separate lines fixes it."
 confusedWith: []
 tags: [cpu-cache, locality, performance]
 visual: flow
@@ -34,14 +46,18 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The memory hierarchy is the set of places a CPU can keep data, arranged from fastest and smallest to slowest and largest. At the top are registers inside the core, then three levels of CPU cache (L1, L2, L3), then main memory (RAM), then disk (SSD or HDD). A cache is a small, fast store that holds copies of recently used data so the CPU does not have to fetch it from a slower level every time.
+
 ## Why it exists
 
-RAM is far slower than the CPU. Small caches near the core keep copies of recent data, so most reads never wait for RAM.
+A CPU core can do work far faster than RAM can hand it data: a RAM read takes roughly 100 nanoseconds, while the core finishes many instructions in that time. If every read waited for RAM, the core would sit idle most of the time. Small caches next to the core keep copies of recent data, so the common case is a fast cache hit and the core rarely waits for RAM.
 
 ## How it works
 
 <Mermaid
-  alt="Fastest to slowest: registers, L1 (about 0.5 ns), L2 (about 7 ns), L3, RAM (about 100 ns), SSD, HDD (seek about 8 ms). A miss asks the next level down."
+  alt="A vertical stack from fastest to slowest: registers, L1 cache about 0.5 ns, L2 cache about 7 ns, L3 cache, RAM about 100 ns, SSD, then HDD with a seek of about 8 ms. Each miss asks the next level down."
   chart={`flowchart TB
   R[Registers] --> L1["L1 cache ~0.5 ns"]
   L1 -- miss --> L2["L2 cache ~7 ns"]
@@ -51,11 +67,16 @@ RAM is far slower than the CPU. Small caches near the core keep copies of recent
   SSD --> HDD["HDD seek ~8 ms"]`}
 />
 
-- Times are rough, from Norvig's typical-PC table.
-- A miss copies the whole cache line up, so its neighbours become cheap.
-- Address translations have their own cache, the [TLB](card:paging-and-page-faults); file data sits in the [page cache](card:files-and-file-descriptors).
+1. The core needs a value, so it asks its L1 cache first.
+2. If L1 has the value, that is a cache hit and the core gets it almost at once.
+3. If L1 misses, the request goes to L2, then L3, then RAM, each slower than the one before.
+4. When the value is finally found, the CPU copies its whole 64-byte cache line up, so the neighbours of that value are now cheap to read too.
+
+So the key is to work in a way that turns most reads into L1 or L2 hits, which depends on locality.
 
 ## Example
+
+This reads the cache sizes and cache-line size of a Linux machine, so you can see the levels and the 64-byte line in real numbers.
 
 ```bash
 lscpu | grep -E '^L[123]'
@@ -70,16 +91,29 @@ L3 cache:                                3 MiB (1 instance)
 64
 ```
 
+What to notice:
+
+- L1 and L2 each have two instances here, one per core, while L3 is a single shared cache. This matches "L1/L2 per core, L3 shared".
+- The caches get larger as you go down (64 KiB, 512 KiB, 3 MiB) because larger stores are slower, so only the smallest stay closest to the core.
+- `LEVEL1_DCACHE_LINESIZE` is 64: data moves in 64-byte blocks, which is why reading neighbours is nearly free.
+
+## Rules and defaults
+
+- **Cache line size:** 64 bytes on Intel Core and Xeon CPUs. One memory read fills a whole line, not a single byte.
+- **Cache levels:** L1 and L2 are usually private to one core; L3 is usually shared across the cores of a chip.
+- **Latency order (approximate, from Norvig's table):** L1 about 0.5 ns, L2 about 7 ns, RAM about 100 ns, an HDD seek about 8 ms. These are orders of magnitude, not exact figures.
+- **Address translations** have their own cache, the [TLB](card:paging-and-page-faults), and file data read from disk is kept in the [page cache](card:files-and-file-descriptors) in RAM.
+
 ## Interview Qs
 
 ### What is locality of reference?
 
-Programs reuse recent data (temporal) and touch data next to it (spatial). Every cache, the TLB included, bets on this.
+Locality is the tendency of programs to reuse data they used recently (temporal locality) and to use data stored near it (spatial locality). Caches, including the TLB, bet on this: they keep recent data and fetch whole lines, so most accesses become hits.
 
 ### Why is looping over an array faster than walking a linked list?
 
-Array elements sit side by side, so one cache line brings several. List nodes can be anywhere, so each step may miss.
+Array elements sit next to each other, so one cache line brings several, and the next reads are hits (spatial locality). Linked-list nodes can be anywhere in RAM, so each step may land on a new line and cause a cache miss that waits for memory.
 
-### What is false sharing?
+### What is false sharing, and how do you fix it?
 
-Two threads write different variables that share one cache line, so the line bounces between cores. Pad or separate hot fields; since Java 8 the JVM can pad marked fields itself (JEP 142, used inside the JDK).
+Two threads write different variables that happen to share one cache line. Each write invalidates the line in the other core's cache, so the line bounces between cores and throughput drops. The fix is to pad the hot fields into separate cache lines; since Java 8 the JVM can pad marked fields itself (JEP 142, used inside the JDK).

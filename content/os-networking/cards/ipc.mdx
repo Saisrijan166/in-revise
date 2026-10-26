@@ -5,16 +5,28 @@ title: "Inter-Process Communication (IPC)"
 topic: io
 level: beginner
 heat: 2
-hook: "Threads share memory; processes do not. So processes need IPC: pipes, queues, shared memory, signals or sockets."
+hook: "Threads in one process share memory; separate processes do not. So processes exchange data through IPC: pipes, queues, shared memory, signals or sockets."
 points:
-  - { k: "Processes vs threads", v: "processes are isolated and need IPC; threads already share memory" }
-  - { k: "Message passing", v: "pipes and FIFOs: the kernel carries the bytes; reads wait for data" }
-  - { k: "Shared memory", v: "both map the same pages: no copy, but you must lock it", kind: plus }
-  - { k: "SIGTERM vs SIGKILL", v: "SIGTERM can be caught for a clean stop; SIGKILL cannot", kind: minus }
+  - { k: "Why IPC is needed", v: "each process has isolated memory, so one cannot read another's variables; the kernel carries the data" }
+  - { k: "Message passing", v: "pipes and FIFOs: the kernel copies the bytes between processes, and a read waits until data is there" }
+  - { k: "Shared memory", v: "both processes map the same pages, so there is no copy, but you must lock it against races", kind: plus }
+  - { k: "Signal", v: "a tiny numbered notice, such as SIGTERM meaning 'please stop'; it carries no data of its own" }
+  - { k: "SIGTERM vs SIGKILL", v: "SIGTERM can be caught to shut down cleanly; SIGKILL (signal 9) cannot be caught and runs no cleanup", kind: minus }
 trap:
   wrong: "kill -9 is the normal way to stop a service."
-  right: "Send SIGTERM so it can finish in-flight requests and close connections. SIGKILL (9) is the last resort and runs no cleanup."
-sayIt: "Processes are isolated, so they use IPC: pipes, FIFOs, message queues, shared memory, signals and sockets. Across machines it becomes sockets, which is how microservices talk."
+  right: "Send SIGTERM first so the service finishes in-flight requests and closes connections. SIGKILL (9) is the last resort and runs no cleanup."
+  why: "kill -9 always works and feels decisive, so people reach for it. But it gives the process no chance to flush or close, which can corrupt state or drop requests."
+sayIt: "Processes are isolated, so they cooperate through IPC: pipes and FIFOs, message queues, shared memory, signals, and sockets. On one host shared memory is fastest but needs locking; across machines IPC becomes sockets, which is how microservices talk."
+cheat:
+  idea: "Separate processes have isolated memory, so they exchange data through IPC: pipes, FIFOs, message queues, shared memory, signals, and sockets."
+  flow: "Same host: pipe / FIFO / shared memory / signal → Across hosts: socket"
+  remember: "Shared memory is fastest but needs a lock. Stop a service with SIGTERM (catchable), not SIGKILL (9, uncatchable)."
+buildsOn: [processes, threads]
+scenarios:
+  - q: "Two services on the same machine must exchange a large block of data many times a second. A pipe is too slow. What else, and what is the catch?"
+    a: "Use shared memory: both processes map the same pages, so the data is visible to both with no copy, which is the fastest IPC. The catch is that there is no automatic synchronisation, so you must guard reads and writes with a semaphore or lock, or the two processes will race."
+  - q: "Kubernetes wants to stop your pod. It sends SIGTERM, waits, then SIGKILL. Why that order, and what should your app do on SIGTERM?"
+    a: "SIGTERM is a polite request the app can catch; SIGKILL is the forced kill it cannot. On SIGTERM the app should stop accepting new requests, finish in-flight ones, and close connections, all within the grace period, so Kubernetes never has to send SIGKILL and cut it off mid-request."
 confusedWith: [process-vs-thread]
 tags: [ipc, signals, graceful-shutdown]
 visual: table
@@ -36,24 +48,37 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Inter-process communication (IPC) is how separate [processes](card:processes) exchange data or signals. It is needed because each process has its own isolated memory: unlike two [threads](card:threads) in one process, two processes cannot simply read each other's variables. So the kernel provides channels between them. The main ones are pipes and FIFOs (a byte stream), message queues (separate messages), shared memory (the same pages mapped into both), signals (a tiny notice such as "stop"), and sockets (which also work across machines).
+
 ## Why it exists
 
-Each [process](card:processes) has its own memory, so one crash cannot corrupt another. To cooperate, the kernel must carry data or share pages between them.
+Isolation is a feature: one process crashing or writing bad data cannot corrupt another, because their memory is separate. But programs still need to cooperate, for example a web server handing work to a background worker. Without IPC they would have no way to pass data across that wall. IPC gives them safe, kernel-managed channels, each suited to a different need: a stream, discrete messages, large shared buffers, or a simple control signal.
 
 ## How it works
 
-| Mechanism | Use when |
+Each mechanism fits a different shape of communication:
+
+| Mechanism | Use it when |
 |---|---|
-| [Pipe](card:pipe) | one-way stream between related processes (shell pipelines) |
-| [Named pipe (FIFO)](card:named-pipe) | the same, between unrelated processes on one host |
-| [Message queue](card:message-queue-ipc) | separate messages rather than a byte stream |
-| [Shared memory](card:shared-memory-ipc) | large data without copying; guard it with a [semaphore](card:semaphores) |
-| [Signal](card:unix-signal) | a tiny notice, such as "stop now" |
-| [Socket](card:ports-and-sockets) | same host ([Unix domain](card:unix-domain-socket)) or across hosts |
+| [Pipe](card:pipe) | a one-way byte stream between related processes, as in a shell pipeline |
+| [Named pipe (FIFO)](card:named-pipe) | the same, but between unrelated processes on one host, via a path name |
+| [Message queue](card:message-queue-ipc) | you want separate messages with boundaries, not one continuous stream |
+| [Shared memory](card:shared-memory-ipc) | large data must be shared without copying; guard it with a [semaphore](card:semaphores) |
+| [Signal](card:unix-signal) | a tiny control notice, such as "stop now" (SIGTERM) |
+| [Socket](card:ports-and-sockets) | same host ([Unix domain socket](card:unix-domain-socket)) or across hosts |
+
+1. For message passing (pipe, FIFO, queue) the sender writes bytes and the kernel copies them to the receiver, which waits until data is available.
+2. For shared memory, both processes map the same physical pages, so a write by one is instantly visible to the other, with no copy and no kernel call per access.
+3. Shared memory therefore needs its own coordination: a semaphore or lock, or the two processes race on the same bytes.
+4. Across machines the only option is sockets, which carry data over the network; this is how microservices communicate.
+
+So the key is the trade-off: message passing is safe but copies; shared memory is fast but you lock it yourself.
 
 ## Example
 
-After `kill -TERM <pid>` the hook prints; after `kill -KILL` it never does.
+A signal is the simplest IPC: `kill -TERM` sends SIGTERM, which a JVM shutdown hook can catch for a clean stop; `kill -KILL` (SIGKILL) cannot be caught, so the hook never runs. This was run with `kill -TERM`.
 
 ```java
 Runtime.getRuntime().addShutdownHook(new Thread(() ->
@@ -67,19 +92,36 @@ Orders API running
 Shutdown hook: finishing in-flight orders
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Graceful shutdown | on (`server.shutdown=graceful`) | Spring Boot 4.1 |
-| SIGTERM to SIGKILL grace | 30 s (`terminationGracePeriodSeconds`) | Kubernetes Pods |
+- The program prints "Orders API running" and then sleeps; sending SIGTERM wakes the JVM, which runs the shutdown hook before exiting, so the second line appears.
+- Replace the SIGTERM with `kill -KILL` (SIGKILL) and the hook line never prints: SIGKILL cannot be caught, so there is no chance to clean up.
+- This is why a graceful shutdown handler must be on SIGTERM; code relying on cleanup at exit is useless against a SIGKILL.
+
+## Rules and defaults
+
+- **Pipe direction and capacity:** a pipe is one-way and buffered; on Linux its capacity is 65,536 bytes (64 KiB) by default, and a write blocks when the buffer is full.
+- **Signals carry no payload:** a plain signal is just a number; it tells a process something happened but cannot pass data, unlike a pipe or queue.
+- **Graceful shutdown:** Spring Boot 4.1 enables graceful shutdown by default (`server.shutdown=graceful`); on SIGTERM it stops taking new requests and lets in-flight ones finish.
+- **Kubernetes grace period:** a pod gets `terminationGracePeriodSeconds` (default 30 s) after SIGTERM before SIGKILL; keep the app's shutdown timeout below it so work finishes before the forced kill.
+
+## Not to be confused with
+
+- **A [message queue (IPC)](card:message-queue-ipc)** is a kernel-held queue of messages on one host.
+- **A message broker** (Kafka, RabbitMQ) is a separate service that holds messages across machines, reached over sockets.
+
+Rule: the IPC message queue is one-host and kernel-provided; a broker is a network service, even though both pass "messages".
 
 ## Interview Qs
 
-### Message passing vs shared memory?
+### What is the difference between message passing and shared memory?
 
-With a pipe or queue the kernel copies each message and handles waiting. With shared memory both processes touch the same pages: faster for big data, but they must coordinate with a semaphore or lock.
+With a pipe or message queue the kernel copies each message between processes and handles the waiting, which is safe but costs a copy. With shared memory both processes map the same pages and read or write them directly, with no copy, so it is the fastest for large data. The price is that you must coordinate access yourself with a semaphore or lock.
+
+### Why send SIGTERM instead of SIGKILL to stop a service?
+
+SIGTERM can be caught, so the service can finish in-flight requests, flush buffers and close connections before exiting cleanly. SIGKILL (signal 9) cannot be caught, blocked or ignored, so the process dies immediately with no cleanup, which can drop requests or leave state inconsistent. SIGKILL is the last resort when SIGTERM is ignored.
 
 ### How does a Spring Boot service shut down cleanly on Kubernetes?
 
-Kubernetes sends SIGTERM, waits the grace period, then sends SIGKILL. On SIGTERM, Spring Boot refuses new requests and lets in-flight ones finish; keep `spring.lifecycle.timeout-per-shutdown-phase` below the pod's grace period.
+Kubernetes sends SIGTERM, waits the `terminationGracePeriodSeconds` (30 s by default), then sends SIGKILL. On SIGTERM, Spring Boot's graceful shutdown stops accepting new requests and lets in-flight ones finish. Keep `spring.lifecycle.timeout-per-shutdown-phase` below the pod's grace period so work completes before Kubernetes forces the kill.

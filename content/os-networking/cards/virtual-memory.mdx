@@ -5,17 +5,28 @@ title: Virtual Memory and Address Spaces
 topic: memory
 level: intermediate
 heat: 3
-hook: "Every process gets its own private address space; the MMU maps each virtual address to real RAM."
+hook: "Every process gets its own private set of memory addresses; hardware called the MMU maps each of those virtual addresses to real RAM."
 points:
-  - { k: "Isolation", v: "the same address in two processes points to different RAM", kind: plus }
-  - { k: "MMU", v: "CPU hardware that translates every access using page tables" }
-  - { k: "Overcommit", v: "Linux default (vm.overcommit_memory=0): reserve now, RAM on first touch", kind: default }
-  - { k: "Swap space", v: "disk area for pages pushed out of RAM; far slower than RAM", kind: minus }
-  - { k: "OOM killer", v: "kills a process when memory cannot be reclaimed", kind: minus }
+  - { k: "Isolation", v: "the same address in two processes points to different RAM, so one cannot read or corrupt the other", kind: plus }
+  - { k: "MMU", v: "CPU hardware that translates every memory access from a virtual address to a physical one using page tables" }
+  - { k: "Overcommit default", v: "on Linux (vm.overcommit_memory=0) the kernel reserves address space now and gives RAM on first touch", kind: default }
+  - { k: "Swap space", v: "a disk area that holds pages pushed out of RAM; reading from it is far slower than RAM", kind: minus }
+  - { k: "OOM killer", v: "when memory runs out and nothing can be freed, Linux kills a process to reclaim RAM", kind: minus }
 trap:
   wrong: "Virtual memory means using the disk as extra RAM."
-  right: "It is per-process address translation. Swapping pages to disk is only one thing it makes possible."
-sayIt: "Virtual memory gives each process its own address space. The MMU translates virtual to physical addresses through page tables, which isolates processes and lets the OS load pages lazily or swap them out."
+  right: "Virtual memory is per-process address translation that isolates processes. Swapping unused pages to disk is only one feature it makes possible, not what it is."
+  why: "The phrase is taught alongside swap in many courses, and Windows shows a 'virtual memory' swap-file setting, so the two ideas get merged."
+sayIt: "Virtual memory gives each process its own private address space. The MMU translates virtual addresses to physical ones through page tables, which isolates processes from each other and lets the OS load pages only when touched and swap idle ones out to disk."
+cheat:
+  idea: "Each process sees its own private address space. The MMU translates every virtual address to physical RAM through the process's page tables, so processes cannot see each other."
+  flow: "virtual address → MMU + page table → RAM or swap"
+  remember: "It is address translation and isolation, not just 'disk as RAM'. Linux gives RAM on first touch; out of RAM, the OOM killer fires."
+buildsOn: [processes]
+scenarios:
+  - q: "`malloc` (or a large Java `-Xmx`) succeeded and the program started fine, but an hour later the OS killed it. How is that possible?"
+    a: "Linux overcommits by default: the allocation only reserved address space, not RAM. RAM is handed out as pages are first touched. Once the touched pages exhaust RAM (or the container's cgroup limit) and nothing can be reclaimed, the OOM killer picks a process and kills it."
+  - q: "In `ps` you see a Java process with VSZ 4.8 GB but RSS only 40 MB. Which number should you compare against the memory limit, and why?"
+    a: "RSS, the resident set, is the memory actually in RAM right now, so it is what counts against a RAM or cgroup limit. VSZ is all the address space the process has mapped, much of it never touched, so a large VSZ alone is not a problem."
 confusedWith: []
 tags: [virtual-memory, mmu, oom, containers]
 visual: flow
@@ -37,14 +48,18 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Virtual memory is a trick the hardware and OS play together so that each [process](card:processes) sees its own private range of memory addresses, called its address space, as if it alone owned the machine's memory. These virtual addresses are not real RAM locations. A piece of CPU hardware, the Memory Management Unit (MMU), translates each virtual address a program uses into the real physical address in RAM, using tables the OS sets up per process.
+
 ## Why it exists
 
-With raw physical RAM, one bad pointer could corrupt another program, and each program must know where it was loaded.
+If every process used physical RAM addresses directly, two problems follow. First, one process could read or overwrite another's memory with a stray pointer, breaking isolation and security. Second, every program would have to know where in RAM it was loaded, which changes every run. Virtual memory removes both: each process gets the same clean, private address space, and the MMU keeps their real RAM separate, so a bad pointer in one process cannot touch another.
 
 ## How it works
 
 <Mermaid
-  alt="Processes A and B both use address 0x1000; the MMU maps them to RAM frames 7 and 2. A swapped-out page lives on disk."
+  alt="Process A and process B both use virtual address 0x1000. The MMU with per-process page tables maps A's 0x1000 to RAM frame 7 and B's 0x1000 to RAM frame 2. A page that was swapped out lives in swap space on disk."
   chart={`flowchart LR
   A["Process A: 0x1000"] --> M{{"MMU + page tables"}}
   B["Process B: 0x1000"] --> M
@@ -53,13 +68,22 @@ With raw physical RAM, one bad pointer could corrupt another program, and each p
   M -. "page swapped out" .-> S[(Swap space)]`}
 />
 
-- An invalid address or a write to a read-only page gives SIGSEGV: a segmentation fault.
-- More: [paging](card:paging-and-page-faults) and [page replacement](card:page-replacement).
-- A container stuck at its cgroup memory.max limit triggers the OOM killer inside that cgroup.
+1. A program reads or writes a virtual address, say `0x1000`.
+2. The MMU looks up that address in the current process's page tables to find the real RAM location.
+3. Because each process has its own page tables, process A's `0x1000` and process B's `0x1000` land on different RAM, so they never collide.
+4. If the address is invalid, or the access breaks permissions (such as writing a read-only page), the CPU raises a fault and the OS sends the process SIGSEGV, a segmentation fault.
+
+So the key is that every access goes through per-process translation, which is what gives isolation.
+
+## Analogy
+
+<Analogy title="Hotel room numbers" limit="rooms do not move between floors, but swapped-out pages really do move to disk and back">
+Every guest asks for "room 101", but each guest is on a different floor, so "room 101" means a different real room for each. The front desk (the MMU) maps your floor plus "101" to one real room. Two guests using the same room number never clash.
+</Analogy>
 
 ## Example
 
-An idle JVM (example run): about 4.6 GiB virtual (VSZ), only about 40 MiB in RAM (RSS).
+An idle JVM reserves a large virtual address space but keeps very little in RAM. This run shows VSZ about 4.6 GiB and RSS only about 40 MiB.
 
 ```bash
 echo 'class Idle { public static void main(String[] a) throws Exception { Thread.sleep(60_000); } }' > Idle.java
@@ -73,16 +97,30 @@ sleep 1; ps -o pid,vsz,rss,comm -C java
  744281 4863172 40868 java
 ```
 
+What to notice:
+
+- VSZ (about 4.8 GB) is all the address space mapped, including the 2 GB heap reserved by `-Xmx2g` that the idle program never touches.
+- RSS (about 40 MB) is what is actually in RAM. The gap shows overcommit: address space was reserved, but RAM follows only the pages that are touched.
+- If you watch a container for OOM, compare RSS (not VSZ) against the memory limit.
+
+## Rules and defaults
+
+- **Overcommit (Linux, `vm.overcommit_memory=0`):** the default heuristic lets allocations reserve more address space than there is RAM; RAM is given on first touch.
+- **OOM killer:** when RAM (or a cgroup's `memory.max`) is exhausted and nothing can be reclaimed, the kernel kills a chosen process to free memory. Inside a container, this happens at the cgroup limit.
+- **Swap space:** optional disk space for pages evicted from RAM. It lets more run than fits in RAM, but a swapped-in access is far slower than a RAM access.
+- **Invalid access:** a bad or permission-breaking address gives SIGSEGV, a segmentation fault, which normally ends the process.
+- **Related mechanisms:** how pages are mapped and loaded is in [paging](card:paging-and-page-faults); choosing which page to evict is in [page replacement](card:page-replacement).
+
 ## Interview Qs
 
 ### What is virtual memory and why do we need it?
 
-Each process sees its own address space, mapped to RAM page by page. It isolates processes, hides physical addresses and gives RAM only to pages touched.
+Virtual memory gives each process its own address space, mapped to physical RAM page by page by the MMU. We need it so processes stay isolated (one cannot touch another's memory), so programs need not know their real RAM location, and so RAM is handed out only to pages a process actually touches.
 
 ### malloc succeeded, yet the process was killed later. How?
 
-Linux overcommits by default: the allocation only reserves address space. When touched pages exhaust RAM (or the cgroup limit) and nothing can be reclaimed, the OOM killer kills a process.
+Linux overcommits by default, so a successful allocation only reserves address space, not RAM. RAM is given as touched pages demand it. When the touched pages exhaust RAM or the cgroup limit and the kernel cannot reclaim enough, the OOM killer kills a process, which may be yours.
 
 ### VSZ vs RSS?
 
-VSZ is all the virtual memory a process has mapped; RSS is the part now in RAM. Watch RSS against the memory limit.
+VSZ is the total virtual address space a process has mapped, much of which may never be touched. RSS is the part currently resident in RAM. For memory pressure and limits, watch RSS; a large VSZ by itself is harmless.

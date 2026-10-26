@@ -5,17 +5,29 @@ title: "Locks: Mutex, Spinlock, Read-Write Lock and Monitor"
 topic: concurrency
 level: intermediate
 heat: 3
-hook: "A lock lets one thread at a time into a critical section; every other thread waits until it is released."
+hook: "A lock lets one thread at a time into a critical section; every other thread that wants in must wait until the holder releases it."
 points:
-  - { k: "Mutex", v: "one owner; only the thread that locked it unlocks it" }
-  - { k: "Spinlock", v: "loops until free; wastes CPU unless the wait is very short", kind: minus }
-  - { k: "Read-write lock", v: "many readers together, or one writer alone; for read-heavy data", kind: plus }
-  - { k: "Reentrant", v: "the owner may lock again; synchronized and ReentrantLock are" }
-  - { k: "Granularity", v: "one big lock is simple; finer locks let more threads work" }
+  - { k: "Mutex", v: "a lock with one owner; only the thread that locked it may unlock it" }
+  - { k: "Spinlock", v: "a lock that loops until it is free; wastes the CPU unless the wait is very short", kind: minus }
+  - { k: "Read-write lock", v: "lets many readers in together, or one writer alone; good for read-heavy data", kind: plus }
+  - { k: "Reentrant", v: "the owner may lock the same lock again; synchronized and ReentrantLock both allow it" }
+  - { k: "Granularity", v: "one big lock is simple but serial; many small locks let more threads work at once" }
+  - { k: "Only one JVM", v: "a Java lock guards one process; across servers lock the database row instead", kind: minus }
 trap:
   wrong: "A synchronized block stops two app instances from selling the same item."
-  right: "A JVM lock guards one process only. Across instances let PostgreSQL lock the row (SELECT ... FOR UPDATE) or use a distributed lock."
-sayIt: "A lock gives mutual exclusion: acquire, run the critical section, release in finally. I keep critical sections short, use a read-write lock for read-heavy data, and lock in the database across servers."
+  right: "A JVM lock guards one process only. Across instances, let PostgreSQL lock the row (SELECT ... FOR UPDATE) or use a distributed lock."
+  why: "In one JVM the lock really does fix the race, so people assume it keeps working after the app is scaled to several instances."
+sayIt: "A lock gives mutual exclusion: acquire, run the critical section, release in finally. I keep critical sections short, use a read-write lock for read-heavy data, and lock in the database when the data is shared across servers."
+cheat:
+  idea: "A lock lets one thread at a time run the critical section; others wait. It makes a group of steps on shared data behave as one, which stops races."
+  flow: "acquire → run critical section alone → release (in finally) → next waiter gets it"
+  remember: "Keep critical sections short, always release in finally, and remember a JVM lock guards one process, not many servers."
+buildsOn: [race-conditions, context-switching]
+scenarios:
+  - q: "A thread acquires a lock, then throws an exception inside the critical section before unlocking. What happens to the other threads?"
+    a: "If the unlock is not in a finally block, the lock is never released and every waiting thread blocks forever. That is why you lock, then try, and unlock in finally, so the lock is freed even when the body fails."
+  - q: "Your data is read thousands of times per second and written rarely. Which lock keeps it correct with the least waiting?"
+    a: "A read-write lock. Many readers hold the read lock together, so reads do not block each other; a writer takes the write lock alone. A plain mutex would force every reader to wait its turn, which wastes the fact that reads do not conflict."
 confusedWith: [mutex-vs-semaphore]
 tags: [lock, mutex, spinlock, read-write-lock, monitor]
 visual: flow
@@ -37,22 +49,32 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A lock is a tool that lets only one thread at a time run a chosen block of code, called the [critical section](card:critical-section). A thread acquires the lock before the block and releases it after; any other thread that reaches an acquired lock waits until it is free. This gives mutual exclusion: the protected steps on shared data run start to finish without another thread slipping in, which is the direct fix for the [race conditions](card:race-conditions) you just saw.
+
 ## Why it exists
 
-A [race](card:race-conditions) comes from steps interleaving on shared data. A lock makes those steps run as one unit by letting a single thread in at a time.
+A race happens because the steps of two threads interleave on shared data. Without a lock, there is no way to say "these three lines must run together, untouched." A lock draws that boundary: while one thread holds it, no other thread can enter the same critical section, so the three lines behave as one indivisible step. The cost is waiting, so you keep the critical section as short as possible to let the other threads back in quickly.
 
 ## How it works
 
 <Steps label="The lock protocol">
-<Step title="Acquire">Thread A takes the free lock. Thread B finds it held and waits, asleep or spinning.</Step>
-<Step title="Critical section">A alone reads and writes the shared data.</Step>
-<Step title="Release">A unlocks in `finally`; a waiting thread gets the lock next.</Step>
+<Step title="Acquire">Thread A takes the free lock. Thread B reaches it, finds it held, and waits, either asleep or spinning.</Step>
+<Step title="Critical section">A alone reads and writes the shared data; B still cannot enter.</Step>
+<Step title="Release">A releases the lock in a finally block; the OS then lets one waiting thread, say B, acquire it.</Step>
 </Steps>
 
-- Java `synchronized` uses the object's [monitor](card:monitor-lock): a lock plus `wait` and `notify`.
-- [Priority inversion](card:priority-inversion): a low-priority holder blocks a high-priority waiter; priority inheritance fixes it.
+1. A thread calls `lock()`; if the lock is free it becomes the owner, otherwise it waits.
+2. The owner runs the critical section with no other thread inside.
+3. The owner calls `unlock()` in `finally`, so the lock is freed even if the body throws.
+4. One waiting thread is woken and acquires the lock next.
+
+So the key is: acquire, do the shared work alone, and always release, even on an exception.
 
 ## Example
+
+A `ReentrantLock` protects a shared counter so two threads never lose an update.
 
 ```java
 static final ReentrantLock lock = new ReentrantLock();
@@ -60,7 +82,7 @@ static int count = 0;
 
 static void increment() {
     lock.lock();                 // wait here if another thread holds it
-    try { count++; }             // critical section
+    try { count++; }             // critical section: only one thread at a time
     finally { lock.unlock(); }   // always release, even on an exception
 }
 // two threads call increment() 100,000 times each, then:
@@ -71,18 +93,30 @@ System.out.println(count);
 200000
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| `new ReentrantLock()` fairness | Non-fair: no order promised to waiters | Java 25 API |
+- `lock.lock()` blocks the second thread until the first releases, so the two `count++` steps never interleave and the total is exactly 200000.
+- `unlock()` sits in `finally`, so an exception inside the critical section still frees the lock; without it, every waiting thread would block forever.
+- The lock is `static final`, so both threads share the one lock object; two different lock objects would guard nothing in common.
+
+## Rules and defaults
+
+- **Ownership (mutex):** only the thread that acquired a `ReentrantLock` may unlock it; another thread calling `unlock()` throws.
+- **Fairness:** `new ReentrantLock()` is non-fair by default (Java 25), so waiting order is not promised; `new ReentrantLock(true)` serves the longest waiter first but is slower.
+- **Reentrancy:** `synchronized` and `ReentrantLock` let the owner acquire the same lock again, which is needed when one locked method calls another.
+- **Spinlock vs blocking:** a spinlock loops while waiting, so use it only for very short waits on another core; otherwise a blocking lock lets the CPU do other work.
+- **Scope:** a Java lock guards one JVM. Across servers, lock the database row with `SELECT ... FOR UPDATE` or use a distributed lock.
+
+## Not to be confused with
+
+A lock (mutex) protects a critical section and has an owner, so threads take turns. A [semaphore](card:semaphores) holds a count of permits and lets up to N threads in at once, with no owner. Rule: a mutex is for "one at a time on this data"; a semaphore is for "at most N users of this resource."
 
 ## Interview Qs
 
 ### When is a spinlock better than a blocking mutex?
 
-When the wait is very short and the holder runs on another core. On one core a spinning thread burns its whole time slice while the holder cannot run, so most code should block instead.
+When the wait is expected to be very short and the holder runs on another core, so the waiting thread spins for a few cycles instead of paying the cost of sleeping and waking. On a single core a spinning thread burns its whole time slice while the holder cannot run, so there most code should block instead.
 
 ### synchronized or ReentrantLock?
 
-Both are reentrant mutexes with the same basic rules. ReentrantLock adds `tryLock` with a timeout, interruptible waits, fairness and several conditions, but you must unlock it yourself in `finally`.
+Both are reentrant mutexes with the same basic behaviour. `ReentrantLock` adds `tryLock` with a timeout, interruptible waiting, optional fairness and multiple condition queues, which `synchronized` lacks. The cost is that you must release it yourself in `finally`, whereas `synchronized` releases automatically when the block ends.

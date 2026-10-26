@@ -5,17 +5,29 @@ title: "Files, File Descriptors and Storage"
 topic: io
 level: intermediate
 heat: 2
-hook: "A file descriptor is a small number for anything a process has open: a file, a socket or a pipe. Every connection uses one."
+hook: "A file descriptor is a small number a process uses for anything it has open: a file, a socket or a pipe. Every open connection uses one, so they run out."
 points:
-  - { k: "fd 0, 1, 2", v: "stdin, stdout and stderr, open when a program starts", kind: default }
-  - { k: "Open-file limit", v: "RLIMIT_NOFILE (ulimit -n); past it, new fds fail with EMFILE", kind: minus }
-  - { k: "Page cache", v: "Linux keeps file data in RAM, so repeat reads skip the disk", kind: plus }
-  - { k: "fsync", v: "blocks until the data is on the device; databases need it" }
-  - { k: "Inode", v: "the file's metadata; its name lives in the directory" }
+  - { k: "File descriptor (fd)", v: "a small integer for something open; the same read()/write() work on files, sockets and pipes" }
+  - { k: "fd 0, 1, 2", v: "stdin, stdout and stderr, open when a program starts; the first file you open is usually fd 3", kind: default }
+  - { k: "Open-file limit", v: "RLIMIT_NOFILE (ulimit -n) caps open fds; past it, a new fd fails with EMFILE", kind: minus }
+  - { k: "Page cache", v: "Linux keeps recently used file data in RAM, so a repeat read skips the disk", kind: plus }
+  - { k: "write() is not durable", v: "write() usually reaches only the page cache; call fsync() to force bytes onto the device" }
+  - { k: "Inode", v: "the file's metadata and block list; the name lives in the directory, not the inode" }
 trap:
-  wrong: "write() returned, so order 42 is safely on disk."
-  right: "write() only reached the page cache. Call fsync() (and fsync the directory of a new file) before reporting success."
-sayIt: "Every open file, socket or pipe is a file descriptor, so the open-file limit caps connections. Writes land in the page cache and reach disk later; fsync forces them, which databases need to survive a crash."
+  wrong: "write() returned without an error, so payment 42 is safely saved on disk."
+  right: "write() normally only reached the page cache in RAM. Call fsync() before you report success."
+  why: "write() returns in microseconds and never errors here, so it feels finished. The actual disk write happens later, and a crash in that window loses the data."
+sayIt: "Every open file, socket or pipe is a file descriptor, so the per-process open-file limit caps how many connections a server can hold. Writes land in the page cache and reach disk later; fsync forces them, which databases rely on."
+cheat:
+  idea: "A file descriptor is a small integer a process uses for anything open: a file, socket or pipe. Sockets are fds too, so each connection uses one, and the open-file limit caps them."
+  flow: "write() → page cache (RAM) → fsync() → disk"
+  remember: "write() only reaches the page cache; fsync() makes it durable. Running out of fds fails with EMFILE."
+buildsOn: [processes, memory-hierarchy]
+scenarios:
+  - q: "Under load your server logs 'Too many open files' and stops accepting clients. What is happening, and what do you check?"
+    a: "Each accepted connection is a file descriptor, and you have hit the process limit RLIMIT_NOFILE, so accept() now fails with EMFILE. Check ulimit -n, look for sockets you forgot to close (a leak), and raise the limit if the real connection count is legitimately high."
+  - q: "A payment service writes a record, calls write(), returns success, then the machine loses power. The record is gone. Why, and what was missing?"
+    a: "write() only copied the bytes into the page cache in RAM; the kernel had not yet flushed them to the SSD. A power loss drops the page cache. The service should have called fsync() (and fsync the directory for a new file) before reporting the payment as saved."
 confusedWith: []
 tags: [files, page-cache, storage]
 visual: flow
@@ -37,33 +49,42 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A file descriptor (fd) is a small non-negative integer that a [process](card:processes) uses to refer to something it has open. The same `read()` and `write()` calls work whether the fd points to a file on disk, a network socket, or a pipe to another process. So, to a program, a socket is just an fd it reads and writes, which is why fds and sockets come up together. Behind a file's fd, the file on disk is described by an inode: its metadata and disk blocks.
+
 ## Why it exists
 
-Unix gives every open file, device, pipe or socket a file descriptor, so the same `read()` and `write()` work on all of them.
+A server needs one uniform way to talk to very different things: log files, client sockets, pipes. Giving each of them an fd and the same `read()`/`write()` interface means your payment server reads a request from a socket and writes to a log file with the same two calls. The cost is that fds are a limited, per-process resource, so a leak or a connection spike runs the server out of them.
 
 ## How it works
 
 <Mermaid
-  alt="An fd points to an open file entry (offset, flags), which points to the inode. Data goes through the page cache in RAM and reaches the SSD or HDD later, or at once on fsync."
+  alt="A file descriptor number in the process fd table points to an open-file entry holding the current offset and flags, which points to the inode holding the file's metadata and block list. File data passes through the page cache in RAM and reaches the SSD or HDD later, or at once when fsync is called."
   chart={`flowchart LR
-  FD["fd table: 0 1 2 3"] --> OF["Open file: offset, flags"]
+  FD["fd table: 0 1 2 3 ..."] --> OF["Open file: offset, flags"]
   OF --> IN["Inode: metadata, blocks"]
   IN --> PC["Page cache (RAM)"]
-  PC -- "later, or fsync" --> D[("SSD / HDD")]`}
+  PC -- "later, or on fsync" --> D[("SSD / HDD")]`}
 />
 
-- The first file a program opens is usually fd 3; `accept()` returns a new fd per client.
+1. The program opens a file or accepts a socket; the kernel returns the lowest free fd number. The first file is usually fd 3, because 0, 1 and 2 are already taken.
+2. Each `accept()` on a listening socket returns a new fd for that one client, so each connection consumes an fd.
+3. A `write()` copies the bytes into the page cache in RAM and returns; the kernel writes them to the device later, in the background.
+4. A `read()` of data already in the page cache is served from RAM, skipping the disk entirely, which is why repeat reads are fast.
+
+So the key is that writes are not on disk when `write()` returns; `fsync()` is what forces them down.
 
 ## Example
 
-A hard link is a second name for the inode; a symlink holds a path, so it can dangle (example run; inode numbers vary):
+A hard link is a second name for the same inode; a symbolic link holds a path and can dangle if the target is removed. This was run; inode numbers vary by machine.
 
 ```bash
 echo '{"id":42}' > order.json
-ln order.json order-hard.json        # hard link
-ln -s order.json order-link.json     # symbolic link
-stat -c '%i %h %N' order*            # inode, link count, name
-rm order.json
+ln order.json order-hard.json        # hard link: another name for the same inode
+ln -s order.json order-link.json     # symbolic link: a path pointing at order.json
+stat -c '%i %h %N' order*            # inode number, link count, name
+rm order.json                        # remove the original name
 cat order-hard.json; cat order-link.json
 ```
 
@@ -75,12 +96,29 @@ cat order-hard.json; cat order-link.json
 cat: order-link.json: No such file or directory
 ```
 
+What to notice:
+
+- `order.json` and `order-hard.json` share one inode number and show a link count of `2`: they are two names for the same file data, not two copies.
+- After `rm order.json`, the data survives because the inode still has one name (`order-hard.json`): the file goes only when its last link is removed.
+- The symlink has its own inode and just stores the path `order.json`; once that name is gone, the symlink dangles and `cat` fails.
+
+## Rules and defaults
+
+- **Standard fds:** 0 is stdin, 1 is stdout, 2 is stderr, opened for you at startup.
+- **Open-file limit:** each process has a soft cap `RLIMIT_NOFILE` (`ulimit -n`); opening past it fails with `EMFILE`, reported as "Too many open files".
+- **Durability:** `write()` only guarantees the page cache; `fsync(fd)` blocks until that file's data is on the device. For a newly created file, also `fsync` its directory so the name itself is persisted.
+- **Storage:** HDDs pay a mechanical seek and rotation per random access, so random I/O is far slower than sequential; SSDs have no moving parts and are much faster at random reads.
+
 ## Interview Qs
 
-### What is a file descriptor, and why does a server care?
+### What is a file descriptor, and why does a server care about them?
 
-An index into the process's open-file table. Sockets are fds too, so each connection uses one; past RLIMIT_NOFILE, accept() fails with EMFILE.
+It is a small integer that stands for something a process has open, and the same `read()`/`write()` work on it whether it is a file, socket or pipe. Sockets are fds too, so each client connection uses one; once a process hits `RLIMIT_NOFILE`, `accept()` fails with `EMFILE` and the server stops taking clients.
 
-### HDD vs SSD: why does random I/O matter?
+### Why is write() returning not enough for durability, and what fixes it?
 
-Each random HDD read pays a mechanical seek and rotation: in OSTEP's table, 2 MB/s random vs 223 MB/s sequential. SSDs have no moving parts and do tens to hundreds of MB/s random.
+`write()` usually only copies the bytes into the page cache in RAM, so a crash or power loss before the kernel flushes them loses the data. Calling `fsync(fd)` blocks until that file's data is on the device; for a new file you also `fsync` its directory so the name survives. Databases rely on this to keep committed data.
+
+### Why does random versus sequential I/O matter on an HDD?
+
+Every random read on an HDD pays a mechanical seek and rotational delay to move the head, which dominates the time. OSTEP's figures show a few MB/s random against hundreds of MB/s sequential. SSDs have no moving parts, so their random reads are far closer to sequential, which changes how databases lay out data on each.
