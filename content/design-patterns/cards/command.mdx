@@ -5,17 +5,29 @@ title: Command
 topic: behavioural
 level: intermediate
 heat: 2
-hook: "Wrap a request in an object, so it can be passed around, queued, scheduled, logged or undone later."
+hook: "Wrap a request as an object that carries everything needed to run it, so it can be passed around, queued, scheduled, logged or undone later."
 points:
-  - { k: "Roles", v: "the client builds it, the invoker runs it, the receiver does the work" }
-  - { k: "Command", v: "holds the receiver and the data: RefundCommand(paymentId)" }
-  - { k: "Uses", v: "queue, delay, keep a history, undo and redo" }
-  - { k: "JDK", v: "a Runnable or Callable submitted to an ExecutorService" }
-  - { k: "Cost", v: "one class per action; heavy for trivial calls", kind: minus }
+  - { k: "Command", v: "the object holding the receiver and the data, such as RefundCommand(service, paymentId)" }
+  - { k: "Receiver", v: "the object with the real logic the command calls, such as RefundService" }
+  - { k: "Invoker", v: "the object that triggers execute() later, without knowing what the command does" }
+  - { k: "Uses", v: "queue a task, delay it, keep a history for undo and redo, log requests", kind: plus }
+  - { k: "JDK", v: "a Runnable or Callable handed to an ExecutorService is a command (Java)", kind: default }
+  - { k: "Cost", v: "one class per action; heavy for a call you could just make directly", kind: minus }
 trap:
   wrong: "Command is only for undo and redo."
-  right: "Undo is one use. Passing, queuing, delaying and logging requests are just as common, as in job queues and executors."
+  right: "Undo is one use. Passing, queuing, delaying and logging requests are just as common, as in job queues and thread-pool executors."
+  why: "Textbooks teach Command with a text-editor undo example, so that single use sticks while the everyday queueing use is forgotten."
 sayIt: "Command turns a request into an object with everything needed to run it, like RefundCommand with the payment id. An invoker such as a job runner calls execute() later, without knowing the refund logic."
+cheat:
+  idea: "Command wraps a request as an object that holds the receiver and the data. An invoker runs its execute() later, without knowing what it does."
+  flow: "Client builds command → invoker queues it → execute() → receiver does the work"
+  remember: "Decouples what to do from when and by whom. Not just undo: queueing and scheduling too."
+buildsOn: [strategy]
+scenarios:
+  - q: "A refund should not run during the web request; a background worker should pick it up and run it a minute later. Which pattern, and what gets queued?"
+    a: "Command. The controller builds a RefundCommand holding the RefundService and the payment id, then puts it on a queue. The worker (the invoker) later calls execute() without knowing the refund logic. The request became a storable object, so it can wait and run elsewhere."
+  - q: "What extra method would you add to a command to support undo, and how does the history work?"
+    a: "Add undo() that reverses the action. Keep executed commands on a stack; undo pops the last one and calls its undo(), and redo runs execute() again. Each command knows how to reverse itself, so the history code stays generic."
 confusedWith: [command-vs-strategy]
 tags: [command, behavioural, queue, undo]
 visual: flow
@@ -34,9 +46,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Command is a pattern that turns a request into an object. The object, the command, carries the target it should act on (the receiver) and the data it needs, and exposes a single `execute()` method. Three roles take part: the client builds the command, the invoker calls `execute()`, and the receiver holds the real logic. Because the request is now an object, you can store it, pass it, delay it or keep a history of it.
+
 ## Why it exists
 
-Code that asks for a refund should not have to run it now, or know how. Packing the request as an object lets a job runner queue it and run it later.
+Code that asks for a refund should not have to run the refund now, or know how refunds work. If it calls `refundService.refund(id)` directly, the refund happens inline, on the same thread, straight away. Packing the request as a `RefundCommand` object lets a job runner hold it, queue it, and run it later on a background worker. The caller is decoupled from when, where and by whom the action runs.
 
 ## How it works
 
@@ -52,10 +68,17 @@ Code that asks for a refund should not have to run it now, or know how. Packing 
   K->>R: refund("P1")`}
 />
 
-- The invoker knows only `execute()`, so one runner handles refunds, payouts and reminders.
-- For undo, keep executed commands in a history; a [Memento](card:memento) can save the state to restore.
+1. The client builds a command, putting the receiver and the data inside it.
+2. The client hands the command to the invoker, for example by adding it to a queue.
+3. The invoker holds commands and knows only one method, `execute()`.
+4. Later the invoker calls `execute()` on a command.
+5. The command calls the receiver, which does the real work.
+
+So the key is that the invoker triggers the action without knowing what it is, and the client decided the action without running it.
 
 ## Example
+
+The command holds the receiver and the id; the job runner stores commands and runs them later, knowing only `execute()`.
 
 ```java
 interface PaymentCommand { void execute(); }
@@ -63,25 +86,43 @@ interface PaymentCommand { void execute(); }
 class RefundCommand implements PaymentCommand {
     private final RefundService service; private final String paymentId;
     RefundCommand(RefundService s, String id) { service = s; paymentId = id; }
-    public void execute() { service.refund(paymentId); }         // the receiver does the work
+    public void execute() { service.refund(paymentId); }       // the receiver does the work
 }
-class JobRunner {                                                 // the invoker
+class JobRunner {                                              // the invoker
     private final Queue<PaymentCommand> queue = new ArrayDeque<>();
     void submit(PaymentCommand c) { queue.add(c); }
     void runAll() { while (!queue.isEmpty()) queue.poll().execute(); }
 }
 ```
 
+What to notice:
+
+- `RefundCommand` stores the receiver and the data, so the whole request is one object that can sit on a queue.
+- `JobRunner` depends only on `PaymentCommand.execute()`, so the same runner can handle refunds, payouts and reminders without knowing any of them.
+- `submit` and `runAll` are separate, which is the point: the request is captured now and run later, maybe on another thread.
+- To add undo, give the command an `undo()` and keep run commands on a stack; the runner code does not change.
+
+## Rules and defaults
+
+- **The command carries its context:** it holds the receiver and the data, so the invoker needs nothing but `execute()`.
+- **Invoker stays ignorant:** the invoker must not depend on concrete commands, or it loses the ability to run any command.
+- **Undo is optional:** add an `undo()` and a history stack only when you need reversible actions; many commands only ever run forward.
+- **Runnable is the JDK form (Java):** a `Runnable` or `Callable` given to an `ExecutorService` is a command; the executor is the invoker and decides when and on which thread it runs.
+
+## Not to be confused with
+
+[Strategy](card:strategy) and Command both wrap behaviour in an object, so they look alike. A Strategy is one of several interchangeable ways to do a job, chosen and called by a context. A Command is a single requested action, with its data, meant to be run later by an invoker. Rule: choosing among ways to do one task is Strategy; capturing a request to queue, delay or undo is Command.
+
 ## Interview Qs
 
 ### A refund must run later from a queue. Command or Strategy?
 
-Command. A refund is one requested action with its own data, run later by a job runner. Strategy fits when one job, like paying, has several interchangeable ways. See [Command vs Strategy](compare:command-vs-strategy).
+Command. A refund is one requested action with its own data (the payment id), captured now and run later by a job runner that does not know the refund logic. Strategy fits a different need: when one job, such as paying, has several interchangeable ways. See [Command vs Strategy](compare:command-vs-strategy).
 
 ### How does Command support undo and redo?
 
-Each command also gets an undo() that reverses it. Executed commands go on a history stack: undo pops one and calls undo(); redo runs it again.
+Each command also implements an `undo()` that reverses its effect. Executed commands go on a history stack. Undo pops the last command and calls its `undo()`; redo runs its `execute()` again. Because each command knows how to reverse itself, the undo/redo machinery stays generic and does not grow with new actions.
 
 ### Where does the JDK use Command?
 
-Runnable and Callable. You submit a task object to an ExecutorService, which decides when and on which thread it runs. Runnable is a functional interface, so a lambda works.
+`Runnable` and `Callable`. You submit a task object to an `ExecutorService`, which decides when and on which thread it runs, so the executor is the invoker. Both are functional interfaces, so a lambda can be the command.

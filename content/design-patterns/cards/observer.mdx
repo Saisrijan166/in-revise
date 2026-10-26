@@ -5,17 +5,29 @@ title: Observer
 topic: behavioural-objects
 level: beginner
 heat: 3
-hook: "One subject keeps a list of observers and tells each of them when something changes."
+hook: "One object keeps a list of interested objects and calls each of them whenever something it cares about changes."
 points:
-  - { k: "Subject", v: "holds the observer list; calls each one on a change" }
-  - { k: "Loose coupling", v: "add a new observer without editing the subject", kind: plus }
-  - { k: "java.util.Observer", v: "deprecated since Java 9; do not use in new code", kind: minus }
-  - { k: "Spring listeners", v: "synchronous, in the publisher's thread (Spring Framework 7)", kind: default }
-  - { k: "@TransactionalEventListener", v: "runs AFTER_COMMIT by default (Spring Framework 7)", kind: default }
+  - { k: "Subject", v: "the object that changes; it holds the list of observers and calls them on a change" }
+  - { k: "Observer", v: "an object that wants to be told; it implements a small interface the subject calls" }
+  - { k: "Loose coupling", v: "you can add a new observer without editing the subject's code", kind: plus }
+  - { k: "java.util.Observer", v: "the old JDK class is deprecated since Java 9; do not use it in new code", kind: minus }
+  - { k: "Spring events", v: "a Spring @EventListener runs in the publisher's own thread unless you add @Async (Spring Framework 7.0)", kind: default }
+  - { k: "@TransactionalEventListener", v: "runs after the database transaction commits by default (Spring Framework 7.0)", kind: default }
 trap:
-  wrong: "Observers inside one app deliver every event, so other services can rely on them."
-  right: "Events live only in memory: if the app crashes or an after-commit listener fails, the event is gone. Across services use a broker."
-sayIt: "Observer lets one subject notify many observers without knowing their classes. In Spring I publish a PaymentSucceeded event and @EventListener methods react; for other services I use a message broker."
+  wrong: "If a listener inside the app receives the event, other services can rely on it too."
+  right: "The event lives only in memory. If the app crashes before a listener runs, the event is gone. To reach other services use a message broker."
+  why: "The listener call looks like any method call that always runs, so people assume the delivery is as reliable as a database write. In memory there is no retry and no record."
+sayIt: "Observer lets one subject notify many observers without knowing their classes, so I add new reactions without touching the subject. In Spring I publish an event and @EventListener methods react; to reach other services I use a broker instead."
+cheat:
+  idea: "One subject holds a list of observers and calls each one when its state changes. Observers react without the subject knowing their classes."
+  flow: "state changes → subject loops its list → each observer reacts"
+  remember: "Great inside one app; across services it is not reliable, so use a broker there."
+buildsOn: []
+scenarios:
+  - q: "After a payment succeeds you must send a receipt, add loyalty points and update analytics, and more reactions keep being added. How do you structure it?"
+    a: "Make PaymentService publish a PaymentSucceeded event and let each reaction be a separate observer. PaymentService never changes when a new reaction is added, because it only publishes; the new observer just subscribes."
+  - q: "A Spring @EventListener throws an exception. What happens to the code that published the event?"
+    a: "By default the listener runs in the publisher's thread, so the exception propagates back and can fail the publishing call. Add @Async to run the listener on another thread, and its failure no longer affects the publisher."
 confusedWith: [observer-vs-pub-sub]
 tags: [observer, events, spring-events]
 visual: code
@@ -37,25 +49,34 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Observer is a pattern where one object, the **subject**, keeps a list of other objects, the **observers**, and calls a method on each of them whenever its own state changes. The subject knows the observers only through a small interface, not by their real class. So one change in the subject fans out to many reactions, and the subject does not need to know what those reactions are.
+
 ## Why it exists
 
-After a payment succeeds, receipts, loyalty points and analytics all need to know. Calling each one from PaymentService ties it to every new feature.
+After a payment succeeds, a receipt must go out, loyalty points must be added and analytics must be updated. If `PaymentService` calls each of these directly, it depends on all of them, and every new reaction means editing and re-testing `PaymentService`. With Observer, `PaymentService` only announces "a payment succeeded" to its observer list. Each reaction is a separate observer that registers itself, so new reactions are added without touching `PaymentService`.
 
 ## How it works
 
 <Mermaid
-  alt="PaymentService, the subject, publishes PaymentSucceeded. It loops over its observer list and calls ReceiptService and LoyaltyService. Neither observer is known to the subject by class, only by the observer interface."
+  alt="PaymentService, the subject, publishes a PaymentSucceeded event. It loops over its observer list and calls ReceiptService and LoyaltyService, which both implement the observer interface. The subject does not know their concrete classes."
   chart={`flowchart LR
-  P[PaymentService: subject] -- PaymentSucceeded --> L{{observer list}}
+  P[PaymentService: subject] -- "state changed" --> L{{observer list}}
   L --> R[ReceiptService]
   L --> Y[LoyaltyService]`}
 />
 
-- Observers register with the subject; the subject only knows the observer interface.
-- [Push model](card:push-model) sends the data; [pull model](card:pull-model) sends a signal and observers ask.
-- Do not rely on notification order; in Spring set it with `@Order` if it matters.
+1. Each observer registers with the subject, so the subject's list fills up with objects it knows only by the observer interface.
+2. The subject's state changes, for example a payment is marked succeeded.
+3. The subject loops over its list and calls the same interface method on every observer.
+4. Each observer runs its own reaction; the subject never learns what any of them did.
+
+So the key is that the subject depends only on the interface, so observers come and go freely.
 
 ## Example
+
+In Spring you rarely write the list by hand: `ApplicationEventPublisher` is the subject and `@EventListener` methods are the observers. This publishes one event and one observer reacts.
 
 ```java
 record PaymentSucceeded(String paymentId) { }
@@ -73,16 +94,37 @@ class ReceiptService {
 }
 ```
 
+What to notice:
+
+- `PaymentService` names no receipt, loyalty or analytics class. It only publishes the event, so it is the subject and stays unchanged as reactions are added.
+- `ReceiptService` is an observer: Spring finds the `@EventListener` method by the event type and calls it. Adding `LoyaltyService` with its own `@EventListener` needs no change to `PaymentService`.
+- `publishEvent` runs the listener in the same thread by default, so `complete` does not return until the receipt code finishes. Add `@Async` to the listener to run it separately.
+
+## Rules and defaults
+
+- **Spring listeners are synchronous:** `@EventListener` methods run in the publisher's thread; the publisher waits for them (Spring Framework 7.0). Add `@Async` (with async enabled) to run on another thread.
+- **Notification order is not guaranteed:** if order matters between listeners, set it with `@Order`.
+- **@TransactionalEventListener:** runs after the surrounding database transaction commits by default. If no transaction is active, the event is dropped unless `fallbackExecution` is true.
+- **java.util.Observer / Observable:** deprecated since Java 9 (not removed). Use Spring events, your own interface, or the `Flow` API instead.
+
+## Not to be confused with
+
+Observer and [publish/subscribe](compare:observer-vs-pub-sub) look alike, but Observer has the subject call its observers directly inside one process, while pub/sub puts a broker between publisher and subscribers so neither side knows the other and the event can be delivered across services. Rule: Observer for reactions inside one app, pub/sub for reactions in other services.
+
+## Common mistakes
+
+- **"Spring events run on a background thread, so publishing is fire-and-forget."** By default the listener runs in the publisher's thread, so a slow or failing listener slows or breaks the publisher. You must add `@Async` for a background thread.
+
 ## Interview Qs
 
 ### Do Spring event listeners run in a separate thread?
 
-No. By default publishEvent() waits until every listener finishes, in the caller's thread. Add @Async to a listener, or a custom ApplicationEventMulticaster, for asynchronous handling.
+No. By default `publishEvent()` waits until every listener finishes, in the caller's thread. To run a listener separately, add `@Async` to it (with async enabled), or configure a custom `ApplicationEventMulticaster` with an executor.
 
 ### Why is java.util.Observable deprecated?
 
-Since Java 9. Its event model is limited: notification order is unspecified, and changes do not map one-to-one to notifications. Javadoc points to java.beans, java.util.concurrent or the Flow API instead.
+It has been deprecated since Java 9. Its model is weak: notification order is unspecified, and state changes do not map cleanly to notifications. The Javadoc points you to `java.beans`, the `java.util.concurrent` classes, or the `Flow` API for richer, safer event handling.
 
-### How do you send the receipt only after the payment commits?
+### How do you send the receipt only after the payment is committed to the database?
 
-Use @TransactionalEventListener: it runs after commit by default. If no transaction is active, the event is dropped unless fallbackExecution is true.
+Use `@TransactionalEventListener`, which runs after the transaction commits by default. This avoids sending a receipt for a payment that later rolls back. If the listener runs with no active transaction, the event is discarded unless you set `fallbackExecution = true`.

@@ -1,5 +1,5 @@
 # Coverage: Design Patterns
-Reference: reference/design-patterns.md  ·  Last updated: 20-10-2026
+Reference: reference/design-patterns.md  ·  Last updated: 21-10-2026
 
 Every reference item (key list: the numbered sections, plus each question, pattern and "X vs Y" row inside them) appears in exactly
 one of Mapped, Corrected or Dropped. A section whose parts went to different places has one row here (Corrected wins over
@@ -180,3 +180,72 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | P12 (part) "middleware" as a use | cut: unverifiable: no primary page in the allowed list defines it; glossary term not written |
 | P13 State Pattern: subtopics, payment lifecycle, invalid transitions, trade-off | also: concept `state` (Mermaid lifecycle, points, Example, Interview Q "overkill") |
 | P15 Dependency Injection (constructor, setter, field injection; benefit: testing, clear dependencies, loose coupling; preferred: constructor injection; trade-off: many dependencies = too many responsibilities; PaymentService example; interview answer: mocks in tests) | also: concept dependency-injection (points, trap, Example, Interview Qs 2); tree nodes constructor-injection, setter-injection, field-injection |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass checked about 650 claims and fixed 3, removing none.
+
+### Unit basics
+
+**Added from the reference**
+
+- (what-are-design-patterns) "A pattern is a tool, not a rule; overuse is overengineering" made a first-class point and a Common mistake. Reference P1 ("Patterns are tools, not mandatory rules") and §19 overengineering angle. The full overengineering concept stays in `anti-patterns`; linked only.
+- (what-are-design-patterns) "four points to explain a pattern" (problem, idea, example, trade-offs) folded into the point "a pattern gives…". Owned fully by `choosing-a-pattern`; not expanded here.
+- No new glossary terms: every interviewer word used (actor, role interface, fragile base class, delegation, DRY, KISS, YAGNI, Law of Demeter) already exists in glossary.yaml.
+
+**Corrections**
+
+- None. All draft facts were re-verified, not changed.
+
+### Unit creational
+
+**Added from the reference**
+
+- Singleton: thread-safety mechanisms (eager field, double-checked locking + volatile, holder idiom, enum) and *why* each is safe (JLS 12.4.2 initialization lock) → `singleton` (How it works table, scenarios, Interview Qs). Reference only said "thread safety".
+- Singleton: enum's reflection/deserialization guarantees made concrete (Constructor.newInstance throws for enum; enum constants resolved by name on deserialize, no readResolve needed) → `singleton` Example "What to notice", points.
+- Factory: static factory method vs GoF Factory Method distinction, exhaustive enum switch (no default) → `factory-method` points, trap, Interview Qs.
+- Builder: HttpRequest.newBuilder() JDK example (immutable result, IllegalStateException without URI), record-as-alternative → `builder` Rules and defaults, points.
+- Prototype: shallow vs deep copy, clone()/Cloneable pitfalls, prototype-into-singleton behaviour → `prototype` (whole concept). Reference only said "cloning a configuration template".
+
+**Corrections**
+
+- Reference factory/builder/singleton examples use `pay(double)`, `String` method keys, `@Component` only. Kept the repo draft's corrected forms: `BigDecimal` money, `enum PaymentMethod`, exhaustive switch. No new correction needed this pass; facts were already verified in the draft.
+- No reference fact contradicted the docs in this unit.
+
+### Unit playbook
+
+**Added from the reference**
+
+- Reference P19 lists 13 problem→pattern rows; the picker in `choosing-a-pattern` already reaches every GoF pattern plus Repository and DI (coverage P157). Kept and grouped Create / Wrap / Behave / App, each a link to the owner concept.
+- Reference P18 confusion table → `pattern-confusions-map` "Not to be confused with" table: one splitting question per pair (coverage P18), plus the wrapper decision tree Mermaid (coverage P161) and the "same structure, different intent" idea for Bridge/State/Strategy (coverage P164, now Interview Q 3).
+- Fifth answer beat (trade-off) kept in the 20-second Strategy example (coverage P158); "when not to use a pattern" / YAGNI kept in Interview Q 1 (coverage P159); machine-coding/LLD tip kept in Interview Q 3 (coverage P160).
+- Adapter vs Facade trap kept as the frontmatter trap and the worked Example (coverage P163).
+
+**Corrections**
+
+- None. All facts carried over unchanged from the verified v2 draft; only explanations were rewritten for v3 teaching clarity.
+
+### Unit solid
+
+**Added from the reference**
+
+- (single-responsibility) "a reason to change is an actor / group of people, not a task count" raised to the central teaching, with the Employee (finance/operations/technology) example and the "bug fixes do not count" rule. Reference P16 S row. Verified from Martin's 2014 SRP post.
+- (single-responsibility) "SOLID are heuristics, not laws" kept as a Rules-and-defaults bullet; verified from Martin's "Getting a SOLID start" (2009).
+- (open-closed) strategic closure ("no program 100% closed; close against the expected change") and the plugin-architecture example kept and explained; Meyer 1988 origin noted.
+- (interface-segregation) recompile cost of a fat interface and the role-interface term (Fowler) kept; adapter-wrapping a fat SDK added as an interview answer.
+- (dependency-inversion) "stable concretes are fine" (String) and "DIP is the primary mechanism for OCP" verified from Martin's 2000 "Design Principles and Design Patterns" paper.
+- No new glossary terms: srp-term, reason-to-change, actor-srp, ocp-term, lsp-term, precondition, postcondition, invariant-term, isp-term, fat-interface, role-interface, dip-term etc. already exist.
+
+**Corrections**
+
+- None. Draft facts re-verified against primary sources; wording sharpened, no fact changed.
+
+### Unit structural
+
+**Added from the reference**
+
+- Nothing materially new was added beyond the verified draft; the reference's structural teaching points (P7, P17.1, P17.2, P17.7, P18.3–P18.5, P6, P8) were already mapped to these concepts in the coverage file. The rewrite re-expressed them in v3 form (What it is, numbered How it works, What-to-notice, Rules and defaults, scenarios, cheat cards).
+
+**Corrections**
+
+- None. All draft facts re-checked against existing sources and left correct.

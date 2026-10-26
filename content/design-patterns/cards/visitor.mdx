@@ -5,16 +5,28 @@ title: Visitor
 topic: behavioural-objects
 level: interview
 heat: 2
-hook: "Put a new operation in a visitor class instead of adding a method to every class it works on."
+hook: "You add a new operation over a fixed set of classes by writing one visitor class, instead of adding a method to every one of those classes."
 points:
-  - { k: "accept / visit", v: "element calls visitor.visit(this); one visit method per type" }
-  - { k: "New operation", v: "write one new visitor; payment classes stay untouched", kind: plus }
-  - { k: "New type", v: "every visitor needs a new visit method", kind: minus }
-  - { k: "Modern Java", v: "sealed interface (Java 17) + pattern switch (Java 21)" }
+  - { k: "Element types", v: "the fixed set of classes the operation runs over, such as UpiPayment, CardPayment, WalletPayment" }
+  - { k: "accept / visit", v: "each element has accept(visitor), which calls visitor.visit(this); the visitor has one visit method per type" }
+  - { k: "New operation is cheap", v: "write one new visitor class; the element classes are not touched", kind: plus }
+  - { k: "New element type is costly", v: "every existing visitor must gain a new visit method for it", kind: minus }
+  - { k: "Modern Java", v: "a sealed interface (Java 17) with an exhaustive pattern switch (Java 21) replaces accept/visit", kind: key }
 trap:
-  wrong: "Overload visit(UpiPayment) and visit(CardPayment), then call visitor.visit(payment)."
-  right: "Overloads are picked at compile time from the declared type, so no overload matches. accept() lets the runtime type choose: double dispatch."
-sayIt: "Visitor moves an operation, like fees or GST, out of the payment classes into one visitor. It suits fixed types with changing operations; in Java 21 a sealed interface with an exhaustive switch does the same job."
+  wrong: "Just overload visit(UpiPayment) and visit(CardPayment), then call visitor.visit(payment)."
+  right: "Overloads are picked at compile time from the declared type (the interface), so none matches. accept() uses the element's runtime type instead: double dispatch."
+  why: "Overloading looks like it would pick by the real object, but Java resolves overloads from the static type at compile time, not the runtime type. Only the virtual accept() call uses the runtime type."
+sayIt: "Visitor moves an operation, like fees or GST, out of the payment classes into one visitor, so new operations do not touch those classes. It suits fixed types with changing operations; in Java 21 a sealed interface with an exhaustive switch does the same more simply."
+cheat:
+  idea: "Put a new operation over a fixed set of classes into one visitor instead of adding a method to each class."
+  flow: "element.accept(visitor) → visitor.visit(this) picks the type's method"
+  remember: "Types stable, operations changing: ideal. A new type forces every visitor to change; in Java 21 use a sealed switch."
+buildsOn: [strategy]
+scenarios:
+  - q: "You have UpiPayment, CardPayment and WalletPayment, and keep being asked for new reports over them: fees, GST, settlement files. The types rarely change. Which pattern fits, and why?"
+    a: "Visitor (or its modern form, a sealed interface with a pattern switch). The types are stable and the operations keep growing, so each new report is one new visitor or one new switch, and the three payment classes are never edited."
+  - q: "You add a new payment type, CryptoPayment. What does Visitor cost you, and how does the Java 21 sealed-switch version help?"
+    a: "Every existing visitor must add a visit(CryptoPayment) method, and the compiler will not force you, so you can forget one. With a sealed interface and exhaustive switches (no default), adding CryptoPayment makes every such switch stop compiling until it handles the new type, so none is missed."
 confusedWith: []
 tags: [visitor, double-dispatch, sealed]
 visual: code
@@ -36,14 +48,18 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Visitor is a pattern that lets you add a new operation over a fixed group of classes, called the **elements**, without editing those classes. You put the operation in a separate **visitor** class that has one method per element type. Each element has an `accept(visitor)` method that calls back the matching method on the visitor. So the operation's code lives in the visitor, and the element classes stay untouched when you add another operation.
+
 ## Why it exists
 
-Fees, GST and reports all need different logic per payment type. Adding each one as a method to UpiPayment, CardPayment and WalletPayment bloats classes that should stay stable.
+Fees, GST and settlement reports each need different logic for `UpiPayment`, `CardPayment` and `WalletPayment`. If you add each one as a method on all three classes, those classes swell with unrelated concerns and change every time a new report appears. Visitor collects one operation into a single class, so a new report is a new visitor and the payment classes are never edited. This fits when the set of types is stable but the operations keep growing.
 
 ## How it works
 
 <Mermaid
-  alt="The client calls accept with a FeeVisitor on a CardPayment. The CardPayment calls visit with itself, so the visitor's CardPayment method runs and returns the fee. Two calls pick the code: the element's runtime type and the visitor's type."
+  alt="The client calls accept with a FeeVisitor on a CardPayment. The CardPayment calls visit on the visitor, passing itself as a CardPayment, so the visitor's CardPayment method runs and returns the fee. Two calls choose the code: the element's runtime type, then the visitor's type."
   chart={`sequenceDiagram
   participant Cl as Client
   participant P as CardPayment
@@ -54,21 +70,26 @@ Fees, GST and reports all need different logic per payment type. Adding each one
   P-->>Cl: fee`}
 />
 
-- First dispatch picks the element's `accept`; the second picks the visitor's `visit`.
-- `GstVisitor` is just another visitor over the same three types.
-- JDK: `Files.walkFileTree` calls a `FileVisitor` for each file and directory.
+1. The client calls `element.accept(visitor)`. This first call picks the method by the element's runtime type, because `accept` is overridden per element.
+2. Inside `accept`, the element calls `visitor.visit(this)`. Because `this` is known here as the concrete type, this second call picks the visitor's matching `visit` method.
+3. The chosen `visit` method runs the operation for that exact type and returns its result.
+
+So the key is the two calls, called double dispatch: the element's type and the visitor's type together decide which code runs, which a single overloaded call cannot do.
 
 ## Example
 
-```java
-sealed interface PaymentStrategy permits UpiPayment, CardPayment, WalletPayment {
-    void pay(BigDecimal amount);
-}
+Modern Java expresses the same idea without `accept`/`visit`: a sealed interface fixes the types, and an exhaustive switch is the "visitor". This one computes the fee per type.
 
-BigDecimal fee(PaymentStrategy method, BigDecimal amount) {    // the "visitor"
-    return switch (method) {                                   // exhaustive: no default
+```java
+sealed interface PaymentMethod permits UpiPayment, CardPayment, WalletPayment { }
+record UpiPayment() implements PaymentMethod { }
+record CardPayment() implements PaymentMethod { }
+record WalletPayment() implements PaymentMethod { }
+
+BigDecimal fee(PaymentMethod m, BigDecimal amount) {           // one "visitor"
+    return switch (m) {                                        // exhaustive: no default needed
         case UpiPayment u    -> BigDecimal.ZERO;
-        case CardPayment c   -> amount.multiply(new BigDecimal("0.02"));  // example rate
+        case CardPayment c   -> amount.multiply(new BigDecimal("0.02"));   // example rate
         case WalletPayment w -> amount.multiply(new BigDecimal("0.01"));
     };
 }
@@ -79,12 +100,37 @@ System.out.println(fee(new CardPayment(), BigDecimal.valueOf(500)));
 10.00
 ```
 
+What to notice:
+
+- The switch chooses by the runtime type of `m`, so it does the job that classic Visitor needed `accept`/`visit` and double dispatch to do.
+- The interface is `sealed`, so the compiler knows the three permitted types. The switch has no `default`, so it must cover all three; a `gst(...)` method is just another such switch.
+- Add a fourth type to the `permits` list and this switch stops compiling until it handles the new case, which is how the compiler stops you forgetting a type.
+
+## Rules and defaults
+
+- **Double dispatch:** classic Visitor needs `accept` on the element (dispatch on the element type) and `visit` on the visitor (dispatch on the visitor), because one Java call dispatches on only one type.
+- **Overloads will not do it:** overloaded methods are resolved from the declared (compile-time) type (JLS 15.12), so `visitor.visit(payment)` with `payment` typed as the interface does not reach the per-type overload.
+- **Sealed + switch (Java 17 / Java 21):** a sealed interface plus an exhaustive `switch` with no `default` gives compile-time safety when a new type is added; JEP 441 itself notes this replaces much Visitor boilerplate.
+- **In the JDK:** `Files.walkFileTree` calls a `FileVisitor` for each file and directory it walks.
+
+## Not to be confused with
+
+[Strategy](card:strategy) swaps one interchangeable behaviour behind one interface, chosen at runtime. Visitor spreads one operation across several fixed element types at once, with a method per type. Rule: Strategy = one behaviour, many implementations; Visitor = one operation over many types.
+
+## Common mistakes
+
+- **"Visitor is always the right tool for operations over a type hierarchy."** Only when the types are stable. If new element types arrive often, every visitor must change, which is painful; plain methods on each class (or a sealed switch) handle changing types better.
+
 ## Interview Qs
 
-### When should you use Visitor?
+### When should you use Visitor, and when not?
 
-When the set of types is stable but new operations keep coming. If new types arrive often, every visitor must change, so plain methods on each class are better.
+Use it when the set of element types is stable but new operations over them keep arriving, so each operation becomes one visitor and the element classes stay untouched. Avoid it when new element types are added often, because then every existing visitor must gain a method for each new type.
 
-### What replaces Visitor in modern Java?
+### Why do you need accept() and double dispatch instead of just overloading visit()?
 
-A sealed interface (Java 17) with a pattern-matching switch (Java 21). The compiler knows all permitted types, so a switch with no default must cover each one; add a new type and each such switch stops compiling until it handles it.
+Java resolves overloaded methods at compile time from the variable's declared type, which is the common interface, so `visitor.visit(payment)` cannot reach the per-type overload. The virtual `accept()` call dispatches on the element's runtime type, and inside it `visitor.visit(this)` dispatches on the visitor; together they pick the exact method.
+
+### What is the modern Java alternative to Visitor?
+
+A sealed interface (Java 17) that fixes the permitted types, with pattern matching for `switch` (Java 21). The compiler knows every permitted type, so an exhaustive `switch` with no `default` must handle each one. Adding a new type makes every such switch fail to compile until it is updated, so no case is silently missed.

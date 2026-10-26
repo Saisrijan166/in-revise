@@ -5,16 +5,27 @@ title: Repository and DAO
 topic: enterprise
 level: intermediate
 heat: 2
-hook: "Business code calls a Repository or DAO interface; the SQL and JPA code stays behind it, in one place."
+hook: "Business code calls a Repository or DAO interface to load and save objects; the SQL and JPA code lives behind it, in one place."
 points:
-  - { k: "Repository", v: "looks like a collection of domain objects (Fowler, PoEAA)" }
-  - { k: "DAO", v: "wraps all access to one data source (Core J2EE Patterns)" }
-  - { k: "Spring Data", v: "declare the interface; CRUD and findBy queries come free", kind: plus }
-  - { k: "Extra generic layer", v: "wrapping JpaRepository in your own generic repository repeats it", kind: minus }
+  - { k: "Repository", v: "an interface that looks like a collection of domain objects, such as findByStatus and save (Fowler, PoEAA)" }
+  - { k: "DAO", v: "wraps all access to one data source in storage words like insertPayment (Core J2EE Patterns)" }
+  - { k: "Hides persistence", v: "business code depends on the interface, never on SQL or the EntityManager", kind: plus }
+  - { k: "Spring Data", v: "extend JpaRepository and the CRUD and findBy methods are generated for you", kind: plus }
+  - { k: "Extra generic layer", v: "wrapping JpaRepository in your own generic repository just repeats what Spring already gives", kind: minus }
 trap:
-  wrong: "Repository is one of the 23 GoF patterns."
-  right: "Neither is GoF. Repository comes from Fowler's PoEAA and Evans's DDD; DAO from Core J2EE Patterns."
-sayIt: "Business code depends on a PaymentRepository interface, never on SQL. With Spring Data I only declare it, extending JpaRepository, and Spring builds CRUD and queries such as findByStatus from method names."
+  wrong: "Repository and DAO are two of the 23 Gang of Four patterns."
+  right: "Neither is GoF. Repository comes from Fowler's PoEAA and Evans's DDD; DAO comes from the Core J2EE Patterns catalogue."
+  why: "They sit beside GoF patterns in everyday Java code and get taught together, so people assume they share the same 1994 source."
+sayIt: "Business code depends on a PaymentRepository interface, never on SQL. With Spring Data I only declare the interface, extending JpaRepository, and Spring generates CRUD and query methods such as findByStatus from the method names."
+cheat:
+  idea: "An interface that hides persistence: business code calls save and findByStatus, while the SQL and EntityManager code stays behind it. Repository speaks in domain words, DAO in storage words."
+  remember: "Neither is a GoF pattern. In Spring Data you declare the interface and the implementation is generated."
+buildsOn: [dependency-injection, single-responsibility]
+scenarios:
+  - q: "A teammate writes a findByStatus method on the PaymentRepository interface but no body. Where does the code that runs the query come from?"
+    a: "Spring Data creates a proxy for the interface at startup and parses the method name into a query, so findByStatus becomes where status = ?. You never write the implementation class."
+  - q: "Should you add your own GenericRepository<T, ID> base interface over JpaRepository to share methods?"
+    a: "Usually not. JpaRepository already is the shared base, so a wrapper duplicates the framework. Put domain-specific finders on each repository interface instead."
 confusedWith: []
 tags: [repository, dao, spring-data-jpa, persistence]
 visual: table
@@ -33,18 +44,28 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A repository or a DAO is an interface that stands between your business code and the database. Business code calls simple methods on it, like `save(payment)` or `findByStatus(SUCCESS)`, and the actual SQL or JPA code lives behind the interface. The two names come from different books: a Repository looks like a collection of domain objects and speaks in domain words; a DAO (Data Access Object) wraps all access to one data source and speaks in storage words. In Spring they blur, because `@Repository` marks both.
+
 ## Why it exists
 
-When SQL and EntityManager calls sit inside services, every rule change touches query code, and testing a rule needs a database.
+If the SQL and `EntityManager` calls sit inside your services, every service is tied to the database. Changing one business rule means editing query code, two services may write the same query twice, and testing a rule needs a running database. Putting all data access behind a repository interface keeps the query code in one place and lets business code [depend on the interface](card:dependency-injection), so a test can pass an in-memory fake instead.
 
 ## How it works
 
 <Compare id="repository-vs-dao" />
 
-- Spring Data creates a repository proxy for your interface; you write no implementation class.
-- A derived query method such as `findByStatus` is parsed from its name; `@Query` gives an explicit query.
+1. You define an interface in domain terms, such as `PaymentRepository` with `save` and `findByStatus`.
+2. Your service depends on that interface, not on JDBC or the `EntityManager`.
+3. With Spring Data, you extend `JpaRepository`, and at startup Spring creates a proxy that implements the interface for you.
+4. A method named `findByStatus` is turned into a query from its name; `@Query` lets you write an explicit query when the name is not enough.
+
+So the service reads like business logic, and the storage details stay in one layer.
 
 ## Example
+
+The entity and its repository. The interface has no body, yet both methods work.
 
 ```java
 @Entity
@@ -59,16 +80,33 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
 }
 ```
 
+What to notice:
+
+- `JpaRepository<Payment, Long>` already brings `save`, `findById`, `findAll` and `delete`, so you write none of them.
+- `findByStatus` has no body. Spring Data reads the name and builds `where status = ?`; a wrong field name in the method fails at startup, not silently.
+- The service injects `PaymentRepository` and never sees SQL, so a test can inject a fake that keeps payments in a list.
+
+## Rules and defaults
+
+- **No implementation class:** Spring Data generates a proxy for each repository interface at startup.
+- **Derived queries:** a method whose name follows the rules (`findBy`, `countBy`, `And`, `OrderBy`) becomes a query; otherwise add `@Query`.
+- **One repository per aggregate root:** the Spring Data guidance is a repository for each aggregate root, not one per table.
+- **@Repository:** optional on a Spring Data interface, but on a hand-written DAO it also turns native persistence exceptions into Spring's `DataAccessException`.
+
+## Not to be confused with
+
+A [service](card:single-responsibility) holds business rules and decides *what* to do; a repository only loads and saves objects and decides *how* to reach storage. Rule: if a method makes a business decision, it belongs in the service; if it only reads or writes data, it belongs in the repository.
+
 ## Interview Qs
 
 ### Why use a repository instead of calling the EntityManager in the service?
 
-The service then depends on one interface, not on JPA. Business rules stay readable, query code lives in one place, and a unit test can pass an in-memory fake instead of a database.
+The service then depends on one domain interface, not on JPA. Business rules stay readable, every query lives in one layer instead of being copied across services, and a unit test can inject an in-memory fake rather than start a real database.
 
 ### How does Spring Data implement an interface you never coded?
 
-It creates a proxy for the interface at bootstrap. CRUD methods come from CrudRepository and JpaRepository; a method like `findByStatus` is turned into a query from its name, or you write one with `@Query`.
+At startup it creates a proxy for the interface. CRUD methods come from `CrudRepository` and `JpaRepository`. A method like `findByStatus` is parsed from its name into a query, or you supply one with `@Query`. You write no implementation class.
 
-### Should you wrap JpaRepository in your own generic repository?
+### Is Repository a Gang of Four pattern?
 
-Usually not. The Spring Data interface already is the repository layer, so a generic wrapper repeats it. Add domain-specific query methods to the interface instead.
+No. Repository comes from Fowler's Patterns of Enterprise Application Architecture and Evans's Domain-Driven Design; DAO comes from the Core J2EE Patterns catalogue. Neither is among the original 23 GoF patterns, although both are everyday patterns in enterprise Java.

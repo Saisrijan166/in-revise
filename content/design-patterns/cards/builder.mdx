@@ -5,27 +5,40 @@ title: Builder
 topic: creational
 level: beginner
 heat: 3
-hook: "Set only the fields you need, by name, then call build(): no constructor with eight confusing arguments."
+hook: "Set only the fields you need, each by name, then call build(): no constructor with eight arguments in an order you keep getting wrong."
 points:
-  - { k: "Solves", v: "the telescoping constructor: many overloads, unclear argument order" }
-  - { k: "build()", v: "the one place to check required fields" }
-  - { k: "Not automatic", v: "validation and immutability are your design, not free", kind: minus }
-  - { k: "Record (Java 16)", v: "few fields, all required: a record alone is enough", kind: plus }
-  - { k: "Cost", v: "extra code; Lombok @Builder can generate it", kind: minus }
+  - { k: "Solves", v: "the telescoping constructor: many overloads and long argument lists where same-typed values are easy to swap" }
+  - { k: "build()", v: "the single place to check required fields are set and to return the finished object" }
+  - { k: "Not automatic", v: "a builder does not make the object immutable or valid on its own; you add final fields and checks", kind: minus }
+  - { k: "Record alternative", v: "with a few fields that are all required, a record (Java 16) is enough; no builder needed", kind: plus }
+  - { k: "Cost", v: "a builder is extra code; Lombok's @Builder can generate it for you", kind: minus }
 trap:
   wrong: "Using a builder makes the object immutable and valid."
-  right: "Only if you make it so: final fields, no setters, and checks in build() or the constructor."
-sayIt: "Builder creates an object step by step when many fields are optional. Calls read by name, and build() is where I validate. With few required fields I just use a constructor or a record."
+  right: "Only if you design it that way: final fields, no setters, and the checks written in build() or the constructor. A builder alone guarantees neither."
+  why: "Builders usually appear on immutable, validated objects in tutorials, so people assume the builder is what provides those traits. It is the final fields and the checks that do, not the builder."
+sayIt: "Builder constructs an object step by step when it has many optional fields. Each call reads by name, and build() is where I validate and return the finished object. With just a few required fields I use a plain constructor or a record instead."
+cheat:
+  idea: "Build an object through named steps instead of one long constructor. You set the fields you want, then call build() to get the finished object."
+  code: |
+    var r = PaymentRequest.builder()
+        .amount(BigDecimal.valueOf(500)).method(UPI).build();
+  remember: "Builder does not make an object immutable or valid by itself. A few required fields? A record is enough."
+buildsOn: [design-principles]
+scenarios:
+  - q: "A teammate writes `new PaymentRequest(amount, \"INR\", UPI, null, null, key)`. What is risky, and how does a builder help?"
+    a: "The two nulls and the strings have no names at the call site, so the currency and the key are easy to swap, and a reader cannot tell what the nulls mean. A builder names each value and lets you skip the optional ones, so only `amount` and `method` appear and their meaning is clear."
+  - q: "You add a builder but the object still has public setters and non-final fields. Is it now immutable?"
+    a: "No. Anyone can call a setter after build() and change the object. A builder controls construction, not later mutation. To make it immutable you remove the setters, make the fields final, and set them only through the constructor the builder calls."
 confusedWith: []
 tags: [builder, creational, records, immutability]
 visual: code
 sources:
-  - title: "Builder: telescoping constructor, director (refactoring.guru)"
+  - title: "Builder: telescoping constructor problem and director (Refactoring.Guru)"
     url: "https://refactoring.guru/design-patterns/builder"
     verifiedOn: "2026-10-20"
-  - title: "HttpRequest.Builder (Java SE 25 API, java.net.http, since 11)"
+  - title: "HttpRequest.Builder.build(): returns a new immutable HttpRequest, throws IllegalStateException if no URI is set (Java SE 25 API, since 11)"
     url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.net.http/java/net/http/HttpRequest.Builder.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-23"
   - title: "JEP 395: Records (OpenJDK, delivered in JDK 16)"
     url: "https://openjdk.org/jeps/395"
     verifiedOn: "2026-10-20"
@@ -34,46 +47,77 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Builder is a pattern for creating an object through a series of named steps instead of one big constructor call. You start a builder, set the fields you care about by name in any order, and call `build()` to get the finished object. It is most useful when an object has many fields, especially optional ones. A "telescoping constructor" is the problem it replaces: a chain of overloaded constructors, each taking a few more parameters, which grows unreadable as fields are added.
+
 ## Why it exists
 
-`new PaymentRequest(amount, "INR", UPI, null, null, key)` is easy to get wrong. A builder names each value and leaves out the optional ones.
+A constructor like `new PaymentRequest(amount, "INR", UPI, null, null, key)` is easy to get wrong. Same-typed arguments can be swapped without the compiler noticing, the two nulls carry no meaning at the call site, and every optional field forces either a new constructor overload or a null. A builder gives each value a name, lets you leave optional fields out entirely, and checks the result in one place, so the call reads clearly and the object is validated once.
 
 ## How it works
 
 <Mermaid
-  alt="Builder flow: start a PaymentRequest builder, set the amount of 500 rupees and the method UPI, optionally set a note, then call build, which checks the required fields and returns the finished PaymentRequest."
+  alt="A payment request builder: start a new builder, set the amount of 500, set the method to UPI, optionally set a note, then call build. build checks that the required fields are set and returns the finished PaymentRequest, or throws if a required field is missing."
   chart={`flowchart LR
-  B([new Builder]) --> A["amount(500)"] --> M["method(UPI)"] --> N["note(...) optional"] --> X{"build(): required set?"}
+  B([builder()]) --> A["amount(500)"] --> M["method(UPI)"] --> N["note(...) optional"] --> X{"build(): required set?"}
   X -- yes --> R([PaymentRequest])
   X -- no --> E([exception])`}
 />
 
-- JDK example: `HttpRequest.newBuilder()` (Java 11); its `build()` throws if no URI is set and returns an immutable request.
-- The GoF form adds a [director](card:gof-builder) that runs the steps in a fixed order.
+1. Call `builder()` to get a fresh builder object that holds the fields, all unset.
+2. Call a named setter for each field you want; each returns the builder, so calls chain in one statement.
+3. Skip any optional field; it keeps its default, usually null.
+4. Call `build()`. It checks the required fields are present and returns the finished object, or throws if one is missing. So the key is that `build()` is the single checkpoint.
 
 ## Example
 
+The `PaymentRequest` has two required fields and one optional note. The record's compact constructor does the checking, and the builder provides the named steps.
+
 ```java
-public record PaymentRequest(BigDecimal amount, PaymentMethod method, String note) {
-    public PaymentRequest {                       // runs on every new, so on build() too
+record PaymentRequest(BigDecimal amount, PaymentMethod method, String note) {
+    PaymentRequest {                                 // runs on every new, so on build() too
         Objects.requireNonNull(amount, "amount"); Objects.requireNonNull(method, "method");
     }
-    public static final class Builder {
+    static Builder builder() { return new Builder(); }
+    static final class Builder {
         private BigDecimal amount; private PaymentMethod method; private String note;
-        public Builder amount(BigDecimal v) { amount = v; return this; }
-        public Builder method(PaymentMethod v) { method = v; return this; }
-        public Builder note(String v) { note = v; return this; }          // optional
-        public PaymentRequest build() { return new PaymentRequest(amount, method, note); }
+        Builder amount(BigDecimal v) { amount = v; return this; }    // return this: calls chain
+        Builder method(PaymentMethod v) { method = v; return this; }
+        Builder note(String v) { note = v; return this; }           // optional
+        PaymentRequest build() { return new PaymentRequest(amount, method, note); }
     }
 }
+PaymentRequest.builder().amount(BigDecimal.valueOf(500)).method(PaymentMethod.UPI).build();
 ```
+
+What to notice:
+
+- Each setter returns `this`, which is why the calls chain in one line; this chaining is the readable part.
+- `note` is simply left out, so an optional field needs no null at the call site.
+- The checks live in the record's compact constructor, which `build()` calls. Remove the `requireNonNull` lines and a request with no amount would be built silently. The builder provides the names; the constructor provides the validation.
+
+## Rules and defaults
+
+- **Validation is yours to write:** put the `requireNonNull` and range checks in `build()` or the constructor. A builder does not add them for you.
+- **Immutability is yours to design:** make the fields `final` and drop setters on the product. A record (Java 16) does this automatically.
+- **JDK example:** `HttpRequest.newBuilder()` returns a builder whose `build()` returns a new immutable `HttpRequest` and throws `IllegalStateException` if no URI was set (Java 11).
+- **Few required fields:** reach for a plain constructor or a record first; a builder earns its keep mainly when there are several optional fields.
+
+## Not to be confused with
+
+Builder assembles **one** complex object step by step and returns it at the end. [Abstract Factory](card:abstract-factory) returns each product of a matching **family** at once, usually fully formed. Rule: many optional fields on one object, Builder; a matching set of related objects, Abstract Factory.
 
 ## Interview Qs
 
 ### What problem does Builder solve that constructors cannot?
 
-Long parameter lists with optional values. Overloaded constructors multiply and same-typed arguments are easy to swap. A builder names each value, skips optional ones and checks the result once in `build()`.
+Long parameter lists with optional values. Overloaded constructors multiply, and same-typed arguments are easy to swap without the compiler noticing. A builder names each value at the call site, lets you omit optional ones, and checks the result once in `build()`, so construction is both readable and validated.
 
-### How is Builder different from Abstract Factory?
+### Does using a builder make the object immutable?
 
-Builder assembles one complex object step by step and returns it at the end. [Abstract Factory](card:abstract-factory) returns each product of a matching family at once.
+No. A builder only controls how the object is constructed. If the product still has setters and non-final fields, anyone can change it after `build()`. Immutability comes from final fields and no setters, which a record provides automatically; the builder just supplies the named construction steps.
+
+### When would you not use a builder?
+
+When the object has only a few fields and they are all required. Then a plain constructor or a record is shorter and just as clear. A builder adds a whole extra class, so it is worth it mainly when several fields are optional and call sites would otherwise be confusing.

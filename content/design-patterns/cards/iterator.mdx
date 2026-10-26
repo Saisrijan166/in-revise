@@ -5,16 +5,28 @@ title: Iterator
 topic: behavioural-objects
 level: beginner
 heat: 2
-hook: "Walk through a collection one item at a time without knowing how it is stored."
+hook: "A collection hands you a small object that walks its items one at a time, so you never see how the items are stored."
 points:
-  - { k: "java.util.Iterator", v: "hasNext(), next(), and an optional remove()" }
-  - { k: "Iterable", v: "has iterator(), so it works in the enhanced for loop" }
-  - { k: "Own position", v: "each iterator keeps its place, so two loops can run at once", kind: plus }
-  - { k: "Fail-fast", v: "ArrayList's iterator throws if the list is structurally changed outside it", kind: minus }
+  - { k: "java.util.Iterator", v: "the walker object; it has hasNext(), next() and an optional remove()" }
+  - { k: "Iterable", v: "a collection with an iterator() method; the enhanced for loop works on anything Iterable" }
+  - { k: "Keeps its own position", v: "each iterator remembers where it is, so two loops over the same collection can run at once", kind: plus }
+  - { k: "Fail-fast", v: "an ArrayList iterator throws ConcurrentModificationException if the list's structure changes mid-walk", kind: minus }
+  - { k: "Safe removal", v: "call iterator.remove() or list.removeIf(...) to delete while iterating, never list.remove(x)", kind: key }
 trap:
-  wrong: "Inside a for-each loop, call list.remove(p) to drop the failed payments."
-  right: "That changes the list behind the iterator and usually throws ConcurrentModificationException. Use iterator.remove() or removeIf."
-sayIt: "Iterator gives one way to walk any collection: hasNext and next, while the storage stays hidden. In Java, anything Iterable works in the enhanced for loop."
+  wrong: "Inside a for-each loop over the list, call list.remove(p) to drop the failed payments."
+  right: "That changes the list behind the iterator, which usually throws ConcurrentModificationException. Use iterator.remove() or list.removeIf(...) instead."
+  why: "The for-each loop hides the iterator, so people forget one is running and think list.remove is just an ordinary call that cannot clash with the loop."
+sayIt: "Iterator gives one way to walk any collection, hasNext then next, while the storage stays hidden. In Java, anything that is Iterable works in the enhanced for loop, and I remove items with iterator.remove or removeIf to avoid ConcurrentModificationException."
+cheat:
+  idea: "A collection hands out an iterator object that walks its items with hasNext() and next(), so the caller never sees how they are stored. Anything Iterable works in the for-each loop."
+  flow: "iterator() → while hasNext() → next()"
+  remember: "To delete while looping use iterator.remove() or removeIf(), never list.remove() inside a for-each."
+buildsOn: []
+scenarios:
+  - q: "You loop over a list of payments with for (Payment p : list) and call list.remove(p) when a payment failed. It throws ConcurrentModificationException. Why, and what is the fix?"
+    a: "The for-each loop walks a hidden iterator. list.remove(p) changes the list's structure behind that iterator, which the ArrayList iterator detects and refuses with ConcurrentModificationException. Use list.removeIf(Payment::failed), or an explicit Iterator and call its remove()."
+  - q: "Why can two threads, or two nested loops, iterate the same ArrayList at the same time without interfering?"
+    a: "Each call to iterator() returns a new iterator object that holds its own position (an index). One iterator's next() does not move another's position, so the two walks are independent (as long as nobody changes the list's structure, which would fail both)."
 confusedWith: []
 tags: [iterator, collections]
 visual: code
@@ -36,36 +48,43 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Iterator is a pattern where a collection gives out a small separate object, the **iterator**, whose only job is to walk the collection's items one at a time. You ask it "is there another item?" and "give me the next one", and it tracks where you are. Because the walking goes through this object, the caller never sees whether the items sit in an array, a linked list or pages. Java builds this in: `java.util.Iterator` is the walker, and a collection that offers one implements `Iterable`.
+
 ## Why it exists
 
-A customer's payment history may sit in pages, a tree or a list. Callers should loop over payments the same way, whatever the storage is.
+A customer's payment history might be stored as one list, as pages from a server, or as a tree. If every caller wrote loops against the actual storage, each would break when the storage changed, and each storage would need its own loop code. Iterator gives every collection the same two calls, `hasNext()` and `next()`, so one piece of loop code works over all of them and the storage can change freely behind it.
 
 ## How it works
 
-<Steps label="One loop over a hidden collection">
-  <Step title="Ask for an iterator">The caller calls `history.iterator()`; the enhanced for loop does this for you.</Step>
-  <Step title="hasNext()">Is there another payment? If not, stop.</Step>
-  <Step title="next()">Get the next payment and use it.</Step>
-  <Step title="remove() if needed">Drop the payment just returned, safely, through the iterator.</Step>
+<Steps label="Walking a collection through its iterator">
+  <Step title="Ask for an iterator">The caller calls `history.iterator()`. The enhanced for loop does this step for you.</Step>
+  <Step title="hasNext()">The iterator reports whether another item is left. If not, the loop stops.</Step>
+  <Step title="next()">The iterator returns the next item and moves its own position forward by one.</Step>
+  <Step title="remove() if needed">To drop the item just returned, call the iterator's own remove(), which changes the collection safely.</Step>
 </Steps>
 
-- [External iteration](card:external-iteration) is your loop; [internal iteration](card:internal-iteration) is `forEach` (Java 8).
+So the key is that the position and the "give me the next one" logic live in the iterator, not in the caller.
 
 ## Example
+
+`PaymentHistory` stores payments in pages, but exposes one flat walk. The caller loops with a normal for-each and never sees the pages.
 
 ```java
 record Payment(String id, BigDecimal amount) { }
 class PaymentHistory implements Iterable<Payment> {
-    private final List<List<Payment>> pages;              // hidden structure
+    private final List<List<Payment>> pages;               // hidden structure
     PaymentHistory(List<List<Payment>> pages) { this.pages = pages; }
 
-    public Iterator<Payment> iterator() {
+    public Iterator<Payment> iterator() {                  // flatten the pages into one walk
         return pages.stream().flatMap(List::stream).iterator();
     }
 }
-var history = new PaymentHistory(List.of(List.of(new Payment("p1", BigDecimal.TEN)),
-        List.of(new Payment("p2", BigDecimal.ONE))));     // two pages
-for (Payment p : history) System.out.println(p.id());    // the caller never sees the pages
+var history = new PaymentHistory(List.of(
+        List.of(new Payment("p1", BigDecimal.TEN)),
+        List.of(new Payment("p2", BigDecimal.ONE))));      // two pages
+for (Payment p : history) System.out.println(p.id());      // caller sees items, not pages
 ```
 
 ```text output
@@ -73,12 +92,37 @@ p1
 p2
 ```
 
+What to notice:
+
+- `PaymentHistory` implements `Iterable`, so the enhanced for loop accepts it. The loop calls `iterator()`, `hasNext()` and `next()` for you.
+- The `iterator()` method flattens the two pages into one stream, so the caller walks `p1` then `p2` and never learns there were pages. Change the storage to a tree and only this method changes.
+- The for-each loop prints the ids in order; the page boundaries are invisible to the caller.
+
+## Rules and defaults
+
+- **Iterable enables for-each:** the enhanced for loop works on an array or any `Iterable`; for an `Iterable` the compiler turns it into `iterator()`, `hasNext()` and `next()` calls (JLS 14.14.2).
+- **Fail-fast collections:** `ArrayList`, `HashMap` and the other `java.util` collections throw `ConcurrentModificationException` (best-effort) if their structure changes while you iterate, except through the iterator's own `remove()`.
+- **Weakly consistent collections:** most `java.util.concurrent` collections never throw that exception; their iterators may or may not reflect changes made after the iterator was created.
+- **Safe deletion:** use `iterator.remove()` or `collection.removeIf(...)` to delete while iterating.
+
+## Not to be confused with
+
+[External iteration](card:external-iteration) is you writing the loop and pulling each item with `next()`. [Internal iteration](card:internal-iteration) is handing the work to the collection, as in `list.forEach(...)` or a stream (Java 8), where the collection runs the loop and calls your code per item. Rule: external = you control the loop; internal = the collection controls it and you pass the action.
+
+## Common mistakes
+
+- **"Fail-fast means the collection is thread-safe."** No. Fail-fast only detects some concurrent structural changes and throws; it does not make concurrent use safe. For concurrent access use a `java.util.concurrent` collection, whose iterators are weakly consistent.
+
 ## Interview Qs
 
-### Fail-fast vs fail-safe iterators?
+### What is the difference between a fail-fast and a weakly consistent iterator?
 
-ArrayList's iterator is fail-fast: it throws ConcurrentModificationException, on a best-effort basis. Most java.util.concurrent collections are weakly consistent instead: they never throw it and may or may not show later changes.
+A fail-fast iterator (for example `ArrayList`'s) throws `ConcurrentModificationException`, on a best-effort basis, if the collection's structure changes during iteration outside the iterator. A weakly consistent iterator (most `java.util.concurrent` collections) never throws it and may or may not show changes made after it was created.
 
-### What does the enhanced for loop need?
+### How do you remove elements from a list while looping over it?
 
-An array or any `Iterable`. For an `Iterable`, the loop is translated into calls to `iterator()`, `hasNext()` and `next()`.
+Not with `list.remove(x)` inside a for-each, which changes the list behind the hidden iterator and usually throws `ConcurrentModificationException`. Use `list.removeIf(predicate)`, or get an explicit `Iterator` and call its `remove()` after `next()`, which updates the list and the iterator together.
+
+### What must a class provide to be used in an enhanced for loop?
+
+It must implement `Iterable`, which means a single `iterator()` method returning a `java.util.Iterator`. The compiler then rewrites the for-each into calls to `iterator()`, `hasNext()` and `next()`. Arrays also work, as a special case in the language.

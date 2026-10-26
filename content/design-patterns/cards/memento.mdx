@@ -5,16 +5,28 @@ title: Memento
 topic: behavioural-objects
 level: intermediate
 heat: 1
-hook: "Take a snapshot of an object's state so you can put it back later, without exposing its fields."
+hook: "An object makes a sealed snapshot of its own state, so someone can restore it later without ever touching its private fields."
 points:
-  - { k: "Originator", v: "the object whose state is saved; it makes and reads the snapshot" }
-  - { k: "Memento", v: "the snapshot; a record (Java 16) fits well" }
-  - { k: "Caretaker", v: "keeps the snapshots, often a stack; does not use what is inside" }
-  - { k: "Memory cost", v: "frequent snapshots of big objects use a lot of memory", kind: minus }
+  - { k: "Originator", v: "the object whose state is saved; only it can create a snapshot and read it back" }
+  - { k: "Memento", v: "the snapshot itself; an immutable record (Java 16) fits it well" }
+  - { k: "Caretaker", v: "keeps the snapshots, often on a stack; it stores them but never looks inside" }
+  - { k: "Encapsulation kept", v: "the private fields never leave the originator, so no outside code depends on them", kind: plus }
+  - { k: "Memory cost", v: "taking frequent snapshots of large objects uses a lot of memory", kind: minus }
 trap:
-  wrong: "Memento and Command do the same job: both give undo."
-  right: "A command is an action to run; a memento is state to go back to. Undo often uses both: snapshot before each command."
-sayIt: "Memento lets an object make a snapshot of its own state and restore it later, so outsiders never touch its fields. I use it for undo, with a stack of snapshots."
+  wrong: "Memento and Command do the same job, because both are used to build undo."
+  right: "A command is an action to run; a memento is captured state to go back to. Undo often uses both: snapshot with a memento before each command."
+  why: "Both show up in undo examples, so people merge them. But one captures what to do, and the other captures what things looked like before."
+sayIt: "Memento lets an object make a snapshot of its own state and restore it later, so outside code never reads its private fields. I use it for undo, keeping the snapshots on a stack and popping the last one to go back."
+cheat:
+  idea: "An object (the originator) makes an immutable snapshot of its own state. A caretaker stores snapshots without reading them, and passes one back to restore the object."
+  flow: "save() → caretaker stores → restore()"
+  remember: "Only the originator reads or writes the snapshot, so private fields never leak; a record makes a clean memento."
+buildsOn: [command]
+scenarios:
+  - q: "A payment form must support undo. The form has private fields for amount and method. How do you add undo without exposing those fields?"
+    a: "Give the form a save() that returns a memento (a record of amount and method) and a restore(memento). A caretaker keeps a stack of mementos; undo pops the last one and calls restore. The fields stay private because only the form reads and writes the snapshot."
+  - q: "Why make the memento an immutable record rather than exposing the originator's fields directly?"
+    a: "A record's fields are final, so a stored snapshot cannot be changed after it is taken, and no outside code can depend on the originator's internal fields. That keeps the originator free to change its internals without breaking the undo history."
 confusedWith: []
 tags: [memento, undo]
 visual: code
@@ -27,9 +39,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Memento is a pattern for saving and restoring an object's state without breaking its encapsulation. The object whose state is saved is the **originator**. It produces a **memento**: a snapshot that holds a copy of its state, which only the originator can read back. A **caretaker** holds these snapshots, often on a stack, but never looks inside them. So you can roll the originator back to an earlier state, and its private fields never leave the object.
+
 ## Why it exists
 
-A customer fills the payment form, switches from UPI to card, then wants to go back. Copying the form's private fields from outside would break its encapsulation.
+A customer fills a payment form, switches from UPI to card, then wants to go back. To undo, something must remember the earlier amount and method. If outside code read and wrote the form's private fields directly to save and restore them, every piece of that code would depend on the form's internals, and the form could not change them safely. Memento lets the form hand out a sealed snapshot instead, so the state is saved without exposing a single field.
 
 ## How it works
 
@@ -39,20 +55,26 @@ A customer fills the payment form, switches from UPI to card, then wants to go b
   participant C as Caretaker (history)
   participant F as PaymentForm (originator)
   C->>F: save()
-  F-->>C: memento: ₹500, UPI
-  Note over C: push on stack
+  F-->>C: memento: 500, UPI
+  Note over C: push on the stack
   C->>F: restore(memento)
-  Note over F: fields back to ₹500, UPI`}
+  Note over F: fields set back to 500, UPI`}
 />
 
-- Only the originator writes and reads the memento's contents.
-- The caretaker decides when to save and when to restore.
+1. The caretaker asks the originator to `save()`. The originator copies its state into a new memento and returns it.
+2. The caretaker pushes the memento onto its stack. It treats the memento as an opaque token and does not read it.
+3. The originator's state changes, for example the user switches to card.
+4. To undo, the caretaker pops the last memento and passes it to the originator's `restore()`, which copies the state back into its own fields.
+
+So the key is that the originator creates and reads the memento, while the caretaker only decides when to save and restore.
 
 ## Example
 
+The `PaymentForm` is the originator; `PaymentDraft` is the memento; the `Deque` is the caretaker. Undo restores the earlier method.
+
 ```java
-record PaymentDraft(BigDecimal amount, PaymentMethod method) { }   // the memento
-class PaymentForm {                                                 // the originator
+record PaymentDraft(BigDecimal amount, PaymentMethod method) { }    // the memento
+class PaymentForm {                                                  // the originator
     private BigDecimal amount = BigDecimal.valueOf(500);
     private PaymentMethod method = PaymentMethod.UPI;
     PaymentDraft save() { return new PaymentDraft(amount, method); }
@@ -60,21 +82,44 @@ class PaymentForm {                                                 // the origi
     void choose(PaymentMethod m) { method = m; }
 }
 var form = new PaymentForm();
-Deque<PaymentDraft> history = new ArrayDeque<>();                   // the caretaker
-history.push(form.save()); form.choose(PaymentMethod.CARD); form.restore(history.pop());
-System.out.println(form.save());                                   // after undo
+Deque<PaymentDraft> history = new ArrayDeque<>();                    // the caretaker
+history.push(form.save());                                          // snapshot before the change
+form.choose(PaymentMethod.CARD);                                   // user switches method
+form.restore(history.pop());                                       // undo
+System.out.println(form.save());                                   // state after undo
 ```
 
 ```text output
 PaymentDraft[amount=500, method=UPI]
 ```
 
+What to notice:
+
+- `save()` and `restore()` are the only code that touches the form's private `amount` and `method`; the caretaker `history` just stores the `PaymentDraft` it is handed.
+- `PaymentDraft` is a record, so its fields are final: a pushed snapshot can never be altered while it sits on the stack.
+- The output is the state from before `choose(CARD)`, because `restore` copied the popped snapshot back. Remove the `history.push` line and there would be nothing to pop, so undo could not work.
+
+## Rules and defaults
+
+- **Only the originator reads the memento:** keep the memento's contents accessible to the originator alone (a nested or package-private type), so no other class depends on them.
+- **Immutable snapshot:** a Java record (Java 16) makes the memento's fields final, so a saved state cannot change after capture.
+- **Caretaker stays blind:** the caretaker stores and orders snapshots (usually a stack for undo) but never inspects or edits them.
+- **Watch memory:** each snapshot is a full copy of the saved state, so frequent snapshots of large objects can use a lot of memory.
+
+## Not to be confused with
+
+A [command](card:command) is an action object: it knows how to do (and sometimes undo) one operation. A memento is captured state: a picture of how the object looked at a moment. Rule: Command = what to do; Memento = what it looked like before. Undo systems commonly use both, taking a memento before each command runs.
+
 ## Interview Qs
 
 ### How would you build undo for the payment form?
 
-Wrap each change in a [command](card:command). Before it runs, push the form's memento on a history stack. Undo pops the last memento and restores it.
+Before each change, push the form's memento (from `save()`) onto a history stack. To undo, pop the last memento and pass it to `restore()`. For undo paired with an action, wrap each change in a [command](card:command) and snapshot the form with a memento before the command runs, so undo restores the prior state.
 
-### How does Memento keep encapsulation?
+### How does Memento preserve encapsulation if it exposes the object's state?
 
-The originator makes the snapshot itself, because only it sees its private fields. The caretaker just stores it. A record memento cannot be changed: its fields are final. Keep it nested or package-private to hide it further.
+The originator creates the memento itself, because only it can see its private fields, and only it reads the memento back in `restore()`. The caretaker holds the snapshot as an opaque token. Making the memento an immutable, nested or package-private type keeps its contents hidden from every other class.
+
+### What is the main cost of Memento?
+
+Memory. Each memento is a full copy of the saved state, so taking many snapshots of large objects can consume a lot of memory. Mitigations include storing only the fields that changed, limiting how many snapshots you keep, or snapshotting less often.

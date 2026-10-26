@@ -5,17 +5,28 @@ title: Decorator
 topic: structural
 level: intermediate
 heat: 3
-hook: "Decorator wraps an object in another with the same interface, adding behaviour before or after it passes the call on."
+hook: "Decorator wraps an object in another object with the same interface, adding behaviour before or after it passes the call on to the one it wraps."
 points:
-  - { k: "Same interface", v: "callers cannot tell a decorated gateway from a plain one" }
-  - { k: "Stackable", v: "a decorator can wrap another decorator, as deep as needed" }
-  - { k: "At runtime", v: "pick the mix per object, without a subclass for each mix", kind: plus }
-  - { k: "Java I/O", v: "BufferedInputStream wraps another stream and adds a buffer" }
-  - { k: "Order-sensitive", v: "results can depend on the wrapping order; one layer is hard to remove", kind: minus }
+  - { k: "Same interface", v: "a decorator implements the same interface it wraps, so callers cannot tell them apart" }
+  - { k: "Wraps and delegates", v: "it holds the inner object, does its extra bit, then calls the inner object" }
+  - { k: "Stackable", v: "a decorator can wrap another decorator, so you add layers to any depth" }
+  - { k: "Chosen at runtime", v: "you pick the mix per object, with no subclass for each combination of features", kind: plus }
+  - { k: "Order matters", v: "the outermost layer runs first, so logging-around-metrics logs before the metric", kind: minus }
 trap:
   wrong: "Decorator is just a subclass that overrides a method."
-  right: "A decorator holds the object it wraps and delegates to it, so behaviour is added per object at runtime, not per class."
-sayIt: "Decorator adds behaviour by wrapping an object behind the same interface. I wrap UpiGateway in MetricsGateway, then LoggingGateway; each adds its bit and delegates, and I can mix them without new subclasses."
+  right: "A decorator holds the object it wraps and delegates to it, so behaviour is added per object at runtime, not fixed per class at compile time."
+  why: "Both change behaviour, and a quick look sees 'extra code around a method'. But a subclass is one fixed class; a decorator is a separate object you can wrap or not, and stack in any order."
+sayIt: "Decorator adds behaviour by wrapping an object behind the same interface. I wrap a UpiGateway in a MetricsGateway, then a LoggingGateway; each adds its bit and delegates inward, and I can mix them per object without writing a subclass for every combination."
+cheat:
+  idea: "Decorator wraps an object in another object with the same interface. The wrapper does something extra, then delegates to the object it wraps. Wrappers stack."
+  flow: "LoggingGateway → MetricsGateway → real UpiGateway"
+  remember: "Same interface, extra behaviour, stacked at runtime. Changing the interface instead would be Adapter."
+buildsOn: [composition-over-inheritance, adapter]
+scenarios:
+  - q: "You need optional logging, metrics and retry on a payment gateway, in any combination. Why is Decorator better than a subclass per combination?"
+    a: "Three optional features give eight combinations, so eight subclasses, fixed at compile time. With decorators you write one small class per feature and nest the ones you want per object, chosen at runtime."
+  - q: "You wrap the gateway as new MetricsGateway(new LoggingGateway(real)) instead of logging outside metrics. What changes?"
+    a: "The metrics layer now runs first, so the call is counted before it is logged. The outermost decorator always runs first; swapping the nesting order swaps which behaviour happens first."
 confusedWith: [adapter-vs-decorator, decorator-vs-proxy]
 tags: [decorator, structural, wrapping, java-io]
 visual: flow
@@ -34,24 +45,34 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Decorator is a class that wraps another object and implements the same interface as that object. When a method is called, the decorator does something extra, such as logging, then calls the same method on the object it wraps. Because it shares the interface, a caller cannot tell a wrapped object from a plain one. And because each decorator holds some object of that interface, a decorator can wrap another decorator, stacking features. Like [Adapter](card:adapter), it wraps and delegates; unlike Adapter, it keeps the interface unchanged.
+
 ## Why it exists
 
-Logging, metrics and retries are optional and combine freely. A subclass for every combination explodes; wrapping lets you choose the mix per object.
+Features like logging, metrics and retries are optional and combine freely. If you add them by subclassing, every combination needs its own subclass: logging-only, metrics-only, logging-and-metrics, and so on, which explodes as features grow and is fixed at compile time. Decorator lets you write one small class per feature and wrap an object in exactly the features you want, decided at runtime for each object.
 
 ## How it works
 
 <Mermaid
   alt="The caller calls charge on LoggingGateway. LoggingGateway logs, then calls MetricsGateway, which records a metric, then calls UpiGateway, which does the real charge. All three implement PaymentGateway."
   chart={`flowchart LR
-  C[Caller] -- "charge(₹500)" --> L[LoggingGateway]
+  C[Caller] -- "charge(500)" --> L[LoggingGateway]
   L -- delegates --> M[MetricsGateway]
   M -- delegates --> U[UpiGateway: real charge]`}
 />
 
-- Each decorator implements `PaymentGateway` and holds a `PaymentGateway`, so it can wrap the real one or another decorator.
-- This is [composition over inheritance](card:composition-over-inheritance) in action. Spring's proxies are covered under [Proxy](card:proxy).
+1. Each decorator implements `PaymentGateway` and holds a `PaymentGateway`, which may be the real one or another decorator.
+2. The caller holds the outermost decorator and calls `charge`, thinking it is a plain gateway.
+3. That decorator does its extra work, then calls `charge` on the gateway it wraps.
+4. The call travels inward through each layer until it reaches the real gateway, which does the actual charge.
+
+So the key is that the outermost layer runs first and the innermost does the real work.
 
 ## Example
+
+This stacks two decorators around a real gateway and runs the chain.
 
 ```java
 class LoggingGateway implements PaymentGateway {            // same interface as what it wraps
@@ -59,13 +80,13 @@ class LoggingGateway implements PaymentGateway {            // same interface as
     LoggingGateway(PaymentGateway inner) { this.inner = inner; }
     public void charge(BigDecimal amount) { System.out.println("charging " + amount); inner.charge(amount); }
 }
-class MetricsGateway implements PaymentGateway {            // a second decorator
+class MetricsGateway implements PaymentGateway {            // a second, independent decorator
     private final PaymentGateway inner;
     MetricsGateway(PaymentGateway inner) { this.inner = inner; }
     public void charge(BigDecimal amount) { System.out.println("metric +1"); inner.charge(amount); }
 }
-PaymentGateway upi = amount -> System.out.println("UPI charged " + amount);
-new LoggingGateway(new MetricsGateway(upi)).charge(BigDecimal.valueOf(500));   // stacked at runtime
+PaymentGateway upi = amount -> System.out.println("UPI charged " + amount);   // the real one
+new LoggingGateway(new MetricsGateway(upi)).charge(BigDecimal.valueOf(500));
 ```
 
 ```text output
@@ -74,16 +95,37 @@ metric +1
 UPI charged 500
 ```
 
+What to notice:
+
+- Both decorators implement `PaymentGateway` and hold a `PaymentGateway`, so each can wrap the real gateway or another decorator.
+- Each `charge` does its own work first, then calls `inner.charge`, passing the call inward. The real gateway is the lambda at the bottom.
+- The output order follows the nesting: logging is outermost, so it prints first; the real charge is innermost, so it prints last.
+- Swap the nesting to `new MetricsGateway(new LoggingGateway(upi))` and `metric +1` prints before `charging 500`. No class changes; only the wrapping order does.
+
+## Rules and defaults
+
+- **Same interface:** a decorator must implement the exact interface it wraps, or callers could tell it apart and it would not be a drop-in.
+- **Delegate inward:** a decorator should call the wrapped object; a decorator that stops the call is doing something else.
+- **In the JDK:** `java.io` streams are decorators. `FilterInputStream` wraps another `InputStream`; `BufferedInputStream` extends it to add a buffer, as in `new BufferedInputStream(new FileInputStream(file))`.
+
+## Not to be confused with
+
+A [proxy](card:proxy) has the same structure but a different goal: it controls access to one object, such as deferring its creation or checking a permission, rather than adding features the caller chose. Rule: if the caller nests the wrappers to add behaviour, it is Decorator; if a wrapper guards or stands in for the real object, it is Proxy.
+
+## Common mistakes
+
+- **"A decorator can change the interface a bit."** Then callers can no longer treat it as the wrapped type, and stacking breaks. Changing the interface is [Adapter](card:adapter), not Decorator.
+
 ## Interview Qs
 
 ### Where does the JDK use Decorator?
 
-In java.io. `FilterInputStream` wraps another stream and passes calls to it; subclasses such as `BufferedInputStream` add features. `new BufferedInputStream(new FileInputStream(file))` adds buffering to a file stream.
+In `java.io`. `FilterInputStream` wraps another `InputStream` and passes calls through to it; subclasses such as `BufferedInputStream` add features. `new BufferedInputStream(new FileInputStream(file))` adds buffering to a file stream without changing how you read it.
 
-### Decorator or inheritance for optional features?
+### Why use Decorator instead of inheritance for optional features?
 
-Decorator. With inheritance, every mix of features needs its own subclass, fixed at compile time. Decorators are combined at runtime, one small class per feature.
+With inheritance, every mix of features needs its own subclass, and the mix is fixed at compile time. Decorators are separate objects you combine at runtime, one small class per feature, so three features give three classes, not eight subclasses for every combination.
 
 ### Does the order of decorators matter?
 
-Yes. The outermost decorator gets the call first. Logging outside metrics logs before the metric is recorded; swap them and the order flips.
+Yes. The outermost decorator runs first. Logging wrapped around metrics logs before the metric is recorded; swap the nesting and the order flips. So the order you wrap them in is the order their behaviour runs.

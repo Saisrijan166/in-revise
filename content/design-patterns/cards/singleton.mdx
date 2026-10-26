@@ -5,83 +5,117 @@ title: Singleton
 topic: creational
 level: intermediate
 heat: 3
-hook: "One instance, one access point: a private constructor plus a static getInstance(), or simply an enum with one constant."
+hook: "Make a class allow only one object, created once, and give every caller the same one through a shared access point."
 points:
-  - { k: "Recipe", v: "private constructor + static method that returns the one instance" }
-  - { k: "Enum form", v: "Java blocks reflective and deserialised copies", kind: plus }
-  - { k: "Spring bean", v: "singleton scope is the default: one per bean definition per container", kind: default }
-  - { k: "Global state", v: "hides dependencies and is hard to replace in tests", kind: minus }
+  - { k: "Recipe", v: "a private constructor so no one calls new, plus one static method that returns the single instance" }
+  - { k: "Thread safety", v: "two threads calling the getter at once must not create two instances; an enum or the holder idiom prevents it", kind: key }
+  - { k: "Enum form", v: "a one-constant enum is the safest: the JVM blocks extra copies by reflection or deserialisation", kind: plus }
+  - { k: "Spring default", v: "a Spring bean is singleton scope by default: one instance per bean definition per container", kind: default }
+  - { k: "Global state", v: "shared mutable state any code can reach, which hides dependencies and is hard to fake in tests", kind: minus }
 trap:
-  wrong: "A singleton has exactly one instance across the whole system."
-  right: "One per ClassLoader (GoF) or per bean definition per container (Spring). Three pods run three instances."
-sayIt: "A singleton has a private constructor and one static access point. In plain Java I use an enum or the holder idiom for thread safety. In Spring a default bean is already one per container, not per cluster."
+  wrong: "A singleton guarantees exactly one instance across the whole system."
+  right: "One per ClassLoader (GoF) or per bean definition per container (Spring). Three running servers hold three separate instances."
+  why: "People hear 'single' and picture one object everywhere. In one JVM that holds, but each deployed instance has its own JVM, so each has its own singleton."
+sayIt: "A singleton has a private constructor and one static access point, so there is only one object. In plain Java I use an enum or the holder idiom for thread safety. A Spring bean is already one per container, but that is per server, not across the cluster."
+cheat:
+  idea: "A class that allows only one object. The constructor is private so no one else calls new, and a static method hands everyone the same instance."
+  flow: "private constructor → one static getInstance() → same object every call"
+  remember: "Use an enum or holder idiom for thread safety. 'One instance' means per JVM, not across servers."
+buildsOn: [design-principles]
+scenarios:
+  - q: "Two threads call getInstance() at the very same moment on a lazy singleton that just checks `if (instance == null) instance = new Config();`. What can go wrong?"
+    a: "Both threads can see null, both run new, and you get two instances. The check and the create are not atomic. The holder idiom or an enum avoids this because the JVM initialises a class only once, even with many threads."
+  - q: "You run three copies of your service behind a load balancer, each with a singleton counter. A request increments it. Is the count shared?"
+    a: "No. Each process has its own JVM and its own singleton, so there are three separate counters. A value that must be shared across servers belongs in a database or a cache like Redis, not a singleton."
 confusedWith: [singleton-vs-static-class]
 tags: [singleton, creational, thread-safety, spring-scope]
 visual: table
 sources:
-  - title: "JLS SE 25, 8.8.10 Preventing Instantiation, 8.9 Enum Classes"
-    url: "https://docs.oracle.com/javase/specs/jls/se25/html/jls-8.html"
-    verifiedOn: "2026-10-20"
-  - title: "Double-Checked Locking is Broken (Pugh et al.)"
-    url: "https://www.cs.umd.edu/~pugh/java/memoryModel/DoubleCheckedLocking.html"
-    verifiedOn: "2026-10-20"
+  - title: "JLS SE 25, 12.4.2 Initialization of Classes and Interfaces (the initialization lock)"
+    url: "https://docs.oracle.com/javase/specs/jls/se25/html/jls-12.html"
+    verifiedOn: "2026-10-23"
+  - title: "Java Object Serialization Specification 25, 3.7 readResolve and enum deserialization"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/specs/serialization/input.html"
+    verifiedOn: "2026-10-23"
+  - title: "Constructor.newInstance: throws IllegalArgumentException for an enum class (Java SE 25 API)"
+    url: "https://docs.oracle.com/en/java/javase/25/docs/api/java.base/java/lang/reflect/Constructor.html"
+    verifiedOn: "2026-10-23"
   - title: "Bean Scopes: the singleton scope (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/core/beans/factory-scopes.html"
     verifiedOn: "2026-10-20"
-  - title: "Singleton (refactoring.guru)"
-    url: "https://refactoring.guru/design-patterns/singleton"
-    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+Singleton is a pattern that lets a class have only one object, and gives all callers that same object. The class makes its constructor private, so no other code can call `new`. It keeps the one instance in a static field and hands it out through a static method, usually called `getInstance()`. "Scope" here means the boundary inside which there is one instance: for plain Java that is one per ClassLoader, which in a normal app means one per running JVM.
 
 ## Why it exists
 
-Some things should exist once, like an app-wide config. Singleton stops other code calling `new` and hands everyone the same object.
+Some objects should exist once: an app-wide config holder, a shared registry. If every part of the code could call `new PaymentConfig()`, you would get many copies, each possibly with different settings, and no single source of truth. Making the constructor private stops that. Callers can no longer build their own; they must go through the one access point, so everyone shares the same object.
 
 ## How it works
 
-| Way | Created | Thread-safe |
-|---|---|---|
-| Eager `static final` field | When the class initialises | Yes, through class initialisation |
-| `synchronized getInstance()` | On first call | Yes, but locks on every call |
-| [Double-checked locking](card:double-checked-locking) | On first call | Only if the field is `volatile` |
-| [Holder class](card:holder-idiom) | On first call | Yes, through class initialisation |
-| [Enum](card:enum-singleton) | When the enum initialises | Yes, and no reflective or deserialised copies |
+The hard part is creating that one instance safely when several threads ask for it at once. These are the common ways, from simplest to safest.
 
-- Overuse turns into hidden global state: see [anti-patterns](card:anti-patterns).
+| Way | Created | Thread-safe? |
+|---|---|---|
+| Eager `static final` field | When the class is first used | Yes: the JVM runs class setup once |
+| [Double-checked locking](card:double-checked-locking) | On the first call | Only if the field is `volatile` |
+| [Holder idiom](card:holder-idiom) | On first use of a nested class | Yes: the JVM runs class setup once |
+| [Enum](card:enum-singleton) with one constant | When the enum is first used | Yes, and no copies by reflection or deserialisation |
+
+1. Decide when the instance is built: eagerly, when the class loads, or lazily, on the first `getInstance()` call.
+2. If it is lazy and plain, two threads can both see the field as null and both build an object. That breaks the single-instance rule.
+3. The holder idiom and the enum both lean on a JVM guarantee: a class is initialised only once, and that step is locked, so the instance is built exactly once.
+4. So the key is to let class initialisation do the locking for you, rather than writing your own locks.
 
 ## Example
 
+The payment service keeps one config holder. The enum form is the one to reach for first.
+
 ```java
-public final class PaymentConfig {
-    private static volatile PaymentConfig instance;      // volatile is required
-    private PaymentConfig() { }
-    public static PaymentConfig getInstance() {
-        if (instance == null) {                          // 1st check, no lock
-            synchronized (PaymentConfig.class) {
-                if (instance == null) instance = new PaymentConfig();   // 2nd check
-            }
-        }
-        return instance;
-    }
+enum PaymentConfig {
+    INSTANCE;                                 // the single object; built once by the JVM
+    String currency() { return "INR"; }
 }
+
+// Every caller gets the same object:
+PaymentConfig.INSTANCE.currency();            // "INR"
+boolean same = PaymentConfig.INSTANCE == PaymentConfig.INSTANCE;   // true
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Bean scope | singleton | Spring Framework 7.0 |
+- `INSTANCE` is the one and only object; writing `enum` with a single constant is the whole pattern.
+- There is no `new` anywhere a caller can reach, so no second instance can be created.
+- Reflection cannot break it: `Constructor.newInstance` throws `IllegalArgumentException` for an enum class. Deserialisation returns the same constant by name, so no duplicate appears. With a hand-written `private` constructor, both of these can create a second instance.
+
+## Rules and defaults
+
+- **Thread safety is not automatic:** a plain lazy `if (instance == null)` can create two instances under load. Use an enum or the holder idiom.
+- **Volatile with double-checked locking:** if you write the classic double-checked form, the field must be `volatile`, or a thread can see a half-built object.
+- **Spring default scope:** a Spring bean is `singleton` scope by default, meaning one instance per bean definition per container (Spring Framework 7.0). Two bean definitions of the same class give two instances.
+- **Not cluster-wide:** "one instance" is per JVM. Across servers, shared state goes in a database or cache.
+
+## Not to be confused with
+
+A [static utility class](card:static-utility-class) also has a private constructor, but it has no instance at all: only static methods. A singleton is a real object you can pass around, inject, or hide behind an interface. Rule: need an object (state, an interface, a test double) use a singleton; just stateless helper methods use a static class.
+
+## Common mistakes
+
+- **"Spring saves me from writing singletons, so Spring beans are globally unique."** A Spring singleton is per container, so per server. Run three servers and you have three instances of that bean.
+- **"Double-checked locking without volatile is fine."** Without `volatile`, the write that stores the object and the writes inside its constructor can be reordered, so another thread sees a non-null reference to an object whose fields are still defaults.
 
 ## Interview Qs
 
 ### How do you make a singleton thread-safe?
 
-Use a one-constant enum or the holder idiom: the nested class is initialised on first use, and the JVM makes that safe. Double-checked locking works only with a `volatile` field.
+Use a one-constant enum, or the holder idiom where the instance lives in a static field of a nested class. Both rely on the JVM initialising a class only once under a lock, so the object is built exactly once. Double-checked locking also works, but only with a `volatile` field.
 
 ### Why does double-checked locking need volatile?
 
-Without it, the constructor's writes and the write of the reference can be reordered. Another thread may then see a non-null instance with default field values. Since Java 5, `volatile` forbids that reordering.
+Without it, the write that publishes the reference and the writes inside the constructor can be reordered. A second thread can then see a non-null instance whose fields are still at their defaults. `volatile` forbids that reordering, so a thread that sees the reference also sees a fully built object.
 
 ### Is a Spring singleton bean the same as a GoF singleton?
 
-No. GoF fixes one instance per ClassLoader. Spring keeps one per bean definition per container, so two definitions of one class give two instances.
+No. A GoF singleton is one instance per ClassLoader. A Spring singleton is one instance per bean definition per container. Two bean definitions of one class give two instances, and separate servers each hold their own, so it is not globally unique.

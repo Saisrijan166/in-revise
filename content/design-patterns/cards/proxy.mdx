@@ -5,17 +5,29 @@ title: Proxy
 topic: structural
 level: interview
 heat: 3
-hook: "A proxy has the real object's interface and sits in front of it, deciding what runs before, after or instead of each call."
+hook: "A proxy stands in front of the real object with its same interface, and decides what runs before, after or instead of each call."
 points:
-  - { k: "Purpose", v: "control access: lazy creation, security, remote, caching" }
-  - { k: "JDK dynamic proxy", v: "java.lang.reflect.Proxy: built at runtime, interfaces only" }
-  - { k: "CGLIB proxy", v: "a runtime subclass; final or private methods cannot be advised", kind: minus }
-  - { k: "Spring Boot 4.1", v: "CGLIB by default: spring.aop.proxy-target-class=true", kind: default }
-  - { k: "Self-invocation", v: "this.method() skips the proxy, so @Transactional does not apply", kind: minus }
+  - { k: "Controls access", v: "it can add lazy creation, a security check, a remote call or caching around the real object" }
+  - { k: "Same interface", v: "it implements the real object's interface, so callers often do not know it is a proxy" }
+  - { k: "JDK dynamic proxy", v: "java.lang.reflect.Proxy builds a proxy at runtime, but only for interfaces" }
+  - { k: "CGLIB proxy", v: "a generated subclass of the class; it cannot proxy final classes or final/private methods", kind: minus }
+  - { k: "Self-invocation", v: "a this.method() call inside the bean skips the proxy, so @Transactional does not apply", kind: minus }
+  - { k: "Spring Boot 4.1 default", v: "proxies beans with CGLIB; spring.aop.proxy-target-class defaults to true", kind: default }
 trap:
   wrong: "Calling a @Transactional method from another method of the same bean starts a transaction."
-  right: "That call goes through this, not the proxy, so no transaction starts."
-sayIt: "A proxy has the real object's interface and controls access to it. Spring proxies beans for @Transactional and AOP, so a this-call inside the bean skips the advice."
+  right: "That call goes through this, not the proxy, so the transaction advice never runs and no transaction starts."
+  why: "The method has the annotation, so people assume the annotation itself acts. The advice lives on the proxy, and an internal this-call never passes through the proxy."
+sayIt: "A proxy has the real object's interface and controls access to it. Spring wraps beans in a proxy to apply @Transactional and other AOP advice, so a this-call to another method of the same bean skips the proxy and its advice."
+cheat:
+  idea: "A proxy sits in front of the real object with the same interface and controls access: lazy loading, security, remote calls, caching. Callers often cannot tell it from the real object."
+  flow: "caller → proxy (check/defer) → real object"
+  remember: "Spring applies @Transactional via a proxy, so a this-call inside the bean skips it."
+buildsOn: [decorator]
+scenarios:
+  - q: "In a Spring bean, save() is @Transactional and process() calls this.save(). The transaction never starts. Why, and how do you fix it?"
+    a: "process calls save through this, not the proxy, so the transaction advice is skipped. Move save to another bean and call it through that bean, or use AspectJ mode, which weaves the advice into the bytecode instead of using a proxy."
+  - q: "You put @Transactional on a method, but the class is final. Why might the advice not apply?"
+    a: "Spring Boot proxies with CGLIB by default, which generates a subclass of the class. A final class cannot be subclassed, so no proxy is created and the advice cannot run. The same applies to final or private methods."
 confusedWith: [decorator-vs-proxy, proxy-vs-facade]
 tags: [proxy, structural, spring-aop, transactional]
 visual: flow
@@ -32,14 +44,21 @@ sources:
   - title: "Using @Transactional (Spring Framework 7.0 reference)"
     url: "https://docs.spring.io/spring-framework/reference/data-access/transaction/declarative/annotations.html"
     verifiedOn: "2026-10-20"
+  - title: "Annotation Interface Proxyable (Spring Framework 7.0 Javadoc)"
+    url: "https://docs.spring.io/spring-framework/docs/7.0.0/javadoc-api/org/springframework/context/annotation/Proxyable.html"
+    verifiedOn: "2026-10-21"
   - title: "Common Application Properties (Spring Boot 4.1.1)"
     url: "https://docs.spring.io/spring-boot/appendix/application-properties/index.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A proxy is an object that stands in for the real object and shares its interface, so callers use it as if it were the real thing. On each call the proxy can act before, after or instead of the real object: create it lazily, check a permission, call it over the network, or return a cached result. In structure it is like a [decorator](card:decorator), a wrapper with the same interface; the difference is intent. A decorator adds behaviour the caller chose, while a proxy controls access.
+
 ## Why it exists
 
-Checks, lazy loading and transactions belong around a call, not inside the class. A stand-in with the same interface adds them without changing the class or callers.
+Concerns such as access checks, lazy loading and starting a transaction do not belong inside the class doing the real work, and you often cannot change that class or its callers. A stand-in with the same interface lets you add these concerns around a call without touching either side. This is how Spring applies `@Transactional` and other AOP advice: it wraps your bean in a proxy, so the transaction logic lives outside your method.
 
 ## How it works
 
@@ -49,17 +68,24 @@ Checks, lazy loading and transactions belong around a call, not inside the class
   participant C as Controller
   participant P as Spring proxy
   participant S as PaymentService
-  C->>P: pay(₹500)
+  C->>P: pay(500)
   P->>P: begin transaction
-  P->>S: pay(₹500)
+  P->>S: pay(500)
   S->>S: this.audit() skips the proxy
   P->>P: commit`}
 />
 
-- Only calls that come in through the proxy get advice.
-- `@Proxyable` (new in Spring Framework 7.0) sets the proxy type for one bean.
+1. Spring creates a proxy that implements the same interface as `PaymentService` and hands that proxy to callers.
+2. The controller calls `pay` on the proxy, not on the real service.
+3. The proxy runs the advice, here beginning a transaction, then calls `pay` on the real service.
+4. Inside `pay`, a call to `this.audit()` goes straight to the real object and never passes the proxy, so no advice runs for it.
+5. When `pay` returns, the proxy commits the transaction.
+
+So the key is that only calls entering through the proxy get the advice.
 
 ## Example
+
+A JDK dynamic proxy adds a line before and after every call, without a wrapper class.
 
 ```java
 PaymentGateway real = amount -> System.out.println("UPI charged " + amount);
@@ -81,19 +107,35 @@ UPI charged 500
 after charge
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Proxy type | CGLIB subclass (`spring.aop.proxy-target-class=true`) | Spring Boot 4.1.1 |
-| Proxy type without Boot | JDK proxy if the bean has an interface, else CGLIB | Spring Framework 7.0 |
+- `Proxy.newProxyInstance` builds the proxy at runtime from a list of interfaces; there is no hand-written proxy class.
+- The `InvocationHandler` lambda runs for every method called on the proxy; `method.invoke(real, args)` forwards the call to the real object.
+- Because a JDK proxy is built from interfaces, `PaymentGateway` must be an interface. A concrete class with no interface needs a CGLIB proxy instead.
+- Remove `method.invoke(real, args)` and the real charge never happens; the proxy fully controls whether the real call runs.
+
+## Rules and defaults
+
+- **Proxy type in Spring Boot:** CGLIB subclass by default; `spring.aop.proxy-target-class` defaults to `true` in Spring Boot 4.1.1.
+- **Proxy type in plain Spring Framework 7.0:** a JDK dynamic proxy when the bean has an interface, otherwise a CGLIB subclass.
+- **CGLIB limits:** it subclasses the target, so a `final` class cannot be proxied, and `final` or `private` methods cannot be advised.
+- **Per-bean override:** `@Proxyable` (new in Spring Framework 7.0) suggests the proxy type for one bean, overriding the global default, but only when the bean is actually being proxied.
+- **Self-invocation:** a call through `this` never reaches the proxy, so its advice is skipped.
+
+## Not to be confused with
+
+A [facade](card:facade) also sits in front, but it offers a new, simpler interface over many classes, while a proxy keeps the exact interface of one object. Rule: same interface, one object, controlled access means Proxy; a new, simpler interface over a whole subsystem means Facade.
 
 ## Interview Qs
 
-### JDK dynamic proxy or CGLIB?
+### JDK dynamic proxy or CGLIB, and what is the trade-off?
 
-A JDK proxy implements the target's interfaces, so only their methods are proxied. CGLIB builds a subclass: no interface needed, but final classes and final or private methods cannot be advised.
+A JDK dynamic proxy implements the target's interfaces, so it can only proxy methods declared on an interface. CGLIB generates a subclass, so it needs no interface, but it cannot proxy a `final` class or `final` and `private` methods. Spring Boot uses CGLIB by default.
 
 ### Why is my @Transactional method ignored, and how do you fix it?
 
-Usually self-invocation: a method of the same bean calls it through this. Move it to another bean, or use AspectJ mode, which weaves bytecode instead of using a proxy. Also check it is not private or final.
+Usually self-invocation: another method of the same bean calls it through `this`, so the call never passes the proxy that holds the advice. Move the method to a separate bean and call it through that bean, or switch to AspectJ mode, which weaves the advice into bytecode instead of using a proxy. Also check the method is not `private` or `final`.
+
+### What kinds of proxy are there?
+
+A virtual proxy creates an expensive object only when first used; a protection proxy checks access rights; a remote proxy stands in for an object on another machine; a caching proxy returns a stored result. All share the real object's interface and add control around it.

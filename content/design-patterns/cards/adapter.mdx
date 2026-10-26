@@ -5,17 +5,28 @@ title: Adapter
 topic: structural
 level: beginner
 heat: 3
-hook: "Adapter is a plug converter: your code keeps calling its own interface, and the adapter translates each call for the other API."
+hook: "Adapter is a plug converter: your code keeps calling its own interface, and the adapter translates each call into the one the other class expects."
 points:
-  - { k: "Target", v: "the interface your code already uses: PaymentGateway" }
-  - { k: "Adaptee", v: "the existing class with the wrong interface: ExternalUpiSdk" }
-  - { k: "Adapter", v: "implements the target, wraps the adaptee, converts each call" }
-  - { k: "Contains the API", v: "SDK types stay in one class; swapping SDKs touches only it", kind: plus }
-  - { k: "Cost", v: "one more layer to keep in step with the SDK", kind: minus }
+  - { k: "Target", v: "the interface your code already calls, such as your own PaymentGateway" }
+  - { k: "Adaptee", v: "the existing class whose methods do not match, such as a third-party ExternalUpiSdk" }
+  - { k: "Adapter", v: "a class that implements the target, holds the adaptee, and converts each call to it" }
+  - { k: "Keeps the SDK contained", v: "the SDK's types live in one class, so swapping SDKs changes only the adapter", kind: plus }
+  - { k: "Cost", v: "one extra class to update whenever the SDK changes its methods", kind: minus }
 trap:
   wrong: "Adapter adds new behaviour to an object."
-  right: "Adapter's job is to change the interface. Adding behaviour behind the same interface is Decorator."
-sayIt: "Adapter makes an existing class usable through the interface my code expects. My UpiAdapter implements PaymentGateway and turns charge(₹500) into the SDK's paise call, so SDK types never leak out."
+  right: "Adapter changes the interface so an existing class fits. Adding behaviour behind the same interface is Decorator."
+  why: "Both wrap another object and delegate to it, so they look identical in code. The difference is the goal: Adapter changes the method shape, Decorator keeps it."
+sayIt: "Adapter makes an existing class usable through the interface my code already expects. My UpiAdapter implements PaymentGateway and turns charge in rupees into the SDK's payment-in-paise call, so SDK types never leak into the rest of the code."
+cheat:
+  idea: "Adapter wraps a class whose methods do not match your interface, and translates each call. Your code keeps calling its own interface; the adapter talks to the other class."
+  flow: "your call → adapter translates → adaptee's method"
+  remember: "Adapter changes the interface to fit; it never adds new behaviour. That job is Decorator."
+buildsOn: [composition-over-inheritance]
+scenarios:
+  - q: "You integrate a new payment provider whose SDK method is pay(long paiseAmount), but your code calls charge(BigDecimal rupees). You cannot edit the SDK. What do you write?"
+    a: "An adapter class that implements your PaymentGateway, holds the SDK, and in charge converts rupees to paise and calls pay. Callers keep using PaymentGateway, so nothing else changes."
+  - q: "A teammate puts retry logic inside the adapter, next to the translation. Is that still Adapter?"
+    a: "No. Translating the call is Adapter; adding retry around the call is Decorator. Mixing both in one class makes it do two jobs. Keep the adapter to translation and add a separate decorator for retry."
 confusedWith: [adapter-vs-decorator]
 tags: [adapter, structural, integration, legacy]
 visual: flow
@@ -37,9 +48,13 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Adapter is a class that sits between your code and another class whose methods do not match what your code calls. The class your code expects is the **target** interface; the mismatched class you must use is the **adaptee**. The adapter implements the target, holds the adaptee inside it, and in each method converts your call into the adaptee's call. This is [composition over inheritance](card:composition-over-inheritance): the adapter wraps the adaptee rather than extending it.
+
 ## Why it exists
 
-You must use a third-party or legacy class whose methods do not match your interface, and you cannot change it. Rewriting callers for it would spread its API everywhere.
+You often must use a third-party SDK or a legacy class whose method names and argument types are not the ones your code uses, and you cannot change that class. If every caller talked to it directly, the SDK's types and quirks would spread through the whole codebase, and swapping the SDK later would mean editing every caller. An adapter puts all of that translation in one class, so callers stay unaware of the SDK.
 
 ## How it works
 
@@ -51,34 +66,58 @@ You must use a third-party or legacy class whose methods do not match your inter
   A -- "makePaymentInPaise(long)" --> S[ExternalUpiSdk]`}
 />
 
-- An **object adapter** wraps the adaptee and works in any language; a class adapter inherits from it instead.
-- JDK: `InputStreamReader` reads a byte stream as characters. Spring MVC: a `HandlerAdapter` lets `DispatcherServlet` call any handler type.
+1. Your code calls `charge` on the `PaymentGateway` interface, which is the only payment interface it knows.
+2. The bean behind that interface is a `UpiAdapter`, which implements `PaymentGateway`.
+3. Inside `charge`, the adapter converts the arguments, for example rupees into the paise count the SDK wants.
+4. It calls the SDK's own method, `makePaymentInPaise`, and translates the result or errors back if needed.
+
+So the key is that callers see only the target interface, while the adapter alone knows the adaptee.
 
 ## Example
 
+`UpiAdapter` makes a third-party SDK usable through your `PaymentGateway`.
+
 ```java
-class UpiAdapter implements PaymentGateway {             // target: PaymentGateway
-    private final ExternalUpiSdk sdk;                     // adaptee
+class UpiAdapter implements PaymentGateway {             // target: your interface
+    private final ExternalUpiSdk sdk;                     // adaptee: the SDK you cannot change
     UpiAdapter(ExternalUpiSdk sdk) { this.sdk = sdk; }
 
     @Override
-    public void charge(BigDecimal amount) {               // ₹500 or ₹500.00
-        long paise = amount.movePointRight(2).longValueExact();   // 50_000
-        sdk.makePaymentInPaise(paise);                    // throws if a fraction of a paisa is left
+    public void charge(BigDecimal amount) {               // your call: rupees, e.g. 500 or 500.00
+        long paise = amount.movePointRight(2).longValueExact();   // 500 -> 50000
+        sdk.makePaymentInPaise(paise);                    // the SDK's call
     }
 }
 ```
+
+What to notice:
+
+- The class implements `PaymentGateway`, so anywhere a `PaymentGateway` is expected, a `UpiAdapter` fits. Callers never mention the SDK.
+- `charge` takes rupees as `BigDecimal`; the SDK wants a `long` count of paise. The adapter does the conversion, which is its whole purpose.
+- `movePointRight(2)` shifts 500 to 50000; `longValueExact` throws if a fraction of a paisa is left, so a bad amount fails loudly instead of silently rounding.
+- Swap this SDK for another provider and you write a new adapter; `PaymentService` and the rest of the code do not change.
+
+## Rules and defaults
+
+- **Object adapter vs class adapter:** an object adapter holds the adaptee in a field and delegates to it; a class adapter inherits from the adaptee. The object form is preferred because it does not tie you to one concrete class.
+- **One job:** the adapter only translates. Anything extra, such as retry or logging, belongs in a separate [decorator](card:decorator).
+- **In the JDK:** `InputStreamReader` adapts a byte `InputStream` so it can be read as characters.
+- **In Spring MVC:** a `HandlerAdapter` lets the `DispatcherServlet` call controllers of different shapes through one interface.
+
+## Not to be confused with
+
+A [decorator](card:decorator) also wraps an object and delegates, but it keeps the same interface and adds behaviour. An adapter changes the interface and adds nothing. Rule: different method on each side means Adapter; same method with extra work means Decorator.
 
 ## Interview Qs
 
 ### Where would you use Adapter in a payment system?
 
-Wrap each provider SDK behind your own `PaymentGateway`. Callers depend only on that interface, so a new or changed SDK needs a new adapter, not changes across the codebase.
+Wrap each provider's SDK behind your own `PaymentGateway` interface. Your services depend only on that interface, so adding or replacing a provider means writing one new adapter, not changing code across the system.
 
-### Object adapter or class adapter?
+### What is the difference between an object adapter and a class adapter?
 
-An object adapter holds the adaptee and delegates to it. A class adapter inherits from the adaptee instead, which ties it to that one concrete class, so the object adapter is looser.
+An object adapter holds the adaptee in a field and delegates to it, so it can adapt any subclass of the adaptee. A class adapter inherits from the adaptee, which ties it to that one concrete class. The object adapter is looser and usually preferred.
 
-### Why not convert rupees to paise with double?
+### Why convert rupees to paise with BigDecimal, not double?
 
-A double cannot hold many decimal amounts, such as 0.1, exactly, so rounding errors creep in. Use BigDecimal, or a long count of paise, and fail loudly if a fraction of a paisa is left.
+A `double` cannot hold many decimal amounts such as 0.1 exactly, so money maths drifts by tiny amounts. `BigDecimal` is exact, and `longValueExact` throws if a sub-paisa fraction is left, turning a silent rounding bug into a loud error.

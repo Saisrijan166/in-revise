@@ -5,17 +5,29 @@ title: State
 topic: behavioural
 level: intermediate
 heat: 2
-hook: "Give each state its own object, so a payment behaves by its current state and moves itself to the next one."
+hook: "Give each state of an object its own behaviour, so the object acts by its current state and moves itself to the next one, instead of every method checking the status."
 points:
-  - { k: "Roles", v: "a context holds the current state; each state is its own class" }
-  - { k: "Transition", v: "the state handles the event and sets the next state" }
-  - { k: "Invalid move", v: "the state rejects it: no refund of a FAILED payment" }
-  - { k: "Enum form", v: "enum constants with their own method bodies can be the states" }
-  - { k: "Cost", v: "a class per state; overkill for a few stable states", kind: minus }
+  - { k: "Context", v: "the object that has a changing status, such as a Payment; it forwards each event to its current state" }
+  - { k: "State", v: "one class (or enum constant) per status, holding what is allowed in that status" }
+  - { k: "Transition", v: "the current state handles the event and returns or sets the next state" }
+  - { k: "Invalid move", v: "a state rejects an event it does not allow, such as refunding a FAILED payment", kind: plus }
+  - { k: "Enum form", v: "enum constants with their own method bodies can be the states (Java)", kind: default }
+  - { k: "Cost", v: "one type per state; too much for a few states that rarely change", kind: minus }
 trap:
   wrong: "An enum of PENDING, SUCCESS and FAILED is the State pattern."
-  right: "A plain enum only names the states. It becomes the pattern when behaviour lives per state: state classes, or enum constants with their own bodies."
-sayIt: "In State, the context forwards each event to its current state object. That state does the work and picks the next state, so no method needs a switch on status and illegal moves are rejected."
+  right: "A plain enum only names the states. It becomes the pattern when behaviour lives per state: state classes, or enum constants with their own method bodies."
+  why: "The enum lists the same states a state machine has, so it looks complete, but naming a state is not the same as giving that state its own behaviour."
+sayIt: "In State, the context forwards each event to its current state object. That state does the work and picks the next state, so no method needs a switch on status and illegal moves, like refunding a failed payment, are rejected at the source."
+cheat:
+  idea: "State gives each status its own object that knows what is allowed and which status comes next. The context delegates every event to its current state."
+  flow: "CREATED → PENDING → SUCCESS → REFUND_PENDING → REFUNDED"
+  remember: "Naming states in an enum is not State; behaviour must live per state. Each state rejects moves it does not allow."
+buildsOn: [strategy]
+scenarios:
+  - q: "Every method of Payment (confirm, refund, cancel) begins with a switch on its status, and a new status means editing all of them. Which pattern fixes this?"
+    a: "State. Each status becomes its own class or enum constant that holds only the moves it allows and returns the next status. The methods lose their switches, and a new status is one new state that the others do not need to know about."
+  - q: "A Payment is in FAILED and someone calls refund(). What should happen, and how does State arrange it?"
+    a: "It should be rejected, because a failed payment was never charged. In State, FAILED simply does not implement refund (or throws), so the illegal move is blocked at the state itself rather than by a scattered if-check that a caller might forget."
 confusedWith: [strategy-vs-state]
 tags: [state, behavioural, state-machine, lifecycle]
 visual: flow
@@ -31,14 +43,18 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+State is a pattern for an object whose behaviour depends on its status. Each status, such as PENDING or SUCCESS for a payment, becomes its own object that holds what is allowed in that status and which status comes next. The main object, the context, keeps a reference to its current state and forwards every event to it. It looks like [Strategy](card:strategy) (the context delegates to a helper), but here the states swap themselves as events happen.
+
 ## Why it exists
 
-A payment's status decides what `confirm()` or `refund()` may do. Without the pattern every method repeats a switch on status, and each new status edits them all.
+A payment's status decides what `confirm()` or `refund()` may do. Without the pattern, every one of these methods starts with the same switch on the status, and the rules are spread across many methods. Adding a new status means editing all of them, and it is easy to forget one check, so an illegal move like refunding a failed payment slips through. State puts each status's rules in one place, so a method has no switch and an illegal move is rejected by the state itself.
 
 ## How it works
 
 <Mermaid
-  alt="Payment lifecycle: CREATED to PENDING on submit; PENDING to SUCCESS or FAILED; SUCCESS to REFUND_PENDING on refund, then REFUNDED. FAILED and REFUNDED are final."
+  alt="Payment lifecycle. CREATED goes to PENDING on submit. PENDING goes to SUCCESS when the provider confirms, or to FAILED when it declines. SUCCESS goes to REFUND_PENDING on refund, then to REFUNDED. FAILED and REFUNDED are final."
   chart={`stateDiagram-v2
   [*] --> CREATED
   CREATED --> PENDING: submit
@@ -50,10 +66,17 @@ A payment's status decides what `confirm()` or `refund()` may do. Without the pa
   REFUNDED --> [*]`}
 />
 
-- Every state answers the same events; an event a state does not allow throws at once.
-- Unlike [Strategy](card:strategy), states may know each other and can switch the context themselves.
+1. You list the allowed moves: the diagram above is the state machine.
+2. Each state holds only the moves it allows; CREATED allows `submit`, SUCCESS allows `refund`, FAILED allows nothing.
+3. The context keeps its current state and forwards each event to it, without a switch of its own.
+4. The state does the work and returns the next state, which the context stores.
+5. An event a state does not allow is rejected there, so the illegal move never happens.
+
+So the key is that the rules for one status live in one place, and the context only passes events along.
 
 ## Example
+
+Each state is an enum constant with its own method body. A constant overrides only the move it allows; the default body rejects the rest.
 
 ```java
 enum PaymentState {
@@ -67,15 +90,38 @@ enum PaymentState {
 }
 class Payment {                                        // the context
     private PaymentState state = PaymentState.CREATED;
-    void refund() { state = state.refund(); } }        // FAILED.refund() throws
+    void refund() { state = state.refund(); }          // FAILED.refund() throws
+}
 ```
+
+What to notice:
+
+- Each constant overrides only its allowed move, so `CREATED` has `submit`, `SUCCESS` has `refund`, and so on.
+- The three default bodies throw, so any move a state does not override is rejected: `FAILED.refund()` throws "FAILED: cannot refund".
+- `Payment.refund()` has no switch on the status; it just forwards to the current state and stores what comes back.
+- This is the pattern because behaviour lives per state. A plain enum with just the names `CREATED, PENDING, ...` and no bodies would not be.
+
+## Rules and defaults
+
+- **Behaviour per state:** the pattern needs each state to carry its own behaviour; naming the states alone is not enough.
+- **Reject by default:** give the default (non-overridden) move a clear failure, so an illegal transition throws instead of silently doing nothing.
+- **The state decides the next state:** unlike Strategy, a state may know and return other states, which drives the lifecycle forward.
+- **Enum vs classes (Java):** enum constants with class bodies suit a small, fixed set of states; separate state classes suit states that need their own fields or are added often.
+
+## Not to be confused with
+
+[Strategy](card:strategy) and State have the same shape: a context delegating to a helper object. The difference is intent. A Strategy is chosen once by the caller and the strategies do not know each other. A state is chosen by the lifecycle: the states can know each other and move the context to the next one as events arrive. Rule: many ways to do one job is Strategy; one object whose allowed actions change through a lifecycle is State.
 
 ## Interview Qs
 
 ### How is State different from Strategy?
 
-Both delegate to a helper object. In Strategy the client picks the algorithm and strategies never know each other. In State the states can know each other and move the context to the next state as events arrive. See [Strategy vs State](compare:strategy-vs-state).
+Both delegate to a helper object, so they look the same in code. In Strategy the client picks the algorithm and the strategies never know each other. In State the states can know each other and move the context to the next state as events arrive. See [Strategy vs State](compare:strategy-vs-state).
 
 ### When is the State pattern overkill?
 
-When there are only a few states that rarely change; a simple switch is clearer. Use State when many methods depend on the status.
+When there are only a few states that rarely change. A simple switch or a status field is clearer then, and the extra classes add no value. Use State when many methods depend on the status and new statuses or rules keep arriving.
+
+### Why is a plain enum of statuses not the State pattern?
+
+A plain enum only names the states; the behaviour still lives in switches elsewhere, which is exactly what the pattern removes. It becomes State only when each state carries its own behaviour, for example enum constants with their own method bodies, so the rules for a status sit in one place.

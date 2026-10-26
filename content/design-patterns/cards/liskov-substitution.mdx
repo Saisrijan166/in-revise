@@ -5,17 +5,27 @@ title: Liskov Substitution Principle (LSP)
 topic: solid
 level: intermediate
 heat: 2
-hook: "A subtype must work wherever its base type is expected, with no surprises for the caller."
+hook: "A subtype must work wherever its base type is expected, with no surprises: code that uses the base type must not break when given any subtype."
 points:
-  - { k: "Rule", v: "code using PaymentStrategy must not be confused by any implementation" }
-  - { k: "Subtyping", v: "covers interface implementations too, not only extends" }
-  - { k: "Contract", v: "same or weaker preconditions, same or stronger postconditions" }
-  - { k: "Exceptions", v: "a subtype may not throw what callers of the base never expect", kind: minus }
-  - { k: "Warning sign", v: "callers fill up with instanceof checks and if-else", kind: minus }
+  - { k: "Rule", v: "code that works with a base type must keep working with any of its subtypes" }
+  - { k: "Covers interfaces too", v: "a subtype is any implementation, not only a subclass made with extends" }
+  - { k: "Contract to keep", v: "accept the same inputs, promise at least the same results, throw no new kinds of error" }
+  - { k: "Exceptions", v: "a subtype must not throw an error that callers of the base type never expect", kind: minus }
+  - { k: "Warning sign", v: "callers start adding instanceof checks and if-else to handle one subtype specially", kind: minus }
 trap:
   wrong: "If it compiles and extends the base class, it follows LSP."
-  right: "The compiler checks only signatures. LSP is about behaviour: a Square whose setWidth also changes height breaks Rectangle's contract."
-sayIt: "LSP says a subtype must keep its base type's contract: accept the same inputs, promise at least the same results, throw no new surprises. If callers need instanceof checks, the hierarchy is wrong."
+  right: "The compiler checks only signatures. LSP is about behaviour: a Square whose setWidth also changes height breaks Rectangle's contract, though it compiles."
+  why: "Java lets any subclass override any method, so people assume the type system already enforces substitutability, but it only checks types, not promises."
+sayIt: "LSP says a subtype must keep its base type's contract: accept the same inputs, promise at least the same results, and throw no new surprises. If callers need instanceof checks to handle a subtype, the hierarchy is wrong."
+cheat:
+  idea: "A subtype must be usable anywhere its base type is expected without breaking the caller. It must honour the base type's contract, not just its method signatures."
+  remember: "The compiler checks signatures; LSP checks behaviour. A subtype must not tighten inputs, weaken results, or throw new errors (Square vs Rectangle)."
+buildsOn: [open-closed]
+scenarios:
+  - q: "A RefundJob loops over a list of PaymentStrategy and calls refund() on each. A GiftCardPayment throws UnsupportedOperationException from refund(). What breaks, and how does LSP guide the fix?"
+    a: "The job fails at run time when it reaches a gift card, because a subtype threw an error the caller never expected. LSP says gift cards do not satisfy the refundable contract, so they should not be that subtype. Fix: GiftCardPayment implements only a non-refundable PaymentStrategy, so it never appears in the refund list."
+  - q: "Someone makes Square extend Rectangle and overrides setWidth to also set height. A test sets width 5, height 4 and expects area 20. What happens?"
+    a: "The area is 16, not 20, because setWidth changed the height too. Rectangle's contract promised that setWidth leaves the height alone; Square weakened that promise, so code written against Rectangle breaks. Square is not substitutable for Rectangle."
 confusedWith: [inheritance-vs-composition]
 tags: [solid, lsp, subtyping, contracts]
 visual: table
@@ -34,43 +44,71 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The Liskov Substitution Principle is the L in SOLID, named after Barbara Liskov. It says a subtype must be usable wherever its base type is expected, without the caller noticing. "Subtype" means any implementation of a type, whether made with `extends` or by implementing an interface. The point is behaviour, not just method names: the subtype must honour the promises the base type made, which Liskov and Wing (1994) call the base type's contract.
+
 ## Why it exists
 
-Polymorphism works only if callers can trust the base type. A subtype that behaves differently breaks code that never even mentions it.
+Polymorphism only works if callers can trust the base type. If a method accepts a `PaymentStrategy` and calls `pay()`, it assumes every strategy behaves like the contract says. A subtype that behaves differently, by rejecting valid inputs or throwing an unexpected error, breaks code that never even mentions it by name. LSP spells out the rules a subtype must follow so that substitution stays safe and callers never need to know which subtype they got.
 
 ## How it works
 
+The subtype must keep four parts of the base type's contract.
+
 | Rule | The subtype must | Payment example |
 |---|---|---|
-| Preconditions | not demand more | CardPayment cannot reject amounts the interface allows |
+| Preconditions | not demand more from the caller | CardPayment cannot reject amounts the interface allows |
 | Postconditions | promise at least as much | when pay() returns, the money is taken |
-| Invariants | keep them true | a paid amount is never negative |
-| Exceptions | throw no new kinds | no UnsupportedOperationException from refund() |
+| Invariants | keep what is always true | a paid amount is never negative |
+| Exceptions | throw no new kinds | refund() does not throw UnsupportedOperationException if the base never does |
 
-- Named after Barbara Liskov (Data Abstraction and Hierarchy, 1988); Liskov and Wing made it formal in 1994.
-- Fix a broken subtype by splitting the interface ([ISP](card:interface-segregation)) or by [composition](card:composition-over-inheritance).
+1. Write down what the base type promises callers: inputs it accepts, results it guarantees, errors it can throw.
+2. For each subtype, check it accepts at least those inputs and promises at least those results.
+3. Check it introduces no new error that callers of the base type are not prepared for.
+4. If a subtype cannot keep the contract, it is the wrong subtype: split the interface or compose instead.
+
+So the key is: a subtype may do more, but never less and never differently, than the base type promised.
 
 ## Example
+
+A gift card that cannot be refunded breaks the refundable contract.
 
 ```java
 interface RefundablePayment extends PaymentStrategy { void refund(BigDecimal amount); }
 
 class GiftCardPayment implements RefundablePayment {
     public void pay(BigDecimal amount) { /* debit the gift card */ }
-    public void refund(BigDecimal amount) {                // breaks the contract
+    public void refund(BigDecimal amount) {                 // breaks the contract
         throw new UnsupportedOperationException("gift cards cannot be refunded");
     }
 }
-// A refund job that loops over RefundablePayment now fails at runtime.
-// Fix: GiftCardPayment implements only PaymentStrategy.
+// A refund job looping over RefundablePayment now fails at run time on a gift card.
+// Fix: GiftCardPayment implements only PaymentStrategy, not RefundablePayment.
 ```
+
+What to notice:
+
+- `GiftCardPayment` compiles, because the signature of `refund` matches, but it violates LSP by throwing an error no caller of `RefundablePayment` expects.
+- Any code that treats all `RefundablePayment` values the same breaks the moment a gift card reaches it.
+- The fix is structural: a gift card is not a refundable payment, so it should not be that subtype. [ISP](card:interface-segregation) (splitting the interface) is the usual remedy.
+
+## Rules and defaults
+
+- **Subtyping is behavioural:** the JVM enforces only signatures; keeping the contract is the author's job.
+- **JDK example:** `List.of(...)` returns an unmodifiable list, and `Collection` documents `add` as an optional operation that may throw `UnsupportedOperationException` (since Java 9). Code that must add cannot assume every `List` allows it, so this is within the documented contract, not an LSP break.
+- **Fix a broken hierarchy** by splitting the interface ([ISP](card:interface-segregation)) or by [composition](card:composition-over-inheritance), not by adding `instanceof` checks in callers.
 
 ## Interview Qs
 
 ### Why is Square extends Rectangle the classic LSP violation?
 
-Rectangle's setWidth promises the height stays the same. Square must change both, so code that sets width 5 and height 4 expects area 20 and gets 16. Square's postcondition is weaker.
+Rectangle's `setWidth` promises the height stays the same. A Square must change both sides together, so code that sets width 5 and height 4 expects area 20 but gets 16. The Square weakened Rectangle's postcondition, so it is not substitutable, even though it compiles and "a square is a rectangle" in mathematics.
 
-### List.of(...).add(x) throws. Does that break LSP?
+### List.of(...).add(x) throws an exception. Does that break LSP?
 
-No. Collection marks add as an optional operation that may throw UnsupportedOperationException, and List.of (Java 9) documents its lists as unmodifiable. Code that must add cannot assume every List allows it.
+No. `Collection` documents `add` as an optional operation that may throw `UnsupportedOperationException`, and `List.of` (Java 9) documents its lists as unmodifiable. The contract always allowed this, so a caller must not assume every `List` is mutable. The behaviour is within the promise, so substitution is still honoured.
+
+### How do you spot an LSP violation in code?
+
+Look for callers that use `instanceof` or type checks to treat one subtype specially, or subtype methods that throw new exceptions or silently do nothing. These mean the subtype does not keep the base type's contract, so callers have to know which subtype they hold.

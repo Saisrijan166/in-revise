@@ -5,17 +5,28 @@ title: Dependency Inversion Principle (DIP)
 topic: solid
 level: intermediate
 heat: 3
-hook: "Business rules must not depend on details; both depend on an interface the business side owns."
+hook: "Business rules must not depend on low-level details. Both should depend on an interface, and the business side owns that interface."
 points:
-  - { k: "Rule A", v: "high-level and low-level modules both depend on abstractions" }
-  - { k: "Rule B", v: "abstractions do not depend on details; details depend on them" }
-  - { k: "Who owns it", v: "the PaymentService side defines PaymentStrategy; UpiPayment implements it" }
-  - { k: "Inverted", v: "the source arrow points from detail to policy, against the call" }
-  - { k: "Stable classes", v: "using a stable concrete class like String directly is fine", kind: plus }
+  - { k: "Rule A", v: "high-level modules and low-level modules both depend on abstractions, not on each other" }
+  - { k: "Rule B", v: "abstractions do not depend on details; details depend on the abstractions" }
+  - { k: "Who owns the interface", v: "the PaymentService (policy) side defines PaymentStrategy; UpiPayment (detail) implements it" }
+  - { k: "What is inverted", v: "the source-code dependency of the detail points up to the policy, against the call direction" }
+  - { k: "Stable concretes are fine", v: "depending directly on a stable class like String is not a violation", kind: plus }
 trap:
   wrong: "Dependency inversion and dependency injection are the same thing."
-  right: "DIP is a principle about which way dependencies point. DI is one way to supply the implementation; a factory or service locator also works."
-sayIt: "DIP says policy code and detail code both depend on an abstraction owned by the policy side. PaymentService depends on PaymentStrategy, UpiPayment implements it, and DI plugs it in at runtime."
+  right: "DIP is a principle about which way dependencies point. DI is one technique for supplying the implementation; a factory or service locator can do it instead."
+  why: "Both start with 'dependency' and both appear in Spring, so beginners treat them as one idea, but one is a design rule and the other a delivery mechanism."
+sayIt: "DIP says policy code and detail code both depend on an abstraction that the policy side owns. PaymentService depends on PaymentStrategy, UpiPayment implements it, and dependency injection plugs the detail in at run time."
+cheat:
+  idea: "High-level policy and low-level details both depend on an abstraction the policy side owns. The detail implements it, so its dependency points up to policy."
+  flow: "PaymentService → PaymentStrategy ← UpiPayment"
+  remember: "DIP is the design rule (depend on abstractions); DI is one way to supply the concrete class. A factory also satisfies DIP."
+buildsOn: [open-closed, interface-segregation]
+scenarios:
+  - q: "PaymentService calls new UpiSdkClient() directly. A card provider is added, then the UPI SDK's constructor changes. Why does this hurt, and how does DIP change it?"
+    a: "The business rules depend on concrete SDKs, so every SDK change ripples up into PaymentService and each new provider edits it. DIP has PaymentService depend on a PaymentStrategy interface it owns; UpiPayment and CardPayment implement it. The SDK is now a detail behind the interface, so policy code stops changing."
+  - q: "Can you follow DIP without Spring or any DI framework?"
+    a: "Yes. DIP is about which way dependencies point, not about tooling. You can pass the implementation into a constructor by hand in main(), or build it in a factory. Spring only automates the wiring step; the design rule is independent of it."
 confusedWith: [dependency-inversion-vs-dependency-injection]
 tags: [solid, dip, abstraction, layering]
 visual: flow
@@ -25,15 +36,19 @@ sources:
     verifiedOn: "2026-10-20"
   - title: "Design Principles and Design Patterns (Robert C. Martin, 2000, archived objectmentor.com)"
     url: "https://web.archive.org/web/20150924054349/http://www.objectmentor.com/resources/articles/Principles_and_Patterns.pdf"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-23"
   - title: "The Open Closed Principle: plugin architecture (Robert C. Martin, Clean Coder Blog, 2014)"
     url: "https://blog.cleancoder.com/uncle-bob/2014/05/12/TheOpenClosedPrinciple.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The Dependency Inversion Principle is the D in SOLID. "High-level modules" hold the business policy, such as `PaymentService` deciding how a payment is taken. "Low-level modules" hold the details, such as the UPI SDK call or the SQL. DIP says neither should depend on the other directly. Both depend on an abstraction, and crucially the high-level side owns that abstraction: it defines the interface that the details must fit.
+
 ## Why it exists
 
-In a classic layered design, business rules depend on SDKs and databases, so every change in a detail ripples up into the rules that matter most.
+In a plain layered design, business rules call SDKs and databases directly, so the most important code depends on the most changeable code. Every time an SDK's method or constructor changes, the ripple reaches up into the rules that matter most, and adding a new provider means editing the policy class. DIP flips the dependency: the policy defines an interface, the detail implements it, so the detail now depends on the policy, and the policy no longer changes when a detail does.
 
 ## How it works
 
@@ -49,25 +64,46 @@ In a classic layered design, business rules depend on SDKs and databases, so eve
   end`}
 />
 
-- At runtime the call still goes from PaymentService to UpiPayment; only the source-code dependency flips.
-- Creating the object still needs a concrete class: Martin's answer was an [abstract factory](card:abstract-factory); today it is usually [dependency injection](card:dependency-injection).
-- Martin (2000): if OCP is the goal, DIP is the main mechanism.
+1. The high-level `PaymentService` defines the `PaymentStrategy` interface it needs, in its own module.
+2. Each detail, such as `UpiPayment`, implements that interface, so the detail depends on the policy's abstraction.
+3. At run time the call still flows from `PaymentService` down into `UpiPayment`.
+4. But in the source code, `UpiPayment` points up at `PaymentStrategy`; the dependency is inverted against the call.
+
+So the key is: the call goes down, the source dependency points up, and the policy owns the interface.
 
 ## Example
 
+How the modules are arranged: the core owns the interface, each detail depends on the core.
+
 ```text
-payment/core   PaymentService, PaymentStrategy     policy; owns the interface
+payment/core   PaymentService, PaymentStrategy      policy; owns the interface
 payment/upi    UpiPayment implements PaymentStrategy, calls the UPI SDK
 payment/card   CardPayment implements PaymentStrategy
 core imports nothing from upi or card; upi and card import core
 ```
 
+What to notice:
+
+- `core` has no import of `upi` or `card`, so it compiles and is tested without any SDK present.
+- Each provider module depends on `core`, never the other way, which is the inverted dependency.
+- Adding `payment/wallet` touches no existing module; this is how DIP delivers [OCP](card:open-closed).
+
+## Rules and defaults
+
+- **Policy owns the abstraction:** the interface lives with the high-level code that needs it, not with the detail that implements it.
+- **Stable concretes are allowed:** Martin notes depending directly on a stable, non-volatile class such as `String` is fine; DIP targets volatile details.
+- **Creating the object still needs the concrete class:** something must pick `UpiPayment`. Martin's answer was an [abstract factory](card:abstract-factory); today it is usually [dependency injection](card:dependency-injection).
+
 ## Interview Qs
 
 ### Why is it called "inversion"?
 
-Structured design made high-level modules depend on low-level ones. In a good object-oriented design that arrow is inverted: details depend on abstractions that the high-level side defines.
+In traditional structured design, high-level modules depend on (call and import) low-level ones. In a good object-oriented design that source dependency is inverted: the detail depends on an abstraction the high-level side defines. The call still goes from high to low, but the compile-time dependency now points from low to high.
+
+### How does DIP relate to the Open/Closed Principle?
+
+DIP is the mechanism that delivers [OCP](card:open-closed). Martin (2000) says if OCP is the goal, DIP is the primary mechanism: by making policy depend on an abstraction, you can add new implementations (extension) without editing the policy (no modification).
 
 ### Can you follow DIP without a DI framework?
 
-Yes. Pass the implementation through a constructor by hand in main, or create it in a factory. Spring only automates the wiring.
+Yes. Pass the implementation into a constructor by hand in `main`, or create it in a factory. DIP is about which way dependencies point in the source code; a framework such as Spring only automates the wiring, it is not required by the principle.
