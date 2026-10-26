@@ -5,17 +5,28 @@ title: "Re-renders: What Triggers Them"
 topic: performance
 level: intermediate
 heat: 2
-hook: "A re-render is React calling your component again; the DOM changes only where the new output differs."
+hook: "A re-render is React calling your component function again to work out the new UI. It changes the real page only where the new output differs from the old."
 points:
-  - { k: "Triggers", v: "own state change, parent re-render, context value change" }
-  - { k: "Not a trigger", v: "a prop changing on its own; the parent's render brings it" }
-  - { k: "DOM", v: "React touches only nodes whose output changed" }
-  - { k: "Cheap by default", v: "fix a re-render only when it causes visible lag", kind: plus }
-  - { k: "Fix order", v: "move state down, pass children, then memo" }
+  - { k: "Re-render", v: "React calls your component again to compute its JSX; it does not by itself change the page" }
+  - { k: "Three triggers", v: "the component's own state changes, its parent re-renders, or a context it reads changes" }
+  - { k: "A prop alone", v: "does not trigger a re-render; new props arrive only because the parent re-rendered", kind: minus }
+  - { k: "DOM update", v: "React compares old and new output and touches only the DOM nodes that changed" }
+  - { k: "Cheap by default", v: "most re-renders are fine; fix one only when profiling shows visible lag", kind: plus }
 trap:
-  wrong: "A re-render repaints the page, so every re-render is a performance problem."
-  right: "A re-render only recomputes JSX. React updates the DOM just where output differs; most re-renders are fine."
-sayIt: "A component re-renders when its state, its parent or a context it reads changes. That recomputes JSX, but React updates the DOM only where it differs, so I fix re-renders only when profiling shows lag."
+  wrong: "A re-render repaints the page, so every re-render is a performance problem to remove."
+  right: "A re-render only re-runs the component to compute JSX. React then updates the DOM just where the output differs, so most re-renders cost almost nothing."
+  why: "The word render sounds like drawing on screen, and beginners picture the whole page being redrawn, so any extra render feels expensive."
+sayIt: "A component re-renders when its own state, its parent, or a context it reads changes. That re-runs the function to compute JSX, but React updates the DOM only where the output differs. So I treat re-renders as cheap and fix one only when profiling shows real lag."
+cheat:
+  idea: "A re-render is React calling your component again to compute its JSX. Triggered by its own state, its parent re-rendering, or a context it reads changing."
+  flow: "trigger → run component → compare output → update DOM"
+  remember: "A re-render is not a DOM update: React changes the DOM only where output differs, so most are cheap."
+buildsOn: [use-state, lifting-state-up]
+scenarios:
+  - q: "A PaymentList shows 500 rows. Next to it is a small 'Dark mode' toggle that holds its own state in the same parent component. Why do all 500 rows re-render when you click the toggle, and is that slow?"
+    a: "Clicking the toggle changes the parent's state, so the parent re-renders, and a parent re-render re-runs all its children, including the list. It is only slow if computing those 500 rows is heavy. The fix is to move the toggle state into its own small component so flipping it does not re-run the parent."
+  - q: "You add a console.log inside a component and see it print on a click even though none of its props changed. Why?"
+    a: "Its parent re-rendered, which re-runs every child regardless of props. Props do not trigger a re-render by themselves; a child only gets new props because the parent re-rendered. The log is normal and usually harmless."
 confusedWith: []
 tags: [performance, rendering]
 visual: flow
@@ -31,54 +42,85 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A re-render is React calling your component function again to work out what the UI should now look like. The function runs, reads its current [state](card:use-state) and props, and returns JSX, which is React's description of the UI. A re-render by itself is just this recalculation. It is a separate step from changing the real page, which React does afterwards and only where needed.
+
 ## Why it exists
 
-Every state change makes React call components again. Knowing what triggers that, and what it really costs, tells you when to leave it alone and when to fix it.
+Something has to decide what changes on screen when data changes. Without re-rendering you would hunt down each DOM node and update it by hand after every click or response, which is error-prone. React instead re-runs the component to get the new JSX, compares it with the old, and updates only the parts that differ. You change state; React works out the rest.
 
 ## How it works
 
 <Mermaid
-  alt="A trigger (own state change, parent re-render, or context value change) makes React call the component again. React compares the new output with the old. If nothing differs, the DOM is not touched. If something differs, only those DOM nodes are updated, then the browser paints."
+  alt="A trigger (the component's own state change, its parent re-rendering, or a context value change) makes React call the component again to compute JSX. React compares the new output with the old. If nothing differs the DOM is left untouched; if something differs React updates only those DOM nodes, then the browser paints."
   chart={`flowchart LR
-  T1[Own state change] --> R[Render: call the component]
+  T1[Own state change] --> R[Run the component: compute JSX]
   T2[Parent re-render] --> R
   T3[Context value change] --> R
   R --> D{Output differs?}
-  D -- no --> N[DOM untouched]
-  D -- yes --> C[Commit: update only those nodes]`}
+  D -- no --> N[DOM left untouched]
+  D -- yes --> C[Update only the changed DOM nodes, then paint]`}
 />
 
-- Find slow renders with the [Profiler](card:measuring-performance) before fixing anything.
-- Fixes, cheapest first: [keep state low](card:lifting-state-up), pass slow parts as `children`, then [memo](card:memoization).
-- Slow update you cannot avoid: mark it non-urgent with [useTransition](card:use-transition) or [useDeferredValue](card:use-deferred-value).
+1. A trigger fires: the component's own state changes, its parent re-renders, or a context it reads gets a new value.
+2. React calls the component function again. It computes fresh JSX from the current state and props.
+3. React compares the new JSX with the previous output. This comparison is called reconciliation.
+4. If some output changed, React updates only those DOM nodes and the browser paints. If nothing changed, the DOM is left untouched.
+
+So the key is that running the component is cheap; only a real DOM change costs much.
 
 ## Example
 
+In the payments dashboard, a status filter and the list of rows start in one component. Moving the filter state down means flipping it no longer re-runs the whole list.
+
 ```jsx
 import { useState } from 'react';
-function Layout({ children }) {
-  const [cartOpen, setCartOpen] = useState(false); // state lives here only
-  return (
+
+function Dashboard({ payments }) {
+  return (                            // flipping the filter re-renders only FilterBar
     <main>
-      <button onClick={() => setCartOpen(!cartOpen)}>Cart</button>
-      {cartOpen && <p>Cart: 2 items</p>}
-      {children}
+      <FilterBar />
+      <PaymentList payments={payments} />
     </main>
   );
 }
-// <Layout><ProductList products={products} /></Layout>: toggling skips ProductList
+
+function FilterBar() {
+  const [status, setStatus] = useState('all'); // state kept low, next to its use
+  return <button onClick={() => setStatus(status === 'all' ? 'failed' : 'all')}>{status}</button>;
+}
 ```
+
+What to notice:
+
+- `status` lives inside `FilterBar`, so changing it re-renders only `FilterBar`, not `Dashboard` or `PaymentList`.
+- If `status` instead lived in `Dashboard`, every click would re-render `Dashboard`, which re-runs `PaymentList` and all its rows.
+- `PaymentList` still re-renders when its `payments` prop truly changes, because that means `Dashboard` re-rendered with new data.
+- This is the first and cheapest fix: keep state low. You reach for [memo](card:memoization) only when moving state is not enough.
+
+## Rules and defaults
+
+- **Three triggers:** a re-render happens only on the component's own state change, a parent re-render, or a new value from a context it reads. Nothing else re-renders it.
+- **Props are not a trigger:** a child re-renders because its parent did; the new props are a result of that, not the cause.
+- **A parent re-renders its children:** by default every child runs again when the parent does, whatever its props. [React.memo](card:memoization) is how you opt a child out.
+- **Re-render is not commit:** React first re-renders (computes JSX), then commits (updates the DOM) only where output differs.
+
+## Common mistakes
+
+- **"Fewer re-renders is always the goal."** The goal is a fast UI. A re-render that does light work is fine; profile first, and optimise only a re-render that profiling shows is slow and frequent.
+- **"memo is the first thing to reach for."** The cheaper fixes come first: keep state low so fewer components re-render, or pass a slow subtree as `children` so it is created outside and skipped. Add `memo` only after those are not enough.
 
 ## Interview Qs
 
 ### Is a re-render the same as a DOM update?
 
-No. Rendering calls the component to compute JSX. In the commit step React changes only DOM nodes whose output differs. If nothing differs, the DOM is not touched.
+No. A re-render runs the component function to compute JSX. React then reconciles the new output against the old and, in the commit step, changes only the DOM nodes whose output differs. If nothing differs, the DOM is not touched at all, so a re-render can cost almost nothing.
 
-### What makes a component re-render?
+### What are the three things that trigger a re-render?
 
-Its own state changing, its parent re-rendering, or a context it reads getting a new value. New props arrive only because the parent rendered.
+Its own state changing, its parent re-rendering, or a context it reads getting a new value. New props do not trigger a re-render on their own; a child receives new props only because its parent re-rendered.
 
-### How do you stop a slow list re-rendering when a small toggle changes?
+### A small toggle re-renders a big list next to it. How do you stop that?
 
-Move the toggle state into a small component, or pass the list as `children` so it is created outside. Use `memo` only if that is not enough.
+Move the toggle state into its own small component, so flipping it no longer re-runs the parent that holds the list. If the list must stay under the same parent, pass it as `children`. Use `memo` on the list only if those do not help.

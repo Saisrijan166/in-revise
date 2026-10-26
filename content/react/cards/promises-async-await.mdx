@@ -5,17 +5,29 @@ title: "Promises and async / await"
 topic: javascript
 level: intermediate
 heat: 3
-hook: "A promise is a value that arrives later; async / await lets you write that wait like normal top-to-bottom code."
+hook: "A promise is an object for a value that is not ready yet; async / await lets you wait for it while writing plain top-to-bottom code."
 points:
-  - { k: "States", v: "pending, then fulfilled or rejected (settled) only once" }
-  - { k: "then / catch / finally", v: "each returns a new promise, so steps chain flat" }
-  - { k: "async function", v: "always returns a promise; a throw becomes a rejection" }
-  - { k: "Errors", v: "one catch at the end, or try / catch around await" }
-  - { k: "fetch", v: "rejects on network errors, not on 404 or 500; check response.ok", kind: minus }
+  - { k: "A promise", v: "an object that is pending, then fulfilled with a value or rejected with an error, once only" }
+  - { k: "then / catch / finally", v: "then runs on success, catch on an error; each returns a new promise so steps chain" }
+  - { k: "async function", v: "always returns a promise; a returned value fulfils it, a throw rejects it" }
+  - { k: "await", v: "pauses the async function until the promise settles, then gives its value or throws" }
+  - { k: "Errors", v: "wrap awaits in try / catch, or add one .catch at the end of a chain" }
+  - { k: "fetch", v: "its promise rejects only on a network failure; a 404 or 500 still fulfils, so check response.ok", kind: minus }
 trap:
-  wrong: "await inside a loop over product ids loads them all at the same time."
-  right: "Each await waits for the previous one. Start them all, then await Promise.all to run in parallel."
-sayIt: "A promise is pending, then fulfilled or rejected. async / await is syntax over promises with try / catch for errors. I run independent calls with Promise.all and always check response.ok after fetch."
+  wrong: "Writing await inside a for-loop over product ids loads them all at the same time."
+  right: "Each await waits for the previous one, so the loop runs them one after another. Start all the calls first, then await Promise.all to run them in parallel."
+  why: "await reads like a normal blocking call, so people picture the whole loop body finishing instantly; they forget await actually pauses until that one call returns."
+sayIt: "A promise is pending, then fulfilled or rejected, once. async / await is syntax over promises: await pauses until it settles, and try / catch handles errors. I run independent calls with Promise.all and always check response.ok after fetch."
+cheat:
+  idea: "A promise is an object for a value that arrives later. async / await lets you wait for it with normal, top-to-bottom code and try / catch for errors."
+  flow: "pending → fulfilled (value) or rejected (error) → then / catch runs"
+  remember: "await pauses one call; use Promise.all to run independent calls in parallel. After fetch, check response.ok because a 404 still fulfils."
+buildsOn: [event-loop]
+scenarios:
+  - q: "You load three products in a loop with `for (const id of ids) { await loadProduct(id); }`. Each call takes 200ms. How long does the loop take, and how would you make it faster?"
+    a: "About 600ms, because each await waits for the previous call to finish before the next starts. Start them together with `ids.map(loadProduct)` and `await Promise.all(...)`; then the three calls overlap and the total is about 200ms."
+  - q: "`fetch('/api/missing')` returns a 404, but your `.catch` never runs. Why, and what prints?"
+    a: "The fetch promise still fulfils on a 404; it rejects only on a network error. So response is a normal Response with response.ok === false. You must check response.ok yourself and throw, or the 404 passes through as success."
 confusedWith: [promise-all-vs-allsettled-vs-race-vs-any]
 tags: [javascript, promises, async]
 visual: flow
@@ -31,27 +43,37 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A promise is an object that stands for a value not ready yet, such as a network request's result. It is in one of three states: pending while the work runs, then either fulfilled with a value or rejected with an error. It settles once and never changes. An [async function](term:async-function) always returns a promise, and `await` inside it pauses until a promise settles, then hands back its value. This builds on the [event loop](card:event-loop): the pause does not block the page; other work runs meanwhile.
+
 ## Why it exists
 
-Nested callbacks for each async step become "callback hell", with error handling at every level. Promises chain the steps flat, and async / await reads like synchronous code.
+Before promises, each step that took time (load a payment, then load its customer, then its card) was a function you passed in, a callback. Chaining several meant nesting callbacks inside callbacks, with error handling repeated at every level, which was hard to read and easy to get wrong. Promises let you chain the steps as a flat list with one error handler, and async / await lets you write that chain as ordinary top-to-bottom code.
 
 ## How it works
 
 <Mermaid
-  alt="A promise starts pending. It becomes fulfilled with a value, which runs then, or rejected with an error, which runs catch. Both are settled and run finally."
+  alt="A promise starts in the pending state. On success it becomes fulfilled with a value, which runs the then handler. On failure it becomes rejected with an error, which runs the catch handler. Both outcomes are called settled and both run the finally handler."
   chart={`flowchart LR
   P([pending]) -- "resolve(value)" --> F([fulfilled])
   P -- "reject(error)" --> R([rejected])
-  F --> T["then"]
-  R --> C["catch"]
+  F --> T["then: use the value"]
+  R --> C["catch: handle the error"]
   T --> Z["finally"]
   C --> Z`}
 />
 
-- Choosing between `all`, `allSettled`, `race` and `any`: see the [comparison](compare:promise-all-vs-allsettled-vs-race-vs-any).
-- Cancelling requests and loading data in React: [data fetching](card:data-fetching).
+1. You call something that returns a promise, such as `fetch`. The promise starts pending and your code keeps running.
+2. When the work finishes, the promise settles: fulfilled with a value, or rejected with an error.
+3. `await` makes the async function wait at that line until the promise settles, then continues with the value, or throws the error so a surrounding `try / catch` can handle it.
+4. To run several independent calls together, you start them all first and then `await Promise.all([...])`, so they overlap instead of running one by one.
+
+So the key is that `await` pauses only that one call; to go parallel you start the calls before you await them.
 
 ## Example
+
+The payments dashboard loads two product lists. Doing them with `Promise.all` makes both requests at once instead of waiting for the first to finish.
 
 ```javascript
 async function loadProducts(query) {
@@ -60,41 +82,32 @@ async function loadProducts(query) {
   return response.json();
 }
 
-const [mouse, cable] = await Promise.all([loadProducts("mouse"), loadProducts("cable")]);
+const [mice, cables] = await Promise.all([loadProducts("mouse"), loadProducts("cable")]);
 ```
 
-```javascript
-const wait = (ms, v) => new Promise((ok) => setTimeout(() => ok(v), ms));
-const found = Promise.resolve("Wireless Mouse");
-const failed = Promise.reject(new Error("HTTP 404"));
-const settled = await Promise.allSettled([found, failed]);
-console.log(settled.map((r) => r.status));
-try {
-  await Promise.all([found, failed]);
-} catch (e) {
-  console.log("all rejected:", e.message);
-}
-console.log(await Promise.any([failed, found]));
-console.log(await Promise.race([wait(50, "slow"), wait(10, "fast")]));
-```
+What to notice:
 
-```text output
-[ 'fulfilled', 'rejected' ]
-all rejected: HTTP 404
-Wireless Mouse
-fast
-```
+- `await fetch(...)` pauses `loadProducts` until the response headers arrive; the page stays responsive meanwhile.
+- `if (!response.ok) throw` is needed because fetch fulfils even on a 404 or 500. Without this line, a failed request looks like success.
+- `Promise.all([a, b])` starts both calls, then waits for both; the two requests overlap. Writing `await loadProducts("mouse"); await loadProducts("cable");` instead would run them one after the other.
+
+## Rules and defaults
+
+- **Settles once:** a promise moves from pending to fulfilled or rejected one time; later resolve or reject calls are ignored.
+- **async always returns a promise:** even `async () => 5` returns a promise that fulfils with `5`. Returning a promise does not wrap it twice.
+- **fetch (browser):** its promise rejects only on a network error, a bad URL or an aborted request. HTTP error statuses (404, 500) fulfil, so you check `response.ok`.
+- **Unhandled rejection:** a rejected promise with no `.catch` or surrounding `try / catch` triggers an `unhandledrejection` event and logs a warning.
 
 ## Interview Qs
 
-### Why check response.ok after fetch?
+### Why do you check response.ok after fetch?
 
-The `fetch` promise rejects only when the request itself fails, such as a network error. A 404 or 500 still fulfils, so you must check `response.ok` or `response.status` and throw yourself.
+The fetch promise rejects only when the request itself fails, such as a lost network or an aborted call. An HTTP 404 or 500 is still a completed response, so the promise fulfils. To treat those statuses as errors you must read `response.ok` or `response.status` and throw yourself.
 
-### Promises vs callbacks?
+### How do promises improve on callbacks?
 
-Promises chain flat instead of nesting, send any error to one `catch`, and combine with `Promise.all`. A callback API makes you handle errors at every level.
+Callbacks nest one level per async step, and you handle errors at every level, which is hard to follow. Promises chain the steps as a flat list, send any error to a single `catch`, and let you combine several with `Promise.all`. async / await then lets you write that chain as plain sequential code.
 
-### What does an async function return?
+### What does an async function return, and what happens when it throws?
 
-Always a promise. A returned value becomes the fulfilled value; a thrown error becomes the rejection.
+It always returns a promise. A value you return becomes the promise's fulfilled value; an error you throw becomes its rejection. So the caller handles both with `.then` / `.catch`, or with `await` inside a `try / catch`.

@@ -5,18 +5,28 @@ title: "Memoization: React.memo, useMemo and useCallback"
 topic: performance
 level: interview
 heat: 3
-hook: "useMemo keeps a value, useCallback keeps a function, React.memo skips a component: all only while inputs stay the same."
+hook: "Memoization reuses the last result while the inputs are the same: useMemo keeps a value, useCallback keeps a function, React.memo skips a child's re-render."
 points:
-  - { k: "Memoization", v: "reuse the last result while the inputs are unchanged" }
-  - { k: "Compared with", v: "Object.is: a new {} or () => {} is a change" }
-  - { k: "Pair them", v: "memo child needs stable object and function props" }
-  - { k: "No gain", v: "if props change every render anyway; harder to read", kind: minus }
-  - { k: "React Compiler", v: "1.0 (07-10-2025) memoizes at build time", kind: plus }
+  - { k: "Memoization", v: "keep the last result and reuse it while the inputs are unchanged, instead of redoing the work" }
+  - { k: "Inputs compared by", v: "Object.is, so a brand-new {} or () => {} each render counts as a changed input" }
+  - { k: "Pair them up", v: "a React.memo child only skips if its object and function props are kept stable by useMemo and useCallback", kind: plus }
+  - { k: "No gain if", v: "the inputs change every render anyway; then it does the extra work and only makes the code harder to read", kind: minus }
+  - { k: "React Compiler 1.0", v: "stable since 07-10-2025; it adds this memoization at build time, so you rarely write these by hand", kind: default }
 trap:
-  wrong: "Wrap every component in memo and every function in useCallback to be safe."
-  right: "Memoize only where profiling shows a slow, frequent re-render. Elsewhere it gives no benefit and makes code harder to read."
-sayIt: "useMemo caches a computed value, useCallback caches a function, and React.memo skips a child whose props are unchanged by Object.is. I add them only where profiling shows a slow render."
-confusedWith: []
+  wrong: "Wrap every component in React.memo and every function in useCallback, to be safe."
+  right: "Memoize only where profiling shows a slow, frequent re-render. Elsewhere it adds work and noise for no benefit."
+  why: "These hooks are framed as optimisations, so more feels faster. But each one runs a comparison on every render, and if the inputs change anyway, that is pure overhead."
+sayIt: "Memoization reuses the last result while inputs are unchanged. useMemo caches a value, useCallback caches a function, and React.memo skips a child whose props are unchanged by Object.is. I add them only where profiling shows a slow render, keeping props stable so memo can skip."
+cheat:
+  idea: "Memoization reuses the last result while inputs are unchanged. useMemo caches a value, useCallback caches a function reference, and React.memo skips a child whose props match by Object.is."
+  remember: "A new object or function prop each render defeats memo. Add it only where profiling shows a slow render."
+buildsOn: [re-renders, use-ref]
+scenarios:
+  - q: "You wrap PaymentRow in React.memo, but it still re-renders on every keystroke in a filter box above it. The row's data has not changed. Why?"
+    a: "The parent passes a prop that is a new value each render, such as an inline onRefund={() => refund(id)} or a style object. Object.is sees a new reference, so memo cannot skip. Wrap the handler in useCallback and the object in useMemo, or pass plain values, so the props stay the same between renders."
+  - q: "Does useCallback stop the function from being created on each render?"
+    a: "No. The arrow function is still created every render. useCallback just stores the first one and returns that same reference while its dependencies are unchanged, instead of the new one. That stable reference is what lets a memo child skip, or keeps an effect from re-running."
+confusedWith: [usememo-vs-usecallback-vs-memo]
 tags: [performance, hooks, memoization]
 visual: table
 sources:
@@ -26,35 +36,47 @@ sources:
   - title: "useMemo (react.dev)"
     url: "https://react.dev/reference/react/useMemo"
     verifiedOn: "2026-10-20"
+  - title: "useCallback (react.dev)"
+    url: "https://react.dev/reference/react/useCallback"
+    verifiedOn: "2026-10-20"
   - title: "React Compiler v1.0 (react.dev blog)"
     url: "https://react.dev/blog/2025/10/07/react-compiler-1"
     verifiedOn: "2026-10-20"
   - title: "reactCompiler (Next.js docs)"
     url: "https://nextjs.org/docs/app/api-reference/config/next-config-js/reactCompiler"
     verifiedOn: "2026-10-20"
-  - title: "React interview questions (GreatFrontEnd)"
-    url: "https://www.greatfrontend.com/questions/react-interview-questions"
-    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+Memoization means keeping the result of some work and reusing it while the inputs are the same, instead of doing the work again. React has three tools for it. `useMemo` caches a value a component calculated. `useCallback` caches a function the component created. `React.memo` wraps a child so it skips its [re-render](card:re-renders) when its props have not changed. All three answer "did the input change?" the same way, which is the key to using them.
 
 ## Why it exists
 
-Each render creates new objects and functions and repeats every calculation. Memoization reuses the last result so a slow calculation or a slow child is skipped when nothing really changed.
+Every time a component runs, it rebuilds its objects and functions and repeats its calculations. If a component filters a large payment list on each render, that filtering runs again even when the list and the filter did not change. And a child that re-renders with the same data still does its work. Memoization lets React skip the repeat: reuse the old filtered list, reuse the old handler, skip the unchanged child.
 
 ## How it works
 
+The three tools differ in what they cache, but all compare their inputs with `Object.is`.
+
 <Compare id="usememo-vs-usecallback-vs-memo" />
 
-- Dependencies are compared one by one with `Object.is`; any change recomputes.
-- With React Compiler on (Next.js 16: `reactCompiler: true`, off by default), keep manual hooks as escape hatches.
+1. On each render, React compares this render's inputs with the last render's, one by one, using `Object.is`.
+2. `Object.is` compares by reference for objects and functions: two objects with the same fields are still different values. So a new `{}` or `() => {}` created during render always counts as a change.
+3. If every input is unchanged, React reuses the stored value, function or child output and does no new work.
+4. If any input changed, it redoes the work and stores the new result.
+
+So the key is keeping inputs stable: a `React.memo` child only skips if the props passed to it are the same references as last time.
 
 ## Example
 
+Objects and functions are compared by reference, which is why a fresh one each render looks like a change.
+
 ```javascript
-const a = { name: 'Wireless Mouse', price: 799 };
-const b = { name: 'Wireless Mouse', price: 799 };
-console.log(a === b, Object.is(a, a));     // compared by reference
-const makeHandler = () => () => {};        // a new function each call
+const a = { id: 1, status: 'failed' };
+const b = { id: 1, status: 'failed' };
+console.log(a === b, Object.is(a, a)); // same fields, but different objects
+const makeHandler = () => () => {};    // builds a new function each call
 console.log(makeHandler() === makeHandler());
 ```
 
@@ -63,30 +85,49 @@ false true
 false
 ```
 
+Now the payments dashboard keeps a memo row's props stable so the row can skip.
+
 ```jsx
 import { memo, useCallback, useMemo } from 'react';
 
-const ProductCard = memo(function ProductCard({ product, onAdd }) {
-  return <button onClick={() => onAdd(product)}>Add {product.name}</button>;
+const PaymentRow = memo(function PaymentRow({ payment, onRefund }) {
+  return <button onClick={() => onRefund(payment.id)}>Refund {payment.id}</button>;
 });
 
-export function ProductList({ products, query, setCart }) {
-  const visible = useMemo(() => products.filter((p) => p.name.includes(query)), [products, query]);
-  const addToCart = useCallback((p) => setCart((c) => [...c, p]), [setCart]);
-  return visible.map((p) => <ProductCard key={p.id} product={p} onAdd={addToCart} />);
+export function PaymentList({ payments, status, refund }) {
+  const visible = useMemo(() => payments.filter((p) => p.status === status), [payments, status]);
+  const onRefund = useCallback((id) => refund(id), [refund]);
+  return visible.map((p) => <PaymentRow key={p.id} payment={p} onRefund={onRefund} />);
 }
 ```
 
+What to notice:
+
+- `a === b` is `false` because they are different objects, even with equal fields; `Object.is(a, a)` is `true` because it is the same reference. This is why memo compares references, not fields.
+- `useMemo` recomputes `visible` only when `payments` or `status` changes, so typing elsewhere does not re-filter the list.
+- `useCallback` gives every render the same `onRefund` reference. Without it, each render would pass a new function, so `Object.is` would see a changed prop and `PaymentRow` would re-render anyway.
+- Remove the `memo` wrapper and every row re-renders whenever `PaymentList` does, stable props or not.
+
+## Rules and defaults
+
+- **Object.is comparison:** React.memo and the hooks compare inputs with `Object.is`. A new object or function reference each render counts as changed.
+- **memo is an optimisation, not a guarantee:** a memo child still re-renders if its own state changes or a context it reads changes, even when props are stable.
+- **React Compiler 1.0 (stable 07-10-2025):** it adds this memoization at build time, so most apps no longer write these hooks by hand. In Next.js 16 it is the top-level `reactCompiler` option, off by default; set it to `true` to enable. Keep manual hooks as escape hatches, for example a value used as an effect dependency.
+
+## Not to be confused with
+
+`useMemo` caches a computed value; `useCallback` caches a function reference; `React.memo` skips a child's re-render. Rule: useMemo = value, useCallback = function, React.memo = component. They are often used together, because a memo child only skips when useMemo and useCallback keep its object and function props stable.
+
 ## Interview Qs
 
-### Why does my memo child still re-render?
+### Why does my React.memo child still re-render?
 
-A prop is a new object or function each render, so `Object.is` sees a change. Pass stable values with `useMemo` or `useCallback`, or pass plain values. Its own state or a context it reads also re-renders it.
+A prop passed to it is a new object or function on each render, so `Object.is` sees a changed prop and memo cannot skip. Pass stable values with `useMemo` or `useCallback`, or pass plain strings and numbers. Its own state changing or a context it reads changing also re-renders it, regardless of props.
 
-### Does useCallback stop the function being created?
+### Does useCallback stop a function being created each render?
 
-No. The function is still created each render; React just returns the cached one while dependencies are unchanged.
+No. The function is still created every render. `useCallback` just stores the first one and returns that same reference while its dependencies are unchanged. That stable reference is what lets a memo child skip, or stops an effect that depends on the function from re-running.
 
 ### Do you still need these hooks with React Compiler?
 
-Mostly no: the compiler memoizes components and values at build time. Keep them where you need exact control, such as a value used as an effect dependency.
+Mostly no. React Compiler 1.0 adds the memoization at build time, so hand-written `useMemo`, `useCallback` and `React.memo` are rarely needed. Keep them where you want exact control, such as a value used as an effect dependency, or in code the compiler is not enabled for.

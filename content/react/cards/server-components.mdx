@@ -5,17 +5,28 @@ title: Server Components and the Next.js App Router
 topic: modern
 level: intermediate
 heat: 2
-hook: "Server Components run only on the server and send their output, not their code; 'use client' marks the interactive parts."
+hook: "A Server Component runs only on the server and sends its finished output, not its code, to the browser; 'use client' marks the parts that need to be interactive."
 points:
-  - { k: "App Router default", v: "pages and layouts are Server Components", kind: default }
-  - { k: "Less client JS", v: "component code and its libraries never reach the browser", kind: plus }
-  - { k: "'use client'", v: "top of a file: it and all its imports become client code" }
-  - { k: "Props across", v: "must be serialisable: no plain functions or class instances", kind: minus }
-  - { k: "Small leaves", v: "make only the Add to cart button a Client Component" }
+  - { k: "App Router default", v: "in the Next.js 16 App Router, pages and layouts are Server Components unless you opt out", kind: default }
+  - { k: "Less client JS", v: "a Server Component's code and the libraries it imports never reach the browser", kind: plus }
+  - { k: "'use client'", v: "at the top of a file makes that file, and everything it imports, run as client code" }
+  - { k: "Serialisable props", v: "props from a Server to a Client Component must be plain data: no functions or class instances", kind: minus }
+  - { k: "Interactivity", v: "a Server Component cannot use useState, Effects or event handlers; those need a Client Component" }
 trap:
-  wrong: "Server Components are just another name for SSR."
-  right: "SSR turns components into HTML for the first load, then hydrates them. Server Components never ship code or hydrate. Next.js uses both."
-sayIt: "In the App Router, components are Server Components by default: they fetch data on the server and ship no JS. I add 'use client' only to small interactive leaves, like the Add to cart button."
+  wrong: "Server Components are just another name for server-side rendering."
+  right: "SSR renders to HTML, then hydrates in the browser. A Server Component never ships its code and is never hydrated; its output is final. Next.js uses both."
+  why: "Both run on the server and both reduce client work, so they blur together. The difference is that SSR's HTML becomes interactive after hydration, while a Server Component's output is fixed and carries no JavaScript."
+sayIt: "In the Next.js App Router, components are Server Components by default: they fetch data and render on the server and ship no JavaScript. I add 'use client' only to the small interactive leaves, like the Add to cart button, to keep the client bundle small."
+cheat:
+  idea: "A component that runs only on the server. It can read a database or secrets directly and sends finished output, not code, so none of its JavaScript reaches the browser."
+  flow: "Server Component renders → sends output → 'use client' leaf hydrates"
+  remember: "Default is Server; add 'use client' to the smallest interactive leaf."
+buildsOn: [rendering-strategies, data-fetching, use-state]
+scenarios:
+  - q: "You add 'use client' to the top-level layout so one button can have an onClick. What is the cost?"
+    a: "Everything the layout imports becomes client code, so the whole page ships its JavaScript and loses the Server Component benefit. Instead, keep the layout a Server Component and extract just the button into its own 'use client' file."
+  - q: "A Server Component reads a secret API key and passes the fetched result to a Client Component. Is the key exposed?"
+    a: "No. The Server Component's code, including the key, stays on the server; only the serialisable result it passes as a prop reaches the browser. The key would leak only if you put it in a Client Component or in a NEXT_PUBLIC_ variable."
 confusedWith: [csr-vs-ssr-vs-ssg-vs-isr]
 tags: [nextjs, rsc, use-client, app-router]
 visual: table
@@ -31,45 +42,84 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A Server Component is a React component that runs only on the server. Instead of sending its code to the browser, it sends its output: the elements it rendered, as data. Because its code never leaves the server, it can read a database or a secret key directly, and adds nothing to the browser's JavaScript. The trade-off is that it cannot be interactive: no state, no Effects, no `onClick`. A [Client Component](card:what-is-react), the ordinary kind, runs in the browser and can do all of those.
+
 ## Why it exists
 
-Shipping every component to the browser makes bundles big and puts data fetching behind extra API calls. Server Components keep non-interactive UI and its data access on the server.
+By default, every React component is sent to the browser and runs there. That means the bundle holds code for parts of the page that never change, and data has to be fetched through extra API calls the browser makes. Server Components let the non-interactive parts of the page, and the data they need, stay on the server. The browser then downloads JavaScript only for the parts that truly need to respond to the user, so the bundle is smaller and the first paint is faster.
 
 ## How it works
 
 <Compare id="server-vs-client-components" />
 
-- On first load, Client Components are also prerendered to HTML, then [hydrated](card:hydration).
-- A Server Component can pass another Server Component to a Client Component as `children`.
-- [Server Functions](card:server-functions) (`'use server'`) let the client call server code, such as a form action.
+1. A request comes in. Next.js renders the Server Components on the server, letting them fetch data directly.
+2. Where a Server Component includes a Client Component, it leaves a placeholder and records the props to pass in.
+3. The server sends the rendered output plus the small bundles for the Client Components only.
+4. In the browser, React fills the placeholders with the Client Components and [hydrates](card:hydration) them, so those leaves become interactive. The Server Component parts are already final and are never hydrated.
+
+So the key is: you mark the smallest interactive leaves with `'use client'`, and everything above them stays on the server for free.
 
 ## Example
 
-```jsx
-// app/products/[id]/page.jsx: a Server Component (the default)
-import AddToCartButton from './AddToCartButton';
-export default async function ProductPage({ params }) {
-  const product = await db.products.find((await params).id); // server only
-  return <main><h1>{product.name}: ₹{product.price}</h1><AddToCartButton id={product.id} /></main>;
-}
+The page is a Server Component (the default) that reads the database directly. Only the button, which needs an `onClick`, is a Client Component.
 
-// app/products/[id]/AddToCartButton.jsx
-'use client';
-export default function AddToCartButton({ id }) {
-  return <button onClick={() => addToCart(id)}>Add to cart</button>; // addToCart: cart context
+```jsx
+// app/products/[id]/page.jsx — a Server Component, no directive needed
+import AddToCartButton from './AddToCartButton';
+
+export default async function ProductPage({ params }) {
+  const product = await db.products.find((await params).id); // runs on the server only
+  return (
+    <main>
+      <h1>{product.name}: ₹{product.price}</h1>
+      <AddToCartButton id={product.id} />
+    </main>
+  );
 }
 ```
+
+```jsx
+// app/products/[id]/AddToCartButton.jsx — the one interactive leaf
+'use client';
+export default function AddToCartButton({ id }) {
+  return <button onClick={() => addToCart(id)}>Add to cart</button>;
+}
+```
+
+What to notice:
+
+- The page has no `'use client'`, so its code, including the `db` call, stays on the server. Only `AddToCartButton`'s code ships to the browser.
+- `id` passed to the button is a plain string, so it is serialisable and crosses the boundary. A function or a class instance would not.
+- Move the `db` call into a Client Component and it breaks: the browser has no database access and the query code would be exposed.
+
+## Rules and defaults
+
+- **Default in the App Router:** a file is a Server Component unless it starts with `'use client'`, in the Next.js 16 App Router.
+- **The boundary is per file:** `'use client'` at the top of a file makes that file and every module it imports run on the client.
+- **Serialisable props only:** a Server Component may pass strings, numbers, plain objects, arrays and JSX to a Client Component, but not functions or class instances.
+- **Secrets:** only variables prefixed `NEXT_PUBLIC_` are sent to the browser in Next.js; other environment variables stay on the server.
+
+## Not to be confused with
+
+Server Components and [SSR](card:rendering-strategies) both run on the server, but they answer different questions. SSR produces the first HTML and that HTML is hydrated into interactive components in the browser. Server Components ship no code and are never hydrated; their output is fixed. Rule: SSR is about the first paint of the whole page; Server Components are about which components carry JavaScript.
+
+## Common mistakes
+
+- **"Put 'use client' once at the top and forget it."** That turns the whole subtree into client code and throws away the benefit. Push the directive down to the smallest leaf that needs state or events.
+- **"Server Functions are safe because the client can only call what I expose."** A Server Function's arguments come from the browser and can be anything. Validate them and check the user's permissions, exactly as you would a normal API endpoint.
 
 ## Interview Qs
 
 ### When do you need 'use client'?
 
-For state, Effects, event handlers, browser APIs such as `localStorage`, and custom hooks that use them. Put it at the top of the smallest file that needs them, not on the whole app.
+When a component uses state, Effects, event handlers such as `onClick`, browser APIs such as `localStorage`, or a custom hook that uses any of these. Put the directive at the top of the smallest file that needs it, so only that component and its imports ship to the browser.
 
 ### Can a Server Component use useState or Context?
 
-No. It cannot use state or Effects, and cannot create Context. It can render a Client Component provider, and Client Components inside it read the value.
+No. It cannot hold state, run Effects or create a Context, because its code never runs in the browser. It can render a Client Component that provides a Context, and Client Components nested inside it can then read that value.
 
 ### Is it safe to read secrets in a Server Component?
 
-Yes: its code stays on the server. In Next.js only `NEXT_PUBLIC_` variables reach the browser. Server Function arguments come from the client, so validate them and check the user.
+Yes, because its code stays on the server and is never sent to the browser. Only `NEXT_PUBLIC_` variables reach the client. Be careful with Server Functions, though: their arguments come from the client, so validate them and check the user before trusting them.

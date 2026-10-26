@@ -5,17 +5,28 @@ title: "Rendering Strategies: CSR, SSR, SSG and ISR"
 topic: modern
 level: intermediate
 heat: 3
-hook: "Where and when is the HTML built: in the browser (CSR), per request (SSR), at build (SSG), or at build and refreshed (ISR)?"
+hook: "Where and when is a page's HTML built: in the browser (CSR), fresh on each request (SSR), once at build (SSG), or built and refreshed in the background (ISR)?"
 points:
-  - { k: "Next.js 16 default", v: "prerendered; cookies, headers and uncached data render per request", kind: default }
-  - { k: "Hydration", v: "server HTML shows first; clicks work once JS hydrates it" }
-  - { k: "ISR refresh", v: "serves the stale page, regenerates it in the background" }
-  - { k: "Server HTML", v: "fast first paint and easy for search crawlers", kind: plus }
-  - { k: "Hydration cost", v: "a big JS bundle still delays interaction (INP)", kind: minus }
+  - { k: "CSR", v: "the browser downloads near-empty HTML plus JS, then JS builds the page" }
+  - { k: "SSR", v: "the server builds full HTML on every request, so the first paint is fast and crawlers see content", kind: plus }
+  - { k: "SSG", v: "HTML is built once at build time and served from a CDN; it stays fixed until the next build" }
+  - { k: "ISR", v: "SSG that, after a set time, serves the old page and rebuilds it in the background" }
+  - { k: "Hydration cost", v: "a large JS bundle still delays the first click even when the HTML paints fast", kind: minus }
 trap:
-  wrong: "Reading `window` or a timestamp during render is fine; components run in the browser."
-  right: "With SSR they also run on the server, so the HTML differs and hydration mismatches. Read browser-only values in an Effect."
-sayIt: "CSR builds the page in the browser, SSR on each request, SSG at build time, and ISR is SSG that regenerates in the background. Server HTML paints fast and helps SEO, then hydrates to become interactive."
+  wrong: "Reading `window` or `Date.now()` during render is fine, because components run in the browser."
+  right: "With SSR a component also runs on the server, where `window` is undefined, so server and first browser render disagree. Read browser-only values in an Effect."
+  why: "In a plain CSR app a component only ever runs in the browser, so these reads always worked. People carry that habit into SSR, where the same code now runs twice."
+sayIt: "CSR builds the page in the browser, SSR builds fresh HTML on each request, SSG builds it once at build time, and ISR is SSG that regenerates in the background. Server-built HTML paints fast and helps SEO, then hydrates to become interactive."
+cheat:
+  idea: "Four ways to decide where and when a page's HTML is built: in the browser (CSR), per request (SSR), once at build (SSG), or built and refreshed (ISR)."
+  flow: "CSR: browser · SSR: per request · SSG: build once · ISR: build + refresh"
+  remember: "Prerender shared pages (SSG, or ISR when they change); SSR for per-request data."
+buildsOn: [what-is-react, how-browsers-render, data-fetching]
+scenarios:
+  - q: "A marketing page shows the same content to everyone and changes a few times a day. Which strategy, and why?"
+    a: "ISR. The page is the same for all users, so build it once (SSG) and serve it from a CDN for a fast first paint. Because it changes a few times a day, add a revalidate time so it rebuilds in the background instead of needing a full redeploy."
+  - q: "You render `{new Date().toLocaleTimeString()}` in an SSR page and the console warns about a hydration mismatch. Why?"
+    a: "The server runs the component at build or request time and puts one time in the HTML. The browser then runs the same component and gets a different time. The two renders differ, so hydration warns. Render the time in an Effect, which runs only in the browser."
 confusedWith: [server-vs-client-components]
 tags: [nextjs, ssr, ssg, isr, hydration, seo]
 visual: table
@@ -26,59 +37,87 @@ sources:
   - title: "Incremental Static Regeneration (Next.js 16 docs)"
     url: "https://nextjs.org/docs/app/guides/incremental-static-regeneration"
     verifiedOn: "2026-10-20"
-  - title: "Caching (Next.js 16 docs)"
-    url: "https://nextjs.org/docs/app/getting-started/caching"
-    verifiedOn: "2026-10-20"
   - title: "cacheLife (Next.js 16 docs)"
     url: "https://nextjs.org/docs/app/api-reference/functions/cacheLife"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "hydrateRoot (React reference)"
     url: "https://react.dev/reference/react-dom/client/hydrateRoot"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A rendering strategy decides **where** a page's HTML is built (in the browser or on a server) and **when** (once at build time, or freshly for each request). The four common choices are CSR, SSR, SSG and ISR. They are not React features; they are deployment choices a framework like Next.js makes for you per page. The strategy only decides the first HTML the browser receives. After that, React takes over through [hydration](card:hydration): it attaches event handlers to the HTML so clicks and typing work.
+
 ## Why it exists
 
-A blank page waiting for JavaScript shows late and is harder for crawlers to read. Where and when HTML is built trades speed, freshness and server cost.
+A pure [client-rendered](card:what-is-react) app sends near-empty HTML and makes the browser build everything with JavaScript. The user sees a blank page until the JS loads and runs, and a search crawler may see no content at all. Building the HTML on a server instead means the first thing the browser receives already shows the page, so it paints sooner and crawlers read it. Each strategy picks a different point on the trade-off between first-paint speed, how fresh the data is, and how much server work each visit costs.
 
 ## How it works
 
 <Compare id="csr-vs-ssr-vs-ssg-vs-isr" />
 
-- [Hydration](card:hydration) attaches React to server HTML with `hydrateRoot`.
-- [Streaming SSR](card:streaming-ssr) sends HTML in chunks, so the browser paints before the slowest data arrives.
-- Server HTML speeds the first paint; heavy hydration JS can hurt INP. [Measure both](card:measuring-performance).
+1. The browser asks for a page. What comes back depends on the strategy: near-empty HTML (CSR), HTML built right now on the server (SSR), or a pre-built HTML file (SSG and ISR).
+2. The browser paints that HTML. With SSR, SSG and ISR the user already sees content; with CSR they see a blank page or a spinner.
+3. The page's JavaScript downloads and React [hydrates](card:hydration) the HTML, attaching event handlers so the page becomes interactive.
+4. With ISR, once the page is older than its revalidate time, the next request still gets the old page instantly, and the server rebuilds it in the background for later visitors.
+
+So the key is: server-built HTML trades a little server work for a faster first paint and readable content, while CSR pushes all the work to the browser.
 
 ## Example
 
+In the Next.js App Router, this product page is prerendered at build time (SSG) and refreshed hourly (ISR). The `'use cache'` directive marks the function as cacheable, and `cacheLife('hours')` sets the refresh interval.
+
 ```jsx
-// app/products/[id]/page.jsx (Next.js 16.4, Cache Components, plus a loading.jsx)
+// app/products/[id]/page.jsx — needs cacheComponents: true in next.config
 import { cacheLife } from 'next/cache';
 
 async function getProduct(id) {
   'use cache';
-  cacheLife('hours'); // ISR: after an hour, serve stale and refresh in the background
-  return fetch(`https://shop.example/api/products/${id}`).then((r) => r.json());
+  cacheLife('hours'); // after 1 hour: serve old page, rebuild in the background
+  const res = await fetch(`https://shop.example/api/products/${id}`);
+  return res.json();
 }
-export async function generateStaticParams() {
-  return [{ id: '1' }, { id: '2' }]; // prerendered at build time; others on first visit
-}
+export const generateStaticParams = () => [{ id: '1' }, { id: '2' }]; // prebuilt; others on first visit
+
 export default async function ProductPage({ params }) {
   const product = await getProduct((await params).id);
   return <h1>{product.name}: ₹{product.price}</h1>;
 }
 ```
 
+What to notice:
+
+- `generateStaticParams` lists which pages to build at build time (SSG). Ids not in the list are built on their first visit and then cached.
+- `cacheLife('hours')` turns SSG into ISR: the page's HTML is reused for an hour, then rebuilt in the background. Remove it and the page stays fixed until the next full build.
+- There is no `window` or `localStorage` here, so the same code runs safely on the server. Browser-only reads would break this page.
+
+## Rules and defaults
+
+- **Next.js 16 default:** a page is prerendered (static) unless it reads request-time data such as cookies, headers or `searchParams`, or uncached data, in which case it renders per request (SSR).
+- **`cacheLife('hours')`:** revalidates after 1 hour, in Next.js 16. The `hours` profile is for content updated several times a day.
+- **Hydration mismatch:** React warns, and in development throws, when the server HTML and the first browser render differ. The fix is to make both renders identical, not to suppress the warning.
+- **No freshness guarantee from ISR:** a user can see a page that is up to one revalidate period out of date.
+
+## Not to be confused with
+
+Rendering strategy and [Server Components](card:server-components) are different questions. The strategy decides **when** HTML is built (build time vs per request). Server Components decide **which** components run only on the server and ship no JavaScript. A page can use any strategy and still mix Server and Client Components.
+
+## Common mistakes
+
+- **"SSR is always faster than CSR."** SSR usually paints sooner, but building HTML on every request can raise the time to first byte, and the page is still not clickable until hydration finishes. Static HTML from a CDN avoids the per-request render entirely.
+- **"ISR shows live data."** It shows data that is at most one revalidate period old. For truly live data, use SSR or fetch in the browser.
+
 ## Interview Qs
 
 ### What is hydration, and what causes a mismatch?
 
-Hydration attaches React and its event handlers to server HTML. A mismatch happens when the first client render differs: `typeof window` checks, browser-only APIs, timestamps or different data. Fix it like a bug; show client-only values after an Effect.
+Hydration is React attaching its event handlers to server-built HTML so the page becomes interactive without rebuilding it. A mismatch happens when the first browser render differs from the server HTML: `typeof window` checks, browser-only APIs, timestamps or random values. Treat it as a bug and move browser-only values into an Effect.
 
 ### Which rendering would you pick for an online shop?
 
-Product pages: ISR, fast and refreshed hourly. Search results: SSR, per query. Cart: CSR in a Client Component. Help pages: SSG.
+Product pages: ISR, so they are fast and refreshed hourly. Search results: SSR, because they depend on the query. The cart: CSR in a Client Component, since it is private and interactive. Static help pages: SSG, built once and served from a CDN.
 
 ### Is SSR always faster than CSR?
 
-No. SSR usually paints sooner, but a render per request can raise TTFB, and clicks still wait for hydration. Static HTML from a CDN skips the render cost.
+No. SSR usually gives a faster first paint and readable HTML for crawlers, but rendering on every request can raise the time to first byte, and the page still waits for hydration before clicks work. Static HTML served from a CDN skips the render cost and is often fastest.

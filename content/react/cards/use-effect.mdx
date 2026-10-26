@@ -5,17 +5,29 @@ title: "useEffect: Effects and Cleanup"
 topic: hooks
 level: intermediate
 heat: 3
-hook: "useEffect syncs a component with something outside React after render; its dependency array decides when it runs again."
+hook: "useEffect runs some code after the component is on screen, to sync it with the outside world; a dependency array decides when it runs again."
 points:
-  - { k: "Runs", v: "after React commits to the screen; on the client only" }
-  - { k: "Cleanup", v: "runs before the next setup and once on unmount" }
-  - { k: "Dependencies", v: "every prop, state or in-component value it reads; compared with Object.is" }
-  - { k: "Strict Mode (dev)", v: "one extra setup + cleanup on mount, to test your cleanup" }
-  - { k: "Not for", v: "values you can compute during render, or work caused by a click", kind: minus }
+  - { k: "When it runs", v: "after React paints the screen, on the client only; never during rendering" }
+  - { k: "Dependency array", v: "list every prop, state or in-component value the effect reads; React re-runs it when one changes" }
+  - { k: "[] vs no array", v: "[] runs once after mount; no array runs after every render", kind: default }
+  - { k: "Cleanup function", v: "the function you return; runs before the next setup and once when the component unmounts" }
+  - { k: "Strict Mode in dev", v: "runs setup, cleanup, setup once extra on mount to check your cleanup; production runs once", kind: minus }
+  - { k: "Not for", v: "a value you can compute while rendering, or work that a click caused", kind: minus }
 trap:
-  wrong: "My effect runs twice on mount, so I remove Strict Mode or add a flag to skip it."
-  right: "That is a development-only check. Write a cleanup that undoes the setup; production runs it once."
-sayIt: "useEffect runs after render to sync with an outside system, like a timer or a connection. It re-runs when a dependency changes, and the cleanup undoes the last run before the next one and on unmount."
+  wrong: "My effect runs twice on mount, so I remove Strict Mode or add a flag to skip the second run."
+  right: "That double run is a development-only check. Write a cleanup that undoes the setup, and production will run it once."
+  why: "The extra run is visible only in development, so it looks like a bug; adding a skip flag hides a real missing cleanup instead of fixing it."
+sayIt: "useEffect runs after render to sync a component with an outside system, like a timer or a connection. It re-runs when a listed dependency changes, and the cleanup undoes the previous run before the next one and on unmount."
+cheat:
+  idea: "useEffect runs code after render to sync a component with something outside React, such as a timer or connection. It re-runs when a dependency changes."
+  flow: "render → paint → effect runs → dependency changes → cleanup → effect again"
+  remember: "List every value the effect reads as a dependency; return a cleanup that undoes the setup."
+buildsOn: [use-state, rules-of-hooks]
+scenarios:
+  - q: "An effect with [] does setCount(count + 1) inside a setInterval. count is stuck at 1. Why?"
+    a: "The effect ran once and captured count as 0, so every tick computes 0 + 1. Either list count as a dependency (the interval restarts each change) or use the updater form setCount(c => c + 1), which reads the latest value and needs no dependency."
+  - q: "You subscribe to a chat room with roomId in an effect. The user switches rooms. What must the cleanup do?"
+    a: "Return a function that disconnects from the old room. With roomId in the deps, React runs that cleanup before connecting to the new room, so you never leak two live connections."
 confusedWith: []
 tags: [hooks, effects, cleanup, strict-mode]
 visual: table
@@ -34,22 +46,34 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+An Effect is code that runs because a component is on screen, not because the user did something. You write it with the `useEffect` hook. It is meant for talking to systems outside React: starting a timer, opening a network connection, or subscribing to a browser event. React runs the Effect after the component has been drawn, and runs it again whenever a value it depends on changes.
+
 ## Why it exists
 
-Some work must happen because a component is on screen, not because of a click: a timer, a subscription, a connection. Rendering must stay pure, so this work goes in an Effect.
+Rendering must stay pure: a component should only look at its props and state and return JSX, with no side effect. But a real app also has to connect to a chat server, poll for new data, or set a timer, and that work has to happen at some point tied to the component being shown. Without Effects you would have nowhere safe to put it. `useEffect` gives it a slot that runs after render and, through its cleanup, a matching slot to undo it.
 
 ## How it works
 
-| Dependency array | When the effect runs |
+The dependency array is the control: it tells React which renders should run the Effect again.
+
+| Dependency array | When the Effect runs |
 |---|---|
-| None | After every render (commit) |
-| `[]` | Once after mount; cleanup on unmount |
+| None given | After every render |
+| `[]` (empty) | Once after mount; cleanup on unmount |
 | `[productId]` | After mount, then whenever `productId` changes |
 
-- Each render's effect sees that render's values. A missing dependency leaves it reading old ones: a stale closure.
-- Data fetching races (old responses arriving last) are handled in [data fetching](card:data-fetching).
+1. React renders the component and paints it to the screen.
+2. It then runs the Effect's setup function.
+3. Before the next run, and when the component is removed, React runs the cleanup function you returned.
+4. On a re-render it compares each dependency with the last render using `Object.is`; if any changed, it runs cleanup then setup again.
+
+So the key is that each Effect captures the values from its own render; a value you read but leave out of the array stays frozen at an old value (a stale closure).
 
 ## Example
+
+In the payments dashboard, a stock badge polls an API every five seconds while it is shown, and stops cleanly when it is removed or the product changes.
 
 ```jsx
 import { useEffect } from 'react';
@@ -63,16 +87,35 @@ function StockBadge({ productId }) {
 }
 ```
 
+What to notice:
+
+- The setup starts the interval; the returned function clears it, so the two always pair up.
+- `productId` is listed because the Effect reads it; when it changes, React clears the old interval and starts one for the new product.
+- Drop the cleanup and each product change would leave its interval running, so several timers would pile up.
+- With Strict Mode in development React runs setup, cleanup, setup once on mount; the `clearInterval` cleanup makes that harmless.
+
+## Rules and defaults
+
+- **Timing:** by default an Effect runs after the browser paints. `useLayoutEffect` runs before paint, blocking it, for cases like measuring an element to avoid a flicker; prefer `useEffect`.
+- **Dependencies:** `exhaustive-deps` (in `eslint-plugin-react-hooks`) warns when you read a value but leave it out of the array.
+- **Non-reactive logic:** code inside an Effect that should read the latest value but not re-trigger it can move into `useEffectEvent` (an Effect Event, added in React 19.2).
+- **Not for derived values:** compute them during render instead; not for user actions, which belong in event handlers.
+
+## Common mistakes
+
+- **"useEffect is where I fetch data."** It works, but raw fetches race and leak; prefer a framework loader or a library, and always handle the stale-response case (see [data fetching](card:data-fetching)).
+- **Empty deps to "run once" while reading props.** `[]` freezes those props at their first value; list what you read, or you get a stale closure.
+
 ## Interview Qs
 
 ### When do you not need an Effect?
 
-To compute a value from props or state: write `const total = price * quantity` during render, not `setTotal` in an Effect, which costs an extra render (see [derived state](card:use-state)). And for user actions: put them in the event handler.
+To compute a value from props or state: write `const total = price * quantity` during render, not `setTotal` in an Effect, which costs an extra render. And for user actions: run them in the event handler that fired, not in an Effect watching the result.
 
-### What is a stale closure in an effect, and how do you fix it?
+### What is a stale closure in an Effect, and how do you fix it?
 
-An interval set up with `[]` that calls `setCount(count + 1)` keeps seeing the first `count`. List every value you read as a dependency, or use the updater form `setCount(c => c + 1)` so the effect needs no dependency.
+An interval set up with `[]` that calls `setCount(count + 1)` keeps seeing the first `count`, because the Effect captured that render's value. Fix it by listing every value you read as a dependency, or by using the updater form `setCount(c => c + 1)`, which needs no dependency.
 
-### useEffect vs useLayoutEffect?
+### Why does an Effect run twice on mount in development?
 
-`useEffect` usually runs after the browser paints. `useLayoutEffect` runs before paint, blocking it, so you can measure layout (a tooltip's height) without a flicker. Prefer `useEffect`.
+React Strict Mode intentionally runs setup, cleanup, then setup again to reveal missing cleanup. It happens only in development. If your cleanup correctly undoes the setup, the double run is invisible and production runs it once.

@@ -5,18 +5,30 @@ title: "Large Lists and Frequent Events"
 topic: performance
 level: intermediate
 heat: 2
-hook: "Render only the rows in view, debounce typing, throttle scrolling."
+hook: "Render only the rows the user can see, run work once typing stops, and cap how often scroll or resize handlers run."
 points:
-  - { k: "Virtualization", v: "10,000 products, only visible rows in the DOM" }
-  - { k: "Overscan", v: "a few extra rows; TanStack Virtual default 1", kind: default }
-  - { k: "Debounce", v: "search box: call the API once typing stops" }
-  - { k: "Throttle", v: "scroll or resize: run at most once per interval" }
-  - { k: "Slow render", v: "useDeferredValue needs no fixed delay", kind: plus }
+  - { k: "The problem", v: "thousands of DOM rows are slow; typing and scrolling fire many events a second" }
+  - { k: "Virtualization", v: "keep only the rows in view (plus a few spare) in the DOM, swapping them as the user scrolls" }
+  - { k: "Overscan", v: "a few extra rows just outside the viewport so scrolling shows no gap; TanStack Virtual default 1", kind: default }
+  - { k: "Debounce", v: "for a search box: wait until typing stops, then call the API once" }
+  - { k: "Throttle", v: "for scroll or resize: run the handler at most once per interval while events keep coming" }
+  - { k: "Slow render, not a call", v: "useDeferredValue keeps typing smooth with no fixed delay, and its background render can be interrupted", kind: plus }
 trap:
-  wrong: "Debounce and throttle are the same thing."
-  right: "Debounce waits for a pause and runs once. Throttle keeps running, but at most once per interval."
-sayIt: "For a huge list I virtualize: only visible rows plus a small overscan are in the DOM. For a search box I debounce, so the API is called once typing stops. For scroll or resize I throttle."
-confusedWith: []
+  wrong: "Debounce and throttle are two names for the same thing."
+  right: "Debounce waits for a pause and then runs once. Throttle keeps running during the activity, but at most once per interval."
+  why: "Both limit how often a function runs during a burst of events, so they are easy to blur together; the difference is debounce waits for silence while throttle fires at a steady rate."
+sayIt: "For a huge list I virtualize: only the visible rows plus a small overscan are in the DOM, swapped as the user scrolls. For a search box I debounce, so the API is called once typing stops. For scroll or resize I throttle, so the handler runs at most once per interval."
+cheat:
+  idea: "Big lists and rapid events are slow. Virtualize a long list so only visible rows are in the DOM. Debounce typing and throttle scroll or resize so handlers run less often."
+  flow: "list → virtualize · search → debounce · scroll → throttle"
+  remember: "Debounce waits for a pause then runs once; throttle runs at most once per interval."
+buildsOn: [memoization, data-fetching]
+scenarios:
+  - q: "A page must show 10,000 payments and it freezes while scrolling. What is the fix, and why does it help?"
+    a: "Virtualize the list: render only the roughly 20 rows in the viewport (plus a small overscan) and swap them as the user scrolls, using TanStack Virtual or react-window. The DOM holds about 20 rows instead of 10,000, so rendering and scrolling stay fast. Pagination or infinite scroll is an alternative that loads fewer rows at a time."
+  - q: "A search box calls the API on every keystroke, hammering the server. Would you debounce or use useDeferredValue?"
+    a: "Debounce the network request, so the API is called once after typing stops, which is what cuts the calls. useDeferredValue does not reduce calls; it suits a slow render, letting React show the old UI while the heavy one renders in the background. You can combine them: debounce the fetch, defer the slow list render."
+confusedWith: [debounce-vs-throttle]
 tags: [performance, lists, events]
 visual: table
 sources:
@@ -34,46 +46,69 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+This concept covers two slow spots that show up at scale. The first is a long list: a page that puts thousands of rows into the DOM at once. The second is a frequent event: typing, scrolling or resizing, which fire an event many times a second. The fixes are virtualization for the list, and debounce or throttle for the events. The [comparison](compare:debounce-vs-throttle) below separates debounce from throttle.
+
 ## Why it exists
 
-Thousands of DOM rows make renders and scrolling slow. Typing and scrolling fire many events a second; heavy work or an API call for each one is waste.
+The browser has to create and lay out every DOM node, so 10,000 rows make the first render and every scroll slow, even though only about twenty rows are visible. Separately, a keystroke or a scroll fires its event on each small change; doing heavy work, or calling an API, for every one of those is wasted effort and can overwhelm the server. These techniques cut the DOM down to what is seen and cut the work down to what is needed.
 
 ## How it works
 
+Pick the fix by the shape of the problem: too many nodes, or too many events.
+
 <Compare id="debounce-vs-throttle" />
 
-- Virtualize with [TanStack Virtual](card:tanstack-virtual) or [react-window](card:react-window), or load fewer rows with pagination.
-- If the slow part is rendering, not a request, [useDeferredValue](card:use-deferred-value) keeps typing smooth without a delay.
-- Debouncing saves calls; still [ignore stale responses](card:data-fetching).
+1. For a long list, virtualize: keep only the rows inside the viewport in the DOM, plus a small overscan so scrolling shows no blank gap, and replace them as the user scrolls. [TanStack Virtual](card:tanstack-virtual) or [react-window](card:react-window) do this; pagination or infinite scroll is an alternative.
+2. For a search box, debounce the work: restart a short timer on each keystroke and act only when the timer finally fires, so one API call is made after typing stops.
+3. For scroll or resize, throttle the handler: run it, then ignore further events until an interval passes, so it runs at a steady maximum rate during the activity.
+4. If the slow part is rendering and not a network call, reach for [useDeferredValue](card:use-deferred-value) instead of a timer: it has no fixed delay and its background render can be interrupted.
 
 ## Example
 
+A debounce wraps a function so it runs only after calls stop for the given delay. This is a common coding-round question.
+
 ```javascript
 function debounce(fn, ms) {
-  let timer;                                 // kept alive by the closure
+  let timer;                                 // kept alive by the closure between calls
   return (...args) => {
-    clearTimeout(timer);                     // a new key press restarts the wait
+    clearTimeout(timer);                     // a new key press cancels the pending call
     timer = setTimeout(() => fn(...args), ms);
   };
 }
-const search = debounce((q) => console.log(`GET /api/products?q=${q}`), 300);
+const search = debounce((q) => console.log(`GET /api/payments?q=${q}`), 300);
 ['m', 'mo', 'mou', 'mous', 'mouse'].forEach((q, i) => setTimeout(() => search(q), i * 100));
 ```
 
 ```text output
-GET /api/products?q=mouse
+GET /api/payments?q=mouse
 ```
+
+What to notice:
+
+- `timer` lives in the [closure](card:closures), so it survives between calls; each call can clear the previous timer.
+- Every keystroke fires within the 300 ms window, so each `clearTimeout` cancels the pending run; only the last one, 300 ms after the final `mouse`, actually fires.
+- The output is a single request for the final value `mouse`, not one per keystroke, which is the point of debouncing.
+- Change the gap in the `forEach` to 400 ms (longer than 300) and each keystroke would complete its own call, printing five lines.
+
+## Rules and defaults
+
+- **Virtualization keeps the DOM small:** only visible rows plus overscan exist; TanStack Virtual's default overscan is 1 extra row.
+- **Debounce timing:** the delay is how long a pause must last before the work runs; a new event during the wait restarts it.
+- **Throttle timing:** the interval is the minimum gap between two runs; events in between are ignored.
+- **Debounce still needs stale-response handling:** it cuts the number of calls, but you must still [ignore an out-of-order response](card:data-fetching) so an old reply does not overwrite a newer one.
 
 ## Interview Qs
 
-### How would you render 10,000 products?
+### How would you render a list of 10,000 payments without the page freezing?
 
-Virtualize: render only the rows in the viewport plus a small overscan, and swap them as the user scrolls. Or paginate, or load more as the user nears the end.
+Virtualize it: render only the roughly twenty rows in the viewport plus a small overscan, and swap them as the user scrolls, using a library like TanStack Virtual or react-window. The DOM then holds about twenty rows instead of ten thousand. Pagination or infinite scroll, loading fewer rows at a time, is an alternative.
 
 ### Write a debounce function.
 
-Keep a timer in a closure. On each call, clear the old timer and start a new one; the function runs only when calls stop for the given delay.
+Keep a timer variable in a closure. The returned function clears the previous timer on each call and starts a new one with `setTimeout`. The wrapped function runs only when calls stop for the given delay, because each new call cancels the pending run. See the example above.
 
-### Debounce or useDeferredValue for a search box?
+### For a search box, would you debounce or use useDeferredValue?
 
-Debounce the network request. useDeferredValue suits slow rendering: it has no fixed delay and its background render can be interrupted. They can be combined.
+Debounce the network request, because that is what reduces the number of API calls. `useDeferredValue` does not cut calls; it helps when the render itself is slow, by letting React keep showing the old UI while the heavy render happens in the background and can be interrupted. The two can be combined.

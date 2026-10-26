@@ -5,17 +5,28 @@ title: "The Event Loop"
 topic: javascript
 level: interview
 heat: 3
-hook: "Run the current code to the end, empty every microtask, maybe paint, then take the next task."
+hook: "JavaScript runs one job at a time. The event loop runs the current code to the end, then empties every microtask, maybe lets the page paint, then picks the next task."
 points:
-  - { k: "One thread", v: "one call stack; a running job is never interrupted" }
-  - { k: "Async work", v: "timers, fetch and I/O wait outside the stack, then queue a callback" }
-  - { k: "Microtasks first", v: "promise callbacks and code after await run before any timer" }
-  - { k: "Long task", v: "a busy stack blocks clicks, typing and painting", kind: minus }
-  - { k: "Timer clamp", v: "after 5 nested setTimeout calls, at least 4 ms (browsers)", kind: default }
+  - { k: "One thread", v: "there is one call stack; a running job runs to the end and is never cut off partway" }
+  - { k: "Async work waits aside", v: "timers, fetch and I/O finish outside the stack, then put a callback on a queue" }
+  - { k: "Microtasks before tasks", v: "promise callbacks and code after await run before any setTimeout callback" }
+  - { k: "A long job blocks", v: "while the stack is busy, clicks, typing and painting all have to wait", kind: minus }
+  - { k: "setTimeout(fn, 0)", v: "does not run fn now; it queues fn as a task that runs after current code and microtasks", kind: default }
 trap:
-  wrong: "setTimeout(fn, 0) runs fn immediately."
-  right: "It queues a task. The current code and every pending microtask run first."
-sayIt: "JavaScript runs one job at a time on the call stack. When it empties, the event loop drains all microtasks, such as promise callbacks, then lets the browser render, then runs the next task, such as a timer."
+  wrong: "setTimeout(fn, 0) runs fn immediately, or at least before the lines written after it."
+  right: "It queues fn as a task. The rest of the current code runs first, then every pending microtask, and only then fn."
+  why: "The 0 reads like 'no delay, so now', but the number is only the minimum wait before fn is allowed to start as a fresh task, not a request to run it inline."
+sayIt: "JavaScript runs one job at a time on the call stack. When the stack empties, the event loop drains all microtasks, such as promise callbacks, then lets the browser render, then runs the next task, such as a timer callback. That order explains the classic output puzzles."
+cheat:
+  idea: "The event loop runs async callbacks on JavaScript's single thread, in a fixed order, so results are predictable and the page does not freeze."
+  flow: "run current code → drain all microtasks → render → take one task → repeat"
+  remember: "Microtasks (promises, post-await) run before tasks (setTimeout). setTimeout(fn, 0) still waits for both."
+buildsOn: [this-keyword]
+scenarios:
+  - q: "You log A, call setTimeout(log B, 0), then Promise.resolve().then(log C), then log D. In what order do they print?"
+    a: "A, D, C, B. A and D are the current code and run first. C is a microtask, so it runs as soon as the code finishes. B is a task from setTimeout, which runs only after all microtasks, so it is last even with a 0 delay."
+  - q: "A click handler does heavy work for 2 seconds in a loop. The page stops responding to clicks and scrolls during it. Why?"
+    a: "JavaScript has one thread. The handler holds the call stack for 2 seconds, so the event loop cannot pick up click or scroll tasks or let the browser paint until it finishes. Break the work into chunks or move it to a Web Worker."
 confusedWith: []
 tags: [javascript, event-loop, async]
 visual: flow
@@ -34,33 +45,41 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The **event loop** is the mechanism that lets single-threaded JavaScript handle timers, network and user events without freezing. JavaScript runs on one thread with one **call stack**: the list of functions currently running. It can do only one job at a time. When slow work like a timer or a `fetch` finishes, its callback is not run straight away; it is put on a queue. The event loop is the simple rule that decides, again and again, which queued callback runs next.
+
 ## Why it exists
 
-JavaScript has one thread, yet it must wait for timers, network and clicks without freezing. The event loop runs waiting callbacks one at a time, in a fixed order.
+JavaScript has a single thread, so if it waited in place for a network reply or a one-second timer, the whole page would freeze: no clicks, no scrolling, no drawing. To avoid that, the slow work is started and set aside, and the thread keeps running other code. When the work is done it queues a callback. The event loop then runs these callbacks one at a time, in a fixed order, so the code stays responsive and the result order is predictable.
 
 ## How it works
 
 <Steps label="One turn of the browser event loop">
-  <Step title="Run one task">The script, a timer callback or an event handler runs until the stack is empty.</Step>
-  <Step title="Drain microtasks">Every queued microtask runs, including ones added meanwhile.</Step>
-  <Step title="Render">The browser may update the screen.</Step>
-  <Step title="Next task">Take the oldest task from a task queue and repeat.</Step>
+  <Step title="Run one task">The current task, such as the script, a timer callback or an event handler, runs until the call stack is empty.</Step>
+  <Step title="Drain microtasks">Every queued microtask runs, including ones queued while draining, until the microtask queue is empty.</Step>
+  <Step title="Render">The browser may update the screen now.</Step>
+  <Step title="Next task">Take the oldest task from a task queue and start again from step 1.</Step>
 </Steps>
+
+Two queues feed this loop, and microtasks always win.
 
 <Compare id="microtask-vs-macrotask" />
 
-- Long tasks hurt responsiveness, measured as [INP](card:measuring-performance).
+So the key is: current code first, then all microtasks, then one task; a `setTimeout` callback cannot jump ahead of a promise callback.
 
 ## Example
 
+This mixes synchronous code, a timer and promises. Predicting the order is a very common interview question. The output comes from running it with Node.
+
 ```javascript
 console.log("A");
-setTimeout(() => console.log("B"), 0);
-Promise.resolve().then(() => console.log("C"));
+setTimeout(() => console.log("B"), 0);           // a task
+Promise.resolve().then(() => console.log("C"));  // a microtask
 (async () => {
-  console.log("D");
+  console.log("D");                              // runs now
   await null;
-  console.log("E");
+  console.log("E");                              // microtask, after await
 })();
 console.log("F");
 ```
@@ -74,12 +93,26 @@ E
 B
 ```
 
+What to notice:
+
+- `A`, `D`, `F` print first: they are the current code, run top to bottom. An async function runs normally until its first `await`.
+- `C` and `E` are microtasks, so they run as soon as the current code finishes, before any timer.
+- `B` is a task from `setTimeout`, so it runs last, even with a `0` delay.
+- Remove the `await null` and `E` would print with `D`, in the synchronous run.
+
+## Rules and defaults
+
+- **One task per turn:** the loop runs exactly one task, then drains all microtasks, then may render.
+- **Microtasks run to empty:** a microtask that queues more microtasks keeps the loop in the drain step, which can starve tasks and rendering.
+- **Timer minimum:** `setTimeout(fn, 0)` queues `fn` as a task; browsers also clamp deeply nested timers (after 5 levels) to at least 4 ms.
+- **No preemption:** a running job is never paused partway; the next job waits for the stack to empty.
+
 ## Interview Qs
 
-### Why does D print before F?
+### Why does D print before F in an async function?
 
-An async function runs synchronously until its first `await`. Only the code after `await` is queued, as a microtask, so E waits.
+An async function runs synchronously until its first `await`, so `console.log("D")` runs in line with the surrounding code, before `F`. Only the code after `await` is split off and queued as a microtask, so `E` runs later, after the current code finishes.
 
 ### Can a microtask starve the page?
 
-Yes. The loop drains microtasks until the queue is empty, so a microtask that keeps queueing more blocks timers, input and rendering.
+Yes. In each turn the loop drains the microtask queue completely before it runs the next task or lets the browser render. So a microtask that keeps queueing more microtasks never lets the loop move on, blocking timers, input handling and painting.

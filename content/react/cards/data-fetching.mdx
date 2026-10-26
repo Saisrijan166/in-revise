@@ -5,28 +5,39 @@ title: Data Fetching in React
 topic: app-state
 level: intermediate
 heat: 2
-hook: "Show loading, error and data; stop stale responses from winning; let a query cache handle caching and retries."
+hook: "Fetching has three outcomes to show: loading, error and data. The tricky part is that a slow old response can arrive after a newer one and overwrite it."
 points:
-  - { k: "Three states", v: "render loading, error and data" }
-  - { k: "Race condition", v: "an old, slow response can overwrite a newer search", kind: minus }
-  - { k: "Effect fix", v: "cleanup sets an ignore flag or calls controller.abort()" }
-  - { k: "TanStack Query v5", v: "caches by queryKey, dedupes, retries, refetches stale data", kind: plus }
-  - { k: "After a write", v: "useMutation, then invalidateQueries refetches the list" }
+  - { k: "Three states", v: "always render all three: a loading view, an error view, and the data view" }
+  - { k: "Race condition", v: "search 'mo' is slow and search 'mouse' is fast; the slow 'mo' arrives last and overwrites 'mouse'", kind: minus }
+  - { k: "Cleanup fixes it", v: "the effect's cleanup sets an ignore flag or calls controller.abort(), so the stale response is dropped" }
+  - { k: "Query cache", v: "TanStack Query v5 caches by queryKey, de-dupes, retries, and refetches stale data for you", kind: plus }
+  - { k: "After a write", v: "useMutation sends the change; invalidateQueries then refetches the affected list" }
 trap:
-  wrong: "Fetch in useEffect with [query] and set state when it resolves."
-  right: "Responses can arrive out of order, so an old search can win. Ignore or abort the stale request in cleanup."
-sayIt: "I render loading, error and data states. In an effect I abort the stale request in cleanup, so an old search cannot win. In real apps TanStack Query or a framework loader handles caching and retries."
+  wrong: "Just fetch in a useEffect keyed on the search text and set state when the promise resolves."
+  right: "Two searches can resolve out of order, so an old one can win. In the effect cleanup, abort or ignore the previous request before the new one starts."
+  why: "In quick testing the responses come back in order, so the bug never shows. It appears only with slow networks and fast typing, which local testing rarely reproduces."
+sayIt: "I render loading, error and data states. In a raw effect I abort or ignore the previous request in cleanup, so a slow old response cannot overwrite a newer one. In real apps I let TanStack Query or a framework loader handle caching, de-duping and retries."
+cheat:
+  idea: "Load backend data and render three outcomes: loading, error and data. The hard part is a race condition: a slow older request resolves last and overwrites a newer result."
+  flow: "fetch → cleanup aborts old request → loading / error / data"
+  remember: "In a raw useEffect, abort the stale request in cleanup; in production prefer TanStack Query."
+buildsOn: [use-effect, promises-async-await]
+scenarios:
+  - q: "A search box fetches in a useEffect keyed on the query. The user types 'mo' then 'mouse' fast, and the network is slow. What can go wrong, and how do you fix it?"
+    a: "The 'mo' request can finish after 'mouse' and overwrite the correct results. Fix it in the effect cleanup: set an ignore flag or call controller.abort() so when the query changes, the previous request's result is dropped."
+  - q: "You call useMutation to refund a payment and it succeeds, but the payments list still shows 'PAID'. Why, and what do you add?"
+    a: "The list came from a separate cached query that TanStack Query has not refetched. After the mutation, call queryClient.invalidateQueries for the payments key so the list is marked stale and refetched with the new status."
 confusedWith: []
 tags: [data-fetching, race-condition, tanstack-query]
 visual: flow
 sources:
-  - title: "useEffect: fetching data (react.dev)"
+  - title: "useEffect: fetching data and ignoring stale responses (react.dev)"
     url: "https://react.dev/reference/react/useEffect"
     verifiedOn: "2026-10-20"
-  - title: "Important Defaults (TanStack Query v5)"
+  - title: "Important Defaults: stale data, gcTime, retry (TanStack Query v5)"
     url: "https://tanstack.com/query/v5/docs/framework/react/guides/important-defaults"
-    verifiedOn: "2026-10-20"
-  - title: "Migrating to TanStack Query v5"
+    verifiedOn: "2026-10-21"
+  - title: "Migrating to TanStack Query v5: isPending replaces isLoading"
     url: "https://tanstack.com/query/v5/docs/framework/react/guides/migrating-to-v5"
     verifiedOn: "2026-10-20"
   - title: "Data fetching pitfalls (GreatFrontEnd)"
@@ -34,57 +45,87 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Data fetching is loading data from a backend API and showing it in your components. Unlike a plain variable, a fetch takes time, can fail, and can return out of order, so the UI must handle three outcomes: loading, error and the data itself. You can fetch inside a [`useEffect`](card:use-effect) by hand, or let a library (a query cache) do it. Either way, the central problem is not calling `fetch`; it is coping with time.
+
 ## Why it exists
 
-Responses are slow, can fail and can arrive out of order, so the screen may stay blank, break, or show an old search.
+Say you load the payments list when the page opens. If you only render the data, the screen is blank while the request is in flight and crashes if it fails. And when the user changes a filter quickly, two requests go out, and the slower, older one can come back last and overwrite the newer result. Handling all three states, plus the ordering of responses, is what turns a raw `fetch` call into correct data fetching.
 
 ## How it works
 
 <Mermaid
-  alt="Race condition: slow request A (mo) and request B (mouse). B returns first and is shown; A arrives late and overwrites the list. Fix: cleanup aborts or ignores A."
+  alt="A race condition. The list fires request A for query 'mo' (slow), then request B for query 'mouse' (fast). B returns first and its results are shown. A returns late and overwrites the list with the wrong, older results. The fix is that the effect cleanup aborts or ignores A when the query changes to 'mouse'."
   chart={`sequenceDiagram
-  participant UI as ProductList
-  participant API as /api/products
+  participant UI as PaymentList
+  participant API as /api/payments
   UI->>API: A: q=mo (slow)
-  UI->>API: B: q=mouse
-  API-->>UI: B: mouse results shown
-  API-->>UI: A arrives late, overwrites
+  UI->>API: B: q=mouse (fast)
+  API-->>UI: B: shows "mouse" results
+  API-->>UI: A arrives late, overwrites with "mo"
   Note over UI: Fix: cleanup aborts or ignores A`}
 />
 
-- Other ways: [use() with Suspense](card:use-promise-suspense) (React 19), or fetch in [Server Components](card:server-components).
+1. The component renders a loading view first, because the data is not there yet.
+2. The effect starts the request for the current query and creates an `AbortController` for it.
+3. If the query changes, the effect's cleanup runs and calls `controller.abort()`, cancelling the old request before the new one starts.
+4. When a response arrives, the component shows the error view if it failed, or the data view if it succeeded.
+
+So the key is: the cleanup makes a stale request's result count for nothing, so only the newest request can update the screen.
 
 ## Example
 
+TanStack Query removes the manual effect, loading flags and race handling. `useQuery` caches by its `queryKey` and gives you the three states.
+
 ```jsx
 import { useQuery } from '@tanstack/react-query';
-// getProducts(query, signal): fetch('/api/products?q=' + query), throw if !res.ok
+// getPayments(status, signal): fetch('/api/payments?status=' + status, { signal }), throw if !res.ok
 
-function ProductList({ query }) {
-  const { data: products, isPending, isError } = useQuery({
-    queryKey: ['products', query],                 // one cache entry per search
-    queryFn: ({ signal }) => getProducts(query, signal),
+function PaymentList({ status }) {
+  const { data: payments, isPending, isError } = useQuery({
+    queryKey: ['payments', status],                      // one cache entry per status
+    queryFn: ({ signal }) => getPayments(status, signal),
   });
   if (isPending) return <p>Loading…</p>;
-  if (isError) return <p>Could not load products.</p>;
-  return <ul>{products.map((p) => <li key={p.id}>{p.name}: ₹{p.price}</li>)}</ul>;
+  if (isError) return <p>Could not load payments.</p>;
+  return <ul>{payments.map((p) => <li key={p.id}>{p.id}: ₹{p.amount}</li>)}</ul>;
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| `staleTime` | 0: stale at once; refetch on mount, focus, reconnect | TanStack Query v5 |
-| `gcTime` | 5 minutes for an unused query on the client | TanStack Query v5 |
-| `retry` | 3 on the client, with exponential backoff | TanStack Query v5 |
+- `queryKey: ['payments', status]` names the cache entry. A new `status` fetches new data; the same `status` returns the cached result instead of refetching.
+- The library passes a `signal` into `queryFn`, so when the query changes it aborts the old request for you; you do not write the race handling.
+- `isPending` is the loading flag in v5 (it replaced `isLoading`), and `isError` covers the failure case, so all three states are handled in a few lines.
+- Removing the `isPending` and `isError` guards would render `payments.map` while `payments` is still `undefined`, which throws.
+
+## Rules and defaults
+
+- **staleTime: 0 by default (TanStack Query v5):** fetched data is treated as stale at once, so the library refetches it on mount, on window focus and on reconnect.
+- **gcTime: 5 minutes (TanStack Query v5):** a query with no active component is kept in the cache for 5 minutes, then garbage collected.
+- **retry: 3 by default (TanStack Query v5):** a failed query is retried 3 times with exponential backoff before the error is shown.
+- **Raw effects have none of this:** a hand-written `useEffect` caches nothing and refetches on every mount, and you must add the abort-in-cleanup yourself.
+
+## Not to be confused with
+
+Fetching in a raw `useEffect` is you running the request and managing loading, errors and races by hand. A query cache like TanStack Query wraps that and adds caching, de-duping, retries and background refetch. There is also a newer path: React 19 lets a component read a promise with [`use()` and Suspense](card:use-promise-suspense), and [Server Components](card:server-components) fetch on the server before the HTML is sent. Rule: raw effect for a one-off, a query cache for most client apps.
+
+## Common mistakes
+
+- **"isError means the data is wrong, not that the request failed."** No. `isError` means the `queryFn` threw, usually because the response was not ok or the network failed. Your `queryFn` must throw on a bad response, or TanStack Query treats it as success.
+- **"A mutation updates the list automatically."** It does not. After `useMutation` succeeds, call `invalidateQueries` for the list's key so the cached list is marked stale and refetched.
 
 ## Interview Qs
 
 ### What is a race condition in data fetching, and how do you fix it?
 
-Requests for "mo" and "mouse" can return out of order, so the older result wins. The effect cleanup sets an ignore flag or calls `controller.abort()`.
+Two requests, such as searches for "mo" and "mouse", can resolve out of order, so the slower, older one finishes last and overwrites the newer result. You fix it in the effect cleanup: set an ignore flag so a late result is dropped, or call `controller.abort()` to cancel the old request when the query changes.
 
-### Why use TanStack Query instead of useEffect and fetch?
+### Why use TanStack Query instead of fetching in useEffect?
 
-Effects cache nothing, refetch on each mount and need manual race handling. TanStack Query caches by key, dedupes, retries and gives `isPending` and `isError`.
+A raw effect caches nothing, refetches on every mount, and needs manual loading flags and race handling. TanStack Query caches by `queryKey`, de-dupes identical requests, retries on failure, refetches stale data in the background, and gives `isPending` and `isError` out of the box.
+
+### How do you keep a list fresh after creating or updating an item?
+
+Send the change with `useMutation`. On success, call `queryClient.invalidateQueries` for that list's `queryKey`. That marks the cached list stale, so TanStack Query refetches it and the UI shows the new data without a manual reload.

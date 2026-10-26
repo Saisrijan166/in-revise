@@ -5,17 +5,28 @@ title: Context API and useContext
 topic: hooks
 level: intermediate
 heat: 2
-hook: "Context lets a parent hand a value to any component below it, however deep, without passing props through every level."
+hook: "Context lets a parent hand a value to any component below it, however deep, without passing it as a prop through every level in between."
 points:
-  - { k: "createContext(default)", v: "makes the context; the default is used only with no provider above" }
-  - { k: "Provider", v: "React 19: <CartContext value={...}>; <CartContext.Provider> is legacy" }
-  - { k: "useContext", v: "reads the closest provider above the calling component" }
-  - { k: "Value changes", v: "every reader re-renders, even inside memo (Object.is check)", kind: minus }
-  - { k: "Good for", v: "theme, logged-in user, routing, shared state with a reducer", kind: plus }
+  - { k: "createContext(default)", v: "makes a context object; the default is used only where there is no provider above" }
+  - { k: "Provider", v: "in React 19 you render <CartContext value={...}>; the older <CartContext.Provider> still works" }
+  - { k: "useContext(ctx)", v: "reads the value from the closest matching provider above the component that calls it" }
+  - { k: "Re-render cost", v: "when the provider value changes, every reader re-renders, even ones wrapped in memo", kind: minus }
+  - { k: "Good for", v: "data many components need: theme, the logged-in user, routing, or reducer state", kind: plus }
 trap:
-  wrong: "Passing value={{ cart, addToCart }} inline is free; readers re-render only when cart changes."
-  right: "A new object each render re-renders every reader. Wrap it in useMemo (functions in useCallback)."
-sayIt: "Context avoids prop drilling: a provider sets a value and any component below reads it with useContext. Every reader re-renders when the value changes, so I keep it for data many parts need, like theme or user."
+  wrong: "Passing value={{ cart, addToCart }} written inline is free; readers re-render only when cart changes."
+  right: "An inline object is a new object every render, so every reader re-renders each time. Wrap it in useMemo (and functions in useCallback)."
+  why: "The object looks unchanged because its contents are the same, but React compares the object itself with Object.is, and a fresh object is never equal to the last one."
+sayIt: "Context avoids prop drilling: a provider sets a value and any component below reads it with useContext. Every reader re-renders when the value changes, so I use it for data many parts need, like theme or the current user."
+cheat:
+  idea: "Context passes a value from a provider to any component below it, skipping the props in between. A component reads it with useContext(theContext)."
+  flow: "createContext → <Context value={x}> near the top → useContext(Context) deep below"
+  remember: "Every reader re-renders when the provider value changes; memoize the value so a fresh object does not re-render them all."
+buildsOn: [use-state, components-jsx-props]
+scenarios:
+  - q: "Header and Footer sit between App and a deep CartBadge. App holds the cart in state. How does CartBadge read it without Header and Footer forwarding a prop?"
+    a: "App wraps the tree in <CartContext value={cart}> and CartBadge calls useContext(CartContext). Header and Footer pass nothing; the badge subscribes straight to the nearest provider, so the cart skips the middle layers."
+  - q: "You write <CartContext value={{ cart, addToCart }}> and notice every consumer re-renders on each App render, even when cart is unchanged. Why, and how do you fix it?"
+    a: "The object literal is recreated every render, so the provider value is a new reference each time and all readers re-render. Wrap it with useMemo([cart]) and wrap addToCart in useCallback so the value stays stable between renders."
 confusedWith: [context-vs-redux-vs-zustand]
 tags: [hooks, context, prop-drilling]
 visual: flow
@@ -37,14 +48,20 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Context is a way to pass a value from a component down to any component inside it, no matter how many levels deep, without threading it through each one as a prop. You create a context with `createContext`, wrap part of the tree in its provider to set the value, and any component below reads that value with the `useContext` hook. It is React's built-in answer to prop drilling, where the same prop is forwarded through many components that do not use it themselves.
+
 ## Why it exists
 
-Passing the same prop through many components that do not use it ([prop drilling](card:lifting-state-up)) is noisy and fragile. Context lets distant components read shared data directly.
+A value like the signed-in user or the colour theme is needed in many places across the tree. Without context you pass it as a prop from the top, through every component on the way down, even the ones that only hand it onward. That clutters each component's props and breaks the moment you add a layer in between. Context removes the chain: the value is set once at the top and read directly wherever it is needed.
 
 ## How it works
 
+The provider sits high in the tree; readers deep below subscribe to it directly, and the components in between pass nothing.
+
 <Mermaid
-  alt="App holds the cart in state and renders CartContext with value cart. Layout and Header sit in between and pass nothing. CartBadge and ProductCard, deep below, each call useContext(CartContext) and get the cart from the closest provider."
+  alt="App holds the cart in state and renders CartContext with value cart. Layout and Header sit in between and pass nothing. CartBadge and ProductCard, deep below, each call useContext of CartContext and get the cart from the closest provider above them."
   chart={`flowchart TD
   A["App: cart state"] --> P["CartContext value={cart}"]
   P --> L[Layout]
@@ -53,18 +70,24 @@ Passing the same prop through many components that do not use it ([prop drilling
   L --> C["ProductCard: useContext"]`}
 />
 
-- Middle components (Layout, Header) pass nothing; readers subscribe directly.
-- Try plain props or passing JSX as `children` first; context hides where data comes from.
+1. You call `createContext(defaultValue)` once, outside your components, to make the context object.
+2. High in the tree you render `<CartContext value={cart}>`, which supplies the value to everything inside it.
+3. Any component below calls `useContext(CartContext)` and receives the value from the nearest provider above it.
+4. When that provider's value changes, React re-renders every component that read it.
+
+So the key is that readers subscribe to the provider directly, and the layers in between are untouched.
 
 ## Example
+
+The dashboard keeps the cart in `App` and lets a deep `CartBadge` read it with no prop passing.
 
 ```jsx
 import { createContext, useContext } from 'react';
 
-const CartContext = createContext([]);         // default: used with no provider
+const CartContext = createContext([]);         // default: used where there is no provider
 
 function CartBadge() {
-  const cart = useContext(CartContext);         // closest provider wins
+  const cart = useContext(CartContext);         // reads the closest provider's value
   return <span>Cart ({cart.length})</span>;
 }
 
@@ -73,16 +96,33 @@ export default function App({ cart }) {
 }
 ```
 
+What to notice:
+
+- `createContext([])` sets a default of `[]`, used only if a `CartBadge` is rendered with no provider above it.
+- `<CartContext value={cart}>` is the React 19 provider form; `<CartContext.Provider value={cart}>` does the same.
+- `CartBadge` reads the cart with one `useContext` call and never receives it as a prop.
+- If `cart` changes, `CartBadge` re-renders, because it read this context.
+
+## Rules and defaults
+
+- **No provider above:** `useContext` returns the default passed to `createContext`. A provider with `value={undefined}` gives `undefined`, not the default.
+- **Closest provider wins:** when providers for the same context are nested, a reader gets the value of the nearest one above it.
+- **Try props first:** for passing a value down only a level or two, plain props or passing JSX as `children` keep the data flow visible; context hides where the value comes from.
+
+## Not to be confused with
+
+Context is a transport for a value; it is not a store and does nothing to optimise re-renders. A state manager like Redux or Zustand (see [Context vs Redux vs Zustand](compare:context-vs-redux-vs-zustand)) holds the state itself and lets a component read just the slice it needs. Rule: context moves a value down the tree; a store owns the state and controls who re-renders.
+
 ## Interview Qs
 
 ### When should you use context, and when not?
 
-Use it for data many distant components need: theme, current user, routing, or reducer state. Do not use it just to skip a few levels of props; props keep data flow visible. For a large, often-changing app store, compare [Context, Redux and Zustand](compare:context-vs-redux-vs-zustand).
+Use it for data many distant components need: theme, the current user, routing, or reducer state. Do not reach for it just to skip one or two levels of props, since props keep the data flow visible. For a large, frequently changing store, a dedicated state manager suits better.
 
-### What does useContext return with no provider above?
+### Why can context cause performance problems?
 
-The default passed to `createContext`. A provider with `value={undefined}` gives `undefined`, not the default.
+Every component that reads a context re-renders whenever the provider's value changes, and `React.memo` does not stop that. If the value is an object created inline, it is a new reference each render, so all readers re-render even when nothing really changed.
 
 ### How do you cut re-renders caused by a context?
 
-Memoize the value with `useMemo` and its functions with `useCallback`. Or provide state and `dispatch` in two contexts: [dispatch](card:use-reducer) is stable, so readers of only the dispatch context are not re-rendered through it when state changes.
+Memoize the value with `useMemo` and its functions with `useCallback` so the reference stays stable. Or split state and `dispatch` into two contexts: `dispatch` is stable, so components reading only it are not re-rendered when the state changes.

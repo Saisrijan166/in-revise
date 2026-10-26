@@ -1,5 +1,5 @@
 # Coverage: React & Frontend
-Reference: reference/react.md  ·  Last updated: 20-10-2026
+Reference: reference/react.md  ·  Last updated: 21-10-2026
 
 Every reference item (key list: the numbered sections, plus each question, pattern and "X vs Y" row inside them) appears in exactly
 one of Mapped, Corrected or Dropped. A section whose parts went to different places has one row here (Corrected wins over
@@ -176,3 +176,7 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | PM (part: 'Too much state → colocate state') | also: `frontend-playbook` row 2 "move state down" → `lifting-state-up` |
 | PM (part: 'Find bottleneck → Profiler / DevTools') | also: `frontend-playbook` row "Not sure what is slow" → `measuring-performance`; point "Performance"; tree node `measure-first` |
 | PM (parts: 'Duplicate state → derived state', 'Too much state → colocate state', 'Less client JS → Server Components') | cut: `use-state`, `lifting-state-up`, `server-components` |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass checked about 656 claims and fixed 0, removing none.

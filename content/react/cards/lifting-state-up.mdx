@@ -5,17 +5,28 @@ title: Lifting State Up and State Colocation
 topic: app-state
 level: beginner
 heat: 2
-hook: "Shared state goes up to the closest common parent; state only one component uses stays down in that component."
+hook: "When two components need the same value, move that value into their closest shared parent. Keep every other piece of state in the one component that uses it."
 points:
-  - { k: "Lift", v: "move shared state to the closest common parent" }
-  - { k: "Flow", v: "data goes down as props; changes come up through callbacks" }
-  - { k: "One owner", v: "each piece of state lives in exactly one component" }
-  - { k: "Colocate", v: "keep state as low as it can go: fewer components re-render", kind: plus }
-  - { k: "Prop drilling", v: "lift too high and middle layers just forward props", kind: minus }
+  - { k: "Lift state up", v: "move state two siblings share into their closest common parent, then pass it down as props" }
+  - { k: "Data flows down", v: "the parent passes the value down as a prop; a child asks for a change through a callback prop" }
+  - { k: "Single owner", v: "each piece of state lives in exactly one component, so there is no second copy to drift" }
+  - { k: "Colocation", v: "keep state in the lowest component that uses it; only that subtree re-renders on a change", kind: plus }
+  - { k: "Prop drilling", v: "if you lift too high, middle components receive props only to forward them, which is noisy", kind: minus }
 trap:
-  wrong: "Two components need the same data, so put it in Context or Redux straight away."
-  right: "Lift it to their closest common parent first. Try passing props and children before Context or a store."
-sayIt: "When siblings share state, I lift it to their closest common parent and pass it down with a callback to change it. Everything else stays local, so fewer components re-render."
+  wrong: "Two components need the same data, so reach for Context or Redux straight away."
+  right: "First lift the state to their closest common parent and pass props. Use Context or a store only when the value is needed far apart."
+  why: "Context and Redux are famous, so people assume shared state means a shared store. For nearby components, a parent with props is simpler and re-renders less."
+sayIt: "When sibling components share a value, I lift it to their closest common parent and pass it down as a prop, with a callback for changes. Everything else I keep local, so a change re-renders only the small part that uses it."
+cheat:
+  idea: "Shared state lives in the closest common parent, which passes it down as props. Colocation keeps every other piece of state in the component that uses it."
+  flow: "Child callback → parent updates → new props flow down"
+  remember: "Lift only shared state, no higher than the closest common parent; keep the rest local."
+buildsOn: [use-state]
+scenarios:
+  - q: "A StatusFilter dropdown and a PaymentList both need the selected status. Each keeps its own useState. Why do they show different things?"
+    a: "They hold two separate copies of the status, so changing one does not change the other. Lift the status into their common parent and pass it to both; then there is one value and they always agree."
+  - q: "You put the whole app's state in the top App component and pass it through five layers. What is the cost?"
+    a: "Prop drilling: the middle layers take props only to forward them, and any change re-renders the whole tree. Move each piece of state down to the lowest component that uses it so updates stay local."
 confusedWith: []
 tags: [lifting-state, prop-drilling, colocation, composition]
 visual: flow
@@ -34,47 +45,86 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Lifting state up means moving a piece of [state](card:use-state) out of a component and into a parent, so that more than one component can read the same value. State colocation is the opposite move: keeping each piece of state in the lowest component that actually uses it. Together they answer one question for every value: which component should own it. The owner holds the `useState`; everyone else receives the value as a prop.
+
 ## Why it exists
 
-SearchBox and ProductList must agree on the same search text. If each keeps its own copy, they drift apart, so one component has to own it.
+A payments screen has a status filter and a list of payments, and both need the chosen status. If each keeps its own `useState`, there are two copies of the status, and changing the filter does not change the list: they drift apart. Giving the value one owner fixes this. The common parent holds the status and passes it to both the filter and the list, so there is a single source of truth and they always agree.
 
 ## How it works
 
 <Mermaid
-  alt="ProductsPage owns the query state and passes query and onQueryChange to SearchBox and the filtered products to ProductList. Typing calls onQueryChange, which updates the state in ProductsPage."
+  alt="PaymentsPage owns the status state. It passes status and onStatusChange down to StatusFilter, and the filtered payments down to PaymentList. When the user picks a status, StatusFilter calls onStatusChange, which updates the state in PaymentsPage, and new props flow back down."
   chart={`flowchart TD
-  P["ProductsPage: owns query"] -- "query, onQueryChange" --> S[SearchBox]
-  P -- "filtered products" --> L[ProductList]
-  S -. "onQueryChange(text)" .-> P`}
+  P["PaymentsPage (owns status)"] -- "status, onStatusChange" --> S[StatusFilter]
+  P -- "filtered payments" --> L[PaymentList]
+  S -. "onStatusChange(value)" .-> P`}
 />
 
-- Remove the state from the children, add it to the parent, pass it down with a setter callback.
-- [Prop drilling](card:prop-drilling)? Pass JSX as `children` first; reach for [Context](card:context-api) later.
-- Which tool fits which state: [the picker](card:global-state).
+1. Find the two components that need the same value, and find their closest common parent in the tree.
+2. Remove the `useState` from the children and add it to that parent instead.
+3. Pass the value down to each child as a prop.
+4. Pass a callback down too, so a child can ask the parent to change the value; the child never changes it directly.
+5. When the callback runs, the parent updates its state, re-renders, and both children receive the new value.
+
+So the key is: lift only the shared value, and no higher than the closest common parent.
 
 ## Example
+
+`PaymentsPage` owns the status; the filter and the list both read it through props.
 
 ```jsx
 import { useState } from 'react';
 
-export default function ProductsPage({ products }) {
-  const [query, setQuery] = useState('');      // lifted: both children need it
-  const shown = products.filter((p) => p.name.toLowerCase().includes(query.toLowerCase()));
+export default function PaymentsPage({ payments }) {
+  const [status, setStatus] = useState('all');          // lifted: both children need it
+  const shown = status === 'all'
+    ? payments
+    : payments.filter((p) => p.status === status);
   return (
     <>
-      <SearchBox query={query} onQueryChange={setQuery} />
-      <ProductList products={shown} />
+      <StatusFilter status={status} onStatusChange={setStatus} />
+      <PaymentList payments={shown} />
     </>
   );
 }
 ```
 
+What to notice:
+
+- The `status` lives only in `PaymentsPage`. `StatusFilter` shows it and `PaymentList` reads the filtered result; neither keeps its own copy.
+- `onStatusChange={setStatus}` is the callback the child calls to change the value. Data flows down as props; change requests flow up as calls.
+- `shown` is derived from `status` and `payments` during render, so it is never stale and needs no state of its own.
+- If each child kept its own `useState('all')` instead, picking a status in the filter would leave the list unfiltered, because they would be two unrelated values.
+
+## Rules and defaults
+
+- **One owner per value:** put each piece of state in exactly one component. A second copy is a bug waiting to drift.
+- **Lift to the closest common parent, not higher:** lifting past it forces middle components to forward props they do not use (prop drilling).
+- **Derive, do not store:** a value you can compute from props or state (like `shown`) should be computed in render, not kept in its own `useState`.
+- **Colocate the rest:** state only one component uses stays in that component, so an update re-renders only its subtree.
+
+## Not to be confused with
+
+Lifting state up is about moving state *up* to a shared parent so siblings agree. State colocation is about keeping state *down* in the one component that uses it, so updates stay cheap. They are two sides of the same rule: state belongs with its single owner. [Context](card:context-api) is a different tool again: it carries a value to far-apart components without threading props, and you reach for it only after lifting is not enough.
+
+## Common mistakes
+
+- **"Shared state should be as high as possible."** No. The higher it lives, the more components re-render on each change and the more props are drilled through. Put it at the closest common parent, no higher.
+- **"Derived data needs its own state."** A filtered list computed from `status` and `payments` is derived; store it in state and you must keep it in sync by hand. Compute it during render instead.
+
 ## Interview Qs
 
-### What is prop drilling and how do you avoid it?
+### What does "lifting state up" mean, and when do you do it?
 
-Passing a prop through components that only forward it. First pass JSX as `children`, so the middle layers never see the prop. If many distant components need it, use [Context](card:context-api) or a [store](card:global-state).
+It means moving state from a child into a shared parent so two or more components can use the same value. You do it when sibling components must agree on something, such as a filter and the list it filters. The parent owns the state and passes it down as props, with a callback for changes.
 
-### What is state colocation, and why is it faster?
+### What is prop drilling, and how do you reduce it?
 
-Keeping state in the lowest component that uses it. An update then re-renders only that small subtree, not the whole page, so slow components that do not use the state are skipped.
+Prop drilling is passing a prop through components that do not use it, only to reach a deep child. You reduce it by passing JSX as `children` so middle layers never see the prop, or, when the value is needed far apart, by using [Context](card:context-api) or a [store](card:global-state).
+
+### What is state colocation, and why does it help performance?
+
+Colocation is keeping state in the lowest component that uses it. A change then re-renders only that small subtree, not the whole page, so components that do not use the value are skipped. Lifting state higher than needed makes more of the tree re-render on every change.

@@ -5,17 +5,27 @@ title: "Frontend Security: XSS, CSRF and CORS"
 topic: web-basics
 level: intermediate
 heat: 2
-hook: "XSS runs an attacker's script in your page; CSRF rides the victim's cookies; CORS lets a server say which origins may read it."
+hook: "XSS runs an attacker's script inside your page; CSRF makes the victim's browser send a forged request; CORS lets a server say which origins may read its response."
 points:
-  - { k: "JSX text", v: "React escapes it, so {review.text} cannot inject tags", kind: plus }
-  - { k: "dangerouslySetInnerHTML", v: "skips escaping; sanitise the HTML with DOMPurify first", kind: minus }
-  - { k: "javascript: URLs", v: "React 19 blocks them in href and src; still validate URLs" }
-  - { k: "CSRF defence", v: "CSRF tokens first; SameSite cookies as an extra layer" }
-  - { k: "CORS with cookies", v: "the server must name the exact origin, never *" }
+  - { k: "JSX escapes text", v: "React turns {review.text} into plain text, so tags in it show as text and cannot run as HTML", kind: plus }
+  - { k: "dangerouslySetInnerHTML", v: "inserts raw HTML and skips React's escaping; sanitise it with DOMPurify first or you reopen XSS", kind: minus }
+  - { k: "javascript: URLs", v: "React 19 blocks them in href and src; still validate any user-supplied URL yourself" }
+  - { k: "CSRF defence", v: "use a CSRF token on state-changing requests; add SameSite cookies as a second layer" }
+  - { k: "CORS with cookies", v: "the server must name the one exact origin in Access-Control-Allow-Origin, never the wildcard *", kind: minus }
 trap:
   wrong: "CORS protects my API from attackers."
-  right: "CORS is enforced by browsers: it only says which origins may read a response. The API still needs authentication."
-sayIt: "I stop XSS by letting React escape output, sanitising any HTML I must render and adding a CSP. I stop CSRF with tokens and SameSite cookies. CORS is a browser rule for reading responses, not server security."
+  right: "CORS is a browser rule that only decides which origins may read a response. It is not a server defence; the API still needs authentication and authorisation."
+  why: "CORS blocks a cross-origin page from reading your response, so it feels like a wall, but tools like curl ignore CORS entirely and can still call the API."
+sayIt: "I stop XSS by letting React escape output, sanitising any HTML I must inject, and adding a Content Security Policy. I stop CSRF with tokens plus SameSite cookies. CORS is a browser read-permission rule, not server security, so the API still needs auth."
+cheat:
+  idea: "XSS is attacker code running in your page; CSRF is the victim's browser sending a forged request with their cookies; CORS is the server telling the browser which origins may read a response."
+  remember: "Fix XSS first: an injected script can read the page and defeat every CSRF defence. CORS is not server security."
+buildsOn: [how-browsers-render, browser-storage-cookies]
+scenarios:
+  - q: "A product review stores the text <img src=x onerror=alert(1)>. You render it as {review.text} in JSX. Does the script run?"
+    a: "No. React renders {review.text} as plain text and escapes the angle brackets, so the user sees the literal characters and no image or script runs. It would run only if you passed that string to dangerouslySetInnerHTML without sanitising it first."
+  - q: "Your API trusts a session cookie and has no CSRF token. Why is a plain <form action=\"https://bank.example/transfer\"> on an attacker's site dangerous?"
+    a: "The browser attaches the victim's bank cookie to that cross-site POST automatically, so the transfer runs as the logged-in user. That is CSRF. A CSRF token the attacker cannot guess, or a SameSite cookie, stops the forged request from succeeding."
 confusedWith: []
 tags: [security, xss, csrf, cors]
 visual: table
@@ -37,19 +47,26 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+These are the three web-security terms every frontend interview touches. **XSS** (cross-site scripting) is when an attacker's JavaScript runs inside your page, usually sneaked into content the page renders. **CSRF** (cross-site request forgery) is when another site makes the victim's browser send a request that carries the victim's [cookies](card:browser-storage-cookies), so it runs as them. **CORS** (cross-origin resource sharing) is the browser rule that lets a server say which other [origins](card:how-browsers-render) may read its responses.
+
 ## Why it exists
 
-The browser runs code from many places and sends cookies by itself. Attackers abuse both, so the frontend must never run untrusted code or trust a cross-site request.
+The browser runs code and loads data from many places, and it attaches cookies to requests on its own. Attackers abuse both facts: they try to slip their script into your page (XSS) or to make the victim's browser fire a request they could not send themselves (CSRF). Without defences, a single review field that renders raw HTML, or an endpoint that trusts a cookie alone, hands an attacker control. Knowing which attack each defence stops is what keeps you from, for example, trusting CORS to protect an API it cannot protect.
 
 ## How it works
 
 <Compare id="xss-vs-csrf" />
 
-- Same-origin policy: a script may read a response only if scheme, host and port match; cross-origin form posts are still allowed.
-- CORS: the server opts in with `Access-Control-Allow-Origin`; PUT, JSON bodies or custom headers first send an `OPTIONS` preflight.
-- Content Security Policy: a response header listing allowed script sources; a backup layer, not the main fix.
+1. The same-origin policy is the browser's base rule: a script may read a response only when scheme, host and port all match. (A cross-origin form can still be submitted, which is why CSRF is possible.)
+2. CORS relaxes that rule on the server's terms: the server sends `Access-Control-Allow-Origin` to name origins it permits to read the response.
+3. For a request that is not "simple" (a `PUT`, a JSON body or a custom header), the browser first sends an `OPTIONS` preflight and proceeds only if the server's reply allows it.
+4. A Content Security Policy (a response header listing allowed script sources) is a backup layer that limits what runs if an XSS hole slips through.
 
 ## Example
+
+This proves React's built-in XSS defence. The review text contains an image tag with an `onerror` script. We render it as JSX text and print the HTML React actually produces.
 
 ```jsx
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -63,20 +80,39 @@ function Review({ review }) {
 console.log(renderToStaticMarkup(<Review review={review} />));
 ```
 
-```text
+```text output
 <p>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;</p>
 ```
+
+What to notice:
+
+- React escaped `<`, `>` and `"` into `&lt;`, `&gt;` and `&quot;`, so the browser shows the characters as text; no `<img>` element is created and `onerror` never runs.
+- This escaping happens for any value placed in JSX as text, which is why plain `{...}` output is safe by default.
+- Replace `<p>{review.text}</p>` with `<p dangerouslySetInnerHTML={{ __html: review.text }} />` and React inserts the raw HTML, the `<img>` is created, and `onerror` fires. That is why such HTML must be sanitised with DOMPurify first.
+
+## Rules and defaults
+
+- **JSX text is escaped:** values rendered as text in `{...}` are HTML-escaped, so they cannot inject markup.
+- **dangerouslySetInnerHTML is not:** it inserts raw HTML unchanged, so sanitise first.
+- **React 19 blocks `javascript:` URLs** in `href` and `src`, but you should still validate user-supplied URLs.
+- **CORS with credentials:** when the request sends cookies, the server must echo the one exact origin and set `Access-Control-Allow-Credentials: true`; the wildcard `*` is not allowed with credentials.
+- **CSRF on GET:** never change data on a `GET`; state changes belong on `POST`, `PUT` or `DELETE` protected by a token.
+
+## Common mistakes
+
+- **"CORS secures my API."** CORS only governs whether a browser lets a page read a cross-origin response. A non-browser client (curl, a server, a script) ignores it completely, so the API still needs real authentication and authorisation.
+- **"SameSite cookies alone stop CSRF."** OWASP treats SameSite as defence in depth, not the primary fix. Use a CSRF token on state-changing requests as well, because browser and gateway behaviour around SameSite varies.
 
 ## Interview Qs
 
 ### How does React protect against XSS, and where can it still happen?
 
-React escapes strings it renders as text. Holes remain: `dangerouslySetInnerHTML` with unsanitised HTML, user-supplied URLs, and direct DOM writes through refs. Sanitise with DOMPurify and validate URLs.
+React escapes any string it renders as text, so injected tags appear as plain characters. Gaps remain where you bypass that: `dangerouslySetInnerHTML` with unsanitised HTML, user-supplied URLs in attributes, and direct DOM writes through refs. Sanitise HTML with DOMPurify, validate URLs, and add a Content Security Policy as a backup.
 
-### What is a CORS preflight?
+### What is a CORS preflight, and when does it happen?
 
-Before a non-simple cross-origin request, such as PUT or a JSON body, the browser sends `OPTIONS` naming the method and headers. The real request goes only if the server's reply allows them.
+Before a non-simple cross-origin request, such as a `PUT` or one with a JSON body or custom header, the browser first sends an `OPTIONS` request naming the method and headers it wants to use. The real request is sent only if the server's response allows that origin, method and those headers.
 
-### Is SameSite enough to stop CSRF?
+### Is SameSite enough to stop CSRF on its own?
 
-OWASP treats it as defence in depth. Use CSRF tokens (or your framework's built-in protection) on state-changing requests and never change data on GET. Any XSS bug defeats every CSRF defence.
+OWASP treats it as defence in depth rather than a complete fix. Use a CSRF token (or your framework's built-in protection) on every state-changing request, and never mutate data on a `GET`. Also remember that any XSS bug defeats CSRF defences, since the attacker's script runs on your origin.

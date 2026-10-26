@@ -5,17 +5,28 @@ title: Browser Storage and Cookies
 topic: web-basics
 level: beginner
 heat: 2
-hook: "localStorage keeps strings until cleared, sessionStorage until the tab closes; cookies travel with every request to the server."
+hook: "localStorage keeps strings until you clear them, sessionStorage until the tab closes, and cookies travel to the server with every request."
 points:
-  - { k: "Web Storage", v: "strings only, synchronous; JSON.stringify objects first" }
-  - { k: "HttpOnly", v: "hidden from document.cookie, so page scripts cannot read it", kind: plus }
-  - { k: "Secure", v: "sent only over HTTPS (localhost excepted)" }
-  - { k: "SameSite", v: "Strict, Lax or None; None also needs Secure" }
-  - { k: "IndexedDB", v: "an async database for large structured data and files" }
+  - { k: "Web Storage", v: "localStorage and sessionStorage store strings only and are synchronous; call JSON.stringify to save an object" }
+  - { k: "Never sent to server", v: "Web Storage stays in the browser; only cookies are attached to requests automatically", kind: key }
+  - { k: "HttpOnly cookie", v: "cannot be read by document.cookie, so page scripts (and injected ones) cannot steal it", kind: plus }
+  - { k: "Secure cookie", v: "is sent only over HTTPS connections (localhost is the one exception)" }
+  - { k: "SameSite", v: "Strict, Lax or None decides if the cookie rides cross-site requests; None also requires Secure" }
 trap:
-  wrong: "Keep the login token in localStorage; only my site can read it."
-  right: "Any script on the page, an injected one too, can read localStorage. Prefer an HttpOnly, Secure cookie with CSRF defence."
-sayIt: "localStorage lasts per origin, sessionStorage per tab; both hold strings and never go to the server. Cookies are small and sent with requests; a session cookie should be HttpOnly, Secure and SameSite."
+  wrong: "Keep the login token in localStorage, because only my own site can read it."
+  right: "Any script on the page, including an injected one, can read localStorage. Store the session in an HttpOnly, Secure cookie instead, with CSRF defence."
+  why: "localStorage is per origin, so people assume 'per origin' means 'only my trusted code', forgetting that an XSS bug runs attacker code on that same origin."
+sayIt: "localStorage persists per origin and sessionStorage per tab; both hold only strings and never reach the server. Cookies are small and sent with every matching request, so a session cookie should be HttpOnly, Secure and SameSite."
+cheat:
+  idea: "Web Storage (localStorage and sessionStorage) keeps strings in the browser and is never sent to the server. Cookies are small and sent to the server with every matching request."
+  flow: "localStorage: until cleared · sessionStorage: until tab closes · cookie: until it expires"
+  remember: "Session tokens go in an HttpOnly, Secure, SameSite cookie, not localStorage, because any injected script can read localStorage."
+buildsOn: [how-browsers-render]
+scenarios:
+  - q: "A user has your shop open in two tabs. They add items to a cart stored in localStorage in tab A. Does tab B see them? What if the cart were in sessionStorage?"
+    a: "With localStorage, yes: it is shared by every tab of the same origin, so tab B sees the items on its next read. With sessionStorage, no: each tab has its own copy, so tab B's cart stays empty. sessionStorage suits a one-tab draft, localStorage a shared cart."
+  - q: "You set a cookie with Set-Cookie: sid=abc; HttpOnly; Secure; SameSite=Lax. What does each attribute buy you?"
+    a: "HttpOnly hides it from document.cookie, so page scripts cannot read or steal it. Secure means it is sent only over HTTPS. SameSite=Lax stops it riding most cross-site requests, which blunts CSRF while still allowing top-level navigation to your site."
 confusedWith: []
 tags: [browser, storage, cookies]
 visual: table
@@ -37,19 +48,28 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+The browser gives a page several ways to remember data between reloads. **localStorage** and **sessionStorage** together are Web Storage: they hold string key-value pairs in the browser and are never sent to the server. A **cookie** is a small piece of data the server or a script sets; the browser then attaches every matching cookie to each request to that site, so cookies travel with requests on their own. **IndexedDB** is a larger async database for structured data and files. Each store is tied to an [origin](card:how-browsers-render).
+
 ## Why it exists
 
-The shop must remember the cart and who is logged in across reloads. Each browser store fits a different job, and the wrong one leaks data.
+A shop has to remember the cart and who is logged in after the user reloads or comes back tomorrow. These needs differ: the cart is private page data the server does not need on every request, while the login session must be proved to the server on each request and must not be readable by stray scripts. One store does not fit all three, and the wrong choice leaks data: a token in localStorage is exposed to any script, and a cart in cookies is sent needlessly on every request.
 
 ## How it works
 
 <Compare id="localstorage-vs-sessionstorage-vs-cookies" />
 
-- A server sets a cookie with a header: `Set-Cookie: session=a3fWa; HttpOnly; Secure; SameSite=Lax; Max-Age=3600`.
-- `Domain` and `Path` limit where the cookie is sent; `Max-Age=0` deletes it.
-- Since the browser sends cookies by itself, cookie sessions need [CSRF defence](card:frontend-security).
+1. For private page data (the cart, a theme), write a string to `localStorage` or `sessionStorage`; stringify objects first.
+2. For the login session, let the server send a cookie with `Set-Cookie: sid=abc; HttpOnly; Secure; SameSite=Lax; Max-Age=3600`.
+3. On every later request to that site, the browser attaches the cookie automatically; your code does nothing.
+4. Because the browser sends cookies by itself, cookie-based sessions need [CSRF defence](card:frontend-security).
+
+So the key is: Web Storage for data the server never needs, cookies for what the server must check on each request.
 
 ## Example
+
+A tiny React hook keeps the cart in `localStorage`, so it survives a reload. Web Storage holds strings, so the array is stringified on the way in and parsed on the way out.
 
 ```jsx
 import { useEffect, useState } from 'react';
@@ -65,23 +85,30 @@ function useSavedCart() {
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Cookie without `Max-Age` or `Expires` | Session cookie: deleted when the session ends | All browsers (MDN) |
-| Cookie without `SameSite` | Treated as `Lax` in Chrome and Edge, not in Firefox or Safari; set it explicitly | Chrome 80+, Edge 86+ (MDN) |
+- `localStorage.getItem('cart')` returns a string or `null`; `?? '[]'` supplies an empty array the first time, so `JSON.parse` never fails.
+- `JSON.stringify(cart)` is required because Web Storage stores strings only; saving the array object directly would store the text `[object Object]`.
+- The write is inside an Effect that lists `cart`, so every change to the cart is saved; see [useEffect](card:use-effect).
+
+## Rules and defaults
+
+- **Cookie with no Max-Age or Expires:** it is a session cookie, deleted when the browsing session ends (MDN).
+- **Cookie with no SameSite:** Chrome and Edge treat it as `Lax`, but Firefox and Safari do not, so set it explicitly (Chrome 80+, Edge 86+, MDN).
+- **Web Storage size:** about 5 MiB per origin; a cookie is about 4 KB and browsers cap the number per domain (MDN).
+- **SameSite=None:** only works together with `Secure`; without it the browser rejects the cookie.
+- **Max-Age=0:** deletes the cookie immediately.
 
 ## Interview Qs
 
-### Where would you store a login token?
+### Where would you store a login token, and why?
 
-In an HttpOnly, Secure, SameSite cookie set by the server, so page scripts cannot read it. Then add CSRF protection, because the browser sends that cookie automatically.
+In a cookie set by the server with `HttpOnly`, `Secure` and `SameSite`. `HttpOnly` keeps page scripts from reading it, so an XSS bug cannot steal it. Because the browser then sends it automatically, you must add CSRF protection. localStorage is the wrong choice, as any script on the page can read it.
 
 ### Is sessionStorage shared between tabs?
 
-No. Each tab gets its own session storage, which survives reloads and is cleared when the tab closes. localStorage is shared by every tab of the same origin.
+No. Each tab (and each window) gets its own sessionStorage, which survives reloads within that tab and is cleared when the tab closes. localStorage, by contrast, is shared by every tab of the same origin and persists until code or the user clears it.
 
 ### Why not keep everything in cookies?
 
-A cookie holds about 4 KB, browsers cap cookies per domain, and every matching request carries them. Use Web Storage or IndexedDB for data the server never needs.
+A cookie is limited to about 4 KB, browsers cap how many a domain may have, and every matching request carries all of them, which wastes bandwidth. Use Web Storage or IndexedDB for data the server never needs, and keep cookies for what must be checked on each request, such as the session.

@@ -5,17 +5,29 @@ title: "Bundling, Code Splitting and Lazy Loading"
 topic: performance
 level: intermediate
 heat: 2
-hook: "Ship less JavaScript first: split the bundle by route and load the rest only when the user needs it."
+hook: "Ship less JavaScript on the first load: split the bundle by route, and fetch the rest only when the user actually opens that part."
 points:
-  - { k: "Bundle size", v: "more JS means more download, parse and run time" }
-  - { k: "Split by route", v: "start with pages, then big rarely used parts" }
-  - { k: "React.lazy", v: "import() inside, Suspense shows the fallback" }
-  - { k: "Tree shaking", v: "relies on static import and export (ES modules)" }
-  - { k: "New app", v: "a framework, or Vite 8; CRA deprecated 14-02-2025", kind: default }
+  - { k: "Bundle", v: "the JavaScript file a build tool makes by joining your modules; the browser downloads, parses and runs it" }
+  - { k: "Bundle size", v: "more JavaScript means more time to download, parse and run before the page works", kind: minus }
+  - { k: "Code splitting", v: "the build cuts the bundle into chunks so the first load ships only what the first screen needs" }
+  - { k: "Lazy loading", v: "React.lazy with a dynamic import() fetches a chunk only when the component first shows" }
+  - { k: "Tree shaking", v: "the build drops exports you never import; it works because ES modules are static" }
+  - { k: "New app", v: "use a framework like Next.js 16 or a tool like Vite 8; Create React App was deprecated on 14-02-2025", kind: default }
 trap:
   wrong: "Start a new React app with Create React App."
-  right: "CRA was deprecated for new apps on 14-02-2025. Use a framework such as Next.js, or a build tool such as Vite."
-sayIt: "A bundler joins my modules into chunks. I keep the first chunk small: split by route with React.lazy and Suspense, let tree shaking drop unused exports, and remove heavy dependencies I barely use."
+  right: "Create React App was deprecated for new apps on 14-02-2025. Use a framework such as Next.js, or a build tool such as Vite."
+  why: "Create React App was the official starter for years, so tutorials and memory still reach for it, even though it is no longer maintained for new apps."
+sayIt: "A bundler joins my modules into chunks the browser loads. I keep the first chunk small: split by route with React.lazy and Suspense so a page's code loads on demand, let tree shaking drop unused exports, and remove heavy unused dependencies."
+cheat:
+  idea: "A bundler joins your modules into JavaScript the browser loads. Code splitting cuts it into chunks; lazy loading fetches a chunk only when first shown, shrinking the first load."
+  flow: "resolve imports → transform → tree-shake → split"
+  remember: "React.lazy sits at module level, not in the component; it needs a Suspense boundary and a default export."
+buildsOn: [what-is-react, data-fetching]
+scenarios:
+  - q: "Your app loads slowly on the first visit. The Network tab shows one 1.8 MB JavaScript file, and most of it is an admin dashboard that normal users never open. What do you do?"
+    a: "Code-split the admin dashboard: load it with React.lazy(() => import('./Admin')) behind a Suspense boundary. The build then puts it in its own chunk that downloads only when a user opens the admin route, so the first load drops to what the common screens need."
+  - q: "You write const Modal = lazy(() => import('./Modal')) inside a component's body, and the modal keeps losing its state. Why, and how do you fix it?"
+    a: "Inside the body, a new lazy component is created on every render, so React treats it as a different component and resets its state. Move the lazy(...) call to module level, outside the component, so the same lazy component is reused across renders."
 confusedWith: []
 tags: [performance, bundling, code-splitting]
 visual: flow
@@ -34,26 +46,37 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A bundler is a build tool, such as Vite or the one inside Next.js, that follows the `import` lines in your code and joins all those files into JavaScript the browser can load. That output is the bundle. Code splitting is cutting the bundle into smaller pieces, called chunks, so the first visit downloads only part of it. Lazy loading is fetching one of those chunks later, only when the user reaches the part that needs it.
+
 ## Why it exists
 
-Browsers must download, parse and run JavaScript before the page responds. One big bundle makes the first visit slow for code the user may never open.
+The browser must download, parse and run your JavaScript before the page can respond to clicks. If everything is in one bundle, a first-time visitor waits for code they may never use, such as a checkout flow or an admin screen, before anything is interactive. Splitting the bundle and loading parts on demand means the first screen ships only its own code, so the page becomes usable sooner.
 
 ## How it works
 
-<Steps label="From source to the browser">
-  <Step title="Resolve">The [bundler](card:bundler) follows every `import` from the entry file.</Step>
-  <Step title="Transform">JSX and TypeScript become plain JavaScript.</Step>
-  <Step title="Shake and minify">Unused exports are dropped; names and spaces are shortened.</Step>
-  <Step title="Split">Each `import()` starts a separate chunk, loaded on demand.</Step>
+<Steps label="From your source files to the browser">
+  <Step title="Resolve">The [bundler](card:bundler) starts at the entry file and follows every `import` to build the full list of modules.</Step>
+  <Step title="Transform">It turns JSX and TypeScript into the plain JavaScript browsers run.</Step>
+  <Step title="Tree-shake and minify">It drops exports that nothing imports, then shortens names and removes spaces to make the file smaller.</Step>
+  <Step title="Split">Each dynamic `import()` becomes a separate chunk, loaded on demand rather than up front.</Step>
 </Steps>
 
-- To find what is heavy, check the Network tab or a bundle analyser; drop or lazy-load big libraries.
+1. The bundler resolves every import into one module list, then transforms JSX and TypeScript to plain JavaScript.
+2. Tree shaking removes exports nothing imports, and minification shrinks what is left.
+3. Wherever your code uses a dynamic `import()`, the bundler puts that module in its own chunk instead of the main bundle.
+4. At runtime the browser fetches a chunk only when the code reaches its `import()`, so the first load carries less.
+
+So the key is that a dynamic `import()` is the seam the bundler splits on.
 
 ## Example
 
+The checkout flow is heavy and most visitors never reach it, so it loads only when the user clicks to pay.
+
 ```jsx
 import { lazy, Suspense, useState } from 'react';
-const Checkout = lazy(() => import('./Checkout.jsx')); // outside the component: its own chunk
+const Checkout = lazy(() => import('./Checkout.jsx')); // module level: Checkout gets its own chunk
 
 export default function Cart({ cart }) {
   const [paying, setPaying] = useState(false);
@@ -66,16 +89,31 @@ export default function Cart({ cart }) {
 }
 ```
 
+What to notice:
+
+- `lazy(() => import('./Checkout.jsx'))` tells the bundler to put `Checkout` in its own chunk; it is fetched only when `Checkout` first renders, after the user clicks.
+- The `lazy(...)` call sits at module level, outside `Cart`. Inside the body it would create a new lazy component each render and reset its state.
+- `Checkout` must be a `default` export, which is what `import('./Checkout.jsx')` resolves to.
+- `Suspense` shows the `fallback` while the chunk is downloading; without a Suspense boundary above a lazy component, React throws.
+
+## Rules and defaults
+
+- **React.lazy needs a default export:** the imported module's `default` is used as the component.
+- **A Suspense boundary is required:** a lazy component must render inside a `<Suspense>` with a `fallback`, or React throws while it loads.
+- **Declare lazy at module level:** calling `lazy()` inside a component body recreates the component each render and loses its state.
+- **Tree shaking needs ES modules:** static `import`/`export` lets the bundler see which exports are used before any code runs; `require()` with a computed path cannot be shaken reliably.
+- **New apps:** Create React App was deprecated on 14-02-2025; use Next.js 16 or Vite 8 instead.
+
 ## Interview Qs
 
 ### What is the difference between code splitting and lazy loading?
 
-Code splitting is the build step that cuts the bundle into chunks. Lazy loading is fetching a chunk only when it is needed, for example `React.lazy` loading the Checkout page on first render.
+Code splitting is the build-time step that cuts the bundle into separate chunks. Lazy loading is the runtime behaviour of fetching a chunk only when it is needed, for example `React.lazy` loading the checkout page's chunk the first time it renders. Splitting creates the chunks; lazy loading decides when each one is fetched.
 
 ### Why must lazy() be declared outside the component?
 
-Inside, a new lazy component is created on every render, so React resets its state each time. Declare it at module level.
+Calling `lazy()` inside the component body creates a brand-new lazy component on every render. React sees a different component each time and resets its state and remounts it. Declaring it once at module level means the same lazy component is reused across renders, so its state and loaded chunk persist.
 
 ### Why does tree shaking need ES modules?
 
-Static `import` and `export` let the bundler see which exports are used before running code, so it can drop the rest.
+Static `import` and `export` are fixed at the top of a file, so the bundler can tell which exports are actually imported before running any code, and drop the rest. CommonJS `require()` can take a computed path and run conditionally, so the bundler cannot be sure an export is unused and must keep it.
