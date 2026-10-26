@@ -5,86 +5,139 @@ title: "Amazon S3: Object Storage"
 topic: storage
 level: beginner
 heat: 3
-hook: "S3 keeps files as objects in a bucket, found by key: very durable, strongly consistent and private by default."
+hook: "S3 stores files as objects in a bucket, each found by its key. It keeps them very durably, is strongly consistent and is private by default."
 points:
-  - { k: "Bucket + key", v: "an object's address; a prefix like receipts/2026/ is part of the key" }
-  - { k: "S3 Standard", v: "designed for 11 nines durability and 99.99% availability", kind: default }
-  - { k: "Consistency", v: "strong read-after-write for PUT, DELETE and LIST (since 12-2020)", kind: plus }
-  - { k: "Private by default", v: "new buckets: Block Public Access on, ACLs off (since 04-2023)", kind: default }
-  - { k: "Whole objects only", v: "a PUT replaces the whole object; no atomic update across keys", kind: minus }
+  - { k: "Bucket and key", v: "an object's address is its bucket plus its key, such as receipts/2026/10/pay_123.pdf" }
+  - { k: "Prefixes are not folders", v: "receipts/2026/ is only the start of a key; the console just shows it like a folder" }
+  - { k: "S3 Standard", v: "designed for 99.999999999% (11 nines) durability and 99.99% availability over a year", kind: default }
+  - { k: "Strong consistency", v: "since 12-2020, a read or LIST right after a successful PUT or DELETE sees the change", kind: plus }
+  - { k: "Private by default", v: "since 04-2023, new buckets have Block Public Access on and ACLs off", kind: default }
+  - { k: "Whole objects only", v: "you cannot edit part of an object, and no single write changes several keys together", kind: minus }
 trap:
   wrong: "Keep the payment's status in a JSON file in S3; S3 is just another database."
-  right: "S3 holds files like receipt PDFs; the payment row in RDS keeps the state and the S3 key."
-sayIt: "S3 is durable, strongly consistent object storage: files go into a bucket under a key. I keep receipts private and share them through short pre-signed URLs."
+  right: "S3 holds files such as receipt PDFs. The payment row in RDS keeps the status and the receipt's S3 key."
+  why: "S3 takes any bytes, never loses them and reads them back at once, so it looks like a cheap database. But it has no queries, no partial updates and no transaction across objects."
+sayIt: "S3 is durable, strongly consistent object storage: each file is an object in a bucket under a key. In the payment service I keep receipts private, store only their keys in the database, and let customers download them through short-lived pre-signed URLs."
+cheat:
+  idea: "S3 stores files as objects in a bucket, each found by its key. It is designed for 11 nines durability, is strongly consistent and is private by default."
+  remember: "S3 holds files, not records: keep the payment state in the database, and share a private file through a short-lived pre-signed URL."
+buildsOn: [regions-and-azs]
+scenarios:
+  - q: "The payment service uploads receipts/pay_123.pdf, and a millisecond after the PUT returns, another task calls GetObject on the same key. Can it get a 404?"
+    a: "No. Since December 2020 S3 gives strong read-after-write consistency: once a PUT has returned success, every later GET and LIST sees the new object. Answers that say S3 is only eventually consistent are outdated."
+  - q: "Versioning is on for the receipts bucket, and a support engineer deletes a receipt by mistake. Is the file gone?"
+    a: "No. A DELETE without a version ID only adds a delete marker, which hides the object. The earlier version is still stored, so you remove the marker or copy the old version back. Without versioning, the object would be gone."
+  - q: "A customer must download their receipt from a private bucket. Do you make the bucket public?"
+    a: "No. The backend checks that the payment belongs to the customer, then creates a pre-signed GET URL for that one key, valid for a few minutes. The URL uses the backend role's permission, so the bucket stays private."
 confusedWith: [identity-vs-resource-based-policy]
 tags: [s3, object-storage, presigned-url, versioning]
-visual: table
+visual: code
 sources:
-  - title: "Amazon S3 FAQs"
+  - title: "Amazon S3 FAQs: durability, availability, consistency"
     url: "https://aws.amazon.com/s3/faqs/"
     verifiedOn: "2026-10-20"
-  - title: "What is Amazon S3?"
+  - title: "What is Amazon S3? (S3 User Guide)"
     url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/Welcome.html"
     verifiedOn: "2026-10-20"
-  - title: "S3 presigned URLs"
+  - title: "Organizing objects using prefixes: prefixes are not directories (S3 User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-prefixes.html"
+    verifiedOn: "2026-10-21"
+  - title: "Sharing objects with presigned URLs (S3 User Guide)"
     url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html"
     verifiedOn: "2026-10-20"
-  - title: "S3 storage classes"
+  - title: "Work with Amazon S3 pre-signed URLs (AWS SDK for Java 2.x Developer Guide)"
+    url: "https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/examples-s3-presign.html"
+    verifiedOn: "2026-10-21"
+  - title: "Understanding and managing Amazon S3 storage classes (S3 User Guide)"
     url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-class-intro.html"
     verifiedOn: "2026-10-20"
-  - title: "S3 multipart upload limits"
+  - title: "Uploading and copying objects using multipart upload (S3 User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html"
+    verifiedOn: "2026-10-21"
+  - title: "Amazon S3 multipart upload limits: max object size 48.8 TiB, 10,000 parts (S3 User Guide)"
     url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Amazon S3 (Simple Storage Service) is object storage: you store whole files, called objects, and read them back over HTTPS through an API. An object is the file's bytes plus metadata, such as its content type. Each object lives in a bucket, a container you create in one Region, and is found by its key, its full name inside that bucket. Unlike a disk, S3 is attached to no server: every app with permission calls the same API.
 
 ## Why it exists
 
-Apps need cheap, durable storage for any number of files.
+The payment service must keep a PDF receipt for every payment. On a task's own disk, receipts vanish when the task is replaced, and two tasks see different files. Inside the database, large files bloat the tables and backups. S3 keeps files apart: every task reads the same bucket, storage grows with no size to plan, and AWS keeps copies across at least three AZs.
 
 ## How it works
 
-| Feature | What it does |
-|---|---|
-| Versioning | keeps every version; a plain DELETE adds a delete marker |
-| Lifecycle rule | after N days, moves objects to a cheaper class or deletes them |
-| Pre-signed URL | a time-limited link acting with the signer's permissions |
-| Event notification | on upload or delete, tells SQS, SNS, Lambda or EventBridge |
-| Multipart upload | parallel parts; advised from 100 MB, needed above 5 GB |
+<Mermaid
+  alt="The payment service puts the receipt into the S3 bucket and saves its key in the payment row in RDS. Later it gives the customer a pre-signed URL, and the customer downloads the receipt straight from the bucket."
+  chart={`flowchart LR
+  P[Payment service] -- "1. PUT receipts/pay_123.pdf" --> B[(S3 bucket: payments-receipts)]
+  P -- "2. save the key" --> D[(RDS: payment row)]
+  P -- "3. pre-signed URL" --> C[Customer]
+  C -- "4. GET with the signature" --> B`}
+/>
 
-- Bucket policies: [how they are evaluated](card:iam-policy-evaluation).
-- New uploads get SSE-S3 encryption (since 05-01-2023); see [KMS](card:kms-and-encryption).
+1. The payment service calls PutObject with the bucket name, the key `receipts/2026/10/pay_123.pdf` and the PDF bytes. S3 stores the object across several AZs, encrypts it by default, and returns success.
+2. The service writes that key into the payment row. The row stays the record of the payment; S3 only holds the file.
+3. When the customer asks for the receipt, the service checks that the payment is theirs and creates a pre-signed URL for that key, valid for 10 minutes.
+4. The customer's browser downloads the file straight from S3 with that URL. The bucket stays private, and the app never streams the bytes.
+
+So the key is: S3 holds the bytes, the database holds the facts, and a key links them.
 
 ## Example
 
+The payment service creates a 10-minute download link for one private receipt (AWS SDK for Java 2.x):
+
 ```java
 try (S3Presigner presigner = S3Presigner.create()) {
-    var get = GetObjectRequest.builder()
+    GetObjectRequest get = GetObjectRequest.builder()
             .bucket("payments-receipts")
-            .key("receipts/2026/10/pay_123.pdf").build();
-    var req = GetObjectPresignRequest.builder()
-            .signatureDuration(Duration.ofMinutes(10))
-            .getObjectRequest(get).build();
-    String url = presigner.presignGetObject(req).url().toString();
+            .key("receipts/2026/10/pay_123.pdf")
+            .build();
+    GetObjectPresignRequest request = GetObjectPresignRequest.builder()
+            .signatureDuration(Duration.ofMinutes(10))      // the link expires in 10 minutes
+            .getObjectRequest(get)
+            .build();
+    return presigner.presignGetObject(request).url().toString();
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Pre-signed URL longest life | 7 days (SDK, CLI); 12 hours (console) | S3, as of 20-10-2026 |
-| Largest object | 50 TB, by multipart (single PUT: 5 GB) | S3, since 02-12-2025 |
+- The URL is signed with the credentials the SDK finds, on ECS the task role's. It can do only what that role may do: if the role cannot read the key, the link returns Access Denied.
+- `signatureDuration` sets the lifetime. With temporary credentials, such as a task role's, the link also stops working when those credentials expire, even if that is earlier.
+- Anyone who holds the URL can download the file until it expires, so keep it short and send it only to the owner.
+- No setting in the code makes anything public: the bucket stays private, and only this one signed request is allowed.
+
+## Rules and defaults
+
+- **Versioning:** off by default. Once on, you can only suspend it, not remove it. A plain DELETE then adds a delete marker and the older versions stay.
+- **Lifecycle rules:** after a number of days, a rule moves objects to a cheaper storage class or expires (deletes) them.
+- **Event notifications:** S3 can tell SQS, SNS, Lambda or EventBridge when an object is created or deleted; you will meet these services in the integration topic.
+- **Encryption:** since 05-01-2023 every new object is encrypted at rest with SSE-S3 by default; [KMS](card:kms-and-encryption) covers other options.
+- **Large files:** a single PUT takes at most 5 GB. Multipart upload sends up to 10,000 parts in parallel (advised from 100 MB), and an object can reach 48.8 TiB (at the time of writing).
+- **Pre-signed URL lifetime:** at most 7 days when signed with the SDK or CLI, and 12 hours from the console (at the time of writing).
+
+## Not to be confused with
+
+A bucket policy is attached to the bucket and says who may use it, for example another AWS account. An IAM policy is attached to a user or role and says what that identity may do, for example "the payment task role may write to `receipts/`". You will meet both in [IAM basics](card:iam-basics). Rule: IAM policy = what this caller may do; bucket policy = who may use this bucket.
+
+## Common mistakes
+
+- **"Making the bucket public is the easy way to share receipts."** Then anyone who guesses a key can read any receipt. Keep Block Public Access on, and share single files with pre-signed URLs or through [CloudFront](card:cloudfront).
+- **"An upload that never finished costs nothing."** The parts of an unfinished multipart upload are stored and billed until you complete or abort it. Add a lifecycle rule that aborts incomplete multipart uploads.
 
 ## Interview Qs
 
-### What are the S3 storage classes?
+### What are the S3 storage classes, and how do you choose one?
 
-Standard for hot data, Intelligent-Tiering for unknown access, Standard-IA and One Zone-IA for monthly reads, three Glacier classes for archives. Cheaper classes add retrieval fees or minimum days.
-
-### How does a customer download a private receipt?
-
-The backend checks the user, then signs a short-lived pre-signed GET URL for that key. Anyone holding it can use it until expiry.
+S3 Standard, the default, is for files read often. Intelligent-Tiering suits unknown access, moving objects between tiers by use. Standard-IA and One Zone-IA are for files read about monthly, with a retrieval fee and a 30-day minimum. The Glacier classes are archives. For receipts: Standard, then a lifecycle rule to a cheaper class.
 
 ### How do you upload a file larger than 5 GB?
 
-Multipart upload: up to 10,000 parts of 5 MiB to 5 GiB, sent in parallel. A lifecycle rule should abort unfinished uploads, whose parts are billed.
+With multipart upload: split the file into up to 10,000 parts, send them in parallel, then complete the upload so S3 joins them. If one part fails, you resend only that part. AWS advises it from 100 MB.
+
+### Why not store receipts in the database as BLOBs?
+
+Large files make rows, backups and replicas heavy, and every download passes through the app and database. In S3 the files sit apart, every task reads them, and customers download them directly through pre-signed URLs. The database keeps only the key.

@@ -5,72 +5,142 @@ title: "Amazon EC2: Virtual Servers"
 topic: compute
 level: beginner
 heat: 2
-hook: "EC2 is a virtual server: the AMI decides what it boots, the instance type decides its CPU and memory, and you run the OS."
+hook: "EC2 rents you a virtual server in your VPC: the AMI decides what it boots, the instance type decides its CPU and memory, and you run the OS and the app."
 points:
-  - { k: "Instance type", v: "m7g.large: series m, generation 7, g for Graviton, size large" }
-  - { k: "AMI", v: "the boot image with OS and software; tied to one Region" }
-  - { k: "User data", v: "a script run as root at first boot only, by default (EC2, 20-10-2026)", kind: default }
-  - { k: "IMDSv2", v: "metadata needs a session token from a PUT first; you can require it", kind: plus }
-  - { k: "Instance store", v: "local disk, no extra cost; lost on stop, hibernate, terminate", kind: minus }
+  - { k: "AMI", v: "the boot image: OS plus installed software; an AMI belongs to one Region" }
+  - { k: "Instance type", v: "fixes CPU, memory and network; m7g.large = general purpose, gen 7, Graviton, large" }
+  - { k: "User data", v: "a script EC2 runs as root at the first boot only, by default; up to 16 KB (EC2)", kind: default }
+  - { k: "Billing", v: "a running instance is billed per second (one-minute minimum); a stopped one is not, but its EBS volumes are", kind: default }
+  - { k: "IMDSv2", v: "code reads instance data at 169.254.169.254 after a PUT returns a token; you can require the token", kind: plus }
+  - { k: "Stop", v: "keeps EBS volumes and the private IP, but erases instance store and changes the public IPv4", kind: minus }
 trap:
   wrong: "Stopping an instance is safe: everything comes back exactly as it was."
-  right: "EBS volumes and the private IP stay, but instance store data is lost and the public IPv4 changes unless you use an Elastic IP."
-sayIt: "EC2 gives me a virtual server. I pick an AMI and an instance type, bootstrap it with user data, keep data on EBS, not instance store, and require IMDSv2."
+  right: "EBS volumes and the private IP stay, but instance store data is erased and the public IPv4 changes unless you use an Elastic IP."
+  why: "Stop feels like pausing a laptop, and most instances keep everything on an EBS root volume, so the losses only appear with instance store or a hard-coded public IP."
+sayIt: "EC2 is a virtual server. I pick an AMI and instance type, launch it in a private subnet, bootstrap it with user data, keep data on EBS, give it an IAM role instead of access keys, and require IMDSv2."
+cheat:
+  idea: "EC2 is a virtual server you rent by the second. The AMI decides what it boots, the instance type decides CPU and memory, and you run the OS and app."
+  flow: "AMI + instance type + subnet → launch"
+  remember: "Stop keeps EBS and the private IP; instance store data is lost and the public IP changes."
+buildsOn: [regions-and-azs, vpc-and-subnets, security-groups-and-nacls]
+scenarios:
+  - q: "Partners allow-list the public IPv4 address of your payment-service instance. You stop it, change the instance type and start it again. What breaks?"
+    a: "The partners' allow-list. A stop and start gives the instance a new public IPv4 address. An Elastic IP stays with the instance; better still, put a load balancer with a stable DNS name in front of it."
+  - q: "Your user data installs Java and starts the jar with nohup. After a reboot the payment service is down. Why?"
+    a: "By default user data runs only at the first boot, so after the reboot nothing starts the jar again. Register the app as a systemd service in the script, or bake it into your own AMI, so the OS starts it on every boot."
 confusedWith: [ec2-vs-lambda-vs-fargate]
 tags: [ec2, ami, instance-type, user-data, imdsv2]
-visual: table
+visual: flow
 sources:
   - title: "Amazon EC2 instance type naming conventions"
     url: "https://docs.aws.amazon.com/ec2/latest/instancetypes/instance-type-names.html"
     verifiedOn: "2026-10-20"
-  - title: "Run commands when you launch an EC2 instance with user data input"
-    url: "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html"
-    verifiedOn: "2026-10-20"
-  - title: "Use the Instance Metadata Service to access instance metadata"
-    url: "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html"
-    verifiedOn: "2026-10-20"
   - title: "Amazon EC2 instance types (product page)"
     url: "https://aws.amazon.com/ec2/instance-types/"
     verifiedOn: "2026-10-20"
-  - title: "Amazon EC2 instance state changes"
+  - title: "Amazon EC2 instance state changes: billing, stop, terminate, DeleteOnTermination"
     url: "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Run commands when you launch an EC2 instance with user data input"
+    url: "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html"
+    verifiedOn: "2026-10-21"
+  - title: "Use the Instance Metadata Service to access instance metadata (IMDSv2)"
+    url: "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html"
+    verifiedOn: "2026-10-21"
+  - title: "Amazon Corretto 25 installation on Amazon Linux 2023"
+    url: "https://docs.aws.amazon.com/corretto/latest/corretto-25-ug/amazon-linux-install.html"
+    verifiedOn: "2026-10-21"
+  - title: "AWS CLI v2 on Amazon Linux 2023"
+    url: "https://docs.aws.amazon.com/linux/al2023/ug/awscli2.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Amazon EC2 (Elastic Compute Cloud) rents you virtual servers, called instances, by the second. An instance boots from an AMI (Amazon Machine Image), a saved disk image with an operating system and software. Its instance type decides how much CPU, memory and network it gets. You launch it into a [subnet of your VPC](card:vpc-and-subnets) with a [security group](card:security-groups-and-nacls), and from then on the OS, Java and your app are yours to run.
 
 ## Why it exists
 
-Some apps need a whole server: their own OS, long-running processes and root access. EC2 gives one in minutes, no hardware to buy.
+Before the cloud, running the payment service meant buying a server, waiting weeks for it, and paying for it even when it sat idle. EC2 gives you a server in minutes and stops charging for compute when you stop it. You still get a whole machine: your own OS, root access and long-running processes, which some software needs. The price of that control is that patching the OS and installing the runtime stay your job, as the [shared responsibility model](card:shared-responsibility-model) says.
 
 ## How it works
 
-| First letter of the type | Optimised for | Example |
-|---|---|---|
-| M, T | General purpose | A Spring Boot API |
-| C | Compute | CPU-heavy batch jobs |
-| R, X | Memory | Large in-memory data |
-| I, D | Storage | Fast local disks |
-| P, G | Accelerated (GPU) | Graphics, machine learning |
+<Mermaid
+  alt="Launching an EC2 instance. An AMI, an instance type, and a subnet with a security group go into the launch. At first boot the user data script runs, and the instance is running and billed per second. Stop moves it to stopped, where EBS volumes are kept and compute is not billed. Start returns it to running. Terminate deletes it for good."
+  chart={`flowchart LR
+  A[AMI: boot image] --> L[Launch]
+  T[Instance type: CPU, memory] --> L
+  N[Subnet + security group] --> L
+  L --> U[User data runs once]
+  U --> R([running: billed per second])
+  R -- stop --> S([stopped: EBS kept])
+  S -- start --> R
+  R -- terminate --> X([terminated: gone])`}
+/>
 
-- The root disk is usually an [EBS volume](card:ebs-and-efs), so it survives stop and start.
-- The app gets AWS credentials from an instance profile role, never stored keys: [temporary credentials](card:sts-and-temporary-credentials).
-- Paying for it: [pricing models](card:aws-pricing-models).
+1. You choose an AMI, for example Amazon Linux 2023, and an instance type such as `m7g.large`.
+2. You choose the subnet, which fixes the Availability Zone, and the security groups that filter its traffic.
+3. EC2 boots the instance. On the first boot it runs your user data script as root, which can install Java and start the app.
+4. While the instance is running you pay per second. Your code can read facts about the instance, such as its ID and role credentials, from the instance metadata service.
+5. When you stop it, compute billing ends and the EBS volumes stay. When you terminate it, the instance is gone for good.
+
+So the AMI and the instance type are the two choices that define every instance.
 
 ## Example
 
+The payment service's instance installs Java 25 and runs the jar as a service at first boot:
+
 ```bash
 #!/bin/bash
-# EC2 user data on Amazon Linux 2023: runs once, as root, at first boot
+# EC2 user data (Amazon Linux 2023): runs once, as root, at first boot
 yum install -y java-25-amazon-corretto-headless
-aws s3 cp s3://payments-artifacts/payment-service.jar /opt/app.jar
-nohup java -jar /opt/app.jar --server.port=8080 > /var/log/payments.log 2>&1 &
+aws s3 cp s3://payments-artifacts/payment-service.jar /opt/payment-service.jar
+cat > /etc/systemd/system/payment.service <<'UNIT'
+[Unit]
+Description=Payment service
+[Service]
+ExecStart=/usr/bin/java -jar /opt/payment-service.jar --server.port=8080
+Restart=always
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl enable --now payment.service
 ```
+
+What to notice:
+
+- The script runs as root, so there is no `sudo`, and `-y` is needed because nobody is there to answer prompts.
+- `aws s3 cp` works only if the instance has an IAM role attached (an instance profile); without one the copy fails with a credentials error. You will see roles in [IAM basics](card:iam-basics).
+- The systemd unit makes the OS start the app on every boot and restart it if it crashes. Starting it with `nohup` instead would run it only until the next reboot, because user data does not run again.
+- If the app never comes up, `/var/log/cloud-init-output.log` on the instance shows what the script printed.
+
+## Rules and defaults
+
+- **Reading an instance type:** `m7g.large` is family m (general purpose), generation 7, option g (Graviton, AWS's Arm processor) and size large. Other families: C for compute, R and X for memory, I and D for local storage, P and G for GPUs.
+- **User data:** runs as root at the first boot only, by default; at most 16 KB before base64 encoding (EC2, at the time of writing).
+- **Billing:** per second with a one-minute minimum while running; a stopped instance is not billed for compute, but its EBS volumes and Elastic IPs are.
+- **Changing the instance type:** only while the instance is stopped.
+- **Terminate:** deletes the root EBS volume by default and keeps other EBS volumes (`DeleteOnTermination`).
+- **IMDS:** by default an instance accepts both IMDSv1 and IMDSv2; set the token to required so only IMDSv2 works.
+
+## Not to be confused with
+
+Instance store is a disk attached to the physical host: fast and included in the price, but erased on stop, hibernate or terminate. An [EBS volume](card:ebs-and-efs) is a network disk that survives stop and start. Rule: anything you must keep, such as data or logs not yet shipped, goes on EBS or off the instance.
+
+## Common mistakes
+
+- **"I will put access keys in the AMI or the user data."** Anyone who can read the AMI or the instance attributes can read them. Attach an IAM role; the SDK then gets short-lived keys from instance metadata.
 
 ## Interview Qs
 
 ### What is the difference between stopping and terminating an instance?
 
-Stop: you can restart it; EBS volumes stay and you pay for them and Elastic IPs, not the instance. Terminate deletes the instance for good; its root EBS volume is deleted too by default.
+Stop shuts it down so you can start it again: EBS volumes and the private IP stay, compute billing ends, and you still pay for EBS. Terminate deletes the instance for good, and its root EBS volume is deleted too by default. Both erase instance store data.
 
-### How does code on EC2 read its instance ID or role credentials?
+### How does code on EC2 get AWS credentials without stored keys?
 
-From the instance metadata service at 169.254.169.254. With IMDSv2 the code first gets a session token with a PUT request, then sends it with every GET; this adds defence against SSRF.
+Attach an IAM role to the instance through an instance profile. The AWS SDK reads temporary keys for that role from the instance metadata service at 169.254.169.254, and AWS replaces them before they expire. Requiring IMDSv2 adds a session token, which defends against SSRF attacks that try to read those keys.
+
+### How do you choose an instance type for a Spring Boot API?
+
+Start with a general-purpose type, M family, and pick C if the work is CPU-heavy or R if it holds a lot in memory. AWS positions Graviton types (g) as its best price-performance option if your software runs on Arm. Watch CPU and memory in CloudWatch, then resize: stop, change the type, start.

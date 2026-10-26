@@ -5,58 +5,116 @@ title: "Amazon ElastiCache"
 topic: databases
 level: intermediate
 heat: 2
-hook: "ElastiCache is managed in-memory Valkey, Redis OSS or Memcached: keep hot data in RAM so the database reads less."
+hook: "ElastiCache is managed in-memory Valkey, Redis OSS or Memcached. You keep hot data in RAM in front of the database, so repeated reads skip the database."
 points:
-  - { k: "Engines", v: "Valkey, Redis OSS and Memcached (as of 20-10-2026)", kind: default }
-  - { k: "Serverless", v: "no nodes to size; scales itself; data kept in three AZs", kind: plus }
-  - { k: "Node-based", v: "you choose node type, node count and AZs" }
-  - { k: "Cache-aside", v: "on a miss, load from the database and set a TTL" }
+  - { k: "Engines", v: "Valkey, Redis OSS and Memcached (at the time of writing)", kind: default }
+  - { k: "Cache-aside", v: "read the cache; on a miss load from the database, store it with a TTL, and return it" }
+  - { k: "Serverless", v: "no nodes to size; scales itself; keeps data across three AZs; TLS always on", kind: plus }
+  - { k: "Node-based", v: "you choose node type, node count and AZ placement, and tune it finely" }
+  - { k: "Not the source of truth", v: "a cache can be emptied any time; the database still holds the real data", kind: minus }
 trap:
   wrong: "ElastiCache holds the payments, so the database can be skipped."
-  right: "Use it as a cache; the database stays the source of truth. Durable in-memory data needs MemoryDB, or node-based Valkey 9.0+ with durability on."
-sayIt: "I put ElastiCache for Valkey in front of RDS with cache-aside: read the cache, and on a miss load from the database and store it with a TTL. When the config changes, I evict the key."
-confusedWith: []
+  right: "Use it as a cache; the database stays the source of truth. For durable in-memory data use MemoryDB, or Valkey 9.0+ with durability on."
+  why: "Valkey and Redis keep data in RAM and can save snapshots, so they look like a database, but a cache node can be replaced or emptied at any time and is meant to be rebuildable."
+sayIt: "I put ElastiCache for Valkey in front of RDS with cache-aside: read the cache, and on a miss load from the database and store it with a TTL. When the underlying data changes, I evict the key so the next read refreshes it. The database stays the source of truth."
+cheat:
+  idea: "ElastiCache is managed in-memory Valkey, Redis OSS or Memcached, in front of the database to serve hot reads from RAM."
+  flow: "Read cache → hit: return | miss: load from DB, store with TTL"
+  remember: "The cache is not the source of truth. Give keys a TTL and evict on change."
+buildsOn: [rds]
+scenarios:
+  - q: "The payment service reads the same merchant's fee config on every request, and RDS CPU is high. How does ElastiCache help, and what breaks if the config changes?"
+    a: "Cache the config with cache-aside: after the first read it comes from RAM, so RDS is hit far less. If the config changes in the database and you do nothing, the cache serves the old value until its TTL ends. Evict the key on change so the next read reloads the fresh value."
+  - q: "You need a cache that also survives a node failure with zero data loss. Plain ElastiCache or something else?"
+    a: "Plain ElastiCache is a cache: a node can be replaced and its data lost. For zero-loss durability use Amazon MemoryDB, or a node-based Valkey 9.0+ cluster with durability turned on, which writes to a Multi-AZ transactional log."
+confusedWith: [redis-vs-memcached]
 tags: [elasticache, caching, valkey]
 visual: table
 sources:
-  - title: "What is Amazon ElastiCache? (ElastiCache User Guide)"
+  - title: "What is Amazon ElastiCache? Engines and in-memory caching (ElastiCache User Guide)"
     url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/WhatIs.html"
-    verifiedOn: "2026-10-20"
-  - title: "Choosing between deployment options (ElastiCache User Guide)"
+    verifiedOn: "2026-10-21"
+  - title: "Choosing between deployment options: serverless vs node-based, TLS, durability (ElastiCache User Guide)"
     url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/WhatIs.deployment.html"
-    verifiedOn: "2026-10-20"
-  - title: "What is MemoryDB? (Amazon MemoryDB Developer Guide)"
+    verifiedOn: "2026-10-21"
+  - title: "What is MemoryDB? Durable in-memory database (Amazon MemoryDB Developer Guide)"
     url: "https://docs.aws.amazon.com/memorydb/latest/devguide/what-is-memorydb.html"
     verifiedOn: "2026-10-20"
-  - title: "Caching strategies: lazy loading and TTL (ElastiCache User Guide)"
+  - title: "Caching strategies: lazy loading (cache-aside) and TTL (ElastiCache User Guide)"
     url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html"
     verifiedOn: "2026-10-20"
-  - title: "Declarative annotation-based caching, @Cacheable (Spring Framework reference)"
+  - title: "Declarative annotation-based caching: @Cacheable, @CacheEvict (Spring Framework reference)"
     url: "https://docs.spring.io/spring-framework/reference/integration/cache/annotations.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Amazon ElastiCache is a managed in-memory data store: it runs Valkey, Redis OSS or Memcached for you. These keep data in RAM, so reads return in well under a millisecond, far faster than a disk-backed database. You put a cache in front of a database and keep the data that is read again and again, such as a merchant's fee config, so most reads are served from memory. Valkey is an open-source fork of Redis; Redis OSS is Redis itself.
+
 ## Why it exists
 
-The payment service reads the same merchant config on every request. Reading it from memory is faster and takes that load off RDS.
+The payment service reads the same merchant config on nearly every request. Each read hits [RDS](card:rds), using CPU and connections that the real work needs. A database is tuned for correctness and durability, not for serving the same small value a million times. ElastiCache holds that value in RAM beside the app: after the first read, the rest come from memory, and RDS is left for writes and queries that genuinely need it.
 
 ## How it works
 
 <Compare id="redis-vs-memcached" />
 
-- AWS calls cache-aside "lazy loading". In Spring, `@Cacheable` does the read side: it runs the method only on a miss.
-- Serverless caches use a VPC endpoint, or a public one (Valkey 9.0+, IAM auth and TLS 1.3 required).
+The common pattern is cache-aside (AWS calls it lazy loading):
+
+1. The service needs the config for merchant `m-42` and asks the cache for key `merchant:m-42`.
+2. On a hit, the cache returns the value from RAM and the database is untouched.
+3. On a miss, the service reads the config from RDS, stores it in the cache with a TTL, and returns it. Later reads now hit.
+4. When the config changes in RDS, the service deletes (evicts) that key, so the next read misses and reloads the fresh value.
+5. The TTL is a safety net: even with no eviction, the key expires after its time and is reloaded.
+
+So the key is: the cache speeds up reads, the database stays correct, and a TTL plus eviction keep the two from drifting apart.
+
+## Example
+
+In Spring, `@Cacheable` does the read side of cache-aside and `@CacheEvict` removes a stale key:
+
+```java
+@Cacheable(cacheNames = "merchantConfig", key = "#merchantId")   // hit: method is skipped
+public MerchantConfig find(String merchantId) {
+    return repository.findById(merchantId).orElseThrow();       // runs only on a miss
+}
+
+@CacheEvict(cacheNames = "merchantConfig", key = "#merchantId")  // delete the cached copy
+public void changeFee(String merchantId, BigDecimal feePercent) {
+    repository.updateFee(merchantId, feePercent);
+}
+```
+
+What to notice:
+
+- With `@Cacheable`, Spring checks the cache first and runs the method body only on a miss, then stores the result. The database read happens once per key until it expires.
+- `@CacheEvict` deletes the key after the fee changes, so the next `find` misses and reloads. Remove this line and callers keep seeing the old fee until the TTL ends.
+- The cache name maps to an ElastiCache instance through Spring's Redis configuration; the TTL is set there, not in these annotations.
+- If ElastiCache is down, the method still runs against RDS, so the app keeps working, only slower.
+
+## Rules and defaults
+
+- **Engines:** Valkey, Redis OSS and Memcached (at the time of writing). Valkey and Redis OSS offer rich types, replicas and backups; Memcached is a plain multithreaded key-value cache.
+- **Serverless:** no nodes to size; it scales itself, stores data across three AZs, and always uses encryption in transit (TLS).
+- **Node-based:** you choose the node type, the number of nodes and their AZ placement, and you can turn on cluster mode to shard data.
+- **Public endpoint:** available on serverless Valkey 9.0+; it requires IAM authentication and TLS 1.3. Otherwise the cache lives in your VPC and its security group must allow the client on port 6379.
+- **Durability:** plain caches are not durable. For zero-loss in-memory data use MemoryDB, or node-based Valkey 9.0+ with durability enabled.
+
+## Not to be confused with
+
+Valkey and Redis OSS are the same kind of engine: rich data types, replicas with failover, backups and pub/sub. Memcached is a simpler, multithreaded key-value cache with none of those. Rule: Valkey/Redis OSS = features and high availability; Memcached = the plainest cache you can afford to lose.
 
 ## Interview Qs
 
-### Valkey/Redis OSS or Memcached?
+### Valkey or Redis OSS versus Memcached?
 
-Valkey or Redis OSS when you need rich data types, replicas with automatic failover, backups or pub/sub. Memcached for the simplest multithreaded key-value cache that you can afford to lose.
+Choose Valkey or Redis OSS when you need rich data types, replicas with automatic failover, backups or pub/sub. Choose Memcached for the simplest multithreaded key-value cache where losing the data is fine. Most new caches use Valkey, the open-source fork AWS now leads with.
 
 ### How do you keep cached merchant config from going stale?
 
-Give every key a TTL, and evict the key when the config changes in the database (`@CacheEvict` in Spring). The next read misses and loads the fresh value.
+Give every key a TTL so it refreshes on its own, and evict the key the moment the config changes in the database (`@CacheEvict` in Spring). The next read misses and loads the current value. TTL alone bounds staleness; eviction removes it at once.
 
-### Serverless or node-based?
+### Serverless or node-based ElastiCache?
 
-Serverless when load is unknown or spiky: no capacity planning, and data is stored across three AZs. Node-based when you need control over node type, shard count and placement.
+Serverless when load is unknown or spiky: no capacity planning, it scales itself and stores data across three AZs. Node-based when you want control over node type, shard count and placement, or need features such as durability on Valkey 9.0+.

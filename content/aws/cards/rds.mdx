@@ -5,27 +5,41 @@ title: "Amazon RDS: Managed Relational Databases"
 topic: databases
 level: beginner
 heat: 3
-hook: "RDS runs a relational engine such as PostgreSQL or MySQL for you: AWS patches, backs up and fails over; you own the schema and queries."
+hook: "RDS runs a relational database such as PostgreSQL for you: AWS installs, patches, backs up and fails it over; you own the schema, the queries and the tuning."
 points:
-  - { k: "AWS manages", v: "patching, backups, failure detection and recovery" }
-  - { k: "Multi-AZ", v: "a standby in another AZ, for failover only" }
-  - { k: "Read replica", v: "an async read-only copy that scales reads", kind: plus }
-  - { k: "Restore", v: "point-in-time restore always creates a new DB instance" }
-  - { k: "Connections", v: "pool size x app instances must stay below max_connections", kind: minus }
+  - { k: "AWS manages", v: "OS and engine installs and patches, backups, failure detection and recovery" }
+  - { k: "You manage", v: "schema, indexes, query tuning, the instance size, and who may connect through security groups" }
+  - { k: "Multi-AZ DB instance", v: "a synchronous standby in another AZ that takes over on failure; it serves no reads", kind: plus }
+  - { k: "Read replica", v: "an asynchronous read-only copy that takes read traffic and can lag a little behind" }
+  - { k: "Backup retention", v: "7 days by default from the console, 1 day from the CLI or API; 0 to 35 days allowed", kind: default }
+  - { k: "Connections", v: "pool size times app instances must stay below the database's max_connections", kind: minus }
 trap:
   wrong: "Multi-AZ doubles read capacity because the standby is a copy."
-  right: "A Multi-AZ DB instance's standby serves no reads. Reads need read replicas or a Multi-AZ DB cluster."
-sayIt: "RDS is a managed relational database. Multi-AZ keeps a synchronous standby for failover; read replicas are async copies for reads. Backups let me restore to a point in time as a new instance."
-confusedWith: [rds-vs-aurora, rds-vs-dynamodb]
+  right: "The standby of a Multi-AZ DB instance serves no reads. For more reads, add read replicas or use a Multi-AZ DB cluster."
+  why: "The standby is a full, current copy in another AZ, so leaving it idle sounds wasteful, and the newer Multi-AZ DB cluster option does have readable standbys."
+sayIt: "RDS is a managed relational database: AWS patches, backs up and fails over the server, and I own the schema and queries. Multi-AZ keeps a synchronous standby for failover only; read replicas are asynchronous copies for reads; a point-in-time restore creates a new instance."
+cheat:
+  idea: "RDS runs a relational engine such as PostgreSQL for you. AWS patches, backs up and fails over the server; you own the schema, the queries and the connections."
+  remember: "Multi-AZ standby = failover only, no reads. Read replica = asynchronous copy for reads. Point-in-time restore = a new instance."
+buildsOn: [regions-and-azs, vpc-and-subnets, security-groups-and-nacls]
+scenarios:
+  - q: "The payment service runs on one Multi-AZ DB instance, and month-end reports slow down checkout. Does pointing the reports at the standby help?"
+    a: "No. The standby of a Multi-AZ DB instance serves no reads at all; it only takes over on failure. Add a read replica and point the reports at its endpoint, accepting that it can lag a little behind the primary."
+  - q: "Auto Scaling grows the payment service from 6 to 20 tasks, each with a pool of 10 connections, and new tasks fail with 'too many connections'. Why, and what can you do?"
+    a: "20 x 10 = 200 connections, more than the instance's max_connections allows. Make each pool smaller, put RDS Proxy between the tasks and the database so they share fewer database connections, or move to a larger instance class, which raises the default limit."
+confusedWith: [multi-az-vs-read-replicas, rds-vs-aurora]
 tags: [rds, databases, high-availability]
-visual: table
+visual: flow
 sources:
-  - title: "What is Amazon RDS? (Amazon RDS User Guide)"
+  - title: "What is Amazon RDS? Responsibilities compared with EC2 (Amazon RDS User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Welcome.html"
-    verifiedOn: "2026-10-20"
-  - title: "Failing over a Multi-AZ DB instance (Amazon RDS User Guide)"
+    verifiedOn: "2026-10-21"
+  - title: "Failing over a Multi-AZ DB instance; JVM DNS TTL (Amazon RDS User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.Failover.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Working with DB instance read replicas (Amazon RDS User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_ReadRepl.html"
+    verifiedOn: "2026-10-21"
   - title: "Backup retention period (Amazon RDS User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_WorkingWithAutomatedBackups.BackupRetention.html"
     verifiedOn: "2026-10-20"
@@ -35,45 +49,88 @@ sources:
   - title: "Restoring a DB instance to a specified time (Amazon RDS User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PIT.html"
     verifiedOn: "2026-10-20"
+  - title: "Best practices for Amazon RDS: DNS caching and failover testing (Amazon RDS User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_BestPractices.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Amazon RDS (Relational Database Service) is a managed service that runs a relational database engine for you: PostgreSQL, MySQL, MariaDB, Oracle, SQL Server or Db2. You create a DB instance, which is the database server, choose its size and storage, and place it in [private subnets](card:vpc-and-subnets) of your VPC. The app connects to its endpoint, a DNS name, with the normal JDBC driver. AWS runs the operating system and the engine underneath.
 
 ## Why it exists
 
-On EC2 you patch, back up and fail over the database yourself. RDS takes those jobs.
+Running PostgreSQL yourself on EC2 means installing it, patching the operating system and the engine, scheduling backups, testing restores and building failover to another AZ. Each job is easy to get wrong, and one mistake can lose payments. RDS takes over these jobs: you choose a backup retention period and a maintenance window and turn on Multi-AZ. Your time goes to the schema and the queries instead.
 
 ## How it works
 
-<Compare id="multi-az-vs-read-replicas" />
+<Mermaid
+  alt="The payment service in private subnets connects to the RDS endpoint, which points at the primary in AZ a. The primary copies every write synchronously to a standby in AZ b and sends backups and transaction logs to S3."
+  chart={`flowchart LR
+  A[Payment service] -- "payments-db endpoint (DNS)" --> P[(Primary, AZ a)]
+  P -- "synchronous copy" --> S[(Standby, AZ b)]
+  P -- "daily backup + logs" --> B[(S3, managed by RDS)]`}
+/>
 
-- The app connects to a DNS endpoint. On failover RDS points it at the standby, so keep the JVM DNS cache at 60 s or less.
-- Point-in-time restore replays logs that RDS copies to S3 every five minutes.
-- Many short-lived clients, such as [Lambda](card:lambda), should connect through [RDS Proxy](card:rds-proxy-node), which pools and reuses connections.
+1. The payment service connects to the endpoint, such as `payments-db.abc123example.ap-south-1.rds.amazonaws.com`. DNS resolves it to the primary instance in AZ a.
+2. Every write is copied synchronously to the standby in AZ b before it counts as done, so the standby holds every committed transaction.
+3. RDS also takes a daily backup and uploads the transaction logs to S3 every five minutes. Together they allow a restore to any moment in the retention period.
+4. If the primary or its AZ fails, RDS promotes the standby and points the endpoint's DNS record at it, typically within 60 to 120 seconds.
+5. Open connections break. The connection pool opens new ones, and once the JVM looks the name up again, they reach the new primary.
+
+So the app never needs a new address: the same endpoint name always leads to the current primary.
 
 ## Example
 
-The JDBC URL and the password from Secrets Manager: [AWS Code Templates](card:aws-code-templates). Pool size per app instance:
+The payment service on ECS connects through the endpoint name, sizes its pool, and makes the JVM refresh DNS so it follows a failover:
 
 ```yaml
 spring:
   datasource:
+    url: jdbc:postgresql://payments-db.abc123example.ap-south-1.rds.amazonaws.com:5432/payments
     hikari:
-      maximum-pool-size: 10   # 6 app instances x 10 = 60 connections, below max_connections
+      maximum-pool-size: 10   # 6 tasks x 10 = 60 connections in total
 ```
 
-## Defaults
+```java
+// At startup, before any connection is opened: look DNS names up again after 60 s
+java.security.Security.setProperty("networkaddress.cache.ttl", "60");
+```
 
-| What | Default | Where |
-|---|---|---|
-| Automated backup retention | 7 days (console), 1 day (CLI/API); 0-35 allowed | RDS User Guide, as of 20-10-2026 |
-| Read replicas per primary | 15 | RDS quotas, as of 20-10-2026 |
-| Multi-AZ DB instance failover | typically 60-120 s | RDS User Guide, as of 20-10-2026 |
+What to notice:
+
+- The URL names the endpoint, never an IP address. After a failover the same name points at the new primary.
+- The pool size is per task. If Auto Scaling adds tasks, the total grows, so compare it with `max_connections`, which RDS sets from the instance's memory by default.
+- On some Java setups the JVM caches DNS answers until it restarts, so the pool would keep dialling the old primary. AWS advises a JVM DNS TTL of 60 seconds or less.
+- The password is not here. You will load it from [Secrets Manager](card:secrets-and-parameters) later.
+
+## Rules and defaults
+
+- **Backups:** automated backups are kept 7 days by default from the console and 1 day from the CLI or API; you can choose 0 to 35, and 0 turns them off.
+- **Point-in-time restore:** always creates a new DB instance. You then switch the app to it, or copy the lost rows back.
+- **Read replicas:** you create them yourself (RDS does not add them automatically), in the same or another Region, up to 15 per source instance (quota at the time of writing). A replica can be promoted to a standalone database.
+- **Multi-AZ DB cluster:** a different option with a writer and two readable standbys in three AZs; its failover is usually under 35 seconds.
+- **Many short-lived clients:** functions such as [Lambda](card:lambda) should connect through RDS Proxy, which pools and reuses database connections.
+- **Test failover:** AWS advises testing a failover to learn how long it takes for you and to prove the app reconnects.
+
+## Not to be confused with
+
+A Multi-AZ standby is a hidden, synchronous copy that exists only to take over when the primary fails. A read replica is a visible, asynchronous copy with its own endpoint that serves read-only queries, so it can be slightly behind. Rule: Multi-AZ = survive a failure; read replica = serve more reads.
+
+## Common mistakes
+
+- **"A read replica is my backup."** A replica copies every change within seconds, including a mistaken DELETE. Use automated backups and point-in-time restore to go back in time.
 
 ## Interview Qs
 
 ### What happens to the app during a Multi-AZ failover?
 
-RDS moves the endpoint's DNS record to the standby. Open connections drop, so the pool must reconnect, and the JVM must not cache the old IP for long.
+RDS promotes the standby and moves the endpoint's DNS record to it, typically within one to two minutes. Open connections drop, so the pool must reconnect, and the JVM must not cache the old IP for long. Writes in flight fail and should be retried safely.
 
 ### Rows were deleted by mistake at 10:42. How do you recover?
 
-Restore to a point just before 10:42 from automated backups. RDS creates a new DB instance; copy the rows back or switch the app to it. A read replica would have copied the delete too.
+Restore the database to a time just before 10:42 from automated backups. RDS creates a new DB instance at that point; you copy the missing rows back or switch the app to it. A read replica would not help, because it copied the delete too.
+
+### Would you run PostgreSQL on EC2 or on RDS?
+
+RDS by default: AWS recommends it for most relational workloads, because it does the patching, backups and failover for you. EC2 makes sense only when you need something RDS does not allow, such as full control of the operating system, and then you run backups and failover yourself.

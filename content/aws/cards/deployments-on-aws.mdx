@@ -5,63 +5,105 @@ title: "Deployments on AWS: CI/CD, Blue-Green, Canary"
 topic: operations
 level: intermediate
 heat: 2
-hook: "Ship small, shift traffic step by step, watch the alarms, and roll back on their signal, not on a hunch."
+hook: "Ship a new version in small steps, shift traffic gradually, watch the alarms, and roll back automatically when they fire, not on a hunch."
 points:
-  - { k: "ECS rolling defaults", v: "minimumHealthyPercent 100, maximumPercent 200", kind: default }
-  - { k: "Auto rollback", v: "ECS circuit breaker (tasks never healthy) or a CloudWatch alarm", kind: plus }
-  - { k: "Bake time", v: "ECS keeps watching alarms after the shift before it marks success" }
-  - { k: "ECS built-in", v: "blue/green since 17-07-2025; linear and canary since 30-10-2025", kind: default }
+  - { k: "Pipeline", v: "a commit builds and tests the jar, pushes an image to ECR, then deploys the new version to ECS" }
+  - { k: "ECS rolling defaults", v: "minimumHealthyPercent 100%, maximumPercent 200% (replica service), so new tasks start before old ones stop", kind: default }
+  - { k: "Alarm rollback", v: "link CloudWatch alarms to the deployment; if they fire during the bake time, ECS rolls back", kind: plus }
+  - { k: "Circuit breaker", v: "for rolling updates, ECS fails and can roll back a deployment whose tasks never become healthy", kind: plus }
+  - { k: "Built-in traffic shifting", v: "ECS added blue/green (17-07-2025) and linear and canary (30-10-2025) without CodeDeploy", kind: default }
+  - { k: "OIDC, no keys", v: "GitHub Actions assumes an IAM role via OIDC, so no long-term AWS keys are stored", kind: plus }
 trap:
   wrong: "The deployment finished, so the release is healthy."
-  right: "Finished only means traffic moved. Watch 5xx and latency alarms during a bake time and roll back automatically when they fire."
-sayIt: "My pipeline builds and tests the jar, pushes an image to ECR and deploys to ECS. Rolling is the default; for payments I use canary or blue/green with alarms that roll back automatically."
+  right: "Finished only means the traffic moved. Watch 5xx and latency alarms during a bake time, and roll back automatically if they fire."
+  why: "A green 'deployment complete' feels like success, and in a quick test the new version answers requests, so people stop watching. Problems often show up a few minutes later under real load."
+sayIt: "My pipeline builds and tests the jar, pushes an image to ECR, and deploys to ECS. Rolling is the default; for payments I use canary or blue/green with CloudWatch alarms that auto-roll-back, plus a bake time to catch a bad release."
+cheat:
+  idea: "A deployment strategy decides how a new version replaces the old and how traffic shifts to it: rolling, blue/green, linear or canary on ECS."
+  flow: "Build, test → push image → shift traffic in steps → watch alarms → roll back or finish"
+  remember: "Finished means traffic moved, not healthy; keep a bake time with auto-rollback on alarms."
+buildsOn: [infrastructure-as-code, elastic-load-balancing, containers-ecs-eks-fargate]
+scenarios:
+  - q: "You are deploying a change to the payment API that handles live money. Rolling, blue/green or canary, and why?"
+    a: "Canary: shift a small slice (say 5-10%) to the new version first and watch the alarms, then shift the rest. A bad release reaches few users and rolls back fast. Blue/green is also fine if you want one clean switch with instant switch-back; rolling is better kept for routine, low-risk changes."
+  - q: "During a rolling deployment, the new tasks keep crashing and never pass health checks. What stops this from taking the service down, if configured?"
+    a: "The ECS deployment circuit breaker: it detects that the new tasks never reach a steady state, marks the deployment failed and stops launching new ones, and with rollback enabled it returns the service to the last version that deployed successfully."
 confusedWith: []
 tags: [ci-cd, deployment, blue-green, canary, ecs]
 visual: table
 sources:
-  - title: "Deployment configuration defaults (Amazon ECS API Reference)"
-    url: "https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_DeploymentConfiguration.html"
-    verifiedOn: "2026-10-20"
+  - title: "ECS deployment configuration: minimumHealthyPercent 100, maximumPercent 200 defaults, strategies (Amazon ECS API Reference)"
+    url: "https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-ecs-service-deploymentconfiguration.html"
+    verifiedOn: "2026-10-23"
   - title: "CloudWatch alarms, circuit breaker and bake time for ECS deployments (Amazon ECS Developer Guide)"
     url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-alarm-failure.html"
-    verifiedOn: "2026-10-20"
-  - title: "Amazon ECS now supports built-in linear and canary deployments (AWS What's New, 30-10-2025)"
+    verifiedOn: "2026-10-23"
+  - title: "Amazon ECS canary deployments: two-phase shift, canary bake time (Amazon ECS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/canary-deployment.html"
+    verifiedOn: "2026-10-23"
+  - title: "Amazon ECS built-in linear and canary deployments (AWS What's New, 30-10-2025)"
     url: "https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-ecs-built-in-linear-canary-deployments/"
-    verifiedOn: "2026-10-20"
-  - title: "Amazon ECS enables built-in blue/green deployments (AWS What's New, 17-07-2025)"
-    url: "https://aws.amazon.com/about-aws/whats-new/2025/07/amazon-ecs-built-in-blue-green-deployments/"
     verifiedOn: "2026-10-20"
   - title: "OIDC federation, for example GitHub Actions (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_oidc.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A deployment strategy is how a new version of your service replaces the old one, and how user traffic moves onto it. The main choices are rolling (replace tasks a batch at a time), blue/green (run a full new copy, then switch), and canary (send a small slice first, then the rest). CI/CD is the pipeline that gets you there: it builds and tests the code on every commit, packages it as a container image, and triggers one of those deployment strategies.
+
 ## Why it exists
 
-Replacing every server at once turns one bad build into a full outage. Moving traffic in steps, with health checks and alarms, limits the damage and makes rollback fast.
+Replacing every running server at once turns one bad build into a full outage, with no easy way back. Moving traffic in controlled steps, behind health checks and alarms, limits the blast radius: if the new version is bad, only a fraction of requests hit it, and you can switch back quickly. Automating the build, test and deploy also removes the manual, error-prone steps between "merged" and "running in production".
 
 ## How it works
 
 <Compare id="rolling-vs-blue-green-vs-canary" />
 
-- New tasks get traffic only after passing [load balancer health checks](card:elastic-load-balancing).
+New tasks receive traffic only after they pass the [load balancer's health checks](card:elastic-load-balancing), so the steps below always route to tasks that are up.
 
 ## Example
 
+A typical CI/CD flow for the payment service, from a merge to production traffic.
+
 <Steps label="CI/CD for the payment service">
   <Step title="Commit">A merge to main starts the pipeline.</Step>
-  <Step title="Build and test">CodeBuild or GitHub Actions runs the tests and builds the image.</Step>
-  <Step title="Push">The image goes to Amazon ECR, tagged with the commit.</Step>
-  <Step title="Deploy">ECS shifts traffic to the new revision: rolling, canary or blue/green.</Step>
-  <Step title="Watch">Alarms on 5xx and latency; on ALARM, roll back.</Step>
+  <Step title="Build and test">CodeBuild or GitHub Actions runs the tests and builds the container image.</Step>
+  <Step title="Push">The image goes to Amazon ECR, tagged with the commit SHA.</Step>
+  <Step title="Deploy">ECS shifts traffic to the new service revision: rolling, canary or blue/green.</Step>
+  <Step title="Watch">CloudWatch alarms on 5xx and latency; on ALARM during the bake time, ECS rolls back.</Step>
 </Steps>
+
+What to notice:
+
+- The image is tagged with the commit SHA, so every deployment maps to an exact commit, and a rollback is redeploying a known earlier image rather than rebuilding.
+- The deploy step and the watch step are linked: with alarm-based rollback, ECS does not mark the deployment complete until it has shifted traffic and watched the alarms stay quiet for the bake time.
+- If GitHub Actions is the runner, it authenticates to AWS by assuming an IAM role through OIDC, so no AWS access keys are stored in the repo.
+
+## Rules and defaults
+
+- **Rolling defaults (ECS replica service):** `minimumHealthyPercent` 100% and `maximumPercent` 200%, so ECS can start the new tasks before stopping the old ones (ECS, at the time of writing).
+- **Circuit breaker:** available for the rolling (`ECS`) deployment type; it fails a deployment whose tasks never reach a steady state, and can roll back.
+- **Alarm rollback:** supported for the rolling deployment type; link CloudWatch alarm names, enable rollback, and ECS fails and reverts the deployment if an alarm fires. A rolling deployment has no bake time by default; set `bakeTimeInMinutes` if you want ECS to keep watching the alarms after the new tasks are healthy.
+- **Built-in strategies:** ECS supports `ROLLING`, `BLUE_GREEN`, `LINEAR` and `CANARY` natively; blue/green, linear and canary default to a 15-minute deployment bake time, and the canary phase defaults to a 10-minute canary bake time.
+- **No stored keys:** register GitHub (or another CI) as an OIDC identity provider in IAM so each run assumes a role for short-lived credentials.
+
+## Common mistakes
+
+- **"A blue/green or canary deployment needs CodeDeploy."** Not any more. ECS has built-in blue/green (since 17-07-2025) and linear and canary (since 30-10-2025); CodeDeploy is one option, not a requirement.
+- **No bake time, no alarms.** Shifting all traffic and declaring success immediately means a slow memory leak or a spike under load goes unnoticed until customers complain. Keep a bake time and auto-rollback on alarms.
 
 ## Interview Qs
 
 ### How does GitHub Actions deploy to AWS without stored access keys?
 
-Register GitHub as an OIDC identity provider in IAM and let the workflow assume a role through it. Each run gets short-lived credentials, so no long-term keys are kept in GitHub.
+Register GitHub as an OIDC identity provider in IAM and let the workflow assume an IAM role through it. Each workflow run receives short-lived credentials scoped to that role, so there are no long-term AWS keys sitting in GitHub secrets to leak or rotate.
 
 ### Rolling update, blue-green or canary for a payment API?
 
-Canary: send about 10% of traffic to the new version, watch the alarms, then move the rest. A bad release reaches few users and rolls back quickly.
+Canary. Shift about 5-10% of traffic to the new version, watch 5xx and latency alarms during the canary bake time, then shift the rest. A bad release reaches only a few users and rolls back quickly. Blue/green is the alternative when you want one clean switch and an instant switch-back; rolling is for routine, low-risk changes.
+
+### What does it mean that a deployment "completed", and why is that not the same as healthy?
+
+Completed means the new tasks are running and traffic has moved to them. It does not prove the release is good under real load, where a memory leak or a slow dependency may only show up after some minutes. That is why you keep a bake time with CloudWatch alarms that trigger an automatic rollback.

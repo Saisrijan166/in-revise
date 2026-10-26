@@ -5,65 +5,108 @@ title: Amazon API Gateway
 topic: networking
 level: intermediate
 heat: 2
-hook: "API Gateway is a managed front door for APIs: it authorises, throttles and routes each call to Lambda or a backend."
+hook: "API Gateway is a managed front door for your APIs: it authorises, throttles and routes each call to a Lambda function or a backend, so you run no web server for it."
 points:
-  - { k: "Three API types", v: "REST (most features), HTTP (cheaper, simpler), WebSocket (two-way)" }
-  - { k: "Authorisation", v: "IAM, Cognito or a Lambda authorizer; JWT authorizers on HTTP APIs" }
-  - { k: "Throttling", v: "10,000 rps, burst 5,000, per account per Region (most Regions); then 429", kind: default }
-  - { k: "Integration timeout", v: "REST: 29 s default (Regional, private can raise it); HTTP: 30 s max", kind: default }
+  - { k: "Three API types", v: "REST (most features), HTTP (cheaper and simpler), WebSocket (two-way messaging)" }
+  - { k: "Authorisation", v: "IAM, a Lambda authorizer or Cognito; HTTP APIs add built-in JWT authorizers" }
+  - { k: "Throttling", v: "10,000 requests/sec with a 5,000 burst per account per Region by default; over it returns 429", kind: default }
+  - { k: "Integration timeout", v: "REST default 29 s (raisable on Regional/private), HTTP max 30 s; long jobs must be async", kind: default }
   - { k: "Pricing", v: "per request plus data out; nothing to pay while idle", kind: plus }
+  - { k: "VPC link", v: "lets API Gateway reach a private ALB or NLB inside your VPC" }
 trap:
-  wrong: "API Gateway can wait as long as a slow report takes."
-  right: "REST integrations stop at 29 s by default and HTTP APIs at 30 s. Make long jobs asynchronous: accept, queue, return 202."
-sayIt: "API Gateway fronts my APIs with auth, throttling and stages, and calls Lambda or a private ALB through a VPC link. I choose an HTTP API unless I need REST-only features."
+  wrong: "API Gateway can wait as long as a slow report takes to run."
+  right: "A REST integration stops at 29 s by default and an HTTP API at 30 s. Make long jobs asynchronous: accept the request, queue the work, return 202."
+  why: "It looks like a normal proxy, so people expect it to wait for any backend; the integration timeout is a hard ceiling they do not see until a slow call fails."
+sayIt: "API Gateway fronts my APIs with authorisation, throttling and stages, and calls Lambda or a private ALB through a VPC link. I pick an HTTP API by default and a REST API only when I need its extra features like API keys or WAF."
+cheat:
+  idea: "API Gateway is a managed front door for APIs. It authorises, throttles and routes each call to Lambda or a backend, so you run no web server."
+  remember: "Default to an HTTP API; choose a REST API only for API keys, usage plans, WAF, caching, request validation or a private endpoint."
+buildsOn: [vpc-and-subnets]
+scenarios:
+  - q: "A client calls POST /reports, which takes two minutes to build a PDF. The call keeps failing with a timeout. How do you design it?"
+    a: "Do not hold the connection open past the integration timeout. Have the endpoint accept the request, put the job on a queue, and return 202 with a status URL the client can poll. The report is built asynchronously, and no single call waits two minutes."
+  - q: "You need API keys and per-client usage plans. Which API type, and why?"
+    a: "A REST API. HTTP APIs do not support API keys or usage plans; those are REST-only features. If you did not need them, an HTTP API would be cheaper and simpler, which is the usual default."
 confusedWith: [api-gateway-vs-alb]
 tags: [api-gateway, serverless, throttling]
 visual: table
 sources:
-  - title: "Choose between REST APIs and HTTP APIs (API Gateway Developer Guide)"
+  - title: "Choose between REST APIs and HTTP APIs (Amazon API Gateway Developer Guide)"
     url: "https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-vs-rest.html"
-    verifiedOn: "2026-10-20"
-  - title: "Amazon API Gateway quotas (API Gateway Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Amazon API Gateway quotas: throttle quota per account per Region (Developer Guide)"
     url: "https://docs.aws.amazon.com/apigateway/latest/developerguide/limits.html"
-    verifiedOn: "2026-10-20"
-  - title: "Quotas for REST APIs and for HTTP APIs (API Gateway Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Quotas for a REST API: integration timeout, payload size (Developer Guide)"
     url: "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-execution-service-limits-table.html"
-    verifiedOn: "2026-10-20"
-  - title: "Throttle requests to your REST APIs (API Gateway Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Quotas for an HTTP API: 30 s integration timeout (Developer Guide)"
+    url: "https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-quotas.html"
+    verifiedOn: "2026-10-22"
+  - title: "Throttle requests to your REST APIs: token bucket, 429 (Developer Guide)"
     url: "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-request-throttling.html"
-    verifiedOn: "2026-10-20"
-  - title: "Amazon API Gateway pricing"
-    url: "https://aws.amazon.com/api-gateway/pricing/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+Amazon API Gateway is a managed service that sits in front of your API and handles the work every API needs before and after your code runs: checking who the caller is, limiting how fast they can call, picking the right stage, and forwarding the request to a backend. The backend can be a Lambda function, a public HTTP service, or a private load balancer in your [VPC](card:vpc-and-subnets). Because the gateway does this, a Lambda-based API needs no web server of its own.
 
 ## Why it exists
 
-Every API needs authentication, rate limits, versions and routing. API Gateway runs these as a managed service, so a Lambda-based payment API needs no web server at all.
+Every API has to authenticate callers, rate-limit them, version itself, and route requests. Writing and running that yourself means a server you have to scale and patch. API Gateway runs all of it as a managed service that scales on its own and charges per request, so you add authentication, throttling and routing by configuration, and you pay nothing while the API is idle.
 
 ## How it works
 
 <Compare id="rest-api-vs-http-api" />
 
-- Both REST and HTTP APIs can set CORS for browser clients.
-- Private backends are reached through a [VPC link](card:vpc-link).
+1. A request arrives at the API's URL and hits the stage you deployed, such as `prod`.
+2. The authorizer runs first: it checks the token or signature and rejects the call if it is not allowed.
+3. Throttling is applied: if the request rate is over the limit, the gateway returns `429` instead of calling the backend.
+4. The integration forwards the request; a Lambda proxy integration passes the whole request to the function, which returns the response.
+
+So the gateway does auth, throttling and routing in order, and your code only sees requests that passed.
 
 ## Example
 
+This is the path of one payment call through a REST API with a Lambda proxy integration.
+
 ```text
-POST /prod/payments  {"amount": 500, "currency": "INR", "method": "UPI"}
-  1. JWT authorizer checks the bearer token
-  2. throttling: over the limit → 429 Too Many Requests
+POST /prod/payments   {"amount": 500, "currency": "INR", "method": "UPI"}
+  1. authorizer checks the bearer token      -> fail: 401 Unauthorized
+  2. throttling: over the account limit?      -> yes: 429 Too Many Requests
   3. Lambda proxy integration passes the whole request to the handler
-← 201 Created  {"paymentId": "pay_123", "status": "PENDING"}
+<- 201 Created   {"paymentId": "pay_123", "status": "PENDING"}
 ```
+
+What to notice:
+
+- The authorizer and throttling run before the integration, so a bad token or a flood never reaches your Lambda function.
+- A `429` here is throttling, not a client error in your code; the fix is retry-with-backoff or a higher quota.
+- With a Lambda proxy integration, the function receives the entire request (headers, path, body) and must return a shape with `statusCode`, `headers` and `body`.
+
+## Rules and defaults
+
+- **Throttle quota:** 10,000 requests per second per account per Region across all API types, with a 5,000-request burst, by default; some Regions start lower (Amazon API Gateway).
+- **Integration timeout:** REST APIs default to 29 s (raisable above 29 s on Regional and private APIs, which may lower your throttle quota); HTTP APIs are capped at 30 s and cannot be raised.
+- **Payload size:** 10 MB maximum for both REST and HTTP APIs.
+- **API keys are not authentication:** AWS advises against using API keys to control access; use IAM, a Lambda authorizer or Cognito, and keys only to identify clients for usage plans.
+- **Throttling is best-effort:** do not rely on it to control cost or block access; use AWS Budgets and WAF for that.
+
+## Not to be confused with
+
+API Gateway publishes and protects APIs, with auth, throttling, keys and stages. An [Application Load Balancer](card:elastic-load-balancing) spreads steady HTTP traffic across targets and has no API-management features. Rule: Lambda or keyed partner APIs go behind API Gateway; busy container services sit behind an ALB; put API Gateway in front of a private ALB via a VPC link when you want both.
 
 ## Interview Qs
 
-### REST API or HTTP API?
+### When would you choose a REST API over an HTTP API?
 
-HTTP API by default: lower price, JWT authorizers. REST API when you need API keys and usage plans, AWS WAF, caching, request validation or a private endpoint.
+Choose a REST API when you need API keys and usage plans, AWS WAF, response caching, request validation, or a private endpoint. Otherwise choose an HTTP API: it is cheaper and simpler, and it has built-in JWT authorizers.
 
-### Clients get 429 errors. What is happening?
+### Clients are getting 429 errors. What does that mean and what do you do?
 
-Requests passed the throttle: the account limit per Region, or a stage, method or usage-plan limit. Retry with backoff, raise the quota, or cut calls with caching.
+They are being throttled: the request rate passed the account-, stage-, method- or usage-plan limit. Retry with exponential backoff, request a higher quota, or reduce calls with caching. Throttling is best-effort, so do not rely on it for cost control.
+
+### How do you handle a request whose backend takes minutes?
+
+Do not keep the connection open past the integration timeout (29 or 30 s). Accept the request, put the work on a queue, and return `202 Accepted` with a URL the client can poll for the result. The slow work then runs asynchronously.

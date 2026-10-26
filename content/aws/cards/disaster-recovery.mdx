@@ -5,67 +5,109 @@ title: "Disaster Recovery: RTO, RPO and Strategies"
 topic: operations
 level: intermediate
 heat: 2
-hook: "Pick the DR strategy from two numbers: how long you may be down (RTO) and how much data you may lose (RPO)."
+hook: "Pick a disaster-recovery strategy from two numbers: how long you can be down (RTO) and how much data you can lose (RPO)."
 points:
-  - { k: "RTO", v: "longest acceptable time from outage to service restored" }
-  - { k: "RPO", v: "most data you may lose, as time since the last recovery point" }
-  - { k: "Cost", v: "smaller RTO and RPO need more running in the second Region", kind: minus }
-  - { k: "Failover", v: "use data-plane actions (Route 53 health checks, ARC), not console edits" }
-  - { k: "Test it", v: "fail over regularly; an untested recovery path fails when needed" }
+  - { k: "RTO", v: "the longest acceptable time from the outage starting to the service being restored" }
+  - { k: "RPO", v: "the most data you can afford to lose, measured as time back to the last recovery point" }
+  - { k: "Cost trade-off", v: "a smaller RTO and RPO need more running and more data live in the second Region, which costs more", kind: minus }
+  - { k: "Four strategies", v: "backup and restore, pilot light, warm standby, active/active, in cost and speed order" }
+  - { k: "Failover switch", v: "use data-plane actions like Route 53 health checks or ARC, not console edits, which are control-plane", kind: key }
+  - { k: "Test it", v: "fail over regularly; an untested recovery path tends to fail the one time you need it", kind: minus }
 trap:
-  wrong: "We replicate to another Region, so we do not need backups."
-  right: "Replication copies corruption and deletes too. Keep point-in-time backups or versioning as well."
-sayIt: "I start from RTO and RPO. Backup and restore is cheapest but takes hours; pilot light and warm standby keep data live in a second Region; active/active is near real time and costs most. And I test failover."
+  wrong: "We replicate data to another Region, so we don't need backups."
+  right: "Replication copies corruption and deletions too, almost instantly. Keep point-in-time backups or versioning as well, to recover to before the bad change."
+  why: "Continuous replication feels like the strongest protection, and it is, against losing a Region. But it faithfully copies a bad DELETE or corrupted row to the second Region just as fast."
+sayIt: "I start from RTO and RPO. Backup and restore is cheapest but slow; pilot light and warm standby keep data live in a second Region; active/active is near real time but costs most. I fail over on the data plane and keep backups against corruption."
+cheat:
+  idea: "Disaster recovery is your plan to restore service after losing a Region or corrupting data. You choose from two targets: RTO (max downtime), RPO (max data loss)."
+  flow: "Backup & restore → pilot light → warm standby → active/active (cost rises)"
+  remember: "Smaller RTO/RPO costs more; replication is not a backup; test the failover."
+buildsOn: [regions-and-azs, infrastructure-as-code, route-53]
+scenarios:
+  - q: "The payment API must come back within 15 minutes and lose at most 1 minute of data if a whole Region fails. Which DR strategy fits, and roughly how?"
+    a: "Warm standby. A scaled-down but running copy in a second Region, fed by continuous replication (Aurora Global Database, S3 Cross-Region Replication) for the ~1-minute RPO, scaled up and switched to via Route 53 or ARC on failover for the ~15-minute RTO. Pilot light would be cheaper but slower, because its servers are off until you start them."
+  - q: "Your team argues that cross-Region replication means backups are unnecessary. Why are they wrong?"
+    a: "Replication copies everything, including a bad DELETE or corrupted data, to the DR Region within seconds, so both copies are broken. Backups and versioning give you a point in time before the damage to restore from. You need both: replication for Region loss, backups for corruption and human error."
 confusedWith: []
 tags: [disaster-recovery, rto, rpo, multi-region]
 visual: table
 sources:
-  - title: "Disaster recovery options in the cloud (Disaster Recovery of Workloads on AWS, whitepaper)"
+  - title: "Disaster recovery options in the cloud: four strategies, data plane vs control plane (DR of Workloads on AWS, whitepaper)"
     url: "https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html"
-    verifiedOn: "2026-10-20"
-  - title: "Business continuity plan: RTO and RPO (Disaster Recovery of Workloads on AWS, whitepaper)"
+    verifiedOn: "2026-10-23"
+  - title: "Business continuity plan: RTO and RPO (DR of Workloads on AWS, whitepaper)"
     url: "https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/business-continuity-plan-bcp.html"
     verifiedOn: "2026-10-20"
-  - title: "Testing disaster recovery (Disaster Recovery of Workloads on AWS, whitepaper)"
+  - title: "Testing disaster recovery (DR of Workloads on AWS, whitepaper)"
     url: "https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/testing-disaster-recovery.html"
-    verifiedOn: "2026-10-20"
-  - title: "AWS scenario interview questions: RTO and RPO (GeeksforGeeks)"
-    url: "https://www.geeksforgeeks.org/devops/aws-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Disaster recovery (DR) is your plan for restoring service after a serious failure, such as losing a whole AWS Region, or having your data corrupted or deleted. It is defined by two targets. RTO (recovery time objective) is the longest acceptable time from the outage until the service is back. RPO (recovery point objective) is the most data you can afford to lose, expressed as how far back in time your last good copy is. Those two numbers decide which strategy, and which cost, you need.
+
 ## Why it exists
 
-[Multi-AZ](card:regions-and-azs) survives a data-centre failure. Losing a whole Region, or having data corrupted or deleted, needs a plan agreed before it happens.
+Running every layer across [two Availability Zones](card:regions-and-azs) survives one data centre failing. It does not survive an entire Region going down, or someone deleting the production database. Those need a plan agreed and built before they happen, because improvising recovery during an outage is slow and error-prone. DR forces you to decide, up front, how much downtime and data loss the business can tolerate, and to build (and test) exactly the capability that meets it.
 
 ## How it works
 
 | Strategy | RPO / RTO | In the second Region |
 |---|---|---|
 | [Backup and restore](card:dr-backup-restore) | Hours | Only backups; build everything after the event |
-| [Pilot light](card:dr-pilot-light) | Tens of minutes | Data live; app servers switched off |
+| [Pilot light](card:dr-pilot-light) | Tens of minutes | Data live; app servers deployed but switched off |
 | [Warm standby](card:dr-warm-standby) | Minutes | A smaller, fully working copy, already running |
 | [Multi-site active/active](card:dr-multi-site) | Near real time | Full copies serving traffic in every Region |
 
-- Cost rises down the table. Data copies: see [replication options](card:dr-data-replication).
-- Rebuild from [infrastructure as code](card:infrastructure-as-code); fail over with [Route 53](card:route-53).
+1. Start from the business's RTO and RPO for this workload; they rule out the strategies that are too slow.
+2. Choose the cheapest strategy that still meets both numbers; cost rises down the table as more runs, and more data is kept live, in the second Region.
+3. Set up data copies to match the RPO: periodic backups for hours, continuous [replication](card:dr-data-replication) for minutes or seconds.
+4. On failover, redeploy or scale up from [infrastructure as code](card:infrastructure-as-code) and switch traffic with a data-plane action like a [Route 53](card:route-53) health check or Application Recovery Controller.
+
+So the key is: the two numbers come first, then you buy exactly the strategy that meets them, no more.
 
 ## Example
 
+A worked choice for the payment service, reading the strategy straight off the targets.
+
 ```text
-Need:    payment API, RPO 1 minute, RTO 15 minutes
+Targets: RPO 1 minute, RTO 15 minutes  (lose <= 1 min of data, back in <= 15 min)
 Pick:    warm standby in a second Region
-Data:    Aurora Global Database; S3 Cross-Region Replication for receipts
-App:     a small ECS service already running there, scaled up on failover
-Switch:  Route 53 failover record and health check, or an ARC switch
+Data:    Aurora Global Database (sub-second lag); S3 Cross-Region Replication for receipts
+App:     a small ECS service already running in the DR Region, scaled up on failover
+Switch:  Route 53 failover record + health check, or an ARC routing control (data plane)
+Also:    point-in-time backups, in case the 1-minute replication copies corrupted data
 ```
+
+What to notice:
+
+- The 1-minute RPO rules out nightly backups, so continuous replication is required; the 15-minute RTO rules out pilot light, whose servers are off and take longer to start and scale.
+- Warm standby keeps a running copy, so failover is "scale up and switch traffic", not "build and start", which is what keeps the RTO small.
+- The failover switch is a data-plane action (Route 53 health check or ARC), chosen because data planes stay available during the kind of outage when you most need to fail over.
+
+## Rules and defaults
+
+- **Cost rises with the targets:** backup and restore is cheapest and slowest; active/active is most expensive and fastest. Match the strategy to RTO and RPO, do not over-buy.
+- **Replication is not a backup:** continuous replication protects against Region loss but copies corruption and deletions; keep point-in-time backups or S3 versioning as well.
+- **Use data-plane failover:** prefer Route 53 health checks or Application Recovery Controller routing controls over console edits, because data-plane operations have higher availability than control-plane ones.
+- **Rebuild from code:** the DR Region's infrastructure should come from the same IaC templates, so the recovered environment matches production.
+- **Test regularly:** an untested recovery path is an assumption, not a capability; fail over on a schedule to prove the RTO and RPO.
+
+## Not to be confused with
+
+[Multi-AZ](card:regions-and-azs) is high availability within one Region: it survives a data centre failure automatically, with no failover decision. Disaster recovery is about surviving the loss of a whole Region or a data disaster, which needs a second Region and a deliberate failover. Rule: Multi-AZ = stay up through an AZ failure; DR = recover from a Region or data loss.
 
 ## Interview Qs
 
 ### What is the difference between RTO and RPO?
 
-RTO is how long the service may be down before it is back. RPO is how much data you may lose, measured back to the last recovery point. A 1-minute RPO needs continuous replication, not nightly backups.
+RTO is how long the service may be down before it is restored, measured forward from the outage. RPO is how much data you may lose, measured back to the last recovery point. A 1-minute RPO forces continuous replication rather than nightly backups; a 15-minute RTO forces a strategy that scales up fast, like warm standby, rather than building from scratch.
 
 ### Pilot light or warm standby?
 
-Both keep data live in the second Region. Pilot light cannot serve until you turn on and scale its servers. Warm standby can take traffic at reduced size right away and only needs to scale up: faster, but it costs more.
+Both keep data live in the second Region. Pilot light keeps the app servers deployed but switched off, so it is cheaper, but you must start and scale them before it can serve, which lengthens the RTO. Warm standby keeps a scaled-down copy already running, so it can take traffic immediately and only needs scaling up: faster recovery, higher cost.
+
+### Why isn't cross-Region replication enough on its own?
+
+Replication is almost instant, so it copies a corrupted row or an accidental deletion to the DR Region just as fast, leaving both copies broken. Backups and versioning preserve a point in time before the damage. You need replication for losing a Region and point-in-time backups for corruption and human error.

@@ -5,74 +5,136 @@ title: "Amazon SQS: Queues"
 topic: integration
 level: beginner
 heat: 3
-hook: "A queue holds jobs until a worker pulls one, finishes it and deletes it; an undeleted job comes back for another try."
+hook: "SQS is a managed queue: the payment API drops a job in it and answers at once, and a worker later pulls the job, does it and deletes it."
 points:
-  - { k: "Pull model", v: "workers poll the queue; SQS never pushes to them" }
-  - { k: "Delete to finish", v: "receiving only hides a message; delete it after success" }
-  - { k: "Long polling", v: "WaitTimeSeconds up to 20 s: fewer empty responses, lower cost", kind: plus }
-  - { k: "Dead-letter queue", v: "after maxReceiveCount receives, the message moves aside" }
-  - { k: "Duplicates", v: "standard queues deliver at least once: make workers idempotent", kind: minus }
+  - { k: "Pull, not push", v: "workers ask the queue for messages; SQS never calls your code by itself" }
+  - { k: "Receive hides, delete ends", v: "a received message is only hidden for a while; the worker deletes it after the work succeeds" }
+  - { k: "Visibility timeout (SQS)", v: "30 seconds by default, up to 12 hours; set it above the normal time one job takes", kind: default }
+  - { k: "Dead-letter queue", v: "after maxReceiveCount receives without a delete, SQS moves the message to a separate queue" }
+  - { k: "Long polling", v: "WaitTimeSeconds up to 20 makes a receive wait for messages, so fewer empty, billed responses", kind: plus }
+  - { k: "Duplicates possible", v: "a standard queue delivers at least once, so the worker must be idempotent", kind: minus }
 trap:
-  wrong: "SQS removes a message as soon as a consumer receives it."
-  right: "It only hides it for the visibility timeout. Not deleted in time, it reappears and may run twice."
-sayIt: "SQS decouples the payment API from slow work. Workers long-poll, process and delete. A message not deleted in time reappears, and after maxReceiveCount tries it goes to a DLQ."
-confusedWith: [sqs-vs-sns-vs-eventbridge-vs-kinesis]
+  wrong: "SQS removes a message as soon as a worker receives it."
+  right: "Receiving only hides it. If the worker does not delete it before the visibility timeout ends, it reappears and may run twice."
+  why: "In everyday code, taking an item from a queue removes it, as Queue.poll() does in Java, so people expect SQS to work the same way."
+sayIt: "SQS lets the payment API hand slow work to workers and answer at once. Workers long-poll, process, then delete; a message not deleted in time reappears for a retry, and after maxReceiveCount tries it moves to a dead-letter queue."
+cheat:
+  idea: "SQS is a managed queue that holds jobs until a worker pulls one, finishes it and deletes it. The sender never waits for the worker."
+  flow: "Send → Receive (hidden) → Process → Delete"
+  remember: "Receiving only hides a message; delete it after success, or it reappears when the visibility timeout (30 s by default) ends."
+buildsOn: [containers-ecs-eks-fargate, lambda]
+scenarios:
+  - q: "A receipt PDF takes about 90 seconds to build, and the receipt queue keeps the default visibility timeout. What goes wrong?"
+    a: "After 30 seconds the message becomes visible again while the first worker is still busy, so a second worker builds the same receipt. Set the visibility timeout above the normal processing time, such as 3 minutes, or extend it with ChangeMessageVisibility while working."
+  - q: "One message has a broken payment ID and the worker throws every time. The redrive policy has maxReceiveCount 5. What happens?"
+    a: "Each failure leaves the message undeleted, so it reappears after the visibility timeout and is retried. Once it has been received 5 times without a delete, SQS moves it to the dead-letter queue, and the other receipts keep flowing. An alarm on the dead-letter queue tells you to look."
+confusedWith: [sqs-standard-vs-fifo, sqs-vs-sns-vs-eventbridge-vs-kinesis]
 tags: [sqs, messaging, decoupling]
 visual: flow
 sources:
   - title: "Amazon SQS message quotas (SQS Developer Guide)"
     url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/quotas-messages.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Amazon SQS visibility timeout (SQS Developer Guide)"
     url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Using dead-letter queues in Amazon SQS (SQS Developer Guide)"
     url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Configure a dead-letter queue: queue types must match (SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-configure-dead-letter-queue.html"
+    verifiedOn: "2026-10-21"
   - title: "Amazon SQS short and long polling (SQS Developer Guide)"
     url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-short-and-long-polling.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Amazon SQS queue types: standard copies messages across AZs (SQS Developer Guide)"
+    url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-queue-types.html"
+    verifiedOn: "2026-10-21"
   - title: "Amazon SQS increases maximum message payload size to 1 MiB (What's New, 04-08-2025)"
     url: "https://aws.amazon.com/about-aws/whats-new/2025/08/amazon-sqs-max-payload-size-1mib"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Amazon SQS (Simple Queue Service) is a managed message queue. A queue is a waiting line for messages: a producer, here the payment API, sends a message such as "build the receipt for pay_123", and a consumer, the receipt worker, takes it later. AWS runs the queue for you; a standard queue keeps copies of each message in several [Availability Zones](card:regions-and-azs). Your code only sends, receives and deletes.
+
 ## Why it exists
 
-Making a receipt PDF takes seconds. If the payment API did it inline, every ₹500 payment would wait, and a worker crash would lose the job.
+Building a receipt PDF and saving it to S3 takes seconds. If the payment API did it inside the request, every customer would wait, a burst of payments would overload the API, and a crash halfway would lose the job. With a queue, the API sends a small message and answers at once. Workers take jobs at their own pace, and a job survives a worker crash because SQS keeps it until a worker deletes it.
 
 ## How it works
 
-<Steps label="Life of one SQS message">
-  <Step title="Send">The payment API sends a job with the payment ID.</Step>
-  <Step title="Receive">A worker gets it; other workers no longer see it.</Step>
-  <Step title="Delete">Done in time: the worker deletes it.</Step>
-  <Step title="Reappear">Not deleted within the visibility timeout: visible again.</Step>
-  <Step title="Dead-letter">Received maxReceiveCount times: moved to the DLQ.</Step>
-</Steps>
+<Mermaid
+  alt="The payment API sends a message to the receipt-jobs queue. A receipt worker receives it, writes the PDF to S3 and deletes the message. A message that is received too many times without being deleted moves to the receipt-jobs-dlq dead-letter queue."
+  chart={`flowchart LR
+  API[Payment API] -- "1. SendMessage" --> Q[[receipt-jobs queue]]
+  Q -- "2-3. ReceiveMessage" --> W[Receipt worker]
+  W -- "4. put PDF" --> S3[(S3)]
+  W -- "4. DeleteMessage" --> Q
+  Q -. "6. after maxReceiveCount" .-> DLQ[[receipt-jobs-dlq]]`}
+/>
 
-<Compare id="sqs-standard-vs-fifo" />
+1. The payment API calls SendMessage with the payment ID, and SQS stores the message.
+2. A worker calls ReceiveMessage. With long polling, the call waits up to 20 seconds for a message instead of returning empty.
+3. SQS hands over the message with a receipt handle and starts the visibility timeout. The message stays in the queue, but no other worker can see it.
+4. The worker builds the PDF, saves it to S3, then calls DeleteMessage with the receipt handle. Only now is the message gone.
+5. If the worker crashes or throws, it never deletes. When the visibility timeout ends, the message is visible again and another worker retries it.
+6. When a message reaches the redrive policy's maxReceiveCount, SQS moves it to the dead-letter queue instead of retrying it forever.
 
-- Send, long-poll, receive and delete in Java: [AWS Code Templates](card:aws-code-templates).
+So a message leaves the queue only when a worker deletes it.
 
-## Defaults
+## Example
 
-| What | Default | Where |
-|---|---|---|
-| Visibility timeout | 30 s (0 s to 12 h) | SQS quotas, 20-10-2026 |
-| Message retention | 4 days (1 min to 14 days) | SQS quotas, 20-10-2026 |
-| Max message size | 1 MiB (256 KiB before 04-08-2025) | SQS quotas, 20-10-2026 |
+The receipt queue is created with settings that fit the job, using the Java SDK ([Calling AWS from Java](card:aws-sdk-for-java) covers it later; the send, receive and delete calls are in [AWS Code Templates](card:aws-code-templates)):
+
+```java
+String dlqArn = "arn:aws:sqs:ap-south-1:111122223333:receipt-jobs-dlq";
+sqs.createQueue(b -> b.queueName("receipt-jobs").attributes(Map.of(
+    QueueAttributeName.VISIBILITY_TIMEOUT, "180",                // 3 min; a receipt takes ~90 s
+    QueueAttributeName.RECEIVE_MESSAGE_WAIT_TIME_SECONDS, "20",  // long polling
+    QueueAttributeName.REDRIVE_POLICY,
+        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"5\"}")));
+```
+
+What to notice:
+
+- A visibility timeout of 180 seconds is longer than one receipt takes, so a worker deletes the message before anyone else can see it. With the default 30 seconds, slow receipts would be built twice.
+- A queue-level wait time of 20 seconds turns on long polling for every receive that does not set its own. With the default of 0, idle workers pay for many empty responses.
+- The redrive policy names a dead-letter queue that you create first. After 5 receives without a delete, a "poison" message that always fails moves there.
+
+## Rules and defaults
+
+- **Visibility timeout:** 30 seconds by default, 0 seconds to 12 hours (SQS quotas, at the time of writing). The 12 hours count from the first receive; extending with ChangeMessageVisibility does not reset them.
+- **Retention:** a message nobody deletes is kept 4 days by default (1 minute to 14 days), then SQS deletes it.
+- **Message size:** up to 1 MiB, raised from 256 KiB on 04-08-2025. For more, put the payload in S3 and send its key; the SQS Extended Client Library for Java does this, up to 2 GB. One call can send, receive or delete up to 10 messages.
+- **Short polling is the default:** a receive with WaitTimeSeconds 0 checks only some servers, so it can return empty while messages exist.
+- **Dead-letter queue:** same account, Region and type as the source queue (FIFO for FIFO). On a standard queue the message keeps its first enqueue time, so give the dead-letter queue a longer retention.
+- **Lambda as the worker:** an [event source mapping](card:lambda) polls the queue and calls a function for you.
+
+## Not to be confused with
+
+- **Standard queue:** the default type. Throughput is nearly unlimited, but order is best effort and a message can arrive twice.
+- **FIFO queue:** its name ends in .fifo. It keeps order within each message group and drops duplicates sent within 5 minutes, at lower throughput.
+
+Rule: standard queue plus an idempotent worker by default; FIFO only when order per key matters.
+
+## Common mistakes
+
+- **"Delete first, then work, so it never runs twice."** A crash after the delete loses the job. Delete only after the work succeeds.
+- **"Within the visibility timeout, nobody else can get the message."** SQS does not promise that; a standard queue delivers at least once, so make the worker idempotent.
 
 ## Interview Qs
 
-### A worker crashes while making a receipt. Is the job lost?
+### A worker crashes while building a receipt. Is the job lost?
 
-No. It was never deleted, so it reappears after the visibility timeout and another worker retries. Set the timeout above the normal processing time.
+No. The worker never deleted the message, so it becomes visible again when the visibility timeout ends and another worker retries it. So the timeout must exceed the normal processing time, and a dead-letter queue catches messages that keep failing.
 
 ### How do you handle duplicate messages?
 
-Make the consumer idempotent: record the payment ID with a unique constraint and skip IDs already done.
+Make the consumer idempotent: processing a message twice leaves the same result as once. For receipts, store the payment ID with a unique constraint and skip IDs already done. FIFO deduplication helps only when you also need order, and it limits throughput.
 
-### The payload is bigger than 1 MiB. What now?
+### Short polling or long polling?
 
-Store it in S3 and send its key; the SQS Extended Client Library for Java does this, up to 2 GB.
+Short polling, the default, answers at once and checks only some servers, so it often returns empty. Long polling waits up to 20 seconds, checks all servers and returns as soon as a message arrives: fewer empty, billed calls. Use long polling almost always.
+

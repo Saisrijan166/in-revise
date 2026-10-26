@@ -5,63 +5,117 @@ title: "Elastic Load Balancing: ALB, NLB, GWLB"
 topic: compute
 level: intermediate
 heat: 3
-hook: "A load balancer is one front door that spreads traffic over healthy targets in several AZs: ALB for HTTP, NLB for TCP and UDP."
+hook: "A load balancer is one stable front door that spreads traffic over healthy targets in several AZs: ALB understands HTTP, NLB forwards raw TCP and UDP."
 points:
-  - { k: "Listener", v: "a protocol and port, like HTTPS:443; its rules pick a target group" }
-  - { k: "Target group", v: "the targets plus one health check: instances, IPs, or Lambda on ALB" }
-  - { k: "Health check", v: "a failing target gets no traffic until it passes again" }
-  - { k: "HTTPS listener", v: "decrypts TLS with an ACM certificate, so the app does not have to", kind: plus }
-  - { k: "Sticky sessions", v: "a cookie keeps a client on one target; the client must accept cookies", kind: minus }
+  - { k: "Listener", v: "a protocol and port, like HTTPS:443; its rules pick the target group for a request" }
+  - { k: "Target group", v: "a set of targets (instances, IPs, Lambda on ALB) plus one health check they must pass" }
+  - { k: "Health check", v: "a target that fails gets no traffic until it passes again; a new target must pass before any traffic" }
+  - { k: "HTTPS listener", v: "ends TLS with an ACM certificate, so the app gets plain HTTP and handles no certificates", kind: plus }
+  - { k: "Fail open", v: "if every target is unhealthy, the ALB sends to all of them rather than returning nothing", kind: minus }
+  - { k: "Deregistration delay", v: "a removed target finishes in-flight requests first, 300 s by default (ALB, NLB)", kind: default }
 trap:
-  wrong: "Deregistering a target cuts its open requests at once."
-  right: "It stops new requests and waits the deregistration delay (300 s by default) so in-flight ones finish; shut the app down gracefully."
-sayIt: "For an HTTP API I use an ALB: an HTTPS listener with an ACM certificate, rules by path or host to target groups, and a health check on the app's health path. NLB for TCP or UDP, or fixed IPs."
-confusedWith: [api-gateway-vs-alb]
+  wrong: "Deregistering a target cuts its open requests immediately."
+  right: "It stops new requests and waits the deregistration delay (300 s by default) so in-flight requests finish; shut the app down gracefully within that window."
+  why: "Removing a target feels instant, but the balancer drains it first; if the app exits before the delay ends, those clients get 500-level errors."
+sayIt: "For an HTTP API I use an ALB: an HTTPS listener with an ACM certificate, rules routing by path or host to target groups, and a health check on the app's health path. NLB for raw TCP or UDP, or a static IP."
+cheat:
+  idea: "A load balancer is one stable address that spreads traffic over healthy targets in several AZs. ALB routes by HTTP path and host; NLB forwards TCP and UDP fast."
+  flow: "request → listener → rule → target group → healthy target"
+  remember: "ALB = layer 7, HTTP routing and TLS; NLB = layer 4, raw TCP/UDP, static IPs, extreme throughput."
+buildsOn: [ec2, regions-and-azs, security-groups-and-nacls]
+scenarios:
+  - q: "A Spring Boot API serves /payments and /refunds and must end HTTPS. Which load balancer, and how do you split the two paths?"
+    a: "An ALB, because it works at layer 7. Add an HTTPS listener with an ACM certificate, then listener rules: path /payments/* to one target group, /refunds/* to another. An NLB forwards TCP and cannot read the path, so it could not split them."
+  - q: "Targets keep failing health checks, but you can curl the app fine from your laptop. What is the likely cause?"
+    a: "The check runs from the load balancer, not your laptop. The target's security group probably does not allow the balancer on the health check port, or the path or success code is wrong. The check must reach the port and path and get the matcher code within the timeout."
+confusedWith: [api-gateway-vs-alb, alb-vs-nlb-vs-gwlb]
 tags: [load-balancer, alb, nlb, health-check, target-group]
 visual: table
 sources:
-  - title: "How Elastic Load Balancing works"
-    url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/userguide/how-elastic-load-balancing-works.html"
-    verifiedOn: "2026-10-20"
-  - title: "Health checks for Application Load Balancer target groups"
+  - title: "What is an Application Load Balancer? (listeners, rules, target groups, layer 7)"
+    url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/introduction.html"
+    verifiedOn: "2026-10-22"
+  - title: "Application Load Balancers (at least two AZ subnets; cross-zone always on)"
+    url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html"
+    verifiedOn: "2026-10-22"
+  - title: "Health checks for Application Load Balancer target groups (defaults; fail open)"
     url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html"
-    verifiedOn: "2026-10-20"
-  - title: "Edit target group attributes for your Application Load Balancer"
+    verifiedOn: "2026-10-22"
+  - title: "Edit target group attributes (deregistration delay 300s; sticky sessions)"
     url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-target-group-attributes.html"
-    verifiedOn: "2026-10-20"
-  - title: "Create an HTTPS listener for your Application Load Balancer"
+    verifiedOn: "2026-10-22"
+  - title: "Create an HTTPS listener for your Application Load Balancer (ACM certificate)"
     url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/create-https-listener.html"
-    verifiedOn: "2026-10-20"
-  - title: "Troubleshoot your Application Load Balancers"
-    url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-troubleshooting.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A load balancer is a single network entry point that receives client requests and forwards each one to one of several backend targets. Elastic Load Balancing is the AWS service that runs it for you. It comes in three types: the Application Load Balancer (ALB) for HTTP and HTTPS, the Network Load Balancer (NLB) for raw TCP and UDP, and the Gateway Load Balancer (GWLB) for routing traffic through network appliances. It constantly checks each target's health and sends requests only to the healthy ones.
+
 ## Why it exists
 
-Clients need one stable address while servers start, stop and fail. A load balancer hides them and sends traffic only to healthy ones.
+Behind an [Auto Scaling group](card:auto-scaling-groups) the instances come and go: they start, stop and sometimes fail, each with a different IP. Clients cannot be asked to track that, and a single server would be one point of failure. The load balancer gives clients one stable DNS name and hides the fleet behind it. It spreads load so no instance is overwhelmed, stops sending to an instance the moment it fails a health check, and spans AZs so one AZ failing does not take the service down.
 
 ## How it works
 
 <Compare id="alb-vs-nlb-vs-gwlb" />
 
-- A request goes listener, rule, target group, healthy target. An ALB needs at least two AZs.
-- Cross-zone load balancing spreads traffic over targets in every AZ: on for ALB (a target group can opt out), off by default for NLB.
+A request travels through four things in order, so follow one through an ALB:
 
-## Defaults
+1. The client resolves the balancer's DNS name and connects to a listener, for example the HTTPS listener on port 443.
+2. The listener ends TLS with its ACM certificate, then checks its rules in priority order for a match.
+3. The matching rule points to a target group, for example the one for /payments.
+4. The balancer picks a healthy target from that group and forwards the request; it never sends to a target that is failing its health check.
+5. Meanwhile each target group keeps checking its targets, so a bad instance is dropped and a recovered one added back.
 
-| What | Default | Where |
-|---|---|---|
-| Health check | Every 30 s, 5 s timeout, path /, success code 200 | ALB target group, 20-10-2026 |
-| Thresholds | 5 passes to become healthy, 2 failures to become unhealthy | ALB target group, 20-10-2026 |
-| Deregistration delay | 300 seconds | ALB and NLB target groups, 20-10-2026 |
+So the chain is listener, rule, target group, healthy target; an ALB needs subnets in at least two AZs.
+
+## Example
+
+A target group for the payment service, and the rule that finishes draining a removed instance gracefully:
+
+```bash
+aws elbv2 create-target-group --name payment-tg \
+  --protocol HTTP --port 8080 --vpc-id vpc-0abc1234 \
+  --health-check-path /actuator/health --matcher HttpCode=200
+
+aws elbv2 modify-target-group-attributes --target-group-arn "$TG_ARN" \
+  --attributes Key=deregistration_delay.timeout_seconds,Value=30
+```
+
+What to notice:
+
+- The health check hits `/actuator/health` and treats HTTP 200 as healthy; a target must pass it before it ever receives traffic.
+- The deregistration delay here is 30 seconds instead of the default 300: when an instance is removed, the balancer stops new requests but waits up to 30 s for in-flight ones to finish.
+- If the app shuts down before that window ends, in-flight clients get 500-level errors, so the app should stop gracefully inside the delay.
+
+## Rules and defaults
+
+- **Subnets:** an ALB needs subnets in at least two AZs; cross-zone load balancing is always on for an ALB (a target group can turn it off).
+- **Default health check (ALB target, instance/ip):** every 30 s, 5 s timeout, path `/`, success code 200, 5 passes to become healthy, 2 failures to become unhealthy.
+- **Fail open:** if all targets in a group are unhealthy, the ALB routes to all of them regardless, rather than returning nothing.
+- **Deregistration delay:** 300 s by default for ALB and NLB target groups; a draining target with no in-flight requests completes at once.
+- **Sticky sessions:** optional; a cookie (`AWSALB` for duration-based) keeps one client on one target, and the client must accept cookies.
+
+## Not to be confused with
+
+An ALB works at layer 7, so it can read the HTTP request and route by path, host or header, end HTTPS, and target Lambda. An NLB works at layer 4: it forwards TCP and UDP connections very fast and can hand out a static IP per AZ, but it cannot read a URL. [API Gateway](card:api-gateway) is a different thing again, a managed API front door with auth and throttling. Rule: ALB for HTTP routing, NLB for raw speed and fixed IPs, GWLB only to insert security appliances.
+
+## Common mistakes
+
+- **"Sticky sessions make my app scalable."** They pin a client to one target, so a new instance gets little traffic until new sessions arrive, and losing that target loses the session. Prefer a stateless app with session state in [ElastiCache](card:elasticache); use stickiness only when the app truly keeps state in memory.
 
 ## Interview Qs
 
 ### ALB or NLB for a Spring Boot REST API?
 
-ALB. It works at layer 7, so it can send /payments and /refunds to different target groups, end HTTPS and check an HTTP health path. Pick NLB for raw TCP or UDP, very high throughput, or a fixed IP per AZ.
+ALB. It works at layer 7, so it can route /payments and /refunds to different target groups, end HTTPS with an ACM certificate, and health-check an HTTP path. Choose NLB for non-HTTP traffic, for extreme throughput, or when you need a fixed IP address per AZ.
 
-### Targets keep failing health checks, but the app looks fine. Why?
+### A target is stuck as unhealthy though the app runs fine. How do you debug it?
 
-The check must reach the port and path and get the success code within the timeout. Common causes: the target's security group blocks the load balancer, the path does not exist, or the connection times out.
+The check runs from the load balancer. Confirm the target's security group allows the balancer on the health check port, that the path exists and returns the success code, and that the app answers within the timeout. Check the target health reason code: Target.Timeout points to networking or a slow path, Target.ResponseCodeMismatch to a wrong status code.
+
+### What happens to requests in flight when an instance is removed?
+
+The balancer stops sending new requests and the target enters draining. It waits the deregistration delay, 300 s by default, for in-flight requests to finish before completing removal. If the app terminates its connections before the delay elapses, those clients receive 500-level errors, so shut down gracefully within the window.

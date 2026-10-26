@@ -5,78 +5,132 @@ title: "Amazon CloudWatch: Metrics, Logs, Alarms"
 topic: operations
 level: beginner
 heat: 3
-hook: "CloudWatch shows how the system behaves: metrics and logs come in, alarms act when a number crosses a line."
+hook: "CloudWatch is where AWS and your app send numbers and log lines; an alarm watches a number and acts when it crosses a line you set."
 points:
-  - { k: "Metric", v: "a time series in a namespace, told apart by dimensions" }
-  - { k: "EC2 basic monitoring", v: "5-minute periods, free; detailed monitoring: 1-minute, paid", kind: default }
-  - { k: "Log retention", v: "never expire by default; set it per log group", kind: default }
-  - { k: "Alarm states", v: "OK, ALARM, INSUFFICIENT_DATA; actions run on a state change" }
-  - { k: "Spring Boot", v: "Micrometer micrometer-registry-cloudwatch2 sends app metrics" }
+  - { k: "Metric", v: "a named series of numbers over time in a namespace, such as AWS/ApplicationELB, told apart by dimensions" }
+  - { k: "Log group", v: "a bucket of log lines; by default it keeps them forever until you set a retention period", kind: default }
+  - { k: "EC2 default metrics", v: "basic monitoring reports every 5 minutes and is free; detailed monitoring reports every minute and is paid", kind: default }
+  - { k: "No memory metric", v: "default EC2 metrics have no memory or disk-space use; the CloudWatch agent collects those", kind: minus }
+  - { k: "Alarm states", v: "OK, ALARM, INSUFFICIENT_DATA; it runs its actions only when the state changes, not every minute", kind: key }
+  - { k: "Alarm action", v: "on ALARM it notifies an SNS topic or triggers an Auto Scaling policy", kind: key }
 trap:
-  wrong: "EC2 sends memory usage to CloudWatch by default."
-  right: "Memory is not in the default EC2 metrics; install the CloudWatch agent to collect it."
-sayIt: "CloudWatch collects metrics and logs. I alarm on the payment API's 5xx count and latency and notify the on-call SNS topic. For who changed what, I use CloudTrail."
+  wrong: "EC2 sends its memory usage to CloudWatch by default."
+  right: "Default EC2 metrics cover CPU, network and disk I/O, but not memory. Install the CloudWatch agent to collect memory and disk-space use from inside the instance."
+  why: "CPU shows up with no setup, so people assume every useful number does. Memory lives inside the guest OS, which AWS cannot see from outside without an agent."
+sayIt: "CloudWatch collects metrics and logs from AWS and my app. I alarm on the load balancer's 5xx count and latency and notify the on-call SNS topic. For memory I run the CloudWatch agent; for who-did-what I use CloudTrail."
+cheat:
+  idea: "CloudWatch is AWS monitoring: AWS and your app push metrics and logs into it, and an alarm watches a metric and fires an action when it crosses a threshold."
+  flow: "Metrics and logs in → alarm checks threshold → notify SNS or scale"
+  remember: "Default EC2 metrics lack memory; run the CloudWatch agent for in-guest metrics."
+buildsOn: [elastic-load-balancing, auto-scaling-groups, sns]
+scenarios:
+  - q: "You set an alarm on the load balancer's 5xx count with Period 60s and EvaluationPeriods 5, threshold 10. The count is 12 for one minute, then back to 2. Does the alarm fire?"
+    a: "No. With EvaluationPeriods 5 and no DatapointsToAlarm set, CloudWatch needs all 5 of the last 5 one-minute periods breaching. One breaching minute out of five keeps it in OK. Set DatapointsToAlarm to make it an 'M out of N' alarm."
+  - q: "Your dashboard shows CPU for an EC2 instance but no memory line at all. Why, and how do you get memory?"
+    a: "Memory is inside the guest OS, which the default EC2 metrics do not read. Install the CloudWatch agent on the instance; it publishes memory and disk-space use as custom metrics under the CWAgent namespace."
 confusedWith: [cloudwatch-vs-cloudtrail]
 tags: [cloudwatch, monitoring, alarms, logs]
 visual: flow
 sources:
-  - title: "Amazon CloudWatch concepts and alarms (CloudWatch User Guide)"
+  - title: "Amazon CloudWatch concepts: namespace, metric, dimension, retention (CloudWatch User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch_concepts.html"
+    verifiedOn: "2026-10-23"
+  - title: "Alarm evaluation: states, Period, Evaluation Periods, Datapoints to Alarm (CloudWatch User Guide)"
     url: "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/alarm-evaluation.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-23"
   - title: "Basic and detailed monitoring for EC2 (Amazon EC2 User Guide)"
     url: "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/manage-detailed-monitoring.html"
-    verifiedOn: "2026-10-20"
-  - title: "What is Amazon CloudWatch Logs? Log retention (CloudWatch Logs User Guide)"
+    verifiedOn: "2026-10-23"
+  - title: "What is Amazon CloudWatch Logs? Log retention never expires by default (CloudWatch Logs User Guide)"
     url: "https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/WhatIsCloudWatchLogs.html"
-    verifiedOn: "2026-10-20"
-  - title: "CloudWatch metrics (Spring Cloud AWS 4.2 reference)"
-    url: "https://docs.awspring.io/spring-cloud-aws/docs/4.2.0/reference/html/index.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-23"
+  - title: "Collect metrics, logs, and traces using the CloudWatch agent (CloudWatch User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/Install-CloudWatch-Agent.html"
+    verifiedOn: "2026-10-23"
 ---
+
+## What it is
+
+Amazon CloudWatch is the AWS monitoring service. It holds two kinds of data: metrics, which are numbers measured over time, and logs, which are text lines your app and AWS services write. A metric is a named series of numbers in a namespace, such as the load balancer's 5xx count in `AWS/ApplicationELB`; dimensions like the load balancer's name tell one series apart from another. On top of that data you create alarms, which watch a metric and act when it crosses a line.
 
 ## Why it exists
 
-You cannot fix what you cannot see. Every service needs numbers to watch, logs to search and a way to wake someone up when payments start failing.
+When the payment service starts failing, you need to know before customers call. Without monitoring you would be logging in to each instance to tail files and guess. CloudWatch gathers the numbers and logs from every instance and service in one place, so you can see the whole system, search all logs at once, and have an alarm page the on-call engineer the moment errors rise, instead of finding out hours later.
 
 ## How it works
 
 <Mermaid
-  alt="AWS services such as the load balancer send metrics to CloudWatch. The payment service writes logs to a log group; a metric filter turns matching lines into a metric. An alarm watches a metric and, in the ALARM state, notifies an SNS topic or runs an Auto Scaling action."
+  alt="The load balancer sends its 5xx count as a metric to CloudWatch. The payment service writes log lines to a log group, and a metric filter turns matching lines into another metric. An alarm watches a metric; when it enters the ALARM state it notifies an SNS topic for the on-call engineer and can trigger an Auto Scaling action."
   chart={`flowchart LR
-  ALB[Load balancer] -- metrics --> M[Metric]
-  App[Payment service] -- logs --> LG[Log group]
-  LG -- metric filter --> M
+  ALB[Load balancer] -- "5xx count" --> M[Metric]
+  App[Payment service] -- "log lines" --> LG[Log group]
+  LG -- "metric filter" --> M
   M --> A{Alarm}
-  A -- ALARM --> SNS[SNS topic: on-call]
-  A -- ALARM --> AS[Auto Scaling action]`}
+  A -- "ALARM" --> SNS[SNS topic: on-call]
+  A -- "ALARM" --> AS[Auto Scaling action]`}
 />
 
-- Search logs with [Logs Insights](card:cw-logs-insights); a [metric filter](card:cw-metric-filter) counts lines like `PAYMENT_FAILED`.
-- Traces across services: [X-Ray and OpenTelemetry](card:x-ray-and-tracing).
+1. Each AWS service pushes its metrics to CloudWatch on its own, for example the load balancer's per-minute 5xx count.
+2. Your app writes log lines to a log group. A [metric filter](card:cw-metric-filter) can count lines that match a pattern, like `PAYMENT_FAILED`, and publish that count as a metric.
+3. You create an alarm on a metric, with a threshold, a period and how many periods must breach.
+4. CloudWatch evaluates the alarm each minute over the chosen window. When enough periods breach, the alarm moves to ALARM and runs its actions; when the metric recovers, it moves back to OK.
+
+So the key is: the alarm acts only on a state change, so a brief spike that recovers does not page anyone.
 
 ## Example
 
+This CloudFormation alarm pages the on-call team when the payment load balancer returns too many server errors.
+
 ```yaml
-Payment5xxAlarm:                       # CloudFormation
+Payment5xxAlarm:
   Type: AWS::CloudWatch::Alarm
   Properties:
     Namespace: AWS/ApplicationELB
     MetricName: HTTPCode_Target_5XX_Count
-    Dimensions: [{ Name: LoadBalancer, Value: !GetAtt PaymentAlb.LoadBalancerFullName }]
+    Dimensions:
+      - { Name: LoadBalancer, Value: !GetAtt PaymentAlb.LoadBalancerFullName }
     Statistic: Sum
-    Period: 60
-    EvaluationPeriods: 5
+    Period: 60                     # one data point per minute
+    EvaluationPeriods: 5           # look at the last 5 minutes
+    DatapointsToAlarm: 3           # 3 of those 5 breaching = ALARM
     Threshold: 10
     ComparisonOperator: GreaterThanThreshold
     AlarmActions: [!Ref OnCallTopic]
 ```
 
+What to notice:
+
+- `Statistic: Sum` adds up the 5xx responses in each one-minute period; `HTTPCode_Target_5XX_Count` counts errors from the targets, not from the load balancer itself.
+- `DatapointsToAlarm: 3` with `EvaluationPeriods: 5` makes this a "3 out of 5" alarm, so one noisy minute does not page anyone, but a sustained problem does. Remove `DatapointsToAlarm` and it needs all 5 minutes breaching.
+- `AlarmActions` points at an SNS topic; subscribers to that topic (email, SMS, a chat webhook) get the notification when the state turns to ALARM.
+
+## Rules and defaults
+
+- **Metric retention:** one-minute data is kept 15 days, five-minute data 63 days, one-hour data 455 days, then it ages out; you cannot delete a metric yourself (CloudWatch, at the time of writing).
+- **Log retention:** a new log group keeps its logs forever by default; set a retention period (one day to ten years) per log group (CloudWatch Logs, at the time of writing).
+- **EC2 monitoring:** basic monitoring (free) reports metrics every 5 minutes; detailed monitoring (paid) reports every minute. Match the alarm period to the resolution.
+- **Missing data:** by default a period with no data is treated as `missing`; if the whole window is missing the alarm goes to INSUFFICIENT_DATA, not ALARM (CloudWatch, at the time of writing).
+- **In-guest metrics:** memory, swap and disk-space use need the CloudWatch agent; they are not in the default EC2 metric set.
+
+## Not to be confused with
+
+CloudWatch answers "how is the system behaving?" with metrics, logs and alarms. [CloudTrail](card:cloudtrail) answers "who did what in the account?" with a record of every AWS API call. Rule: CloudWatch = health and alerting; CloudTrail = audit of API calls.
+
+## Common mistakes
+
+- **"The alarm will fire the moment the metric crosses the threshold once."** It fires only when enough periods in the window breach and the state actually changes. A one-minute spike that recovers usually stays OK.
+- **Alarming on `Average` latency only.** A high p99 can hide behind a healthy average. Alarm on a percentile like p99 of `TargetResponseTime` for user-facing latency.
+
 ## Interview Qs
 
 ### How would you get alerted when the payment API starts failing?
 
-Alarm on the load balancer's target 5xx count and on latency, over a few one-minute periods, with an SNS topic as the action. Add a dashboard and, for app errors, a metric filter on the logs.
+Create a CloudWatch alarm on the load balancer's `HTTPCode_Target_5XX_Count` and on `TargetResponseTime` (a high percentile), over a few one-minute periods with an "M out of N" setting, and set the alarm action to an SNS topic the on-call team subscribes to. Add a dashboard, and a metric filter on the app logs for app-level errors.
 
-### Why can't you see your EC2 instance's memory use?
+### Why can't you see your EC2 instance's memory usage in CloudWatch?
 
-The default EC2 metrics do not include memory. Install the CloudWatch agent, which collects in-guest metrics such as memory and disk use, and logs.
+Memory lives inside the guest operating system, which AWS cannot read from outside the instance. The default EC2 metrics cover CPU, network and disk I/O only. Install the CloudWatch agent on the instance; it collects in-guest metrics such as memory and disk-space use, plus logs, and publishes them as custom metrics.
+
+### What does an alarm's INSUFFICIENT_DATA state mean?
+
+The alarm does not have enough recent data points to decide OK or ALARM, for example just after creation, or when the metric has stopped reporting. By default missing data is treated as `missing`, so a metric that only reports when something happens can sit in INSUFFICIENT_DATA; you can change how missing data is treated per alarm.

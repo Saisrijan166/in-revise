@@ -5,42 +5,59 @@ title: "EC2 Auto Scaling Groups"
 topic: compute
 level: intermediate
 heat: 3
-hook: "An Auto Scaling group keeps between min and max instances running across AZs, replaces unhealthy ones and resizes with load."
+hook: "An Auto Scaling group keeps a set number of EC2 instances running across AZs, replaces any that fail a health check, and adds or removes them as load changes."
 points:
-  - { k: "Launch template", v: "what to launch: AMI, instance type, security groups, user data" }
-  - { k: "Min, desired, max", v: "the group holds desired; policies move it between min and max" }
-  - { k: "Target tracking", v: "keep a metric at a target, e.g. CPU or ALB requests per target", kind: plus }
-  - { k: "Lifecycle hook", v: "pause a launch or termination to run your own step; 1 hour by default", kind: default }
+  - { k: "Launch template", v: "the blueprint for each instance: AMI, instance type, security groups, user data" }
+  - { k: "Min, desired, max", v: "the group holds 'desired'; policies move desired between min and max, never outside" }
+  - { k: "Self-healing", v: "an instance that fails its health check is terminated and a fresh one launched", kind: plus }
+  - { k: "Target tracking", v: "you set a metric target, like 50% CPU; the group adds or removes instances to hold it", kind: plus }
+  - { k: "Health check type", v: "EC2 status checks only, by default; turn on ELB checks so a hung app is replaced too", kind: default }
+  - { k: "Across AZs", v: "give it subnets in two or more AZs and it spreads instances evenly, surviving one AZ failing", kind: plus }
 trap:
-  wrong: "The group replaces an instance as soon as the app behind the load balancer stops responding."
-  right: "By default it uses only EC2 status checks. Turn on ELB health checks so a hung app is replaced."
-sayIt: "I run the instances in an Auto Scaling group over two or more AZs behind an ALB, turn on ELB health checks, and use target tracking on CPU or requests per target between a min and a max."
+  wrong: "The group replaces an instance as soon as the app stops responding."
+  right: "By default it uses only EC2 status checks, which see the VM, not the app. Turn on ELB health checks so a hung app is replaced too."
+  why: "People assume 'health check' means the app is healthy, but the default check only confirms the VM is running and not impaired."
+sayIt: "I run the instances in an Auto Scaling group across two or more AZs behind a load balancer, turn on ELB health checks so a stuck app is replaced, and use target tracking on CPU or requests."
+cheat:
+  idea: "An Auto Scaling group keeps 'desired' EC2 instances running across AZs, replaces unhealthy ones, and scales desired with load, between min and max."
+  flow: "metric crosses target → policy changes desired → launch or terminate"
+  remember: "Default health check is EC2-only; turn on ELB checks so a hung app is replaced, not just a dead VM."
+buildsOn: [ec2, regions-and-azs]
+scenarios:
+  - q: "Your group has min 2, desired 2, max 6. Traffic triples and CPU sits at 85%. Target tracking targets 50% CPU. What happens, and what stops it?"
+    a: "The group scales out, launching instances until average CPU falls near 50% or it reaches max 6. Max is the ceiling: even if 50% needs 8 instances, it stops at 6. Raise max, or add scheduled scaling before a known peak."
+  - q: "One instance's app deadlocks but the VM stays up. The group does nothing. Why, and how do you fix it?"
+    a: "The default EC2 status checks still pass, because the VM is running. Attach the group to the ALB target group and turn on ELB health checks; then a failed app health check marks the instance unhealthy and the group replaces it."
 confusedWith: []
-tags: [auto-scaling, scaling-policy]
+tags: [auto-scaling, scaling-policy, launch-template]
 visual: flow
 sources:
-  - title: "What is Amazon EC2 Auto Scaling?"
+  - title: "What is Amazon EC2 Auto Scaling? (min, desired, max; balancing across AZs)"
     url: "https://docs.aws.amazon.com/autoscaling/ec2/userguide/what-is-amazon-ec2-auto-scaling.html"
-    verifiedOn: "2026-10-20"
-  - title: "Health checks for instances in an Auto Scaling group"
+    verifiedOn: "2026-10-22"
+  - title: "About the health checks for your Auto Scaling group (EC2 default; ELB opt-in; replacement)"
     url: "https://docs.aws.amazon.com/autoscaling/ec2/userguide/health-checks-overview.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Target tracking scaling policies for Amazon EC2 Auto Scaling"
     url: "https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-scaling-target-tracking.html"
-    verifiedOn: "2026-10-20"
-  - title: "Scaling cooldowns for Amazon EC2 Auto Scaling"
-    url: "https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-scaling-cooldowns.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Example scaling policies for the AWS CLI (ASGAverageCPUUtilization)"
+    url: "https://docs.aws.amazon.com/autoscaling/ec2/userguide/examples-scaling-policies.html"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+An Auto Scaling group is a managed set of [EC2](card:ec2) instances that AWS keeps at a size you choose. You give it a launch template (the recipe for each instance: AMI, instance type, security groups, user data) and three numbers: minimum, desired and maximum. The group launches instances until it has the desired count, and from then on it watches their health and the load, launching or terminating instances to match.
 
 ## Why it exists
 
-A fixed fleet is too small at peak, wasted at night, and a crashed server stays down. An Auto Scaling group sizes and heals the fleet.
+A fixed set of servers is wrong most of the time: too few at the daily peak, so requests queue, and too many at 3 a.m., so you pay for idle machines. Worse, if one crashes it stays down until someone notices. An Auto Scaling group fixes both. It replaces a failed instance on its own, so the fleet heals, and it changes the instance count as traffic rises and falls, so capacity follows demand instead of a guess.
 
 ## How it works
 
 <Mermaid
-  alt="Users call an ALB, which sends requests to EC2 instances of an Auto Scaling group in two AZs. A CloudWatch metric drives a scaling policy that changes desired capacity."
+  alt="Users reach an ALB, which forwards to EC2 instances of an Auto Scaling group spread over two AZs. A CloudWatch metric feeds a scaling policy that changes the group's desired capacity, which launches or terminates instances."
   chart={`flowchart LR
   U([Users]) --> ALB[ALB]
   subgraph ASG [Auto Scaling group]
@@ -53,24 +70,60 @@ A fixed fleet is too small at peak, wasted at night, and a crashed server stays 
   P -- "change desired" --> ASG`}
 />
 
-- Policies: target tracking (AWS's first choice), step, simple, scheduled and predictive; see the [scaling policies](card:asg-scaling-policies).
-- Load balancer details: [Elastic Load Balancing](card:elastic-load-balancing); why many instances in one AZ are not enough: [Regions and AZs](card:regions-and-azs).
-- ECS services and DynamoDB scale through Application Auto Scaling instead.
+1. You create the group with a launch template, a min, desired and max, and subnets in two or more AZs.
+2. The group launches instances up to the desired count, spreading them evenly across the AZs.
+3. It keeps checking each instance. An instance that fails its health check is terminated, and a replacement is launched, so the count returns to desired.
+4. A target tracking policy watches a CloudWatch metric, such as average CPU. When the metric drifts from its target, the policy raises or lowers desired.
+5. Changing desired launches new instances or terminates extra ones, always staying between min and max.
 
-## Defaults
+So min and max are the safety rails, and desired is the number the group works to keep.
 
-| What | Default | Where |
-|---|---|---|
-| Health check type | EC2 status checks only; ELB checks are opt-in | EC2 Auto Scaling, 20-10-2026 |
-| Default cooldown | 300 seconds; it delays only simple scaling policies | EC2 Auto Scaling, 20-10-2026 |
+## Example
+
+One target tracking policy keeps the payment-service group near 50% CPU:
+
+```bash
+aws autoscaling put-scaling-policy \
+  --auto-scaling-group-name payment-asg \
+  --policy-name cpu-50 --policy-type TargetTrackingScaling \
+  --target-tracking-configuration \
+  '{"PredefinedMetricSpecification":
+      {"PredefinedMetricType":"ASGAverageCPUUtilization"},
+    "TargetValue":50.0}'
+```
+
+What to notice:
+
+- You give a target, not step rules. Auto Scaling creates and manages the CloudWatch alarms and works out how many instances to add or remove, like a thermostat holding a temperature.
+- `ASGAverageCPUUtilization` is average CPU across the group. For a web tier, `ALBRequestCountPerTarget` (requests per instance) often tracks load better.
+- It scales out quickly when CPU is above 50% but scales in gradually, to protect availability. Max capacity still caps how far out it can go.
+
+## Rules and defaults
+
+- **Health check type:** EC2 status checks only, by default; ELB (and VPC Lattice, EBS) checks are opt-in (EC2 Auto Scaling).
+- **Replacement:** an instance not in the `running` state is replaced at once; one that fails other checks is replaced a few at a time to avoid replacing the whole group.
+- **Across AZs:** the group balances instances evenly across the AZs of the subnets you give it.
+- **Scaling policy types:** target tracking (AWS's first choice), step, simple (AWS advises against), scheduled, and predictive; see [the scaling policies in the tree](card:asg-scaling-policies).
+- **Not for containers:** ECS services and DynamoDB scale through Application Auto Scaling, not an EC2 Auto Scaling group.
+
+## Not to be confused with
+
+A launch template describes one instance; the Auto Scaling group decides how many of them run and keeps them healthy. A target tracking policy is just the rule that moves the group's desired count. Rule: template = what each instance is; group = how many and how healthy; policy = when the number changes.
+
+## Common mistakes
+
+- **"Scaling and load balancing are the same thing."** A [load balancer](card:elastic-load-balancing) spreads requests over the instances you have; the Auto Scaling group changes how many instances there are. You usually use both: the ALB registers and deregisters instances as the group launches and terminates them.
 
 ## Interview Qs
 
 ### Traffic suddenly doubles. How does your design cope?
 
-The ALB spreads requests over healthy instances; target tracking adds instances when CPU or requests per target pass the target, up to max. For known daily peaks, scheduled or predictive scaling adds capacity first.
+The load balancer spreads requests over the healthy instances, and target tracking adds instances when CPU or requests per target rise above the target, up to max. For a known daily peak, scheduled or predictive scaling adds capacity before it arrives, so the first users of the spike are not slow.
+
+### Why turn on ELB health checks when EC2 checks already exist?
+
+EC2 status checks only confirm the virtual machine is running and not impaired; they cannot see a deadlocked or crashed app. ELB health checks call your app's health path, so a stuck app fails them and the group replaces that instance. Without them a hung app keeps receiving traffic.
 
 ### Target tracking or step scaling?
 
-Target tracking: you set a target value; Auto Scaling creates the alarms and adjusts capacity in proportion, like a thermostat. Step scaling: you define alarms and how much to add per breach size. AWS recommends target tracking for metrics that move with capacity.
-
+Target tracking: you give a target value and Auto Scaling creates the alarms and adjusts capacity to hold it, like a thermostat. Step scaling: you define the alarms and exactly how much to add per breach size. AWS recommends target tracking for metrics that move with capacity, such as CPU or requests per target, and step scaling when you need that finer control.

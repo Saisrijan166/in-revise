@@ -5,72 +5,115 @@ title: "Calling AWS from Java: SDK v2 and Spring Cloud AWS"
 topic: operations
 level: intermediate
 heat: 2
-hook: "Build one SDK 2.x client per service, reuse it, set timeouts, and let the default chain find the role's credentials."
+hook: "Build one SDK 2.x client per service, share it across threads, set your own timeouts, and let the default chain find the role's credentials, no keys in code."
 points:
-  - { k: "Use SDK 2.x", v: "software.amazon.awssdk; 1.x reached end of support 31-12-2025", kind: default }
-  - { k: "One client, reused", v: "clients are thread-safe and each holds a connection pool" }
-  - { k: "Timeouts", v: "no default API call timeout: set apiCallTimeout and attempt timeout", kind: minus }
-  - { k: "Spring Cloud AWS 4.x", v: "for Spring Boot 4.0: S3Template, SqsTemplate, @SqsListener" }
+  - { k: "Use SDK 2.x", v: "the software.amazon.awssdk packages; SDK 1.x ended support on 31-12-2025", kind: default }
+  - { k: "One client, reused", v: "clients are thread-safe and each holds a connection pool, so build one per service and share it", kind: plus }
+  - { k: "Set timeouts", v: "no default apiCallTimeout or attempt timeout, so set both or a call can hang", kind: minus }
+  - { k: "Default credentials chain", v: "system props, env vars, web identity, profile files, ECS task role, EC2 role, in that order" }
+  - { k: "Retries on", v: "the SDK retries throttling and transient errors a few times with backoff by default", kind: default }
+  - { k: "Spring Cloud AWS 4.x", v: "auto-configures the clients and adds S3Template, SqsTemplate and @SqsListener", kind: key }
 trap:
-  wrong: "Create a new S3Client for every request."
-  right: "Each client opens its own connection pool. Build one per service at startup, share it across threads, and close it only at shutdown."
-sayIt: "I use SDK for Java 2.x: one thread-safe client per service, API call timeouts set, credentials from the default chain so the IAM role is used. In Spring Boot, Spring Cloud AWS wires the clients for me."
+  wrong: "Create a new S3Client for each request to keep things isolated."
+  right: "Each client opens its own connection pool and threads. Build one client per service at startup, share it across all requests, and close it only at shutdown."
+  why: "In plain Java you often new-up a helper per call, so people do the same here. An SDK client is heavyweight; making one per request exhausts connections and slows every call."
+sayIt: "I use AWS SDK for Java 2.x: one thread-safe client per service, built once and shared, with timeouts set (there is no default). Credentials come from the default chain, so the IAM role is used and no keys are in code."
+cheat:
+  idea: "The AWS SDK for Java 2.x is how your app calls AWS. It signs requests, retries, pools connections and finds credentials, so your code holds no access keys."
+  code: |
+    S3Client s3 = S3Client.builder().region(Region.AP_SOUTH_1).build();
+  remember: "One thread-safe client per service, reused; set timeouts yourself (no default); credentials from the default chain."
+buildsOn: [sts-and-temporary-credentials, s3, sqs]
+scenarios:
+  - q: "Your Spring Boot app runs as an ECS task and must call S3 and SQS. How does it get AWS credentials without any access keys in the image or config?"
+    a: "The default credentials chain reaches the ECS container credentials provider: ECS sets AWS_CONTAINER_CREDENTIALS_RELATIVE_URI, and the SDK fetches the task role's temporary credentials from that endpoint. You attach an IAM task role to the task; the SDK does the rest, with no keys stored anywhere."
+  - q: "An S3 call occasionally hangs for minutes and ties up a thread. The client has no override configuration. Why, and what do you add?"
+    a: "There is no default apiCallTimeout or apiCallAttemptTimeout, so a stuck network call can hang until the socket gives up. Set apiCallTimeout (whole call, all retries) and apiCallAttemptTimeout (one HTTP attempt) in the client's override configuration so it fails fast."
 confusedWith: []
 tags: [sdk, java, spring-cloud-aws, credentials]
 visual: flow
 sources:
-  - title: "Default credentials provider chain (AWS SDK for Java 2.x Developer Guide)"
+  - title: "Default credentials provider chain, in order (AWS SDK for Java 2.x Developer Guide)"
     url: "https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/credentials-chain.html"
-    verifiedOn: "2026-10-20"
-  - title: "Best practices: timeouts and reusing clients (AWS SDK for Java 2.x Developer Guide)"
+    verifiedOn: "2026-10-23"
+  - title: "Best practices: reuse thread-safe clients, no default API call timeouts (AWS SDK for Java 2.x Developer Guide)"
     url: "https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/best-practices.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-23"
+  - title: "Configure retry behavior: retries on by default for throttling and transient errors (AWS SDK for Java 2.x Developer Guide)"
+    url: "https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/retry-strategy.html"
+    verifiedOn: "2026-10-23"
   - title: "End-of-support for AWS SDK for Java v1.x on 31-12-2025 (AWS Developer Tools Blog)"
     url: "https://aws.amazon.com/blogs/developer/announcing-end-of-support-for-aws-sdk-for-java-v1-x-on-december-31-2025/"
     verifiedOn: "2026-10-20"
-  - title: "Spring Cloud AWS 4.2 reference: starters, S3Template, SqsTemplate, testing"
+  - title: "Spring Cloud AWS 4.2 reference: starters, S3Template, SqsTemplate (awspring docs)"
     url: "https://docs.awspring.io/spring-cloud-aws/docs/4.2.0/reference/html/index.html"
-    verifiedOn: "2026-10-20"
-  - title: "Spring Cloud AWS compatibility table (awspring/spring-cloud-aws README)"
-    url: "https://github.com/awspring/spring-cloud-aws"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-23"
 ---
+
+## What it is
+
+The AWS SDK for Java is the library your application uses to call AWS services from code: put an object in S3, send a message to SQS, read a secret. You use version 2.x (the `software.amazon.awssdk` packages). For each service you build a client, like `S3Client`, which signs every request, retries failures, pools HTTP connections, and finds your credentials. In Spring Boot, Spring Cloud AWS builds those clients for you and adds higher-level helpers on top.
 
 ## Why it exists
 
-The payment service must put receipt PDFs in S3 and send SQS messages. The SDK signs each request, retries, pools connections and finds credentials, so the code never holds access keys.
+The payment service must put receipt PDFs in S3 and send "payment completed" messages to SQS. Doing that by hand would mean signing each HTTPS request with the AWS signature algorithm, retrying throttled calls, managing a connection pool, and somehow supplying credentials, a large amount of fiddly, security-sensitive code. The SDK does all of it, and crucially it finds credentials from the environment, so the running code never holds an access key.
 
 ## How it works
+
+The SDK finds credentials by walking a fixed list and using the first source that has them, so the same code works on your laptop, in ECS and on EC2 without change.
 
 <Steps label="Default credentials chain: the first source that has credentials wins">
   <Step title="Java system properties">aws.accessKeyId and aws.secretAccessKey</Step>
   <Step title="Environment variables">AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY</Step>
-  <Step title="Web identity token">Assumes a role with a token file, as on EKS</Step>
+  <Step title="Web identity token">Assumes a role from a token file, as on EKS</Step>
   <Step title="Profile files">~/.aws/credentials and ~/.aws/config, including SSO</Step>
-  <Step title="Container credentials">The ECS task role, through the ECS credentials endpoint</Step>
+  <Step title="Container credentials">The ECS task role, via the ECS credentials endpoint</Step>
   <Step title="Instance profile">The EC2 instance role, from the instance metadata service</Step>
 </Steps>
 
-- Which role each compute type uses: [temporary credentials](card:sts-and-temporary-credentials).
-- The request builder and call for S3, SQS and RDS: [AWS Code Templates](card:aws-code-templates).
+On ECS or EC2 the chain falls through to the task or instance role, so you attach an IAM role and store no keys. Which role each compute type gets is covered in [temporary credentials](card:sts-and-temporary-credentials).
 
 ## Example
+
+Build the client once with explicit timeouts, then reuse it everywhere; credentials come from the chain, not from code.
 
 ```java
 S3Client s3 = S3Client.builder()                        // build once, reuse everywhere
     .region(Region.AP_SOUTH_1)
     .overrideConfiguration(o -> o
-        .apiCallTimeout(Duration.ofSeconds(10))         // whole call, all retries
+        .apiCallTimeout(Duration.ofSeconds(10))         // whole call, across all retries
         .apiCallAttemptTimeout(Duration.ofSeconds(3)))  // one HTTP attempt
     .build();                                           // credentials: default chain
 ```
+
+What to notice:
+
+- There is no credentials provider on the builder, so the SDK uses the default chain; on ECS that resolves to the task role, which is why no keys appear here.
+- `apiCallAttemptTimeout` caps one HTTP attempt and `apiCallTimeout` caps the whole call including retries. Remove them and there is no default, so a stuck call can hang the thread for minutes.
+- This `S3Client` is thread-safe and holds a connection pool, so you build it once (a Spring bean, or a static field) and share it; you do not create one per request.
+
+## Rules and defaults
+
+- **Use 2.x:** SDK 1.x (the `com.amazonaws` packages) reached end of support on 31-12-2025; new code uses `software.amazon.awssdk`.
+- **Reuse clients:** clients are thread-safe and pool connections; share one per service and call `close()` only at shutdown.
+- **Timeouts:** the SDK sets connection and socket timeouts but no `apiCallTimeout` or `apiCallAttemptTimeout`; set those yourself.
+- **Retries:** on by default; the SDK retries throttling and transient errors a few times with exponential backoff, and a token bucket stops retry storms.
+- **Testing:** run LocalStack in Testcontainers to test AWS calls with no real account; Spring Cloud AWS can point its clients at it.
+
+## Not to be confused with
+
+The SDK client is a low-level, per-service object you build and configure. The Spring Cloud AWS [templates](card:aws-code-templates) (`S3Template`, `SqsTemplate`) and `@SqsListener` are higher-level helpers that wrap the client and are auto-configured as beans. Rule: SDK client = the raw, portable API; Spring Cloud AWS = the Spring-friendly layer over it.
 
 ## Interview Qs
 
 ### How does the app get AWS credentials on ECS without access keys?
 
-The default chain reaches the container credentials provider. ECS sets AWS_CONTAINER_CREDENTIALS_RELATIVE_URI, and the SDK fetches the task role's temporary credentials from that endpoint. No keys live in the image or config.
+The default credentials chain falls through to the container credentials provider. ECS sets the `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` environment variable, and the SDK fetches the task role's temporary credentials from that endpoint. You attach an IAM task role to the task definition; no keys live in the image, the config, or the code.
+
+### Why build one SDK client and reuse it?
+
+Each client is thread-safe and holds its own HTTP connection pool and threads, which are expensive to set up. Creating a client per request wastes those resources and can exhaust connections, slowing every call. Build one client per service at startup, share it across all requests, and close it only when the app shuts down.
 
 ### How do you test AWS code without a real account?
 
-Run LocalStack in Testcontainers. Spring Cloud AWS's testcontainers module points the clients at it through @ServiceConnection.
+Run LocalStack, a fake AWS, in Testcontainers, and point the SDK clients at its endpoint. With Spring Cloud AWS, the Testcontainers module wires the clients to LocalStack through `@ServiceConnection`, so tests exercise real SDK calls against a local service instead of production AWS.

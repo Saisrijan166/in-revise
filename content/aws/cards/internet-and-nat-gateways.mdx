@@ -5,76 +5,103 @@ title: Internet Gateway and NAT Gateway
 topic: networking
 level: intermediate
 heat: 2
-hook: "Internet gateway: two-way internet for resources with public IPs. NAT gateway: outbound-only internet for private subnets."
+hook: "An internet gateway is the two-way door between your VPC and the internet. A NAT gateway is a one-way exit, so private resources can call out but nobody can call in."
 points:
-  - { k: "Internet access needs", v: "an attached IGW, a route to it, a public IP, rules that allow it" }
-  - { k: "NAT gateway", v: "in a public subnet with an Elastic IP; replies return, new inbound does not" }
-  - { k: "Zonal NAT", v: "lives in one AZ; if that AZ fails, other AZs lose internet", kind: minus }
-  - { k: "Regional NAT", v: "since 19-11-2025 one NAT gateway can span AZs, no public subnet", kind: plus }
-  - { k: "Cost", v: "IGW: no charge, only data transfer. NAT: per hour plus per GB", kind: default }
+  - { k: "Internet gateway", v: "attach one per VPC; it gives two-way internet to resources that have a public IP" }
+  - { k: "Internet access needs", v: "an attached IGW, a 0.0.0.0/0 route to it, a public IP, and SG and NACL rules that allow it" }
+  - { k: "NAT gateway", v: "lets private subnets start outbound connections; replies return, new inbound is blocked" }
+  - { k: "Zonal NAT", v: "lives in one AZ; if that AZ fails, subnets pointing at it lose internet", kind: minus }
+  - { k: "Regional NAT", v: "since 19-11-2025, one NAT gateway spans all AZs automatically; no public subnet needed", kind: plus }
+  - { k: "Cost", v: "IGW has no charge (only data transfer); NAT gateway is billed per hour plus per GB", kind: default }
 trap:
-  wrong: "Give the instance a public IP and it is on the internet."
-  right: "It also needs an internet gateway attached to the VPC, a route to it in the subnet's route table, and SG and NACL rules that allow it."
-sayIt: "Public subnets route to an internet gateway, which is two-way. Private subnets route 0.0.0.0/0 to a NAT gateway, one per AZ, so tasks can call out but nobody can call in."
+  wrong: "Give the instance a public IP and it can reach the internet."
+  right: "It also needs an internet gateway attached to the VPC, a route to it in the subnet's route table, and SG and NACL rules that allow the traffic."
+  why: "The public IP is the most visible piece, so people assume it is the whole story; the routing and the gateway are invisible in the console until you look."
+sayIt: "Public subnets route to an internet gateway, which works both ways. Private subnets route 0.0.0.0/0 to a NAT gateway, so tasks can call out while nothing outside can open a connection in."
+cheat:
+  idea: "An internet gateway connects a VPC to the internet both ways. A NAT gateway lets private subnets reach out while blocking all unsolicited inbound traffic."
+  flow: "Private task → NAT gateway → internet gateway → internet"
+  remember: "A NAT gateway carries only connections started inside the VPC; inbound needs a load balancer in a public subnet."
+buildsOn: [vpc-and-subnets]
+scenarios:
+  - q: "An ECS task in a private subnet must download an OS patch. How does its traffic reach the internet, and can the patch server open a connection back?"
+    a: "Its route table sends 0.0.0.0/0 to a NAT gateway in a public subnet, which uses its Elastic IP and the internet gateway. The reply returns on the same connection, but the server cannot start a new connection back, because NAT only allows connections initiated inside the VPC."
+  - q: "You run one zonal NAT gateway in AZ-a and point both private subnets at it. AZ-a fails. What breaks?"
+    a: "The private subnet in AZ-b loses outbound internet, because its only path went through the NAT gateway in the failed AZ. Fix it with one NAT gateway per AZ, or a single regional NAT gateway that spans AZs."
 tags: [internet-gateway, nat-gateway, routing]
 visual: table
 sources:
-  - title: "Internet gateways (VPC User Guide)"
+  - title: "Internet gateways (Amazon VPC User Guide)"
     url: "https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Internet_Gateway.html"
-    verifiedOn: "2026-10-20"
-  - title: "NAT gateway basics (VPC User Guide)"
-    url: "https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-basics.html"
-    verifiedOn: "2026-10-20"
-  - title: "NAT gateways: connectivity types (VPC User Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "NAT gateways: connectivity types (Amazon VPC User Guide)"
     url: "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-nat-gateway.html"
-    verifiedOn: "2026-10-20"
-  - title: "Pricing for NAT gateways (VPC User Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "NAT gateway basics: bandwidth and resiliency (Amazon VPC User Guide)"
+    url: "https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-basics.html"
+    verifiedOn: "2026-10-22"
+  - title: "Regional NAT gateways for automatic multi-AZ expansion (Amazon VPC User Guide)"
+    url: "https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateways-regional.html"
+    verifiedOn: "2026-10-22"
+  - title: "Pricing for NAT gateways (Amazon VPC User Guide)"
     url: "https://docs.aws.amazon.com/vpc/latest/userguide/nat-gateway-pricing.html"
-    verifiedOn: "2026-10-20"
-  - title: "AWS NAT Gateway now supports regional availability (What's New, 19-11-2025)"
-    url: "https://aws.amazon.com/about-aws/whats-new/2025/11/aws-nat-gateway-regional-availability/"
-    verifiedOn: "2026-10-20"
-  - title: "AWS interview questions (GeeksforGeeks)"
-    url: "https://www.geeksforgeeks.org/devops/aws-interview-questions/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+An internet gateway (IGW) is a component you attach to a [VPC](card:vpc-and-subnets) to let its resources talk to the internet in both directions. A NAT gateway (Network Address Translation) is a managed service that lets resources in a private subnet start connections out to the internet, while stopping anyone outside from starting a connection in. Both are the pieces that carry traffic between your private network and the outside world, each for a different direction.
 
 ## Why it exists
 
-A VPC has no internet path by default. Load balancers must be reachable from outside; app servers must fetch updates and call payment partners without being reachable.
+A new VPC has no path to the internet at all. But a load balancer must be reachable from outside, and app servers in private subnets must still fetch OS patches and call payment partners, without being exposed. The internet gateway gives public-facing resources their two-way path. The NAT gateway gives private resources an outbound-only path, so they can reach out without ever being reachable.
 
 ## How it works
 
 <Compare id="internet-gateway-vs-nat-gateway" />
 
-- Traffic to S3, SQS or Secrets Manager can skip the NAT fee: use [VPC endpoints](card:vpc-endpoints-privatelink).
-- IPv6 outbound only: an egress-only internet gateway.
+1. You attach one internet gateway to the VPC and give the public subnet's route table a `0.0.0.0/0` route to it.
+2. The ALB in the public subnet gets a public IP, so clients on the internet can reach it through the IGW.
+3. For the private subnets, you create a NAT gateway in a public subnet and give each private route table a `0.0.0.0/0` route to the NAT gateway.
+4. When a private task calls out, the NAT gateway swaps the task's private IP for its own Elastic IP and sends the traffic through the IGW; the reply comes back the same way.
+
+So the IGW is the only door to the internet, and the NAT gateway is how private subnets borrow it for outbound traffic.
 
 ## Example
 
+These two route tables put a public subnet and a private subnet on the same VPC. Only the targets differ.
+
 ```text
-Public subnet route table      Private subnet a route table
-10.0.0.0/16  local             10.0.0.0/16  local
-0.0.0.0/0    igw-0abc          0.0.0.0/0    nat-0aaa  (NAT in public subnet a)
+Public subnet route table        Private subnet-a route table
+10.0.0.0/16  local               10.0.0.0/16  local
+0.0.0.0/0    igw-0abc            0.0.0.0/0    nat-0aaa   (NAT gateway in public subnet a)
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| NAT gateway type | public | Amazon VPC, 20-10-2026 |
-| NAT gateway bandwidth | 5 Gbps, scales up to 100 Gbps | Amazon VPC, 20-10-2026 |
+- The `local` route is the same in both and cannot be removed; it keeps the subnets able to reach each other inside the VPC.
+- The public subnet's `0.0.0.0/0` points at the internet gateway (`igw-`), which is what makes it public.
+- The private subnet's `0.0.0.0/0` points at the NAT gateway (`nat-`), so its traffic goes out but cannot be reached from outside.
+- Change the private subnet's `0.0.0.0/0` target to the IGW and you have made it public, which is usually a mistake for app and database tiers.
+
+## Rules and defaults
+
+- **Internet gateway:** no charge for the gateway itself; you pay only for data transfer (Amazon VPC). It is horizontally scaled and highly available, so there is no AZ to choose.
+- **NAT gateway connectivity type:** `public` by default, which needs a public subnet and an Elastic IP; a `private` NAT gateway has no Elastic IP and reaches other VPCs or on-premises, not the internet (Amazon VPC).
+- **Bandwidth:** a NAT gateway starts at 5 Gbps and scales automatically up to 100 Gbps (Amazon VPC).
+- **No security group on a NAT gateway:** you cannot attach one; control its traffic with the subnet's security groups and NACL.
+- **Avoiding the NAT fee:** traffic to S3 or DynamoDB can skip the per-GB NAT charge through a [gateway endpoint](card:vpc-endpoints-privatelink).
 
 ## Interview Qs
 
-### How does an instance in a private subnet download patches?
+### How do you make outbound internet access highly available for private subnets?
 
-Its route table sends 0.0.0.0/0 to a NAT gateway in a public subnet. The NAT gateway uses its Elastic IP and the internet gateway. Nobody outside can open a connection to the instance.
+Create one zonal NAT gateway in each AZ and point each private subnet at the NAT gateway in its own AZ, or use a single regional NAT gateway that spans AZs automatically. A single zonal NAT gateway shared across AZs is a single point of failure.
 
-### Can internet users reach a server through the NAT gateway?
+### Can internet users reach a server through a NAT gateway?
 
-No. Connections must start inside the VPC; only replies come back. For inbound traffic, put a load balancer in the public subnets.
+No. A NAT gateway only allows connections that start inside the VPC; replies return, but no outsider can open a new connection. To accept inbound traffic, put a load balancer in the public subnets instead.
 
-### How do you make NAT highly available?
+### Why prefer a gateway endpoint over NAT for S3 traffic?
 
-Create a zonal NAT gateway in each AZ and point each private subnet at its own AZ's gateway, or use one regional NAT gateway.
+A NAT gateway charges per GB processed, and S3 transfers can be large. A gateway endpoint sends that traffic to S3 over a private AWS path at no extra charge, cutting both the NAT data cost and the need for an internet route.

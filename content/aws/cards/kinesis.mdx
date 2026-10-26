@@ -5,55 +5,117 @@ title: "Amazon Kinesis: Streams and Firehose"
 topic: integration
 level: intermediate
 heat: 2
-hook: "Kinesis Data Streams keeps an ordered log split into shards; many apps read it, each at its own position, and can replay it."
+hook: "Kinesis Data Streams is an ordered log split into shards; records stay for a retention period, so many apps read the same records and can replay them."
 points:
-  - { k: "Shard", v: "writes 1 MB/s or 1,000 records/s; reads 2 MB/s (KDS quotas)", kind: default }
-  - { k: "Partition key", v: "hashed to pick the shard; same key, same shard, in order" }
-  - { k: "Retention", v: "24 hours by default, up to 365 days", kind: default }
-  - { k: "Capacity", v: "on-demand adds shards for you; provisioned: you set the count" }
-  - { k: "Hot shard", v: "one very busy key can exceed its shard's limit", kind: minus }
+  - { k: "Shard = a unit of capacity", v: "one shard takes 1 MB/s or 1,000 records/s in, and gives 2 MB/s out (KDS quotas)", kind: default }
+  - { k: "Partition key picks the shard", v: "the key is hashed to a shard; the same key always lands on the same shard, in order" }
+  - { k: "Records stay, can re-read", v: "a read does not delete; retention is 24 hours by default, up to 365 days", kind: default }
+  - { k: "Order is per shard only", v: "records in one shard are ordered; across shards there is no global order", kind: minus }
+  - { k: "Many consumers", v: "each app keeps its own position, so several read the same stream independently", kind: plus }
 trap:
   wrong: "Kinesis keeps every record in order across the whole stream."
-  right: "Order holds only within a shard. Give records that must stay in order the same partition key, such as the merchant ID."
-sayIt: "Kinesis Data Streams is a shard-based log: the partition key picks the shard, order holds per shard, and records stay 24 hours to 365 days so several apps can read and replay them."
-confusedWith: [sqs-vs-sns-vs-eventbridge-vs-kinesis]
+  right: "Order holds only within a shard. Records that must stay in order need the same partition key, such as the merchant ID, so they share one shard."
+  why: "A stream looks like one list, so people expect one global order and forget that it is split into shards that are each ordered on their own."
+sayIt: "Kinesis Data Streams is a shard-based log. The partition key picks the shard, order holds per shard, and records stay from 24 hours to 365 days, so several apps read and replay them. I use it for event streams and analytics, not one-worker job queues."
+cheat:
+  idea: "Kinesis Data Streams is an ordered log split into shards. Records stay for a retention period, so many apps read the same records and can replay them."
+  flow: "Put (key → shard) → records stay → many apps read"
+  remember: "Order is only per shard; key records that must stay ordered the same. A read never deletes."
+buildsOn: [sqs, lambda]
+scenarios:
+  - q: "Fraud scoring and a live dashboard must each read every payment event, in order per merchant, and sometimes re-read. Why Kinesis over SQS here?"
+    a: "SQS gives each message to one worker and deletes it, so two readers cannot both see every message, and nothing can be replayed. Kinesis keeps records for the retention period and lets both apps read the whole stream at their own position, in shard order, and start again from the past."
+  - q: "One merchant sends far more traffic than the rest and its shard throttles. What is wrong, and how do you fix it?"
+    a: "All of that merchant's records share one shard because they use the same partition key, so that shard is hot. Use a key with more values, or in provisioned mode split the busy shard; in on-demand mode Kinesis splits shards for you when traffic rises."
+confusedWith: [kinesis-data-streams-vs-firehose, sqs-vs-sns-vs-eventbridge-vs-kinesis]
 tags: [kinesis, streaming, firehose]
 visual: table
 sources:
   - title: "Kinesis Data Streams terminology and concepts (KDS Developer Guide)"
     url: "https://docs.aws.amazon.com/streams/latest/dev/key-concepts.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Kinesis Data Streams quotas and limits (KDS Developer Guide)"
     url: "https://docs.aws.amazon.com/streams/latest/dev/service-sizes-and-limits.html"
-    verifiedOn: "2026-10-20"
-  - title: "PutRecord: partition keys and ordering (Kinesis API Reference)"
-    url: "https://docs.aws.amazon.com/kinesis/latest/APIReference/API_PutRecord.html"
-    verifiedOn: "2026-10-20"
-  - title: "Choose the right capacity mode (KDS Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Choose the right mode to stream in: on-demand and provisioned (KDS Developer Guide)"
     url: "https://docs.aws.amazon.com/streams/latest/dev/how-do-i-size-a-stream.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Read data from Kinesis Data Streams: shared and enhanced fan-out (KDS Developer Guide)"
+    url: "https://docs.aws.amazon.com/streams/latest/dev/building-consumers.html"
+    verifiedOn: "2026-10-22"
   - title: "Introducing Amazon Data Firehose, formerly Kinesis Data Firehose (What's New, 09-02-2024)"
     url: "https://aws.amazon.com/about-aws/whats-new/2024/02/amazon-data-firehose-formerly-kinesis-data-firehose/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Amazon Kinesis Data Streams is a managed, ordered log of records. A record is a blob of data with a partition key, and the stream is split into shards, each an ordered sequence of records with a fixed unit of capacity. Producers put records in; consumers read them. Reading does not remove a record: it stays for the retention period, so many apps read the same records, each at its own position, and can re-read them. Unlike [SQS](card:sqs), no read deletes a record.
+
 ## Why it exists
 
-A queue gives each message to one worker, then deletes it. Fraud scoring and dashboards must each read every payment event, in order, sometimes twice.
+A queue hands each message to one worker and then deletes it, which suits jobs done once. But fraud scoring, a live dashboard and an analytics pipeline must each read every payment event, in order, and sometimes read the same events twice. A queue cannot do that. Kinesis keeps records for the retention period and lets several apps read the full stream independently, so you get one ordered feed that many consumers share and can replay after a bug or an outage.
 
 ## How it works
 
+The comparison with Firehose shows where each fits; the steps below follow one payment event through a stream:
+
 <Compare id="kinesis-data-streams-vs-firehose" />
 
-- The family as of 20-10-2026: Kinesis Data Streams, Amazon Data Firehose (renamed on 09-02-2024) and Managed Service for Apache Flink.
-- Consumers: your own app using the Kinesis Client Library, or a Firehose stream.
+1. A producer calls PutRecord with the event and a partition key, here the merchant ID.
+2. Kinesis hashes the partition key to pick a shard. Every record with that key goes to the same shard, so one merchant's events stay in order.
+3. The record gets a sequence number within its shard and is stored for the retention period.
+4. Each consumer app reads its shards from its own position, using the Kinesis Client Library, and records its progress so it can resume after a restart.
+5. A record is not deleted when read. It leaves only when the retention period ends, so another app, or the same app replaying, can read it again.
+
+So order and capacity live at the shard level, and reading never consumes a record.
+
+## Example
+
+The payment service puts one event on the stream, keyed by merchant so each merchant's events stay ordered:
+
+```java
+String event = "{\"paymentId\":\"pay_123\",\"merchantId\":\"m_42\",\"amount\":500}";
+PutRecordResponse r = kinesis.putRecord(b -> b
+    .streamName("payment-events")
+    .partitionKey("m_42")                        // merchant ID picks the shard
+    .data(SdkBytes.fromUtf8String(event)));
+System.out.println(r.shardId() + " " + r.sequenceNumber());
+```
+
+What to notice:
+
+- The partition key m_42, not random, decides the shard, so all of merchant 42's payments share one shard and stay in order.
+- The response gives the shard ID and a sequence number; sequence numbers increase within a shard, so a consumer reads merchant 42's events in the order they were sent.
+- If you keyed by payment ID instead, each payment could land on a different shard, spreading load evenly but losing per-merchant order.
+- A very busy key makes its shard hot, because one key cannot use more than one shard's capacity.
+
+## Rules and defaults
+
+- **Shard capacity:** each shard takes up to 1 MB/s or 1,000 records/s in, and gives up to 2 MB/s out shared across standard consumers (KDS quotas, at the time of writing).
+- **Capacity mode:** on-demand scales shards for you up to double the recent peak; provisioned means you set and change the shard count. You can switch modes twice in 24 hours.
+- **Retention:** 24 hours by default, down to a 24-hour minimum and up to 365 days (8,760 hours). Beyond 24 hours costs more.
+- **Record size:** the data blob can be up to 1 MB.
+- **Enhanced fan-out:** registers a consumer for its own 2 MB/s per shard, pushed over HTTP/2, so consumers do not share read throughput. Standard mode allows up to 20 registered consumers.
+- **Consumers:** your own app with the Kinesis Client Library, or AWS Lambda, Amazon Data Firehose or Managed Service for Apache Flink.
+
+## Not to be confused with
+
+- **Kinesis Data Streams:** a stream your own apps read, in order, at their own position, and can replay.
+- **Amazon Data Firehose:** a no-code delivery pipe that buffers records and loads them into S3, Redshift or OpenSearch; renamed from Kinesis Data Firehose on 09-02-2024.
+
+Rule: Data Streams when apps must process or replay records; Firehose to land data in a store with no consumer code. For Kafka run by AWS, there is Amazon MSK.
 
 ## Interview Qs
 
 ### Kinesis or SQS?
 
-SQS gives each message to one worker, which deletes it. In Kinesis, records stay for the retention period, and many apps read the same stream in shard order and can replay it. Pick Kinesis for event streams and analytics.
+SQS gives each message to one worker, which deletes it after the work: a job queue. Kinesis keeps records for the retention period and lets many apps read the same stream in shard order and replay it. Choose Kinesis for event streams, ordered per-key processing and analytics; choose SQS for decoupled background jobs.
 
-### How do you scale a stream?
+### How is order guaranteed in Kinesis?
 
-On-demand mode splits shards for you as traffic grows. In provisioned mode you change the shard count yourself. Either way, pick partition keys with many values so no shard runs hot.
+Order holds only within a shard. The partition key is hashed to a shard, so records with the same key share one shard and keep their order by sequence number. To keep a merchant's payments in order, key by merchant ID. Across shards there is no global order.
+
+### How do you scale a stream, and what makes a shard hot?
+
+In on-demand mode Kinesis adds shards as traffic rises; in provisioned mode you change the shard count or split a shard yourself. A shard runs hot when one partition key carries most of the traffic, because a single key is limited to one shard's capacity. Pick keys with many values to spread the load.

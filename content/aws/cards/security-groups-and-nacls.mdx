@@ -5,70 +5,108 @@ title: Security Groups and Network ACLs
 topic: networking
 level: intermediate
 heat: 3
-hook: "Security groups are stateful allow-lists on each resource; network ACLs are stateless allow-and-deny lists on each subnet."
+hook: "A security group is a stateful allow-list wrapped around each resource. A network ACL is a stateless allow-and-deny list wrapped around each subnet."
 points:
-  - { k: "Stateful SG", v: "the reply to allowed traffic goes through by itself", kind: plus }
-  - { k: "Stateless NACL", v: "replies need their own rule, often ephemeral ports 1024-65535", kind: minus }
-  - { k: "SG referencing", v: "allow from another SG, not IPs: ALB SG → app SG → DB SG" }
-  - { k: "NACL order", v: "numbered rules, lowest first; the first match wins" }
-  - { k: "Not IAM", v: "network rules decide which packets arrive; IAM decides AWS API calls" }
+  - { k: "Security group", v: "attached to a resource; allow rules only; the reply to allowed traffic returns by itself", kind: plus }
+  - { k: "Stateful", v: "because it tracks the connection, you never write a rule for return traffic" }
+  - { k: "Network ACL", v: "attached to a subnet; has both allow and deny rules; does not track connections", kind: minus }
+  - { k: "Stateless", v: "a NACL needs a separate rule for replies, usually ephemeral ports 1024-65535" }
+  - { k: "SG referencing", v: "a rule's source can be another security group, so ALB SG to app SG to DB SG chains without IPs", kind: plus }
+  - { k: "NACL order", v: "rules are numbered; evaluated lowest first; the first match wins and stops the search" }
 trap:
-  wrong: "Allow port 443 inbound on the NACL and the HTTPS endpoint works."
-  right: "NACLs are stateless: also allow outbound to the clients' ephemeral ports, or every reply is dropped."
-sayIt: "Security groups are my main firewall: stateful, allow-only, on each resource, chained by group. NACLs are stateless subnet rules with allow and deny, for coarse blocks."
+  wrong: "Allow port 443 inbound on the network ACL and HTTPS works."
+  right: "A NACL is stateless, so you must also allow the outbound reply to the client's ephemeral ports, or every response is dropped."
+  why: "Security groups are stateful and hide this, so people carry the one-rule habit over to NACLs, where return traffic is not automatic."
+sayIt: "Security groups are my main firewall: stateful, allow-only, on each resource, and chained by referencing one another. NACLs are stateless allow-and-deny rules at the subnet level, which I keep for coarse blocks like denying a bad IP range."
+cheat:
+  idea: "A security group is a stateful firewall on a resource with allow rules only. A network ACL is a stateless allow-and-deny filter on a subnet."
+  flow: "ALB SG → app SG (from ALB SG) → DB SG (from app SG)"
+  remember: "Security groups are stateful (replies automatic); NACLs are stateless (allow the return traffic too)."
+buildsOn: [vpc-and-subnets]
+scenarios:
+  - q: "How do you let only the app tier reach the PostgreSQL database, without maintaining a list of IP addresses?"
+    a: "On the database's security group, add an inbound rule for port 5432 whose source is the app's security group. Any task that joins the app security group is allowed automatically, and tasks that leave it lose access, with no IPs to update."
+  - q: "You added an inbound allow rule on a custom NACL for port 443 but clients still time out. What is missing?"
+    a: "The outbound reply rule. NACLs are stateless, so the subnet must also have an outbound allow rule for the client's ephemeral ports (commonly 1024-65535). A security group would have allowed the reply by itself."
 tags: [security-group, nacl, firewall]
 visual: table
 sources:
-  - title: "Security group rules (VPC User Guide)"
+  - title: "Security group rules: allow-only, stateful, referencing (Amazon VPC User Guide)"
     url: "https://docs.aws.amazon.com/vpc/latest/userguide/security-group-rules.html"
-    verifiedOn: "2026-10-20"
-  - title: "Infrastructure security: compare security groups and network ACLs (VPC User Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Compare security groups and network ACLs (Amazon VPC User Guide)"
     url: "https://docs.aws.amazon.com/vpc/latest/userguide/infrastructure-security.html"
-    verifiedOn: "2026-10-20"
-  - title: "Default network ACL (VPC User Guide)"
-    url: "https://docs.aws.amazon.com/vpc/latest/userguide/default-network-acl.html"
-    verifiedOn: "2026-10-20"
-  - title: "Custom network ACLs and ephemeral ports (VPC User Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Network ACL basics: stateless, one per subnet, evaluation order (Amazon VPC User Guide)"
+    url: "https://docs.aws.amazon.com/vpc/latest/userguide/vpc-network-acls.html"
+    verifiedOn: "2026-10-22"
+  - title: "Custom network ACLs and ephemeral ports (Amazon VPC User Guide)"
     url: "https://docs.aws.amazon.com/vpc/latest/userguide/custom-network-acl.html"
-    verifiedOn: "2026-10-20"
-  - title: "AWS interview questions (GeeksforGeeks)"
-    url: "https://www.geeksforgeeks.org/devops/aws-interview-questions/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+A security group is a virtual firewall you attach to a resource, such as an EC2 instance or an ECS task, holding allow rules for the traffic that may reach it. A network ACL (NACL) is a filter attached to a whole [subnet](card:vpc-and-subnets), holding both allow and deny rules. The key difference is one word: a security group is stateful, so it remembers a connection and lets the reply back automatically; a NACL is stateless, so it treats every packet on its own.
 
 ## Why it exists
 
-A private subnet is only a routing choice. Something must still decide which ports and sources may reach the load balancer, the app and the database.
+A private subnet is only a routing choice; by itself it decides nothing about who may connect. Something still has to say the load balancer accepts port 443, the app accepts 8080 only from the load balancer, and the database accepts 5432 only from the app. Security groups do this per resource, which is precise and easy to chain. NACLs add a coarser, subnet-wide layer, useful for blocking a bad IP range that security groups, being allow-only, cannot deny.
 
 ## How it works
 
 <Compare id="security-group-vs-nacl" />
 
-- AWS advises security groups as the main control; NACLs as subnet guard rails, such as denying one bad IP range.
-- An AccessDenied error is IAM, not the network: [policy evaluation](card:iam-policy-evaluation).
+1. You create one security group per tier: `alb-sg`, `app-sg`, `db-sg`.
+2. On `alb-sg` you allow inbound 443 from `0.0.0.0/0`, so the internet can reach the load balancer.
+3. On `app-sg` you allow inbound 8080 with the source set to `alb-sg`, so only the load balancer's tasks can reach the app.
+4. On `db-sg` you allow inbound 5432 with the source set to `app-sg`, so only the app can reach the database.
+
+So each tier references the one in front of it, and no rule mentions an IP address. Return traffic needs no rules, because security groups are stateful.
 
 ## Example
 
+This is the full set of inbound rules for the three-tier chain. Each source is a security group, not a CIDR.
+
 ```text
-alb-sg   inbound 443   from 0.0.0.0/0
-app-sg   inbound 8080  from alb-sg    (Spring Boot tasks)
-db-sg    inbound 5432  from app-sg    (RDS PostgreSQL)
+alb-sg   inbound 443    source 0.0.0.0/0    (the internet reaches the load balancer)
+app-sg   inbound 8080   source alb-sg       (only the ALB reaches the Spring Boot tasks)
+db-sg    inbound 5432   source app-sg       (only the app reaches RDS PostgreSQL)
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| New security group | no inbound, all outbound | Amazon VPC, 20-10-2026 |
-| Default NACL | allows all in and out | Amazon VPC, 20-10-2026 |
-| New custom NACL | denies all until you add rules | Amazon VPC, 20-10-2026 |
+- `app-sg` names `alb-sg` as its source, so every task in `app-sg` accepts traffic from any member of `alb-sg`, with no IPs to track as tasks come and go.
+- There are no outbound reply rules anywhere, because security groups are stateful and allow the response automatically.
+- Replace `source app-sg` on `db-sg` with `0.0.0.0/0` and the database becomes reachable from anywhere the network routing allows, a common and serious mistake.
+
+## Rules and defaults
+
+- **New security group:** no inbound rules (nothing allowed in) and one outbound rule allowing all traffic out (Amazon VPC).
+- **Default NACL:** allows all inbound and outbound traffic. A new custom NACL denies all until you add rules (Amazon VPC).
+- **NACL evaluation:** rules are numbered 1 to 32766 and evaluated lowest first; the first match applies and no later rule is checked. An unremovable `*` rule denies anything unmatched.
+- **One NACL per subnet:** a subnet has exactly one NACL at a time, but one NACL can cover many subnets.
+- **Not a substitute for IAM:** these rules decide which packets arrive; IAM decides which AWS API calls are allowed. An `AccessDenied` error is an [IAM](card:iam-policy-evaluation) problem, not a network one.
+
+## Not to be confused with
+
+A security group controls traffic at the resource and is stateful, so return traffic is automatic. A NACL controls traffic at the subnet boundary and is stateless, so you write rules for both directions. Rule: reach for security groups first as the main control; add NACL rules only to deny a range or as a subnet-wide guard rail.
+
+## Common mistakes
+
+- **"NACLs replace security groups."** They do not. AWS advises security groups as the primary control and NACLs only as a secondary, coarse layer.
+- **"A security group can block a specific IP."** It cannot; it has allow rules only. To deny one bad CIDR, use a NACL deny rule with a low number.
 
 ## Interview Qs
 
-### How do you let only the app reach the database?
+### What is the difference between stateful and stateless filtering here?
 
-On the database's security group, allow port 5432 with the app's security group as the source. New app tasks get access by joining that group; there are no IPs to keep up to date.
+A security group is stateful: once it allows a connection, the reply is allowed automatically, so you write one rule. A NACL is stateless: it checks each packet alone, so an inbound allow needs a matching outbound rule for the reply, usually on ephemeral ports 1024-65535.
 
 ### When would you use a NACL at all?
 
-To deny traffic, which security groups cannot do, for example a known bad CIDR, or as a subnet-wide safety net if someone launches a resource with the wrong security group.
+To deny traffic, which security groups cannot do, for example a known bad CIDR range, or as a subnet-wide safety net in case a resource is ever launched with the wrong security group. For normal allow rules, security groups are simpler and more precise.
+
+### How do you lock the database down to just the app?
+
+Put the app and database in separate security groups. On the database group, allow its port only from the app's security group as the source. New app tasks get access by joining that group; there are no IP addresses to maintain.

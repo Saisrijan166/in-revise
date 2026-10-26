@@ -5,17 +5,29 @@ title: "KMS and Encryption"
 topic: security
 level: intermediate
 heat: 2
-hook: "A symmetric KMS key never leaves KMS: a data key encrypts your data, and the KMS key encrypts that data key."
+hook: "A KMS key never leaves AWS KMS: a small data key encrypts your data, and the KMS key encrypts only that data key."
 points:
-  - { k: "Direct Encrypt", v: "at most 4,096 bytes; bigger data uses a data key", kind: default }
-  - { k: "Key policy", v: "every KMS key has one; IAM policies work only if it lets them", kind: minus }
-  - { k: "Rotation", v: "new key material; old data still decrypts, nothing is re-encrypted", kind: plus }
-  - { k: "RDS encryption", v: "set at creation; later via an encrypted snapshot copy or blue/green", kind: minus }
-  - { k: "In transit", v: "TLS between client, load balancer, app and database" }
+  - { k: "Data key", v: "the small key that really encrypts your data; KMS hands it out, encrypted under the KMS key" }
+  - { k: "4 KB limit", v: "KMS Encrypt accepts at most 4,096 bytes, so files are encrypted with a data key instead", kind: default }
+  - { k: "Key policy", v: "every KMS key has one; an IAM policy can grant use of the key only if the key policy allows that", kind: minus }
+  - { k: "Rotation", v: "creates new key material; old data still decrypts, and nothing is re-encrypted", kind: plus }
+  - { k: "RDS encryption", v: "chosen at creation; later only through an encrypted snapshot copy or a blue/green deployment", kind: minus }
+  - { k: "In transit", v: "TLS protects data moving between client, load balancer, app and database; KMS covers data at rest" }
 trap:
   wrong: "KMS encrypts our 10 MB receipt PDFs directly."
   right: "KMS Encrypt takes at most 4 KB. Services and SDKs use envelope encryption: a data key encrypts the file and KMS encrypts only that key."
-sayIt: "I use customer managed KMS keys with envelope encryption: a data key encrypts the data and KMS encrypts the data key. The key policy decides who can decrypt, and TLS protects data in transit."
+  why: "KMS is described as the service that encrypts data, so people assume you send it the data itself."
+sayIt: "I use customer managed KMS keys with envelope encryption: a data key encrypts the data and KMS encrypts the data key. The key policy decides who can decrypt, every use is logged in CloudTrail, and TLS protects data in transit."
+cheat:
+  idea: "AWS KMS keeps encryption keys inside AWS and controls who may use them. A data key encrypts the data, and the KMS key encrypts that data key."
+  flow: "GenerateDataKey → encrypt locally → store encrypted key with the data"
+  remember: "The key policy decides who can decrypt; rotation never re-encrypts old data."
+buildsOn: [iam-policy-evaluation, s3, rds]
+scenarios:
+  - q: "The payment service may call s3:GetObject on the receipts bucket, but downloading an SSE-KMS receipt fails with AccessDenied. Why?"
+    a: "Reading an SSE-KMS object also needs kms:Decrypt on its KMS key, and the key policy must allow it. S3 cannot unwrap the data key for a caller that KMS refuses, so the download fails."
+  - q: "Your RDS PostgreSQL database was created without encryption, and an audit now requires encryption at rest. Can you just switch it on?"
+    a: "No. RDS encryption is chosen at creation. Take a snapshot, copy it with encryption and a KMS key, and restore a new instance from the copy, or use a blue/green deployment; then point the app at the new database."
 confusedWith: []
 tags: [kms, encryption, envelope-encryption, sse-kms]
 visual: flow
@@ -23,65 +35,99 @@ sources:
   - title: "Data keys (AWS KMS Developer Guide)"
     url: "https://docs.aws.amazon.com/kms/latest/developerguide/data-keys.html"
     verifiedOn: "2026-10-20"
-  - title: "Encrypt (AWS KMS API Reference)"
+  - title: "Encrypt: plaintext up to 4,096 bytes (AWS KMS API Reference)"
     url: "https://docs.aws.amazon.com/kms/latest/APIReference/API_Encrypt.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Rotate AWS KMS keys (AWS KMS Developer Guide)"
     url: "https://docs.aws.amazon.com/kms/latest/developerguide/rotate-keys.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Key policies in AWS KMS (AWS KMS Developer Guide)"
     url: "https://docs.aws.amazon.com/kms/latest/developerguide/key-policies.html"
-    verifiedOn: "2026-10-20"
-  - title: "Encrypting Amazon RDS resources (RDS User Guide)"
+    verifiedOn: "2026-10-21"
+  - title: "Encrypting Amazon RDS resources: limitations, snapshot copy and blue/green (RDS User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.Encryption.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Using server-side encryption with AWS KMS keys (SSE-KMS) (S3 User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingKMSEncryption.html"
+    verifiedOn: "2026-10-21"
+  - title: "Reducing the cost of SSE-KMS with Amazon S3 Bucket Keys (S3 User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucket-key.html"
+    verifiedOn: "2026-10-21"
+  - title: "Default SSE-C setting for new buckets FAQ (S3 User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/default-s3-c-encryption-setting-faq.html"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+AWS KMS (Key Management Service) creates encryption keys, keeps them inside AWS, and controls who may use them. It protects data at rest: stored data, such as an [S3](card:s3) object, a disk or an [RDS](card:rds) database, stays unreadable without the key. A KMS key never leaves KMS unencrypted; KMS hands out data keys, small keys that do the actual encrypting. Data in transit, moving over the network, is protected separately by TLS.
 
 ## Why it exists
 
-Stolen disks, snapshots or backups must be unreadable, and decrypt rights belong in one controlled place, not in config files.
+If someone copies a disk, a snapshot or a backup, they could read every payment record on it. Encryption fixes that, but then the key becomes the secret: kept in a config file, it leaks just like a password. KMS keeps the key in one place, a key policy decides who may decrypt, and CloudTrail logs every use. Taking the data is no longer enough; an attacker also needs permission on the key.
 
 ## How it works
 
-<Steps label="Envelope encryption">
-  <Step title="Ask">The app or service calls GenerateDataKey with a KMS key.</Step>
-  <Step title="Receive">KMS returns the data key in plaintext and encrypted.</Step>
-  <Step title="Encrypt">The plaintext key encrypts the data locally, then is wiped from memory.</Step>
-  <Step title="Store">The encrypted key is stored next to the encrypted data.</Step>
-  <Step title="Decrypt">KMS decrypts the data key, if the key policy allows the caller.</Step>
-</Steps>
+<Mermaid
+  alt="Envelope encryption. 1: the app or S3 calls GenerateDataKey on KMS. 2: KMS returns the data key in plaintext and encrypted. 3: the caller encrypts the receipt with the plaintext key and discards it. 4: it stores the encrypted receipt together with the encrypted data key. 5: to read it, the caller sends the encrypted key to KMS, which returns the plaintext key only if the key policy allows."
+  chart={`flowchart LR
+  A["App or S3"] -- "1. GenerateDataKey" --> K[AWS KMS]
+  K -- "2. data key: plain + encrypted" --> A
+  A -- "3. encrypt, then discard plain key" --> D[("4. encrypted receipt + encrypted key")]
+  D -- "5. Decrypt the key" --> K
+  K -. "plain key, if key policy allows" .-> A`}
+/>
 
-- S3 offers SSE-S3 (the [S3](card:s3) default), SSE-KMS with your KMS key, or SSE-C with a key you send.
-- EBS volumes and RDS databases use KMS keys too, and their snapshots stay encrypted.
-- TLS certificates for load balancers and CloudFront: [ACM](card:edge-security).
+1. The app or AWS service calls `GenerateDataKey` and names a KMS key.
+2. KMS returns the same data key twice: once in plaintext and once encrypted under the KMS key.
+3. The caller encrypts the data locally with the plaintext key, then removes that key from memory.
+4. It stores the encrypted data key next to the encrypted data.
+5. To read the data, the caller sends the encrypted data key to KMS `Decrypt`. KMS checks the key policy and returns the plaintext key only if this caller may decrypt.
+
+So the key is: only the small data key travels to KMS, and the key policy is the one gate for reading the data. This pattern is called envelope encryption.
 
 ## Example
 
-Store a receipt with SSE-KMS under a customer managed key.
+The payment service stores a receipt with SSE-KMS under its own key, so S3 runs the steps above:
 
 ```java
 s3.putObject(PutObjectRequest.builder()
         .bucket("payments-receipts")
-        .key("receipts/2026/10/pay_123.pdf")
+        .key("receipts/pay_123.pdf")
         .serverSideEncryption(ServerSideEncryption.AWS_KMS)
         .ssekmsKeyId("alias/receipts")        // customer managed key
+        .bucketKeyEnabled(true)               // S3 Bucket Key: fewer KMS calls
         .build(),
     RequestBody.fromBytes(pdfBytes));
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Rotation, customer managed key | Optional; when on, every 365 days (90 to 2,560 allowed) | AWS KMS, as of 20-10-2026 |
+- `AWS_KMS` asks S3 for SSE-KMS; S3 does the envelope encryption, and the code never sees a data key.
+- `alias/receipts` names a customer managed key, whose key policy you control. Leave the line out and S3 uses the AWS managed key `aws/s3`, which cannot be shared with another account.
+- `bucketKeyEnabled(true)` lets S3 make data keys from a short-lived bucket-level key, which AWS says can cut KMS request costs by up to 99 per cent.
+- The upload needs `kms:GenerateDataKey` on the key; a later download needs `kms:Decrypt` as well as `s3:GetObject`.
+
+## Rules and defaults
+
+- **Encrypt limit:** KMS `Encrypt` with a symmetric key takes at most 4,096 bytes of plaintext; anything bigger uses a data key.
+- **Key policy:** every KMS key has exactly one. IAM policies can grant use of the key only if the key policy allows that; the default key policy does.
+- **Rotation:** optional for customer managed keys; when on, every 365 days by default (90 to 2,560 allowed), and on demand. AWS managed keys rotate every year. KMS keeps the old key material, so old data still decrypts (AWS KMS, at the time of writing, 21-10-2026).
+- **Key types:** AWS owned keys are a free default that you cannot manage; AWS managed keys (`aws/<service>`) live in your account; customer managed keys let you control the policy, rotation and deletion, for a monthly fee.
+- **S3:** new objects get SSE-S3 (keys managed by S3) by default since 05-01-2023. SSE-C, where you send the key with every request, is disabled on new buckets since April 2026.
+- **RDS:** encryption is chosen when the instance is created and cannot be turned off later; to encrypt an existing database, restore from an encrypted snapshot copy or use a blue/green deployment.
+- **Regional:** a KMS key and its key policy belong to one Region; S3 needs the key in the bucket's Region.
 
 ## Interview Qs
 
 ### What is envelope encryption, and why use it?
 
-A data key encrypts the data; a KMS key encrypts the data key. Only the small data key goes to KMS, and decrypt rights stay in one place: the key policy.
+A data key encrypts the data, and a KMS key encrypts the data key. Only the small data key goes to KMS, so large files are encrypted quickly and locally, and decrypt rights stay in one place, the key policy. KMS `Encrypt` alone accepts only 4 KB anyway.
 
 ### Does rotating a KMS key re-encrypt existing data?
 
-No. KMS keeps the old key material and picks the right one to decrypt, so old data works without code changes. Data keys are not rotated either.
+No. Rotation creates new key material for new encryptions. KMS keeps the old material and picks the right one to decrypt, so old data works without code changes. Data keys are not rotated either, so rotation does not help if a data key itself leaks.
 
+### What is the difference between SSE-S3 and SSE-KMS?
+
+With SSE-S3, S3 owns and manages the keys; it is the default and needs no KMS calls. With SSE-KMS, a KMS key you choose wraps the data keys: its key policy controls who can decrypt, CloudTrail logs each use, and KMS requests add cost, which S3 Bucket Keys reduce.

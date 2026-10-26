@@ -5,68 +5,129 @@ title: "IAM Policy Evaluation: Who Wins"
 topic: security
 level: intermediate
 heat: 2
-hook: "Every request starts denied; one explicit deny ends it; otherwise a policy must allow it and no guardrail may block it."
+hook: "AWS denies every request by default. One matching Deny anywhere ends it; otherwise a policy must allow it and no guardrail may block it."
 points:
-  - { k: "AuthN, then AuthZ", v: "AWS first checks who signed the call, then what it may do" }
-  - { k: "Default", v: "implicit deny: no matching allow means no access", kind: default }
-  - { k: "Explicit deny", v: "beats every allow, in any policy type" }
-  - { k: "Guardrails", v: "SCP, RCP, boundary, session policy only limit; they grant nothing", kind: minus }
-  - { k: "Same account", v: "an allow in the identity or the resource policy is enough (most services)" }
-  - { k: "Cross-account", v: "the caller's policy and the resource's policy must both allow", kind: minus }
+  - { k: "Authentication first", v: "AWS checks the request's signature to learn who is calling; only then does it evaluate policies" }
+  - { k: "Implicit deny", v: "a request that no policy allows is denied; this is the starting answer for every request", kind: default }
+  - { k: "Explicit deny", v: "one matching Deny statement, in any policy that applies, beats every Allow" }
+  - { k: "Guardrails", v: "SCPs, RCPs, permissions boundaries and session policies only limit access; they never grant it", kind: minus }
+  - { k: "Same account", v: "for most services, an Allow in either the caller's policy or the resource's policy is enough" }
+  - { k: "Cross-account", v: "the caller's policy and the resource's policy in the other account must both allow the call", kind: minus }
 trap:
   wrong: "The bucket policy allows the role, so a Deny in the role's own policy does not matter."
   right: "An explicit deny in any policy that applies wins, so the request is denied."
-sayIt: "AWS authenticates the caller, then denies by default. Any explicit deny wins. Otherwise a policy must allow it and SCPs, boundaries and session policies must not block it. Cross-account, both sides must allow."
-confusedWith: []
+  why: "People picture the owner of the resource as having the final word, so they expect the bucket policy to override what the caller's own policy says."
+sayIt: "AWS authenticates the caller, then denies by default. Any explicit deny wins. Otherwise an identity or resource policy must allow the call, and SCPs, boundaries and session policies must not block it. Cross-account, both sides must allow."
+cheat:
+  idea: "AWS turns all the policies that apply to one request into one answer: denied by default, allowed only when a policy says Allow and none says Deny."
+  flow: "Any Deny? → guardrails allow? → a policy allows? → limits allow? → Allowed"
+  remember: "An explicit Deny beats every Allow; SCPs and boundaries never grant; cross-account needs both sides."
+buildsOn: [iam-basics, s3]
+scenarios:
+  - q: "An SCP on the account allows only S3 actions. A developer's role there has full admin rights. Can the developer start an EC2 instance?"
+    a: "No. The SCP caps what any principal in that account can do, and EC2 actions are outside the cap. The role's Allow does not help, because a request must pass the SCP and also be allowed by an identity or resource policy."
+  - q: "An auditor role in account B must read receipts in your bucket in account A. You add a bucket policy that allows that role, but the auditor still gets AccessDenied. Why?"
+    a: "Cross-account access needs both sides. Your bucket policy says account A accepts the request; account B must also give its role an identity-based policy that allows s3:GetObject on your bucket."
+confusedWith: [identity-vs-resource-based-policy]
 tags: [iam, explicit-deny, scp]
 visual: flow
 sources:
   - title: "Policy evaluation logic (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html"
     verifiedOn: "2026-10-20"
-  - title: "How AWS evaluates requests to allow or deny (IAM User Guide)"
+  - title: "How AWS enforcement code evaluates requests to allow or deny (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic_policy-eval-denyallow.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "Cross-account policy evaluation logic (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic-cross-account.html"
     verifiedOn: "2026-10-20"
   - title: "Identity-based policies and resource-based policies (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_identity-vs-resource.html"
     verifiedOn: "2026-10-20"
-  - title: "IAM best practices: IAM Access Analyzer (IAM User Guide)"
+  - title: "Examples of Amazon S3 bucket policies: restrict access to only HTTPS requests (S3 User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/example-bucket-policies.html"
+    verifiedOn: "2026-10-21"
+  - title: "IAM best practices: guardrails grant no permissions; IAM Access Analyzer (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
 ---
+
+## What it is
+
+Policy evaluation is the fixed order of checks AWS runs to turn every policy that applies to one request into a single answer: Allow or Deny. One request can meet several policies: the caller's own policy (an identity-based policy, as in [IAM basics](card:iam-basics)), a policy on the resource itself, such as an [S3](card:s3) bucket policy (a resource-based policy), and limits set for the whole organisation. Evaluation decides who wins when they disagree.
 
 ## Why it exists
 
-One request can match many policies: on the role, the bucket and the organisation. AWS needs one fixed rule to reach a single answer.
+The payment service's role may allow reading receipts, while the bucket policy refuses plain-HTTP requests and the company blocks some services for the whole account. Without one fixed rule you could not predict the result, or explain an AccessDenied error. AWS applies the same order to every request, so you can work out the answer from the policies alone, and a single Deny becomes a lock that no Allow can open.
 
 ## How it works
 
-<Steps label="How AWS decides one request">
-  <Step title="Authenticate">AWS checks who signed the request: the principal.</Step>
-  <Step title="Look for Deny">An explicit Deny in any policy that applies ends it: denied.</Step>
-  <Step title="Guardrails">If the account uses SCPs or RCPs, they must allow the action.</Step>
-  <Step title="Find an Allow">An identity-based or resource-based policy must allow it. None? Implicit deny.</Step>
-  <Step title="Limits">A permissions boundary or session policy, if present, must allow it too.</Step>
-</Steps>
+<Mermaid
+  alt="Policy evaluation flow. A signed request first meets check 1: is there any explicit Deny? If yes, it is denied. If no, check 2: do the SCPs and RCPs allow it? If no, denied. If yes, check 3: does an identity-based or resource-based policy allow it? If no, denied by implicit deny. If yes, check 4: do the permissions boundary and session policy allow it? If no, denied; if yes, allowed."
+  chart={`flowchart TD
+  A[Signed request from a principal] --> D{1. Any explicit Deny?}
+  D -- yes --> N[Denied]
+  D -- no --> G{2. SCPs and RCPs allow it?}
+  G -- no --> N
+  G -- yes --> P{3. Identity or resource policy allows it?}
+  P -- "no: implicit deny" --> N
+  P -- yes --> L{4. Boundary and session policy allow it?}
+  L -- no --> N
+  L -- yes --> Y[Allowed]`}
+/>
 
-<Compare id="identity-vs-resource-based-policy" />
+1. AWS authenticates the request: it checks the signature to learn the principal, the user or role session making the call.
+2. It gathers every policy that applies and looks for a matching `Deny` statement. One explicit deny ends evaluation: the request is denied.
+3. If the account belongs to AWS Organizations, its service control policies (SCPs, limits on the account's principals) and resource control policies (RCPs, limits on its resources) must allow the action.
+4. A policy must then grant it: an identity-based policy on the caller, or a resource-based policy that names the caller. If none does, the answer is implicit deny.
+5. Last, if the role or user has a permissions boundary, or the session was started with a session policy, those must allow the action too.
 
-- Role trust policies and KMS key policies are exceptions: they must allow the principal themselves.
-- IAM Access Analyzer validates policies and flags public or cross-account access.
+So the key is: Deny beats Allow, and "not mentioned" means denied.
+
+## Example
+
+The payment role's policy allows `s3:GetObject` on the receipts bucket. The bucket also carries this statement, which AWS documents as a way to allow only HTTPS:
+
+```json
+{
+  "Sid": "RestrictToTLSRequestsOnly",
+  "Effect": "Deny",
+  "Principal": "*",
+  "Action": "s3:*",
+  "Resource": ["arn:aws:s3:::payments-receipts", "arn:aws:s3:::payments-receipts/*"],
+  "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+}
+```
+
+What to notice:
+
+- Over HTTPS, `aws:SecureTransport` is true, so the condition does not match, the Deny does not apply, and the role's Allow lets the read through.
+- Over plain HTTP the Deny matches and the request is denied, even though the role allows it, because step 2 runs before any Allow is looked at.
+- `"Principal": "*"` means the Deny applies to everyone, admins included.
+- Delete the `Condition` and the bucket denies every request from everyone; fixing a bucket policy that denies all principals is one of the tasks that needs the root user.
+
+## Rules and defaults
+
+- **Default:** every request starts as implicit deny. Only the root user is not limited by it.
+- **Explicit deny wins:** a matching Deny in any policy type overrides any number of Allows.
+- **Guardrails grant nothing:** SCPs, RCPs, permissions boundaries and session policies only cap access; the request still needs an identity-based or resource-based Allow.
+- **Same account:** for most services an Allow in either the identity-based policy or the resource-based policy is enough. Role trust policies and KMS key policies are exceptions: they must allow the principal themselves.
+- **Cross-account:** the caller's account must allow the call in an identity-based policy, and the resource's account must allow it in a resource-based policy. Both sides are needed.
+
+## Not to be confused with
+
+An identity-based policy sits on a user, group or role and says what that identity may do; it has no `Principal` element, because the identity it is attached to is the principal. A resource-based policy sits on a resource, such as a bucket or queue, and names which principals may use it. Rule: identity policy = what I may do; resource policy = who may use me.
 
 ## Interview Qs
 
 ### What is the difference between authentication and authorisation in AWS?
 
-Authentication proves who the principal is, from the signed credentials. Authorisation then evaluates the policies to decide whether that principal may perform this action on this resource.
+Authentication proves who the principal is, from the signed credentials on the request. Authorisation then evaluates the policies to decide whether that principal may perform this action on this resource. A request with a valid signature can still be denied by authorisation.
 
 ### A role's policy allows s3:GetObject, but the call is denied. What do you check?
 
-An explicit deny in the bucket policy, an SCP or RCP, a boundary or a session policy. Cross-account, the bucket policy must allow the role too. For SSE-KMS objects, the [KMS key](card:kms-and-encryption) must allow decrypt.
+Look for an explicit deny in the bucket policy, an SCP or RCP, a permissions boundary or a session policy. Cross-account, check that the bucket policy also allows the role. For objects encrypted with SSE-KMS, the role also needs decrypt permission on the [KMS key](card:kms-and-encryption). IAM Access Analyzer and CloudTrail help find the policy that blocked it.
 
 ### Why does an SCP not grant any permission?
 
-An SCP only caps what principals in member accounts can do. Access still needs an identity-based or resource-based policy that allows it.
+An SCP only sets the maximum that principals in member accounts can do. It is a filter, not a grant. Access still needs an identity-based or resource-based policy that allows the action, inside that maximum.

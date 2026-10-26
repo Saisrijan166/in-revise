@@ -5,64 +5,110 @@ title: "Amazon Aurora"
 topic: databases
 level: intermediate
 heat: 2
-hook: "Aurora is AWS's MySQL- and PostgreSQL-compatible engine: one shared storage volume across three AZs, up to 15 readers on top."
+hook: "Aurora is AWS's own MySQL- and PostgreSQL-compatible engine. All its instances share one storage volume that keeps six copies of the data across three AZs."
 points:
-  - { k: "Compatible", v: "existing MySQL or PostgreSQL code and tools keep working" }
-  - { k: "Shared storage", v: "the writer and all replicas use one cluster volume", kind: plus }
-  - { k: "Failover", v: "a replica is promoted; usually under 60 s, often under 30 s", kind: default }
-  - { k: "Endpoints", v: "cluster endpoint for writes, reader endpoint for reads" }
-  - { k: "Serverless", v: "capacity follows load in ACUs; recent versions pause at 0", kind: plus }
+  - { k: "Compatible", v: "your existing MySQL or PostgreSQL code, drivers and tools work unchanged" }
+  - { k: "Shared storage", v: "the writer and all replicas read one cluster volume, so replicas barely lag", kind: plus }
+  - { k: "Six copies, three AZs", v: "the volume keeps six copies across three AZs and grows by itself up to 128 TiB", kind: plus }
+  - { k: "Failover", v: "with a replica, one is promoted, usually under 60 s and often under 30 s", kind: default }
+  - { k: "Writer and reader endpoints", v: "the cluster endpoint always points at the writer; the reader endpoint spreads reads" }
+  - { k: "No replica means slow failover", v: "with zero replicas, Aurora rebuilds the primary, which can take minutes", kind: minus }
 trap:
-  wrong: "Aurora is just RDS PostgreSQL on faster disks."
-  right: "Aurora has its own distributed storage that all instances share, so replicas lag little and take over fast."
-sayIt: "Aurora is a MySQL- and PostgreSQL-compatible engine whose storage keeps six copies in three AZs. Up to 15 replicas share it, and one is promoted on failover, usually within a minute."
-confusedWith: [rds-vs-dynamodb]
+  wrong: "Aurora is just RDS PostgreSQL running on faster disks."
+  right: "Aurora has its own distributed storage that every instance shares, so replicas lag little and a replica takes over fast on failure."
+  why: "Aurora speaks the same SQL and uses the same drivers as RDS PostgreSQL, so it looks like the same database with better hardware, hiding that the storage layer is completely different."
+sayIt: "Aurora is a MySQL- and PostgreSQL-compatible engine whose storage keeps six copies across three AZs in one shared volume. Up to 15 replicas read that volume, so they lag little, and one is promoted on failover, usually within a minute."
+cheat:
+  idea: "Aurora is AWS's MySQL/PostgreSQL-compatible engine. One shared volume keeps six copies across three AZs, and up to 15 replicas read it."
+  flow: "Writes → cluster endpoint | reads → reader endpoint → replicas"
+  remember: "Same SQL as RDS, different storage: low replica lag, failover under a minute if a replica exists."
+buildsOn: [rds, regions-and-azs]
+scenarios:
+  - q: "A team runs RDS PostgreSQL with five read replicas and complains that replicas lag seconds behind under load. Why would Aurora help?"
+    a: "RDS replicas each keep and update their own copy of the data, so under heavy writes they fall behind. Aurora replicas read the one shared volume the writer already wrote to, so they lag milliseconds, not seconds, and a replica is promoted faster on failover."
+  - q: "Should the payment service write through the cluster endpoint or the reader endpoint, and why?"
+    a: "Writes go to the cluster endpoint, because it always points at the current writer, even after a failover promotes a new one. Reports and lookups that tolerate slight staleness go to the reader endpoint, which balances them across the replicas and keeps that load off the writer."
+confusedWith: [rds-vs-aurora]
 tags: [aurora, databases, high-availability]
 visual: table
 sources:
   - title: "What is Amazon Aurora? (Aurora User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/CHAP_AuroraOverview.html"
     verifiedOn: "2026-10-20"
-  - title: "High availability for Amazon Aurora (Aurora User Guide)"
+  - title: "High availability for Amazon Aurora: six copies, failover under 60 s, recreate primary (Aurora User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Concepts.AuroraHighAvailability.html"
-    verifiedOn: "2026-10-20"
-  - title: "How Aurora serverless works (Aurora User Guide)"
+    verifiedOn: "2026-10-21"
+  - title: "Amazon Aurora storage: cluster volume, three AZs, grows to 128 TiB (Aurora User Guide)"
+    url: "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Overview.StorageReliability.html"
+    verifiedOn: "2026-10-21"
+  - title: "How Aurora Serverless v2 works (Aurora User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-serverless-v2.how-it-works.html"
-    verifiedOn: "2026-10-20"
-  - title: "Evaluate Amazon Aurora Serverless v2 (AWS Database Blog; rename note dated 04-2026)"
-    url: "https://aws.amazon.com/blogs/database/evaluate-amazon-aurora-serverless-v2-for-your-provisioned-aurora-clusters/"
     verifiedOn: "2026-10-20"
   - title: "Replication with Amazon Aurora (Aurora User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Replication.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Amazon Aurora is a relational database engine built by AWS and run through RDS. It is compatible with MySQL and with PostgreSQL, so your existing SQL, drivers and tools keep working. What makes it different is storage: instead of each instance holding its own disk, an Aurora cluster has one cluster volume, a distributed storage layer that every instance in the cluster reads and writes. That volume keeps six copies of the data spread across three Availability Zones.
+
 ## Why it exists
 
-Classic read replicas each keep and update their own copy of the data. Aurora splits compute from one shared storage layer that grows by itself.
+A classic [RDS](card:rds) read replica keeps its own full copy of the data and replays every change onto it. Under heavy writes the replica falls behind, and a failover is slow because the new primary must catch up and warm its disk. Aurora splits the database into compute instances on top of one shared, self-growing storage layer. Because every instance reads the same volume, replicas barely lag and one can take over in seconds.
 
 ## How it works
 
 <Compare id="rds-vs-aurora" />
 
-- Aurora Serverless (named Serverless v2 until 04-2026) scales in steps as small as 0.5 ACU, 0-256 ACUs on recent engine versions; 1 ACU is about 2 GiB of memory.
-- [Aurora Global Database](card:aurora-global-database-node) adds read-only copies in other Regions; see [disaster recovery](card:disaster-recovery).
+1. You create a cluster with a writer instance. Writes go to it and are stored six times across three AZs in the cluster volume.
+2. You add up to 15 Aurora Replicas. Each one reads the same shared volume, so it sees new data almost at once without copying it.
+3. The app sends writes to the cluster endpoint, which always points at the current writer, and reads to the reader endpoint, which spreads them across the replicas.
+4. If the writer fails and the cluster has replicas, Aurora promotes one, usually in under 60 seconds and often under 30. The cluster endpoint now points at it.
+5. If the cluster has no replicas, Aurora rebuilds the primary instead, which can take several minutes.
+
+So the key is: shared storage makes replicas cheap, nearly current, and quick to promote.
 
 ## Example
 
+The payment service uses two URLs: the cluster endpoint for writes and the reader endpoint for read-only queries.
+
 ```properties
-# writes: always the current primary, also after a failover
+# Writes: the cluster endpoint always follows the current writer, even after a failover
 payments.writer.url=jdbc:postgresql://payments.cluster-abc123example.ap-south-1.rds.amazonaws.com:5432/payments
-# reads: balanced across the Aurora Replicas
+# Reads: the reader endpoint balances connections across the Aurora Replicas
 payments.reader.url=jdbc:postgresql://payments.cluster-ro-abc123example.ap-south-1.rds.amazonaws.com:5432/payments
 ```
+
+What to notice:
+
+- The two host names differ only by `cluster-` and `cluster-ro-`. The `-ro-` one is read-only and spreads load across replicas.
+- Sending a write to the reader endpoint fails, because a replica cannot accept writes. Keep reports and lookups there, and the ledger writes on the cluster endpoint.
+- After a failover the names do not change: the cluster endpoint simply resolves to the new writer, so the app keeps working.
+- A report on the reader endpoint may see data a few milliseconds old, which is fine for a summary but not for confirming a payment just written.
+
+## Rules and defaults
+
+- **Storage:** one cluster volume, six copies across three AZs, grows by itself up to 128 TiB (256 TiB on some engine versions); you never provision its size.
+- **Replicas:** up to 15 Aurora Replicas per cluster, each promotable; you can set a promotion priority (0 highest).
+- **Serverless:** Aurora Serverless v2 scales capacity in ACUs (about 2 GiB of memory each) as load changes, and recent engine versions can scale down to 0.
+- **Global Database:** adds read-only copies in other Regions with typical lag under a second, for low-latency global reads and Region-level disaster recovery.
+- **Failover needs a replica:** keep at least one replica in another AZ, or a failure means a slow rebuild of the primary.
+
+## Not to be confused with
+
+RDS (the non-Aurora engines) gives each instance its own storage and replicas that each keep a separate copy. Aurora gives all instances one shared volume that replicas read directly. Rule: RDS replica = its own copy that can lag; Aurora replica = reads the shared volume, so it barely lags.
 
 ## Interview Qs
 
 ### How is Aurora different from RDS PostgreSQL?
 
-Same SQL and drivers, different storage. Aurora keeps six copies of the data across three AZs in a shared volume that grows by itself. Replicas read that volume, so they lag less and one is promoted faster on failover.
+Same SQL and drivers, different storage. Aurora keeps six copies of the data across three AZs in one shared volume that grows by itself. Replicas read that volume instead of their own copy, so they lag milliseconds, not seconds, and one is promoted faster on failover. RDS PostgreSQL gives each instance its own disk and copy.
 
-### Which endpoint should the payment service use?
+### Why keep at least one Aurora Replica?
 
-The cluster endpoint for writes, because it follows the primary after a failover. The reader endpoint for reports and lookups that can be slightly stale; it spreads connections across the replicas.
+With a replica, failover promotes it in seconds. With no replica, Aurora must recreate the primary instance, which can take minutes of downtime. A replica in another AZ also keeps reads working if one AZ fails.
+
+### When would you pick Aurora Serverless?
+
+When load is spiky or hard to predict, or for dev and test databases that sit idle. Capacity follows demand in small steps and recent versions scale to zero, so you do not size an instance for the peak. For steady, predictable load a provisioned instance can be cheaper.

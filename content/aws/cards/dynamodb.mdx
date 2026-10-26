@@ -5,43 +5,64 @@ title: "Amazon DynamoDB"
 topic: databases
 level: intermediate
 heat: 2
-hook: "In DynamoDB you find items by key, so you design the keys from your queries, not from your entities."
+hook: "DynamoDB is a NoSQL store that finds items by their key. You design the keys from the queries you need, not from your entities, because only key reads are fast."
 points:
-  - { k: "Primary key", v: "a partition key, or a partition key plus a sort key" }
-  - { k: "GSI", v: "any other key; add it any time; eventually consistent reads" }
-  - { k: "LSI", v: "same partition key, other sort key; only at table creation", kind: minus }
-  - { k: "Reads", v: "eventually consistent by default; strong reads on request", kind: default }
-  - { k: "Item size", v: "at most 400 KB, attribute names included", kind: default }
+  - { k: "Primary key", v: "either a partition key alone, or a partition key plus a sort key" }
+  - { k: "Partition key spreads data", v: "its hash picks the partition; pick a key with many values to avoid a hot partition", kind: default }
+  - { k: "Query needs a key", v: "Query reads one partition key and sort-key range; other fields need a GSI or a Scan", kind: minus }
+  - { k: "GSI", v: "a second key to query by; add it any time; eventually consistent reads", kind: plus }
+  - { k: "Reads", v: "eventually consistent by default; ask for a strongly consistent read for the latest", kind: default }
+  - { k: "Item size", v: "at most 400 KB per item, attribute names included", kind: default }
 trap:
   wrong: "I can query DynamoDB on any attribute, like a SQL WHERE clause."
-  right: "A Query needs the partition key of the table or of an index. For other attributes add a GSI, or you end up scanning the table."
-sayIt: "DynamoDB is a key-value and document store. I design from access patterns: a partition key, often a sort key, and GSIs for other lookups. Reads are eventually consistent unless I ask for strong ones."
+  right: "A Query must give the partition key of the table or an index. To filter on another attribute, add a GSI, or you scan the whole table."
+  why: "DynamoDB has filter expressions that read like a WHERE clause, but a filter runs after the read and still charges for every item scanned, so it only looks like a cheap query."
+sayIt: "DynamoDB is a key-value and document store. I design from the access patterns: a partition key, often a sort key, and GSIs for other lookups. Reads are eventually consistent unless I ask for a strong one, and a Query always needs a key."
+cheat:
+  idea: "DynamoDB is a NoSQL store that finds items by key. The partition key's hash spreads items across partitions; a sort key orders them."
+  flow: "Query by partition key → fast | other fields → add a GSI, else Scan"
+  remember: "Design keys from your queries. A Query needs a key; a Scan reads the whole table."
+buildsOn: [rds]
+scenarios:
+  - q: "A payments table has partition key merchantId and sort key paymentId. The team now needs 'all FAILED payments across every merchant'. Can a Query do it?"
+    a: "Not on the table: a Query must give a merchantId, but this question spans all merchants. Add a GSI with status as the partition key, then Query that index for status = FAILED. Without it, you would Scan the whole table and filter, which is slow and costly."
+  - q: "A payment is written, and a GSI Query a moment later does not return it. Is DynamoDB broken?"
+    a: "No. GSI reads are always eventually consistent, so a just-written item can take a moment to appear in the index. Read the item by its table key with a strongly consistent read if you need it immediately, or accept the short delay."
 confusedWith: [rds-vs-dynamodb]
 tags: [dynamodb, nosql, databases]
 visual: code
 sources:
-  - title: "Core components of Amazon DynamoDB (DynamoDB Developer Guide)"
+  - title: "Core components of Amazon DynamoDB: keys, items, tables (DynamoDB Developer Guide)"
     url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.CoreComponents.html"
     verifiedOn: "2026-10-20"
-  - title: "Improving data access with secondary indexes (DynamoDB Developer Guide)"
+  - title: "Best practices for designing partition keys: even distribution, hot partitions (DynamoDB Developer Guide)"
+    url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-partition-key-design.html"
+    verifiedOn: "2026-10-21"
+  - title: "Improving data access with secondary indexes: GSI vs LSI (DynamoDB Developer Guide)"
     url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/SecondaryIndexes.html"
     verifiedOn: "2026-10-20"
+  - title: "Scanning tables: filters applied after the read, consume the same capacity (DynamoDB Developer Guide)"
+    url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Scan.html"
+    verifiedOn: "2026-10-21"
   - title: "DynamoDB read consistency (DynamoDB Developer Guide)"
     url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadConsistency.html"
     verifiedOn: "2026-10-20"
   - title: "Working with items: conditional writes (DynamoDB Developer Guide)"
     url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/WorkingWithItems.html"
     verifiedOn: "2026-10-20"
-  - title: "Constraints in Amazon DynamoDB: item size (DynamoDB Developer Guide)"
-    url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Constraints.html"
-    verifiedOn: "2026-10-20"
 ---
+
+## What it is
+
+Amazon DynamoDB is a managed NoSQL database. It stores items, which are like rows but can each hold any attributes, grouped into tables. Every item is found by its primary key: either a partition key alone, or a partition key plus a sort key. The partition key's value is hashed to decide which partition, a piece of the table's storage, holds the item. Unlike [RDS](card:rds), there is no join and no general WHERE: you read by key, so you shape the keys around the queries you need.
 
 ## Why it exists
 
-Some data is only ever read by key, at very high volume. DynamoDB hashes each partition key to spread items over many partitions.
+Some data is read by key at a scale and speed that a single relational server struggles with: a payment's status by its id, millions of times a second, with steady low latency. A relational database would need bigger and bigger instances. DynamoDB spreads items across many partitions by hashing the partition key, so it stays fast as traffic grows. The cost is that you must know your access patterns up front, because only key-based reads are fast.
 
 ## How it works
+
+The table below is a payments table keyed on `merchantId` (partition key) and `paymentId` (sort key). Items with the same merchant sit together, ordered by payment id.
 
 | merchantId (partition key) | paymentId (sort key) | amountInr | status |
 |---|---|---|---|
@@ -49,36 +70,62 @@ Some data is only ever read by key, at very high volume. DynamoDB hashes each pa
 | m-42 | p-1002 | 500 | FAILED |
 | m-77 | p-1003 | 500 | SUCCEEDED |
 
-- A Query reads one partition key, optionally a sort key range: "all payments of m-42".
-- A GSI gives a second key, such as status, for queries the table key cannot serve.
+1. A write hashes `merchantId` to choose a partition and stores the item there, ordered by `paymentId`.
+2. A Query gives one `merchantId` and optionally a `paymentId` range: "all payments of m-42", read straight from one partition.
+3. A query the table key cannot serve, such as "all FAILED payments", needs a global secondary index (GSI) whose key is `status`.
+4. By default a read is eventually consistent, so it may miss the newest write by a fraction of a second; you can ask for a strongly consistent read on the table.
+
+So the key is: pick the partition key for even spread, and add a GSI for every query the main key cannot answer.
 
 ## Example
 
+To store a payment only once, even if the request is retried, write it with a condition that the key does not already exist (AWS SDK for Java 2.x):
+
 ```java
-var put = PutItemRequest.builder().tableName("payments")
+PutItemRequest put = PutItemRequest.builder()
+        .tableName("payments")
         .item(Map.of(
                 "merchantId", AttributeValue.fromS("m-42"),
                 "paymentId", AttributeValue.fromS(paymentId),
                 "amountInr", AttributeValue.fromN("500")))
-        .conditionExpression("attribute_not_exists(paymentId)")
+        .conditionExpression("attribute_not_exists(paymentId)")  // only if no such item yet
         .build();
 try {
     dynamo.putItem(put);
 } catch (ConditionalCheckFailedException e) {
-    // already stored: this is a retry, so do nothing
+    // the item already exists: this was a retry, so do nothing
 }
 ```
+
+What to notice:
+
+- `attribute_not_exists(paymentId)` makes the write happen only when no item with that key exists. The check and the write are one atomic step.
+- A retry of the same payment hits the condition and throws `ConditionalCheckFailedException`, so the payment is never stored twice. This is how you get idempotency.
+- Without the condition, a retry would overwrite the item silently, which could hide a double charge.
+- Numbers are sent as strings (`fromN("500")`): DynamoDB has one Number type, and the SDK carries it as text.
+
+## Rules and defaults
+
+- **Secondary indexes:** a GSI can use any attributes as its key, be added at any time, has its own capacity, and is eventually consistent. A local secondary index (LSI) keeps the table's partition key, must be created with the table, and allows strongly consistent reads.
+- **Capacity mode:** on-demand is the default and recommended mode, billed per request with no capacity to plan. Provisioned mode, where you set read and write units, suits steady, predictable load.
+- **Consistency:** reads are eventually consistent unless you set a strongly consistent read, which costs more and is not available on a GSI.
+- **Item size:** 400 KB maximum per item, including attribute names. Keep large blobs in [S3](card:s3) and store the key.
+- **Scan:** reads every item and charges for all of them; a filter is applied after the read and does not cut the cost. Use Query, not Scan, for anything routine.
+
+## Not to be confused with
+
+A Query reads items under one partition key quickly, using the key. A Scan reads the whole table or index item by item and then optionally filters. Rule: Query = targeted read by key, cheap; Scan = read everything, slow and costly, to avoid in hot paths.
 
 ## Interview Qs
 
 ### GSI or LSI?
 
-A GSI can use any partition and sort key, can be added later and has its own capacity, but its reads are only eventually consistent. An LSI keeps the table's partition key, must exist at creation, and allows strong reads.
+A GSI can use any attribute as its partition and sort key, can be added after the table exists, has its own capacity, but its reads are only eventually consistent. An LSI keeps the table's partition key, with a different sort key, must be created with the table, and allows strongly consistent reads. Reach for a GSI for a new access pattern.
 
 ### How do you stop a retried payment from being stored twice?
 
-Write with a condition, attribute_not_exists on the key. If the item exists, DynamoDB rejects the write with ConditionalCheckFailedException, so the retry changes nothing.
+Write with a condition expression, `attribute_not_exists` on the key. If an item with that key already exists, DynamoDB rejects the write with `ConditionalCheckFailedException`, so the retry changes nothing. This gives an idempotent write without a separate lock.
 
-### A payment written a moment ago is missing from a GSI query. Why?
+### Why avoid Scan on a large table?
 
-Queries on a GSI are only eventually consistent, so a fresh write can appear a moment later. Read the item by its table key with a strongly consistent read, or accept the short delay.
+A Scan reads every item, 1 MB per page, and consumes read capacity for all of them even when a filter returns few. On a hot table it can use up the throughput other requests need. Design a key or a GSI so the query reads only the items you want.

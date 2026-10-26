@@ -5,72 +5,113 @@ title: "Distributed Tracing: X-Ray and OpenTelemetry"
 topic: operations
 level: intermediate
 heat: 2
-hook: "One trace ID rides along with a request through every service, so you can see which hop was slow or failed."
+hook: "A trace follows one request across every service by passing one ID along, so you can see which hop was slow or failed."
 points:
-  - { k: "Trace", v: "all the segments of one request, joined by one trace ID" }
-  - { k: "Segment, subsegment", v: "a service's work; one downstream call inside it (OTel: spans)" }
-  - { k: "Trace header", v: "X-Amzn-Trace-Id, or W3C traceparent with OpenTelemetry" }
-  - { k: "Default sampling", v: "first request each second, then 5% of the rest", kind: default }
-  - { k: "X-Ray SDKs, daemon", v: "maintenance mode since 25-02-2026: security fixes only", kind: minus }
+  - { k: "Trace", v: "all the work recorded for one request, joined by a single trace ID passed between services" }
+  - { k: "Segment, subsegment", v: "a service's own record; a subsegment times one downstream call inside it (OpenTelemetry calls both spans)" }
+  - { k: "Trace header", v: "X-Amzn-Trace-Id carries the ID; OpenTelemetry uses the W3C traceparent header by default", kind: key }
+  - { k: "Default sampling", v: "X-Ray records the first request each second, then 5% of the rest, to keep cost down", kind: default }
+  - { k: "Instrument with OTel", v: "the X-Ray SDKs and daemon are in maintenance mode since 25-02-2026; use OpenTelemetry and send traces to X-Ray", kind: minus }
 trap:
-  wrong: "Instrument a new Java service with the X-Ray SDK for Java."
-  right: "The X-Ray SDKs are in maintenance mode since 25-02-2026. Use OpenTelemetry (ADOT or the upstream Java agent) and send traces to X-Ray."
-sayIt: "A trace follows one payment through the load balancer, the service, the database and the queue by passing a trace ID header. I instrument with the OpenTelemetry Java agent and view traces in X-Ray."
+  wrong: "Add the AWS X-Ray SDK for Java to instrument a new service."
+  right: "The X-Ray SDKs and daemon are in maintenance mode since 25-02-2026. Instrument with OpenTelemetry (the OTel Java agent or ADOT) and send traces to X-Ray."
+  why: "Most tutorials and older docs still show the X-Ray SDK, and it still works, so people reach for it. AWS has since moved to OpenTelemetry as the recommended path."
+sayIt: "A trace follows one payment through the load balancer, service, database and queue via a trace ID header. I instrument with the OpenTelemetry Java agent and send spans to X-Ray through the CloudWatch agent or a Collector, then read the trace map for the slow hop."
+cheat:
+  idea: "Distributed tracing follows one request across services via a trace ID. Each service records its work as a span, and X-Ray joins them into one timeline."
+  flow: "Trace ID → each service records a span → X-Ray joins them into a trace"
+  remember: "Use OpenTelemetry, not the X-Ray SDK; default sampling 1/sec then 5%."
+buildsOn: [cloudwatch, elastic-load-balancing, sqs]
+scenarios:
+  - q: "A payment takes four seconds end to end and customers complain. Logs on each service look normal. How do you find the slow part?"
+    a: "Open the request's trace. The timeline shows each segment and subsegment with its duration, so the slow call, say a 3.5-second database query, stands out at once. Logs show each service alone; a trace shows the whole chain and where the time went."
+  - q: "You are starting a brand-new Spring Boot service and want traces in X-Ray. Which library do you add?"
+    a: "Not the X-Ray SDK; it is in maintenance mode since 25-02-2026. Attach the OpenTelemetry Java agent with -javaagent, which instruments common libraries with no code changes, and export the spans to X-Ray via the CloudWatch agent or an OpenTelemetry Collector."
 confusedWith: []
 tags: [x-ray, tracing, opentelemetry, observability]
 visual: flow
 sources:
-  - title: "AWS X-Ray concepts: segments, traces, sampling, tracing header (X-Ray Developer Guide)"
+  - title: "AWS X-Ray concepts: segments, subsegments, traces, sampling, tracing header, 30-day retention (X-Ray Developer Guide)"
     url: "https://docs.aws.amazon.com/xray/latest/devguide/xray-concepts.html"
-    verifiedOn: "2026-10-20"
-  - title: "X-Ray SDK and Daemon support timeline (X-Ray Developer Guide)"
+    verifiedOn: "2026-10-23"
+  - title: "X-Ray SDK and Daemon support timeline: maintenance mode from 25-02-2026 (X-Ray Developer Guide)"
     url: "https://docs.aws.amazon.com/xray/latest/devguide/xray-sdk-daemon-timeline.html"
-    verifiedOn: "2026-10-20"
-  - title: "Migrating from X-Ray instrumentation to OpenTelemetry (X-Ray Developer Guide)"
+    verifiedOn: "2026-10-23"
+  - title: "Migrating from X-Ray instrumentation to OpenTelemetry: W3C default, Collector/CloudWatch agent (X-Ray Developer Guide)"
     url: "https://docs.aws.amazon.com/xray/latest/devguide/xray-sdk-migration.html"
-    verifiedOn: "2026-10-20"
-  - title: "Java agent: getting started (OpenTelemetry docs)"
+    verifiedOn: "2026-10-23"
+  - title: "OpenTelemetry Java agent getting started: -javaagent, otel.service.name (OpenTelemetry docs)"
     url: "https://opentelemetry.io/docs/zero-code/java/agent/getting-started/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-23"
 ---
+
+## What it is
+
+Distributed tracing follows a single request as it moves through many services. Each service records its own piece of work, with a start and end time, as a span (X-Ray calls a service's top-level span a segment, and a span for one downstream call inside it a subsegment). All the spans from one request share a trace ID, so a tool can gather them and draw one timeline. AWS X-Ray is the AWS service that stores traces and draws that timeline and a service map.
 
 ## Why it exists
 
-A payment touches the load balancer, the service, RDS, SQS and a worker. Logs show each piece alone; a trace shows the whole path and where the time went.
+One payment touches the load balancer, the payment service, the database, a queue and a worker. When it is slow, logs show each service on its own, so you cannot tell which hop ate the time, and you certainly cannot see the end-to-end path. A trace joins the pieces: it shows every hop in order, with its duration, so the slow or failing step is obvious. That is the one thing metrics and logs cannot give you.
 
 ## How it works
 
 <Mermaid
-  alt="One trace ID flows from the load balancer to the payment service, which records subsegments for RDS and SQS calls. The receipt worker continues the trace and writes to S3. X-Ray joins all parts into one trace."
+  alt="One trace ID flows from the load balancer to the payment service, which records subsegments for its RDS and SQS calls. The receipt worker continues the same trace and writes to S3. All parts carry the same trace ID, and X-Ray joins them into one trace and a service map."
   chart={`flowchart LR
-  ALB[Load balancer] -- trace ID --> SVC[Payment service]
-  SVC -- subsegment --> RDS[(RDS)]
-  SVC -- subsegment --> Q[SQS queue]
-  Q -- trace ID --> W[Receipt worker]
+  ALB[Load balancer] -- "trace ID" --> SVC[Payment service]
+  SVC -- "subsegment" --> RDS[(RDS)]
+  SVC -- "subsegment" --> Q[SQS queue]
+  Q -- "trace ID" --> W[Receipt worker]
   W --> S3[(S3)]
-  SVC -.-> XR[X-Ray: trace and trace map]
+  SVC -.-> XR[X-Ray: trace and map]
   W -.-> XR`}
 />
 
-- Metrics say something is wrong, logs say what one service did, a trace says where in the chain.
-- [Application Signals](card:cw-application-signals) adds latency and fault dashboards and SLOs on top of traces.
+1. The first service that handles the request gets or creates a trace ID and puts it in a header: `X-Amzn-Trace-Id` for X-Ray, or the W3C `traceparent` header with OpenTelemetry.
+2. Each service records a span for its own work, and subsegments for the downstream calls it makes, such as a database query or a queue send.
+3. When one service calls another, it passes the same trace ID along, so the next service's spans join the same trace.
+4. Sampling decides which requests to trace: by default X-Ray records the first request each second and 5% of the rest, to keep cost and overhead down.
+5. The spans are sent to X-Ray, which joins all spans with the same ID into one trace timeline and draws a service map of the services and their connections.
+
+So the key is: one ID, passed in a header from hop to hop, is what turns scattered per-service records into a single picture.
 
 ## Example
 
+The OpenTelemetry Java agent instruments the Spring Boot jar with no code changes; you attach it at startup.
+
 ```bash
-# Zero-code instrumentation of the Spring Boot jar (OpenTelemetry Java agent)
+# Zero-code tracing of the payment service with the OpenTelemetry Java agent
 java -javaagent:opentelemetry-javaagent.jar \
      -Dotel.service.name=payment-service \
      -jar payment-service.jar
-# Spans go over OTLP to the CloudWatch agent or an OpenTelemetry Collector, then to X-Ray
+# Spans go over OTLP (http/protobuf, default localhost:4318) to the
+# CloudWatch agent or an OpenTelemetry Collector, which forwards them to X-Ray
 ```
+
+What to notice:
+
+- `-javaagent:opentelemetry-javaagent.jar` attaches the agent, which auto-instruments common libraries (the web server, the JDBC driver, the AWS SDK) so each incoming request and downstream call becomes a span without touching your code.
+- `otel.service.name` sets the name this service shows up as on the trace map; without it the service appears as "unknown_service".
+- The agent exports over OTLP by default; it does not talk to X-Ray directly. A CloudWatch agent or OpenTelemetry Collector receives the spans and sends them on to X-Ray, which is why you stop the old X-Ray daemon when you switch.
+
+## Rules and defaults
+
+- **Instrumentation:** use OpenTelemetry; the X-Ray SDKs and daemon are in maintenance mode (security fixes only) since 25-02-2026 (X-Ray, at the time of writing).
+- **Propagation:** OpenTelemetry defaults to the W3C `traceparent` header; you can add the X-Ray propagator to pass context to AWS services that read `X-Amzn-Trace-Id`.
+- **Default sampling:** first request each second, then 5% of the rest; add rules to trace more of the paths you care about and less of health checks.
+- **Retention:** X-Ray keeps trace and service-graph data for 30 days (X-Ray, at the time of writing).
+- **Annotations vs metadata:** annotations are indexed and searchable (X-Ray indexes up to 50 per trace); metadata is stored but not indexed.
 
 ## Interview Qs
 
 ### A payment takes four seconds. How do you find the slow hop?
 
-Open its trace. The timeline shows each segment and subsegment with its duration, so the slow call, say a database query, stands out. Filter traces by an indexed annotation such as the merchant id.
+Open its trace in X-Ray. The timeline shows each segment and subsegment with its own duration, so the slow call, such as a database query, stands out. You can filter traces by an indexed annotation like the merchant id to find the affected requests, and compare them against fast ones.
 
 ### Why sample instead of tracing every request?
 
-Tracing everything costs money and overhead. X-Ray's default rule records the first request each second and 5% of the rest; add rules to keep more of the paths you care about.
+Tracing every request adds cost and overhead and produces far more data than you need to spot problems. X-Ray's default rule records the first request each second plus 5% of the rest, which is enough to see patterns; you add rules to trace all of a critical path, like payments, and little of noisy traffic like health checks.
+
+### How is a trace tied together across services?
+
+By a trace ID carried in a header. The first service creates the ID and puts it in the request; each service passes the same ID to its downstream calls and records spans tagged with it. The tracing backend gathers all spans with that ID into one trace, which is why context propagation (W3C `traceparent` or `X-Amzn-Trace-Id`) must flow through every hop.

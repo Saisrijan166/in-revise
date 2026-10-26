@@ -5,56 +5,83 @@ title: "Amazon EventBridge: Event Routing"
 topic: integration
 level: intermediate
 heat: 2
-hook: "An event bus checks each event's JSON against rules and sends it only to the targets whose pattern matches."
+hook: "EventBridge is an event bus: producers put JSON events on it, and it sends each event only to the consumers whose filter matches its content."
 points:
-  - { k: "Event bus", v: "default: AWS service events; Custom - Classic: your app's events, by rules" }
-  - { k: "Rule", v: "an event pattern plus up to 5 targets (Classic bus quota)", kind: default }
-  - { k: "Content routing", v: "match on source, detail-type or any field inside detail", kind: plus }
-  - { k: "Archive and replay", v: "keep matching events, resend them to the bus later" }
-  - { k: "New Custom Event Bus", v: "since 24-09-2026, AWS's pick for new apps: subscribers, 1-365 day retention" }
+  - { k: "Event bus", v: "a router you publish events to; each account has a default bus for AWS service events" }
+  - { k: "Routes by content", v: "a filter matches on source, detail-type or any field inside the event's JSON" }
+  - { k: "Classic: rules and targets", v: "a Custom Event Bus - Classic uses rules, each with up to 5 targets", kind: default }
+  - { k: "New Custom Event Bus", v: "launched in 2026, AWS's pick for new apps: subscribers, 1-365 day retention, replay", kind: default }
+  - { k: "Many AWS and SaaS sources", v: "AWS services and partners put events on a bus with no code from you", kind: plus }
 trap:
-  wrong: "EventBridge is SNS with another name, so pick either."
-  right: "SNS pushes copies to its subscriptions. EventBridge routes by rules on the event JSON, takes AWS and SaaS events, and can replay."
-sayIt: "EventBridge is an event router. Producers put events on a bus; each rule's pattern picks events by content and sends them to its targets. I use it when different consumers want different events."
+  wrong: "EventBridge is just SNS with a different name, so pick either one."
+  right: "SNS pushes every message to each subscription. EventBridge matches each event's content against filters, takes AWS and SaaS events, and can replay them."
+  why: "Both deliver one message to many places, so they look the same until you need content routing, AWS-service events or replay, which only EventBridge has."
+sayIt: "EventBridge is a content-based event router. Producers put events on a bus, and each consumer's filter picks the events it wants by their JSON. I use it when different consumers need different events, or when I must react to AWS service or SaaS events."
+cheat:
+  idea: "EventBridge is a serverless event bus: producers put JSON events on it, and it delivers each event only to the consumers whose filter matches its content."
+  flow: "Put event → bus → matching filters → targets"
+  remember: "Pick it over SNS for content routing, AWS or SaaS events, and replay; SNS does plain fan-out."
+buildsOn: [sns, lambda]
+scenarios:
+  - q: "The fraud check wants only UPI payments, and the ledger wants every payment. Both read from one PaymentSucceeded stream. How does EventBridge handle this without the publisher knowing?"
+    a: "Each consumer has its own filter on the same bus. The ledger's filter matches every PaymentSucceeded event; the fraud check's filter adds method = UPI. The payment service publishes once and never names a consumer, so adding or changing a filter needs no change to it."
+  - q: "You must reprocess yesterday's payment events after fixing a bug. SNS cannot do this. Why can EventBridge?"
+    a: "The new Custom Event Bus retains every event for the period you set, 1 to 365 days. You start a subscriber from a past position and it reads the retained events again. A standard SNS topic stores nothing, so once a message is delivered it is gone."
 confusedWith: [sqs-vs-sns-vs-eventbridge-vs-kinesis]
 tags: [eventbridge, events, routing]
 visual: flow
 sources:
   - title: "Amazon EventBridge event bus (default and Classic) (EventBridge User Guide)"
     url: "https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-event-bus.html"
-    verifiedOn: "2026-10-20"
-  - title: "Creating event patterns: matching event values (EventBridge User Guide)"
-    url: "https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-pattern.html"
-    verifiedOn: "2026-10-20"
-  - title: "How EventBridge retries delivering events (EventBridge User Guide)"
-    url: "https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-rule-retry-policy.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "What is the EventBridge Custom Event Bus? (EventBridge User Guide)"
     url: "https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-custom-bus-what-is.html"
-    verifiedOn: "2026-10-20"
-  - title: "Scheduled rules (legacy) and EventBridge Scheduler (EventBridge User Guide)"
-    url: "https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-scheduled-rule-pattern.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
+  - title: "Subscribing to events on a Custom Event Bus: filters and retries (EventBridge User Guide)"
+    url: "https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-custom-bus-subscribers.html"
+    verifiedOn: "2026-10-22"
+  - title: "Event pattern syntax: arrays, exact match, ignored fields (EventBridge User Guide)"
+    url: "https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-pattern.html"
+    verifiedOn: "2026-10-22"
+  - title: "How EventBridge retries delivering events (EventBridge User Guide)"
+    url: "https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-rule-retry-policy.html"
+    verifiedOn: "2026-10-22"
+  - title: "PutEvents: up to 10 entries, FailedEntryCount (EventBridge API Reference)"
+    url: "https://docs.aws.amazon.com/eventbridge/latest/APIReference/API_PutEvents.html"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+Amazon EventBridge is a serverless event bus. An event is a small JSON message that says something happened, such as a payment succeeding. Producers put events on a bus, and EventBridge delivers each event to the consumers whose filter matches it. Unlike [SNS](card:sns), which copies every message to every subscription, EventBridge decides where each event goes by looking inside its JSON. Every account also has a default bus that AWS services use for their own events, such as an EC2 instance changing state.
 
 ## Why it exists
 
-The fraud check wants only UPI payments; the ledger wants all of them. Hard-coding who gets what in the payment API couples every team to it.
+Different teams want different events. The fraud check wants only UPI payments; the ledger wants all of them; an analytics team wants payments over ₹10,000. If the payment API called each consumer, or even published to fixed SNS topics, it would carry the knowledge of who wants what, and every new rule would change the API. EventBridge moves that choice to the consumer: each one writes a filter, and the producer just publishes events.
 
 ## How it works
 
+The example uses the rules model of the Custom Event Bus - Classic, which most interviews still ask about:
+
 <Mermaid
-  alt="The payment service puts a PaymentSucceeded event on a Custom Event Bus - Classic. Rule 1 matches every PaymentSucceeded event and sends it to the ledger SQS queue. Rule 2 matches only UPI payments and sends them to a fraud-check Lambda function. Events that match no rule go nowhere."
+  alt="The payment service puts a PaymentSucceeded event on the payments bus. Rule 1 matches every PaymentSucceeded event and sends it to the ledger SQS queue. Rule 2 matches only UPI payments and sends them to a fraud-check Lambda function. An event matching no rule goes nowhere."
   chart={`flowchart LR
-  P[Payment service] --> B{{payments bus}}
+  P[Payment service] -- "PutEvents" --> B{{payments bus}}
   B -- "Rule 1: all PaymentSucceeded" --> Q[[Ledger queue]]
   B -- "Rule 2: method = UPI" --> F[Fraud-check Lambda]`}
 />
 
-- An event can match many rules; if it matches none, nothing happens.
-- Values in a pattern's array mean "any of these".
+1. The payment service calls PutEvents with an event that has a source, a detail-type and a detail object holding the payment.
+2. The bus checks the event against every rule's event pattern. A pattern lists only the fields that must match; EventBridge ignores the rest.
+3. Each rule whose pattern matches sends the event to its targets, such as a queue or a Lambda function. One event can match several rules.
+4. An event that matches no rule is dropped; nothing happens and no error is raised.
+5. If a target delivery fails, EventBridge retries for up to 24 hours. Events that still fail are dropped unless the target has a dead-letter queue.
+
+So EventBridge routes by what is inside the event, not by a fixed subscriber list.
 
 ## Example
+
+Rule 2's event pattern matches only UPI payments from the payment service:
 
 ```json
 {
@@ -64,20 +91,39 @@ The fraud check wants only UPI payments; the ledger wants all of them. Hard-codi
 }
 ```
 
-Rule 2's pattern: only UPI payments from the payment service match.
+What to notice:
 
-## Defaults
+- Each value is a JSON array. A match needs any one value in the array, so `"method": ["UPI", "WALLET"]` would match either.
+- All three fields must match for the pattern to match, so this rule catches only UPI payments from this one source.
+- Any field not in the pattern is ignored, so the amount and payment ID do not affect matching.
+- String matching is exact and case-sensitive: `"UPI"` does not match `"upi"`.
 
-| What | Default | Where |
-|---|---|---|
-| Retries to a target | 24 hours, up to 185 attempts, then dropped unless a DLQ is set | EventBridge retry docs, 20-10-2026 |
+## Rules and defaults
+
+- **Default bus:** every account has one; AWS services send their events to it. Create a Custom Event Bus for your application's own events.
+- **Custom Event Bus - Classic:** the rules model. A rule has one event pattern and up to 5 targets; an event can match many rules. It keeps no events unless you add an archive.
+- **Custom Event Bus (launched in 2026):** AWS's choice for new applications. It retains every event for 1 to 365 days, so a subscriber can replay or resume. Each subscriber has one filter and one target, and FIFO delivery is available per event group.
+- **Retries:** to a Classic target, up to 24 hours and 185 attempts, then dropped unless a dead-letter queue is set. A new-bus subscriber retries 5 times within 300 seconds by default.
+- **PutEvents:** up to 10 events per call, total under 1 MiB. Check FailedEntryCount in the response and resend the failed entries.
+- **Scheduling:** to run a job on a cron or rate schedule, use EventBridge Scheduler; AWS calls the old scheduled rules legacy.
+
+## Not to be confused with
+
+- **SNS:** pushes a copy of every message to each subscription; the only filtering is a simple filter policy.
+- **EventBridge:** a router that matches each event's full JSON against filters, ingests AWS and SaaS events, and can retain and replay.
+
+Rule: SNS for plain fan-out of every message; EventBridge when consumers need different events by content, AWS or SaaS events, or replay.
 
 ## Interview Qs
 
 ### SNS or EventBridge for PaymentSucceeded?
 
-EventBridge when consumers want different events by content, or you need AWS or SaaS events and replay. [SNS](card:sns) for plain fan-out of every message to many subscribers.
+SNS for plain fan-out: every subscriber gets every message, at very high throughput and low latency. EventBridge when consumers want different events chosen by content, when you must react to AWS service or SaaS events, or when you need to retain and replay events. EventBridge adds a little latency for that routing.
+
+### An event matches no rule. What happens?
+
+Nothing. EventBridge silently drops it, with no error to the producer. So a consumer that gets no events usually has a filter that matches nothing, often because of an exact-match or case mismatch. Test a pattern against a real event before relying on it.
 
 ### How do you run a reconciliation job every night at 2 am?
 
-Use EventBridge Scheduler with a cron expression (it also does one-time schedules). AWS calls scheduled rules legacy and recommends Scheduler.
+Use EventBridge Scheduler with a cron expression; it can also run one-time schedules and rate schedules. AWS now calls the older scheduled rules legacy and recommends Scheduler, which supports many targets and built-in retries.

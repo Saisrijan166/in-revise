@@ -5,59 +5,104 @@ title: VPC Endpoints and PrivateLink
 topic: networking
 level: intermediate
 heat: 2
-hook: "VPC endpoints let private subnets reach AWS services over private paths, with no internet gateway or NAT."
+hook: "A VPC endpoint lets a private subnet reach an AWS service over a private AWS path, with no internet gateway and no NAT gateway in between."
 points:
-  - { k: "Gateway endpoint", v: "S3 and DynamoDB only; a route table entry; no extra charge", kind: plus }
-  - { k: "Interface endpoint", v: "an ENI with a private IP in your subnet, powered by PrivateLink" }
+  - { k: "Gateway endpoint", v: "for S3 and DynamoDB only; adds a route to your route tables; no extra charge", kind: plus }
+  - { k: "Interface endpoint", v: "a network interface with a private IP in your subnet, powered by PrivateLink" }
   - { k: "Interface cost", v: "billed per hour in each AZ plus per GB processed", kind: minus }
-  - { k: "Private DNS", v: "the usual service name resolves to the endpoint's private IPs" }
-  - { k: "Endpoint policy", v: "limits what the endpoint allows; the default allows full access", kind: default }
+  - { k: "Private DNS", v: "with it on, the normal service name resolves to the endpoint's private IPs, so code is unchanged" }
+  - { k: "Reaches further", v: "interface endpoints also work from on-premises and other Regions; gateway endpoints do not", kind: plus }
+  - { k: "Endpoint policy", v: "an extra allow-list on the endpoint; the default policy allows full access", kind: default }
 trap:
-  wrong: "Calls from a private subnet to S3 must go through a NAT gateway."
-  right: "A gateway endpoint takes them to S3 privately at no extra charge, and saves the NAT per-GB fee."
-sayIt: "For S3 and DynamoDB I add free gateway endpoints. For services like SQS or Secrets Manager I add interface endpoints, private IPs in my subnets, so private tasks need no NAT."
+  wrong: "A private subnet must send its S3 traffic through a NAT gateway."
+  right: "A gateway endpoint takes that traffic to S3 over a private path at no charge, and saves the NAT per-GB fee."
+  why: "People learn that private subnets reach the internet through NAT and apply it to AWS services too, not realising S3 and DynamoDB have a free private route."
+sayIt: "For S3 and DynamoDB I add free gateway endpoints. For services like SQS or Secrets Manager I add interface endpoints, which put private IPs in my subnets, so private tasks reach those services with no NAT gateway or internet path."
+cheat:
+  idea: "A VPC endpoint gives private subnets a private path to an AWS service, with no internet gateway or NAT. Gateway endpoints are free for S3 and DynamoDB; interface endpoints cover most other services."
+  remember: "Use free gateway endpoints for S3 and DynamoDB; use interface endpoints (paid, PrivateLink) for SQS, Secrets Manager and others."
+buildsOn: [internet-and-nat-gateways]
+scenarios:
+  - q: "Private ECS tasks need to read the database password from Secrets Manager, but you do not want them to have any internet path. How?"
+    a: "Create an interface endpoint for Secrets Manager in each AZ's private subnet, turn on private DNS, and let its security group allow 443 from the tasks. The SDK call is unchanged, and no NAT gateway or internet gateway is involved."
+  - q: "Your bill shows large NAT data-processing charges, mostly from S3 uploads. What is the cheapest fix?"
+    a: "Add a gateway endpoint for S3 and route the subnets' S3 traffic to it. Gateway endpoints have no charge and keep the traffic on the AWS network, removing the NAT per-GB fee for that traffic."
 tags: [vpc-endpoint, privatelink, private-access]
 visual: table
 sources:
-  - title: "Gateway endpoints (AWS PrivateLink Guide)"
+  - title: "Gateway endpoints: S3 and DynamoDB, route-based, no charge (AWS PrivateLink Guide)"
     url: "https://docs.aws.amazon.com/vpc/latest/privatelink/gateway-endpoints.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Access an AWS service using an interface VPC endpoint (AWS PrivateLink Guide)"
     url: "https://docs.aws.amazon.com/vpc/latest/privatelink/create-interface-endpoint.html"
-    verifiedOn: "2026-10-20"
-  - title: "AWS PrivateLink for Amazon S3: types of VPC endpoints (S3 User Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Types of VPC endpoints for Amazon S3: gateway vs interface (Amazon S3 User Guide)"
     url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/privatelink-interface-endpoints.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Control access to VPC endpoints using endpoint policies (AWS PrivateLink Guide)"
     url: "https://docs.aws.amazon.com/vpc/latest/privatelink/vpc-endpoints-access.html"
-    verifiedOn: "2026-10-20"
-  - title: "AWS PrivateLink pricing"
-    url: "https://aws.amazon.com/privatelink/pricing/"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+A VPC endpoint is a private doorway from your [VPC](card:vpc-and-subnets) to an AWS service, so traffic goes over the AWS network instead of out to the internet. There are two kinds. A gateway endpoint works only for S3 and DynamoDB and is a route entry in your route table. An interface endpoint works for most services and is a network interface with a private IP inside your subnet, built on AWS PrivateLink. PrivateLink is the technology that exposes a service as a private IP in your network.
 
 ## Why it exists
 
-Private tasks still call S3, SQS and Secrets Manager. Sending that through a NAT gateway costs per GB and needs an internet path you may not want.
+Private tasks still need to call S3, SQS, and Secrets Manager. Sending those calls through a [NAT gateway](card:internet-and-nat-gateways) costs per GB and needs an internet path you may not want for sensitive traffic. A VPC endpoint removes both problems: the traffic reaches the service over a private AWS path, so there is no NAT fee for it and no exposure to the internet.
 
 ## How it works
 
 | | Gateway endpoint | Interface endpoint |
 | --- | --- | --- |
-| Services | S3, DynamoDB | most AWS services, your own and partner services |
-| How | prefix-list route in route tables | ENI with a private IP and a security group |
-| Cost | no charge | per hour per AZ, plus per GB |
+| Services | S3, DynamoDB only | most AWS services, plus partner and your own services |
+| How it works | a route to a prefix list in your route tables | a network interface with a private IP, via PrivateLink |
+| Cost | no charge | per hour per AZ, plus per GB processed |
 | From on-premises or another Region | no | yes, over VPN, Direct Connect or peering |
 
-- An endpoint policy never replaces IAM or bucket policies; every one of them must allow the call.
-- Share your own service: put it behind a Network Load Balancer as an endpoint service; consumers create interface endpoints.
+1. For S3 or DynamoDB, you create a gateway endpoint and AWS adds a route for the service's prefix list to the route tables you choose.
+2. Traffic to that service now matches the endpoint route and goes over the AWS network, not the internet.
+3. For a service like SQS, you create an interface endpoint, and AWS places a network interface with a private IP in each subnet you pick.
+4. With private DNS enabled, the normal service hostname resolves to that private IP, so your application code does not change.
+
+## Example
+
+Private DNS is why the SDK needs no change. The same client call resolves to a private endpoint IP.
+
+```text
+Without endpoint:  secretsmanager.ap-south-1.amazonaws.com -> public IP -> NAT -> internet
+With interface endpoint + private DNS:
+                   secretsmanager.ap-south-1.amazonaws.com -> 10.0.1.47 (endpoint ENI in your subnet)
+```
+
+What to notice:
+
+- The hostname your code calls is identical in both cases; only the resolved IP changes.
+- The private IP `10.0.1.47` sits in your subnet, so the traffic never leaves the AWS network and needs no NAT or internet gateway.
+- If private DNS were off, you would have to call an endpoint-specific DNS name by hand; turning it on is what keeps the SDK call unchanged.
+
+## Rules and defaults
+
+- **Gateway endpoint reach:** works only from inside the VPC that holds it; it cannot be used from on-premises, a peered VPC, or a transit gateway (AWS PrivateLink).
+- **Interface endpoint security group:** you must attach one that allows inbound 443 from your resources, or the calls fail.
+- **Private DNS prerequisite:** the VPC must have DNS hostnames and DNS resolution enabled for private DNS to work.
+- **Endpoint policy:** optional; the default allows full access. It never replaces IAM or a bucket policy; all applicable policies must still allow the call (AWS PrivateLink).
+
+## Not to be confused with
+
+A gateway endpoint is a free route entry for S3 and DynamoDB and does not use PrivateLink. An interface endpoint is a paid network interface, built on PrivateLink, for most other services. Rule: S3 and DynamoDB from inside the VPC go through a gateway endpoint; everything else, or access from on-premises, goes through an interface endpoint.
 
 ## Interview Qs
 
-### Private ECS tasks read secrets from Secrets Manager. How, without internet?
-
-Create an interface endpoint for Secrets Manager in each AZ's private subnet, turn on private DNS, and let its security group allow 443 from the tasks. The SDK call stays the same.
-
 ### Gateway or interface endpoint for S3?
 
-Gateway: free, but only from inside that VPC. Interface: costs per hour and GB, but also works from on-premises and from other Regions.
+Use a gateway endpoint when the traffic comes from inside the VPC: it is free and needs only a route. Use an interface endpoint when you also need access from on-premises or another Region, accepting the per-hour and per-GB cost. Both keep traffic on the AWS network.
+
+### How do private tasks read secrets without any internet access?
+
+Create an interface endpoint for Secrets Manager in each AZ's private subnet, enable private DNS, and let the endpoint's security group allow 443 from the tasks. The SDK call stays the same, and no NAT gateway or internet gateway is required.
+
+### Does an endpoint policy replace IAM?
+
+No. An endpoint policy is an extra filter on the endpoint; the IAM identity policy and any resource policy must still allow the call. The default endpoint policy allows everything, so on its own it restricts nothing.

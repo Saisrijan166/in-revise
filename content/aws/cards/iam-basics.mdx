@@ -5,53 +5,90 @@ title: "IAM: Users, Groups, Roles and Policies"
 topic: security
 level: beginner
 heat: 3
-hook: "IAM decides who may call which AWS API: people federate, apps use roles, and each policy allows only what the task needs."
+hook: "IAM checks every call to an AWS API: which identity is calling, and does a policy allow this action on this resource?"
 points:
-  - { k: "Root user", v: "full power; lock it away with MFA, never for daily work", kind: minus }
-  - { k: "People", v: "sign in through IAM Identity Center or another identity provider", kind: plus }
-  - { k: "Workloads", v: "an IAM role gives temporary keys; no keys in code", kind: plus }
-  - { k: "User group", v: "a set of users only; roles and groups cannot join it" }
-  - { k: "Policy statement", v: "Effect + Action + Resource, with an optional Condition" }
+  - { k: "Identity", v: "who calls AWS: the root user, an IAM user, or an IAM role that a person or an app takes on" }
+  - { k: "Policy", v: "a JSON document of statements, each with Effect, Action, Resource and optional Condition" }
+  - { k: "Nothing by default", v: "a new IAM user or role can do nothing until a policy allows it", kind: default }
+  - { k: "Root user", v: "the account's first login has full power; protect it with MFA, keep it out of daily work", kind: minus }
+  - { k: "People and apps", v: "people sign in through IAM Identity Center; apps use an IAM role, never stored access keys", kind: plus }
+  - { k: "User group", v: "holds IAM users only; it cannot hold roles or other groups, or be named as a Principal" }
 trap:
-  wrong: "Create an IAM user and put its access keys in the app's config."
-  right: "Give the app an IAM role so AWS hands it temporary credentials. Keep IAM users for cases a role cannot cover."
-sayIt: "IAM controls access to AWS APIs. People sign in through federation, apps run with IAM roles that give temporary credentials, and every policy allows only the actions and resources the task needs."
-confusedWith: []
+  wrong: "Create an IAM user for the app and put its access keys in application.properties."
+  right: "Give the app an IAM role, so AWS hands it temporary keys that renew themselves. Keep IAM users for cases a role cannot cover."
+  why: "Access keys are what most tutorials show first, and they work at once on a laptop, so the same keys end up in config files, images and Git."
+sayIt: "IAM decides who may call which AWS API on which resource. People sign in through IAM Identity Center, apps run with IAM roles that give temporary credentials, and every policy allows only the actions and resources the task needs."
+cheat:
+  idea: "IAM checks every AWS API call: which identity is calling, and whether one of its policies allows this action on this resource."
+  flow: "Identity signs the call → IAM checks policies → Allow or Deny"
+  remember: "People sign in through Identity Center, apps use roles, and each policy allows only what the task needs."
+buildsOn: [shared-responsibility-model]
+scenarios:
+  - q: "A new developer joins. The team creates an IAM user with full admin rights and shares its access keys in chat. What is wrong, and what should they do instead?"
+    a: "The keys never expire and can leak from the chat, and full admin breaks least privilege. Give the developer sign-in through IAM Identity Center with access limited to their work; each session then gets temporary credentials."
+  - q: "The payment service's policy allows only s3:PutObject on payments-receipts/receipts/*. The service then calls GetObject on a receipt. What happens?"
+    a: "AccessDenied. No statement allows s3:GetObject, and anything not allowed is denied by default. Add GetObject only if the service really needs to read receipts."
+confusedWith: [iam-user-vs-role]
 tags: [iam, least-privilege, roles, policies]
-visual: table
+visual: flow
 sources:
   - title: "Security best practices in IAM (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html"
-    verifiedOn: "2026-10-20"
-  - title: "AWS account root user (IAM User Guide)"
+    verifiedOn: "2026-10-21"
+  - title: "AWS account root user: tasks that require root user credentials (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_root-user.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Root user best practices: do not create access keys for the root user (IAM User Guide)"
+    url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/root-user-best-practices.html"
+    verifiedOn: "2026-10-21"
+  - title: "IAM user groups (IAM User Guide)"
+    url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_groups.html"
+    verifiedOn: "2026-10-21"
   - title: "IAM roles: when to create an IAM user instead of a role (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles.html"
     verifiedOn: "2026-10-20"
   - title: "Policies and permissions in IAM: JSON policy structure (IAM User Guide)"
     url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies.html"
     verifiedOn: "2026-10-20"
+  - title: "How AWS evaluates requests: implicit deny by default (IAM User Guide)"
+    url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic_policy-eval-denyallow.html"
+    verifiedOn: "2026-10-21"
   - title: "AWS interview questions: IAM user, group and role (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/aws-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+IAM (Identity and Access Management) is the AWS service that decides who may call which AWS API, on which resource. Everything you do in AWS, from uploading a receipt to S3 to starting a server, is an API call, and IAM checks each one. An identity is who is calling: a person, or an app such as the payment service. A policy is a JSON document attached to an identity that lists what it may do.
+
 ## Why it exists
 
-Every AWS API call is signed and checked. IAM lets you state exactly who may do what, so one leaked key or buggy service cannot touch everything.
+Without IAM, everyone would share one all-powerful login: any person or app holding it could delete the database or read every receipt, and one leaked password would expose the whole account. IAM gives each person and each app its own identity with only the permissions its task needs. A leaked key or a buggy service can then damage only that small part.
 
 ## How it works
 
-<Compare id="iam-user-vs-role" />
+<Mermaid
+  alt="A person signs in through IAM Identity Center, and the payment service runs with an IAM role. Both send signed API calls. IAM first checks who signed the call, then checks the policies. If a policy allows the action on the resource, the call reaches S3; otherwise it is denied."
+  chart={`flowchart LR
+  P["Person, via Identity Center"] --> R[Signed API call]
+  A["Payment service, with its role"] --> R
+  R --> W{"1. Who signed it?"}
+  W --> Q{"2. Does a policy allow it?"}
+  Q -- yes --> S[(S3 bucket)]
+  Q -- no --> X[AccessDenied]`}
+/>
 
-- Each policy statement has `Effect`, `Action`, `Resource` and an optional `Condition`; ARNs name the resources.
-- Start from AWS managed policies, then tighten with customer managed ones; an inline policy belongs to one identity.
-- When several policies meet, see [policy evaluation](card:iam-policy-evaluation); for assuming roles, see [STS](card:sts-and-temporary-credentials).
+1. A new account has one root user: the email login that created it. It has full power, so you protect it with MFA and use it only for the few tasks that need it.
+2. You create identities for everything else. People sign in through IAM Identity Center or another identity provider and get temporary access. Apps get an IAM role. An IAM user, with a long-term password or access keys, is kept for cases where a role cannot work.
+3. You attach policies to those identities. Each statement has `Effect` (Allow or Deny), `Action` (such as `s3:PutObject`), `Resource` (an ARN, the unique name of a resource) and an optional `Condition`.
+4. When a call arrives, AWS checks its signature to learn who is calling, then evaluates the policies to decide Allow or Deny. The exact order is the next concept, [policy evaluation](card:iam-policy-evaluation).
+
+So the key is: identities say **who**, policies say **what**.
 
 ## Example
 
-Least privilege for the receipt worker: it may only write PDFs under one prefix.
+The payment service needs to save receipt PDFs in S3 and nothing else. This least-privilege policy goes on its role:
 
 ```json
 {
@@ -64,16 +101,37 @@ Least privilege for the receipt worker: it may only write PDFs under one prefix.
 }
 ```
 
+What to notice:
+
+- `"Version": "2012-10-17"` is the version of the policy language, not a date you update.
+- The only action is `s3:PutObject`, so the service can write receipts but cannot read, list or delete them.
+- The resource ends in `receipts/*`, so it covers only objects under that prefix of that bucket. Change it to `"*"` and the service could write into every bucket in the account.
+- The policy is attached to a role, not to a user with keys; how an app uses a role is in [temporary credentials](card:sts-and-temporary-credentials).
+
+## Rules and defaults
+
+- **Nothing by default:** a new IAM user or role has no permissions. A request that no policy allows is denied (the root user is the one exception).
+- **Root user:** some tasks need it, such as restoring permissions when the only admin locked themselves out, or closing a standalone account. Otherwise do not use it.
+- **Three kinds of policy:** AWS managed policies are written and updated by AWS; customer managed policies are yours and can be attached to many identities; an inline policy belongs to one identity and is deleted with it. Start with AWS managed policies, then tighten with your own.
+- **User groups:** a group gives the same policies to many users. It holds only users, cannot be nested, and cannot be named as a `Principal` in a policy.
+- **IAM is global:** users, roles and policies are not tied to one Region.
+
+## Not to be confused with
+
+An IAM user is a fixed identity for one person or app, with a password or access keys that last until someone changes them. An IAM role has no long-term credentials: a trusted user, service or app assumes it and receives keys that expire. Rule: a user carries permanent keys that can leak; a role lends keys that expire.
+
+IAM also differs from [security groups](card:security-groups-and-nacls): IAM decides AWS API calls, security groups decide which network packets reach a server.
+
 ## Interview Qs
 
 ### What is the difference between an IAM user, group and role?
 
-A user is one person or app with long-term credentials. A group is a set of users that share policies. A role has no long-term credentials: trusted users, services or federated people assume it and get temporary ones.
+A user is one identity with long-term credentials, a password or access keys. A group is a set of users that share the same policies; it is not an identity itself. A role has no long-term credentials: trusted users, services or federated people assume it and get temporary ones. AWS recommends roles for both apps and people.
 
 ### How do you apply least privilege in IAM?
 
-Allow only the actions and resources a task needs, narrow further with conditions, and review it. IAM Access Analyzer can generate a policy from the actions a role really used, as logged in CloudTrail.
+Allow only the actions and resources a task needs, and narrow further with conditions. Start from AWS managed policies, then replace them with your own tighter policies. IAM Access Analyzer can generate a policy from the actions a role really used, as recorded in CloudTrail, and remove unused permissions after a review.
 
-### Can you add a role to an IAM group?
+### Why should you not use the root user for daily work?
 
-No. A group holds only users, cannot be nested, and cannot be named as a Principal. Attach the policy to the role itself.
+The root user has complete access to the account, and an implicit deny does not stop it the way it stops users and roles. If its password or keys leak, everything is exposed. Protect it with MFA, do not create access keys for it, and use it only for the tasks that require it.

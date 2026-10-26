@@ -5,60 +5,85 @@ title: "Amazon CloudFront: CDN"
 topic: storage
 level: intermediate
 heat: 2
-hook: "CloudFront serves cached copies from an edge location near the user and goes to your origin only on a miss."
+hook: "CloudFront keeps copies of your files in edge locations near users, answers from that cache, and goes to your origin, such as S3 or the ALB, only on a miss."
 points:
-  - { k: "Distribution", v: "the CDN setup: origins, cache behaviours, domain, certificate" }
-  - { k: "Cache behaviour", v: "a path pattern sends requests to one origin; first match wins" }
-  - { k: "OAC", v: "only CloudFront can read the private bucket; replaces legacy OAI", kind: plus }
-  - { k: "Invalidation", v: "removes a path from all edge caches before its TTL ends" }
-  - { k: "ACM certificate", v: "for viewer HTTPS it must be in us-east-1", kind: default }
+  - { k: "Distribution", v: "one CloudFront setup: its domain name, origins, cache behaviours and TLS certificate" }
+  - { k: "Cache behaviour", v: "a path pattern such as /static/* that picks the origin and cache rules; the first match wins" }
+  - { k: "Default TTL", v: "86,400 s (1 day), used only when the origin sends no Cache-Control or Expires header", kind: default }
+  - { k: "OAC", v: "Origin Access Control lets only your distribution read a private bucket; it replaces the legacy OAI", kind: plus }
+  - { k: "Invalidation", v: "removes paths from every edge cache before their TTL ends; it takes time to spread", kind: minus }
+  - { k: "ACM certificate", v: "the certificate for your own domain on CloudFront must be in us-east-1", kind: default }
 trap:
-  wrong: "A CloudFront signed URL is the same as an S3 pre-signed URL."
-  right: "CloudFront checks a signed URL with your trusted key group; S3 checks a pre-signed URL with the IAM signer's permissions."
-sayIt: "CloudFront sits in front of S3 and the load balancer: users hit the nearest edge and only misses reach the origin. OAC keeps the bucket private; versioned file names avoid invalidations."
+  wrong: "After each deploy, invalidate /* so users get the new JavaScript."
+  right: "Put a version or hash in each file name, such as app.3f9a1c.js. Each deploy then uses new URLs, so nothing needs invalidating."
+  why: "Invalidation is the obvious button in the console and works in a quick test, so it becomes a deploy step, although it takes time to reach every edge and browsers may still hold the old file."
+sayIt: "CloudFront sits in front of S3 and the load balancer: users reach the nearest edge location, and only cache misses go to the origin. I keep the bucket private with OAC, use versioned file names instead of invalidations, and attach AWS WAF at the edge."
+cheat:
+  idea: "CloudFront is AWS's CDN: edge locations near users cache your files and go to the origin, such as S3 or the ALB, only on a miss."
+  flow: "User → nearest edge → hit: reply | miss: fetch origin, cache, reply"
+  remember: "Keep the bucket private with OAC; hash file names instead of invalidating each deploy."
+buildsOn: [regions-and-azs, elastic-load-balancing, s3]
+scenarios:
+  - q: "Behaviours, in this order: /static/* to S3 with no signing, then /static/premium/* requiring signed URLs. A user requests /static/premium/report.pdf with no signature. What happens?"
+    a: "CloudFront serves it. Behaviours are checked in order and the first match wins, so /static/* matches and no signature is needed. Move /static/premium/* above /static/* so the stricter behaviour is checked first."
+  - q: "The origin sends Cache-Control: max-age=60 for prices.json, and the behaviour keeps the default TTL settings. How long can an edge serve its copy?"
+    a: "About 60 seconds. When the origin sends max-age, CloudFront uses it, kept within the behaviour's minimum and maximum TTL. The one-day default TTL applies only to files that arrive with no Cache-Control or Expires header."
 confusedWith: []
 tags: [cloudfront, cdn, caching, edge]
 visual: flow
 sources:
-  - title: "How CloudFront delivers content"
+  - title: "How CloudFront delivers content (CloudFront Developer Guide)"
     url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/HowCloudFrontWorks.html"
     verifiedOn: "2026-10-20"
-  - title: "CloudFront OAC for S3 origins"
-    url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html"
-    verifiedOn: "2026-10-20"
-  - title: "CloudFront cache behavior settings"
+  - title: "Cache behavior settings: path pattern order, default, minimum and maximum TTL (CloudFront Developer Guide)"
     url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesCacheBehavior.html"
-    verifiedOn: "2026-10-20"
-  - title: "CloudFront TLS certificate requirements"
+    verifiedOn: "2026-10-21"
+  - title: "Understand the cache key (CloudFront Developer Guide)"
+    url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/understanding-the-cache-key.html"
+    verifiedOn: "2026-10-21"
+  - title: "Restrict access to an Amazon S3 origin with OAC (CloudFront Developer Guide)"
+    url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html"
+    verifiedOn: "2026-10-21"
+  - title: "Requirements for using SSL/TLS certificates with CloudFront (CloudFront Developer Guide)"
     url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html"
     verifiedOn: "2026-10-20"
-  - title: "CloudFront invalidation pricing"
+  - title: "Pay for file invalidation (CloudFront Developer Guide)"
     url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/PayingForInvalidation.html"
     verifiedOn: "2026-10-20"
-  - title: "AWS interview questions"
+  - title: "AWS interview questions (InterviewBit)"
     url: "https://www.interviewbit.com/aws-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Amazon CloudFront is AWS's content delivery network (CDN): a worldwide set of [edge locations](card:regions-and-azs) that keep cached copies of your content close to users. You create a distribution, which has its own domain name and lists your origins, the places that hold the real content, such as an S3 bucket or a load balancer. A user's request goes to the nearest edge location, which answers from its cache when it can.
+
 ## Why it exists
 
-Far-away users wait for every byte, and each request loads the origin. A nearby cache fixes both.
+The payment app's JavaScript and the receipts live in Mumbai (`ap-south-1`). A user in London waits for every byte to cross the world, and every request lands on the bucket or the load balancer. With CloudFront, the London edge keeps a copy after the first request, so later London users get it from nearby and the origin serves only the misses. The edge also ends HTTPS, and it is where [AWS WAF](card:edge-security) can filter requests.
 
 ## How it works
 
 <Mermaid
-  alt="A user reaches the nearest edge, which answers hits. On a miss, /static/* goes to a private S3 bucket via OAC and /api/* to the payment API load balancer."
+  alt="A user reaches the nearest edge location, which answers cache hits. On a miss, paths under /static go to a private S3 bucket through OAC, and paths under /api go to the load balancer in front of the payment API."
   chart={`flowchart LR
-  U[User] --> E[Edge location]
+  U[User] --> E[Nearest edge location]
   E -- hit --> U
-  E -- "miss: /static/*" --> S3[(S3 bucket, via OAC)]
+  E -- "miss: /static/*" --> S3[(Private S3 bucket, via OAC)]
   E -- "/api/*" --> ALB[Load balancer]
   ALB --> API[Payment API]`}
 />
 
-- [AWS WAF](card:edge-security) attaches to the distribution to filter requests at the edge.
+1. Route 53 points `pay.example.com` at the distribution, so the user's request reaches the nearest edge location.
+2. The edge picks a cache behaviour: it compares the path with each behaviour's path pattern, in order, and the first match wins. The default behaviour, `*`, is checked last.
+3. The edge looks up the cache key, which by default is the distribution's domain name plus the URL path. On a hit, it answers at once.
+4. On a miss, it fetches from that behaviour's origin: `/static/*` from the private S3 bucket, signed with OAC, and `/api/*` from the load balancer.
+5. It caches the response for its TTL: the origin's `Cache-Control: max-age` if there is one, otherwise the default TTL. Then it answers the user.
 
 ## Example
+
+To keep the static bucket private, its bucket policy allows reads only by the CloudFront service, and only on behalf of one distribution:
 
 ```json
 {
@@ -72,24 +97,35 @@ Far-away users wait for every byte, and each request loads the origin. A nearby 
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Default TTL (no Cache-Control from origin) | 86,400 s (1 day) | CloudFront, as of 20-10-2026 |
-| Maximum TTL | 31,536,000 s (1 year) | CloudFront |
-| Free invalidation paths | 1,000 per month per account | CloudFront pricing |
+- The `Principal` is the CloudFront service, not a user. OAC makes CloudFront sign each request it sends to the bucket.
+- The `AWS:SourceArn` condition allows the read only when CloudFront acts for this one distribution. Without it, the statement would trust CloudFront acting for any distribution, not only yours.
+- Only `s3:GetObject` is allowed, so CloudFront can read files but cannot list or change the bucket.
+- Users never reach the bucket directly: Block Public Access stays on, and the S3 URL returns Access Denied.
+
+## Rules and defaults
+
+- **TTL settings:** the default TTL of 86,400 s (1 day) applies only when the origin sends no `Cache-Control` or `Expires` header. The maximum TTL, 31,536,000 s (1 year) by default, caps the origin's value. A minimum TTL above 0 keeps files cached even if the origin says `no-cache`.
+- **What is cached:** CloudFront always caches responses to GET and HEAD, optionally OPTIONS, and never responses to POST, PUT or DELETE.
+- **Certificate Region:** an ACM certificate for your own domain must be created in `us-east-1` (N. Virginia), wherever your origin runs.
+- **Invalidation cost:** the first 1,000 invalidation paths each month are free per account, and a wildcard path such as `/static/*` counts as one path (at the time of writing).
+- **Behaviour order:** the first matching behaviour decides everything, including whether signed URLs are required.
+
+## Not to be confused with
+
+An S3 pre-signed URL is signed with the AWS credentials of an IAM role or user and goes straight to the bucket. A CloudFront signed URL is signed with a private key whose public key sits in a trusted key group on the distribution, and it goes through the edge cache. Rule: S3 pre-signed URL = straight to the bucket with IAM rights; CloudFront signed URL = through the CDN with your own key pair.
 
 ## Interview Qs
 
 ### How do you serve private S3 files through CloudFront?
 
-Keep the bucket private, add an OAC to the distribution and allow only that distribution in the bucket policy. For per-user access, add signed URLs or signed cookies.
-
-### You deployed new JavaScript but users still get the old file. What do you do?
-
-Invalidate the path, such as /static/*. Better: put a version or hash in the file name, so each deploy gets a new URL and needs no invalidation.
+Keep the bucket private with Block Public Access on. Add an Origin Access Control to the distribution, and write a bucket policy that allows `s3:GetObject` only for that distribution. If each user may see only their own files, also require signed URLs or signed cookies on that cache behaviour.
 
 ### Signed URL or signed cookie?
 
-A signed URL protects one file and suits clients without cookies. A signed cookie covers many files, like a video's segments, with unchanged URLs.
+A signed URL protects one file and suits clients that cannot use cookies, such as a download link in an email. A signed cookie covers many files at once, such as all segments of a video, and keeps the file URLs unchanged.
+
+### Which TTL does CloudFront use for a file?
+
+If the origin sends `Cache-Control: max-age` or `s-maxage`, or an `Expires` header, CloudFront uses that value, kept between the behaviour's minimum and maximum TTL. If the origin sends none, it uses the default TTL, one day unless you change it.

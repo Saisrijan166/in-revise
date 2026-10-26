@@ -5,72 +5,132 @@ title: "Amazon SNS: Pub/Sub and Fan-Out"
 topic: integration
 level: beginner
 heat: 3
-hook: "Publish once to a topic; SNS pushes a copy to every subscription: queues, Lambda functions, HTTPS endpoints, email or SMS."
+hook: "Publish a message once to an SNS topic, and SNS pushes a copy to every subscriber: SQS queues, Lambda functions, HTTPS endpoints, email or SMS."
 points:
-  - { k: "Push model", v: "SNS delivers to subscribers; nobody polls a topic" }
-  - { k: "Fan-out", v: "one PaymentSucceeded message, one copy per subscription", kind: plus }
-  - { k: "Filter policy", v: "a subscription gets only messages whose attributes or body match" }
-  - { k: "Failed delivery", v: "retried, then dropped unless the subscription has a DLQ", kind: minus }
-  - { k: "FIFO topic", v: "strict order and deduplication, for SQS queue subscribers" }
+  - { k: "Push, not pull", v: "SNS delivers each copy to the subscriber; nobody polls a topic" }
+  - { k: "Fan-out", v: "one PaymentSucceeded message becomes one copy per subscription", kind: plus }
+  - { k: "Filter policy", v: "a subscription with a filter policy gets only the messages whose attributes match it" }
+  - { k: "Stores nothing", v: "a standard topic keeps no messages; a subscriber that is down relies on retries or its own queue", kind: minus }
+  - { k: "Message size (SNS)", v: "256 KiB by default; up to 1 MiB if you raise the topic's MaximumMessageSize", kind: default }
 trap:
-  wrong: "SNS and SQS do the same job, so use either one."
-  right: "SNS pushes copies to subscribers; SQS stores jobs until workers pull them. Combine them: SNS to several SQS queues."
-sayIt: "SNS is push-based pub/sub: publish once and every subscription gets a copy. For durable fan-out I subscribe one SQS queue per service, so each service reads at its own pace and gets retries."
+  wrong: "SNS and SQS do the same job, so either one will do."
+  right: "SNS pushes a copy to every subscriber and keeps nothing; SQS holds jobs until one worker pulls them. Combine them: SNS fans out into one SQS queue per service."
+  why: "Both are AWS messaging services with similar names, and both take a message from a producer, so on a slide they look interchangeable."
+sayIt: "SNS is push-based publish/subscribe: publish once and every subscription gets a copy. For durable fan-out I subscribe one SQS queue per service, so each service reads at its own pace, survives downtime and gets retries and a dead-letter queue."
+cheat:
+  idea: "SNS is managed publish/subscribe: you publish one message to a topic, and SNS pushes a copy to every subscription, such as SQS queues, Lambda functions or email."
+  remember: "A standard topic stores nothing; put an SQS queue behind each service so its messages wait while it is down."
+buildsOn: [sqs]
+scenarios:
+  - q: "The ledger service is down for 2 hours. It is subscribed to the PaymentSucceeded topic through its own SQS queue. What happens to the payment messages?"
+    a: "SNS delivers them to the ledger queue as usual, so delivery succeeds. They wait in the queue, 4 days by default, and the ledger reads them when it is back. The receipts queue is not affected at all."
+  - q: "A new loyalty-points service must react to every payment. What changes in the payment API?"
+    a: "Nothing. You create a queue for loyalty points and subscribe it to the topic. The publisher does not know its subscribers, so adding one needs no code change or redeploy of the payment API."
 confusedWith: [sqs-vs-sns-vs-eventbridge-vs-kinesis]
 tags: [sns, pub-sub, fan-out]
 visual: flow
 sources:
-  - title: "Fanout to Amazon SQS queues (SNS Developer Guide)"
+  - title: "Fanout Amazon SNS notifications to Amazon SQS queues (SNS Developer Guide)"
     url: "https://docs.aws.amazon.com/sns/latest/dg/sns-sqs-as-subscriber.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
+  - title: "Subscribing an Amazon SQS queue to an Amazon SNS topic: queue policy (SNS Developer Guide)"
+    url: "https://docs.aws.amazon.com/sns/latest/dg/subscribe-sqs-queue-to-sns-topic.html"
+    verifiedOn: "2026-10-21"
   - title: "Amazon SNS event destinations (SNS Developer Guide)"
     url: "https://docs.aws.amazon.com/sns/latest/dg/sns-event-destinations.html"
-    verifiedOn: "2026-10-20"
-  - title: "Amazon SNS message filtering (SNS Developer Guide)"
-    url: "https://docs.aws.amazon.com/sns/latest/dg/sns-message-filtering.html"
-    verifiedOn: "2026-10-20"
-  - title: "Amazon SNS dead-letter queues (SNS Developer Guide)"
+    verifiedOn: "2026-10-21"
+  - title: "Amazon SNS message filtering and filter policy scope (SNS Developer Guide)"
+    url: "https://docs.aws.amazon.com/sns/latest/dg/sns-message-filtering-scope.html"
+    verifiedOn: "2026-10-21"
+  - title: "Amazon SNS raw message delivery (SNS Developer Guide)"
+    url: "https://docs.aws.amazon.com/sns/latest/dg/sns-large-payload-raw-message-delivery.html"
+    verifiedOn: "2026-10-21"
+  - title: "Amazon SNS dead-letter queues and delivery retries (SNS Developer Guide)"
     url: "https://docs.aws.amazon.com/sns/latest/dg/sns-dead-letter-queues.html"
-    verifiedOn: "2026-10-20"
-  - title: "Amazon SNS quotas (AWS General Reference)"
+    verifiedOn: "2026-10-21"
+  - title: "Amazon SNS endpoints and quotas (AWS General Reference)"
     url: "https://docs.aws.amazon.com/general/latest/gr/sns.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-21"
   - title: "AWS interview questions, Q29 (GeeksforGeeks)"
     url: "https://www.geeksforgeeks.org/devops/aws-interview-questions/"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+Amazon SNS (Simple Notification Service) is a managed publish/subscribe service. A publisher sends one message to a topic, which is a named channel. Each subscription on the topic names one endpoint, such as an [SQS queue](card:sqs), a Lambda function, an HTTPS URL, an email address or a phone number, and SNS pushes its own copy to each one. Where SQS holds a job for one worker, SNS tells everyone at once.
+
 ## Why it exists
 
-Receipts, the ledger and customer alerts all need to know a ₹500 payment succeeded. Without SNS the payment API would call each one and fail when any one is down.
+When a ₹500 payment succeeds, the receipt worker, the ledger and the customer alert all need to know. If the payment API called each one, it would need code for every consumer, and one slow or broken consumer would delay or fail the payment. With SNS the API publishes once and does not know who listens. A new consumer is one new subscription, and the payment API does not change.
 
 ## How it works
 
 <Mermaid
-  alt="The payment API publishes PaymentSucceeded once to an SNS topic. The topic pushes one copy to the receipts SQS queue, read by the receipt worker; one copy to the ledger SQS queue, read by the ledger service; and one copy to a notification Lambda function."
+  alt="The payment API publishes PaymentSucceeded once to an SNS topic. The topic pushes one copy to the receipts SQS queue, read by the receipt worker; one copy to the ledger SQS queue, read by the ledger service; and one copy, for UPI payments only, to the fraud-check queue."
   chart={`flowchart LR
   API[Payment API] --> T((PaymentSucceeded topic))
   T --> Q1[[Receipts queue]] --> W[Receipt worker]
   T --> Q2[[Ledger queue]] --> L[Ledger service]
-  T --> F[Notify Lambda]`}
+  T -- "filter: method = UPI" --> Q3[[Fraud-check queue]]`}
 />
 
-- Each queue keeps its own copy, so a slow ledger never delays receipts.
-- A new consumer is one new subscription; the payment API does not change.
+1. You create the topic and subscribe each endpoint. A queue also needs an access policy that lets this topic call sqs:SendMessage on it.
+2. The payment API calls Publish with the message body and optional message attributes, such as method = UPI.
+3. SNS checks each subscription's filter policy. A subscription without one gets every message.
+4. SNS pushes a copy to each matching subscription. A copy sent to a queue waits there until that service reads it.
+5. If a delivery fails with a server-side error, SNS retries it. If retries run out, or the error is client-side (for example, the endpoint was deleted), the copy is dropped unless the subscription has a dead-letter queue.
 
-## Defaults
+## Example
 
-| What | Default | Where |
-|---|---|---|
-| Max message size | 256 KiB; up to 1 MiB with the topic's MaximumMessageSize | SNS quotas, 20-10-2026 |
-| Retries to SQS or Lambda | Up to 100,015 times over 23 days | SNS DLQ docs, 20-10-2026 |
+The payment API publishes once, with the payment method as a message attribute:
+
+```java
+sns.publish(b -> b
+    .topicArn("arn:aws:sns:ap-south-1:111122223333:payment-succeeded")
+    .message("{\"paymentId\":\"pay_123\",\"amount\":500}")
+    .messageAttributes(Map.of("method", MessageAttributeValue.builder()
+        .dataType("String").stringValue("UPI").build())));
+```
+
+The fraud-check queue's subscription has this filter policy:
+
+```json
+{ "method": ["UPI"] }
+```
+
+What to notice:
+
+- The publisher has no list of consumers; receipts, ledger and fraud check are only subscriptions on the topic.
+- The filter policy reads message attributes by default. Set the subscription's FilterPolicyScope to MessageBody to filter on the JSON body instead.
+- The receipts and ledger subscriptions have no filter policy, so they get every payment. The fraud check gets only UPI payments.
+- By default a queue receives a JSON envelope (Type, MessageId, TopicArn, Message and more), and the worker reads the payment from Message. Turn on RawMessageDelivery to get the body exactly as published.
+
+## Rules and defaults
+
+- **Retries (at the time of writing):** to SQS and Lambda endpoints, up to 100,015 times over 23 days; to email, SMS and mobile push, 50 times over 6 hours; HTTP/S endpoints take a retry policy you set.
+- **Subscription dead-letter queue:** an SQS queue set on a subscription, not on the topic, in the same account and Region.
+- **Larger messages:** above 1 MiB, the SNS Extended Client Library stores the payload in S3, up to 2 GB.
+- **FIFO topics:** keep order per message group, remove duplicates, and can archive and replay messages. SQS queues can subscribe to them; most other destinations support only standard topics.
+- **Limits:** a standard topic allows up to 12,500,000 subscriptions and 200 filter policies.
+
+## Not to be confused with
+
+- **SQS:** stores a job until one worker pulls it and deletes it.
+- **SNS:** pushes a copy of each message to every subscription and keeps nothing on a standard topic.
+
+Rule: SNS tells everyone now; SQS holds work for one worker. Used together, SNS to one queue per service is the fan-out pattern. [EventBridge](card:eventbridge), next, also pushes to many targets but routes by event content.
 
 ## Interview Qs
 
 ### SQS or SNS: when do you use each?
 
-SQS when workers must each take a job and finish it at their own pace ([pull](card:sqs)). SNS when many systems must react to one event (push, fan-out). Often both: SNS fans out to SQS queues.
+SQS when a job must be done once, by any worker, at the worker's pace: it is pull-based and keeps the message until deleted. SNS when many systems must react to the same event: it pushes a copy to each subscriber. Often you use both, with SNS fanning out to one SQS queue per consumer.
 
-### Why put SQS queues behind SNS instead of subscribing services directly?
+### Why put an SQS queue behind SNS instead of subscribing a service's HTTPS endpoint?
 
-The queue holds messages while a service is down or slow, adds retries and a DLQ, and lets each service scale on its own.
+The queue holds messages while the service is down or slow, so nothing depends on SNS retries. Each service reads at its own pace, scales on its own, and gets the queue's visibility timeout, retries and dead-letter queue.
+
+### How does a subscriber get only some messages?
+
+Give its subscription a filter policy: a small JSON object of allowed values, matched against message attributes by default or against the body. SNS sends the message only if every condition matches. Without a policy, the subscriber receives everything.

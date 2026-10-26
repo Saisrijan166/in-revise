@@ -5,68 +5,110 @@ title: "Amazon Route 53: DNS and Routing"
 topic: networking
 level: intermediate
 heat: 2
-hook: "Route 53 is AWS's DNS: hosted zones hold your records, and routing policies with health checks pick each answer."
+hook: "Route 53 is AWS's managed DNS. A hosted zone holds your records, and a routing policy with health checks decides which answer each query gets."
 points:
-  - { k: "Hosted zone", v: "public for internet names; private for names inside your VPCs" }
-  - { k: "Alias record", v: "points a name, even the zone apex, at an ALB, CloudFront or S3", kind: plus }
-  - { k: "Alias queries", v: "free for AWS targets; CNAME queries are charged", kind: plus }
-  - { k: "Health checks", v: "drop unhealthy endpoints from answers and drive failover" }
-  - { k: "TTL", v: "resolvers cache an answer that long; lower it before a change" }
+  - { k: "Hosted zone", v: "a container for a domain's records; public for internet names, private for names inside your VPCs" }
+  - { k: "Alias record", v: "points a name, even the bare domain, at an ALB, CloudFront or S3, and free for AWS targets", kind: plus }
+  - { k: "CNAME limit", v: "a CNAME cannot sit at the zone apex (the bare domain) and Route 53 charges for CNAME queries", kind: minus }
+  - { k: "Health checks", v: "drop an unhealthy endpoint from the answers, which is what drives failover" }
+  - { k: "TTL", v: "how long resolvers cache an answer; lower it before a planned change so the change spreads fast" }
+  - { k: "Routing policies", v: "eight choices: simple, weighted, latency, failover, geolocation, geoproximity, IP-based, multivalue" }
 trap:
   wrong: "Point example.com at the load balancer with a CNAME record."
-  right: "A CNAME cannot sit at the zone apex. Use an alias A record; it also follows the load balancer's changing IPs."
-sayIt: "Route 53 is managed DNS. I point the domain at the ALB with an alias record, and pick a routing policy: weighted for canaries, latency for many Regions, failover with health checks."
+  right: "A CNAME is not allowed at the zone apex. Use an alias A record, which also follows the load balancer's changing IPs."
+  why: "CNAME is the usual way to point one name at another, so people reach for it at the apex too, where DNS rules forbid it."
+sayIt: "Route 53 is managed DNS. I point the domain at the ALB with an alias record, and choose a routing policy: weighted for canary splits, latency for many Regions, or failover with health checks for active-passive."
+cheat:
+  idea: "Route 53 is AWS's managed DNS. A hosted zone holds a domain's records, and a routing policy plus health checks decides which answer each query gets."
+  remember: "Use an alias record (not a CNAME) at the bare domain to point at an ALB; it is free and tracks the ALB's IP changes."
+buildsOn: [regions-and-azs]
+scenarios:
+  - q: "You changed a record to a new IP, but some users still hit the old server an hour later. Why, and how do you avoid it next time?"
+    a: "Resolvers cache the old answer until its TTL expires. Before a planned change, lower the record's TTL ahead of time (for example to 300 seconds), make the change, then raise the TTL again once it is confirmed working."
+  - q: "You run the app in Mumbai and a standby in Singapore. How do you send users to Mumbai but fail over automatically if it goes down?"
+    a: "Use a failover routing policy: a primary record for the Mumbai ALB with a health check, and a secondary for the Singapore ALB. While the health check passes, Route 53 answers with Mumbai; when it fails, it answers with Singapore."
 tags: [route-53, dns, failover]
 visual: flow
 sources:
-  - title: "What is Amazon Route 53? (Route 53 Developer Guide)"
+  - title: "What is Amazon Route 53? (Amazon Route 53 Developer Guide)"
     url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html"
-    verifiedOn: "2026-10-20"
-  - title: "Working with hosted zones (Route 53 Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Working with hosted zones: public and private (Amazon Route 53 Developer Guide)"
     url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/hosted-zones-working-with.html"
-    verifiedOn: "2026-10-20"
-  - title: "Choosing between alias and non-alias records (Route 53 Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Choosing between alias and non-alias records (Amazon Route 53 Developer Guide)"
     url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resource-record-sets-choosing-alias-non-alias.html"
-    verifiedOn: "2026-10-20"
-  - title: "Choosing a routing policy (Route 53 Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Choosing a routing policy (Amazon Route 53 Developer Guide)"
     url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy.html"
-    verifiedOn: "2026-10-20"
-  - title: "Record values: TTL (Route 53 Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "TTL values for records (Amazon Route 53 Developer Guide)"
     url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resource-record-sets-values-basic.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
 ---
+
+## What it is
+
+Amazon Route 53 is AWS's managed DNS service: it turns a name a user types, like `pay.example.com`, into the address their browser should connect to. Your records live in a hosted zone, which is a container named after your domain. A record can use one of eight routing policies, which decide how Route 53 picks an answer when a resource has more than one possible address or location. The name comes from port 53, the standard DNS port.
 
 ## Why it exists
 
-Users type a name, not an IP, and load balancer IPs change. DNS must also steer users away from a failed endpoint or to a nearer Region.
+Users type a name, not an IP address, and the IP of a load balancer can change over time. DNS has to turn the name into a current address, but plain DNS only returns a fixed answer. Route 53 adds routing policies and health checks on top, so it can send users to the nearest [Region](card:regions-and-azs), split traffic for a canary release, or steer everyone away from an endpoint that has failed, none of which basic DNS can do.
 
 ## How it works
 
 <Mermaid
-  alt="A browser asks a DNS resolver, which caches answers for the TTL. The resolver asks the Route 53 hosted zone for pay.example.com. While the primary ALB passes its health check, Route 53 answers with it; if it fails, Route 53 answers with the standby ALB in another Region."
+  alt="A browser asks a DNS resolver, which caches answers for the TTL. The resolver asks the Route 53 hosted zone for pay.example.com. A health check watches the primary ALB. While it is healthy, Route 53 answers with the primary ALB in Mumbai; when it fails, Route 53 answers with the standby ALB in Singapore."
   chart={`flowchart LR
   U[Browser] --> R[DNS resolver, caches for TTL]
-  R --> Z[Route 53: pay.example.com]
-  HC[Health check] --> A
+  R --> Z[Route 53 hosted zone: pay.example.com]
+  HC[Health check] --> Z
   Z -- "primary healthy" --> A[ALB, Mumbai]
-  Z -. "primary unhealthy" .-> B[ALB, standby Region]`}
+  Z -. "primary unhealthy" .-> B[ALB, Singapore standby]`}
 />
 
-- Each record has one of [eight routing policies](card:route53-routing-policy).
-- Route 53 also registers domains. Cross-Region failover design: [disaster recovery](card:disaster-recovery).
+1. The browser asks a DNS resolver for `pay.example.com`; the resolver may still hold a cached answer from a previous query, for as long as the TTL.
+2. If the cache has expired, the resolver asks the Route 53 hosted zone that owns the domain.
+3. Route 53 looks at the record's routing policy and any health check, and chooses an answer, for example the healthy primary ALB.
+4. If a later health check marks the primary unhealthy, Route 53 starts answering with the standby instead.
 
-## Defaults
+So the health check is what turns a plain name into automatic failover.
 
-| What | Default | Where |
-| --- | --- | --- |
-| Alias record TTL | cannot be set; uses the target's TTL | Route 53, 20-10-2026 |
+## Example
+
+A pair of failover alias records points one name at two load balancers, with the health check deciding.
+
+```text
+Name            Type   Alias target          Failover   Health check
+pay.example.com A      alb-mumbai (ALB)      PRIMARY     hc-mumbai
+pay.example.com A      alb-singapore (ALB)   SECONDARY   (none needed)
+```
+
+What to notice:
+
+- Both records are type `A` alias records, not CNAMEs, so they can sit at the apex-style name and follow each ALB's changing IPs.
+- The primary record carries a health check; while it passes, Route 53 answers only with Mumbai.
+- When the health check fails, Route 53 switches to the secondary record, so users move to Singapore without any manual edit.
+- Alias records to AWS targets are not charged per query, unlike CNAME records.
+
+## Rules and defaults
+
+- **Alias at the apex:** an alias record can sit at the bare domain (zone apex); a CNAME cannot (Amazon Route 53).
+- **Alias TTL:** you cannot set it; Route 53 uses the target's TTL (Amazon Route 53).
+- **Query charges:** alias queries to AWS resources are free; CNAME queries are billed.
+- **Hosted zone types:** a public hosted zone answers internet queries; a private hosted zone answers only inside the VPCs you associate with it.
+- **Changing a live record:** lower the TTL first (for example to 300 s), apply the change, then raise it again, so resolvers pick up the change quickly.
 
 ## Interview Qs
 
-### Which routing policies does Route 53 support?
+### Why an alias record instead of a CNAME for the load balancer?
 
-Simple, weighted, latency, failover, geolocation, geoproximity, IP-based and multivalue answer. Weighted suits canary splits, latency suits many Regions, failover suits active-passive.
+A CNAME cannot be used at the zone apex, so `example.com` itself cannot be a CNAME, and CNAME queries are charged. An alias record works at the apex, is free for AWS targets, and automatically tracks the load balancer's changing IP addresses.
 
-### You changed a record, but some users still reach the old IP. Why?
+### Which routing policy would you pick for a canary release?
 
-Resolvers keep the old answer until its TTL runs out. Before changing a live record, lower its TTL, for example to 300 seconds, and raise it again once the change works.
+Weighted routing. You give the old and new stacks weights, for example 90 and 10, so Route 53 sends about 10 percent of traffic to the new version. You then raise the new weight gradually as it proves healthy.
+
+### A record change has not reached some users. What is happening?
+
+Resolvers cache the previous answer until its TTL expires, so they keep returning the old value. Lowering the TTL before the change, then raising it afterwards, limits how long stale answers can persist.

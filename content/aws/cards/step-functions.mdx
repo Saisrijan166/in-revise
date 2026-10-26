@@ -5,46 +5,61 @@ title: "AWS Step Functions: Workflows"
 topic: integration
 level: intermediate
 heat: 1
-hook: "A managed state machine in JSON that runs steps in order, with retries, branches and rollback, and records every run."
+hook: "Step Functions runs a multi-step workflow as a state machine written in JSON, with built-in retries, branches and rollback, and it records every step of every run."
 points:
-  - { k: "Amazon States Language", v: "the workflow is a JSON document of named states" }
-  - { k: "Retry and Catch", v: "on Task, Parallel and Map states; no retry code in your app", kind: plus }
-  - { k: "Retry defaults", v: "first wait 1 s, up to 3 retries, interval doubles each time", kind: default }
-  - { k: "Direct calls", v: "Lambda, SQS, SNS, DynamoDB, ECS; 200+ services via SDK integrations" }
-  - { k: "Payload", v: "256 KiB max state input or output: pass an S3 key for more", kind: minus }
+  - { k: "Amazon States Language", v: "the workflow is a JSON document of named states, each with a type and a next state" }
+  - { k: "Retry and Catch", v: "a Task retries on error and catches failures to another state, so no retry code in your app", kind: plus }
+  - { k: "Retry defaults", v: "wait 1 second, 3 attempts, and the interval doubles each time unless you change them", kind: default }
+  - { k: "Standard vs Express", v: "Standard: up to 1 year, exactly-once; Express: up to 5 minutes, higher volume" }
+  - { k: "Payload limit", v: "256 KiB per state input or output; for more, pass an S3 key", kind: minus }
 trap:
-  wrong: "Express is just a faster Standard workflow, so use it for payments."
-  right: "Express runs up to 5 minutes and async runs are at-least-once. Charging a card is not idempotent: use Standard, exactly-once for up to 1 year."
-sayIt: "Step Functions runs a workflow as a state machine in JSON. Each Task can retry and catch errors, so a payment saga can run a refund when a later step fails. Standard runs up to a year, exactly once."
+  wrong: "Express is just a faster Standard workflow, use it for payments."
+  right: "Express runs up to 5 minutes and async is at-least-once, so a step can repeat. Charging a card is not idempotent; use Standard, exactly-once for up to a year."
+  why: "Express is cheaper and marketed for high volume, so it reads like a strict upgrade until you hit its 5-minute limit and at-least-once runs."
+sayIt: "Step Functions runs a workflow as a JSON state machine. Each Task can retry and catch errors, so a payment saga can refund when a later step fails, and every run is recorded. Standard is exactly-once up to a year; Express is for high-volume idempotent work."
+cheat:
+  idea: "Step Functions runs a multi-step workflow as a JSON state machine. Each step can retry, branch and catch errors, and every run is recorded."
+  flow: "Task → Retry on error → Catch failures → compensate"
+  remember: "Standard = up to 1 year, exactly-once, for payments; Express = up to 5 min, at-least-once async, for high-volume idempotent work."
+buildsOn: [lambda, sqs]
+scenarios:
+  - q: "A payment flow charges the card, saves the receipt, then notifies the customer. Saving the receipt fails after the charge went through. How do you make this self-correcting without hand-written retry code?"
+    a: "Model a saga. The SaveReceipt Task retries a few times; if it still fails, its Catch jumps to a RefundPayment step that undoes the charge, then the run ends in Fail. Step Functions drives the retries and the rollback, so your Lambdas stay simple, and the run history shows exactly what happened."
+  - q: "Would you run the payment workflow as Express to save money?"
+    a: "No. Asynchronous Express is at-least-once, so a non-idempotent step like charging a card could run twice, and Express stops at 5 minutes. Use Standard: exactly-once and up to a year. Express suits high-volume, idempotent event processing, such as transforming records into DynamoDB."
 confusedWith: []
 tags: [step-functions, workflow, saga]
 visual: flow
 sources:
-  - title: "Choosing workflow type in Step Functions (Step Functions Developer Guide)"
+  - title: "Choosing workflow type in Step Functions: Standard vs Express (Step Functions Developer Guide)"
     url: "https://docs.aws.amazon.com/step-functions/latest/dg/choosing-workflow-type.html"
-    verifiedOn: "2026-10-20"
-  - title: "Handling errors in Step Functions workflows (Step Functions Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Handling errors: Retry defaults, Catch, States.ALL (Step Functions Developer Guide)"
     url: "https://docs.aws.amazon.com/step-functions/latest/dg/concepts-error-handling.html"
-    verifiedOn: "2026-10-20"
-  - title: "Integrating services with Step Functions (Step Functions Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Integrating services: optimized, AWS SDK, patterns (Step Functions Developer Guide)"
     url: "https://docs.aws.amazon.com/step-functions/latest/dg/integrate-services.html"
-    verifiedOn: "2026-10-20"
-  - title: "Step Functions service quotas (Step Functions Developer Guide)"
+    verifiedOn: "2026-10-22"
+  - title: "Step Functions service quotas: 256 KiB payload, 90-day history, 1 year (Step Functions Developer Guide)"
     url: "https://docs.aws.amazon.com/step-functions/latest/dg/limits-overview.html"
-    verifiedOn: "2026-10-20"
+    verifiedOn: "2026-10-22"
   - title: "Saga orchestration pattern (AWS Prescriptive Guidance)"
     url: "https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/saga-orchestration.html"
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+AWS Step Functions runs a workflow as a state machine: a list of named steps, written in JSON, where each step says what to do and which step comes next. A step, called a state, can run a task (a [Lambda](card:lambda) function or an AWS API call), choose a branch, run steps in parallel, or wait. Step Functions moves the data from one step to the next, retries steps that fail, and records every step of every run so you can see exactly what happened.
+
 ## Why it exists
 
-Charge ₹500, save the receipt, notify the customer: if step two fails after step one, someone must refund. Hand-written retry and rollback code across services is fragile.
+A payment flow is several steps: charge the card, save the receipt, notify the customer. If step two fails after step one, someone must refund the charge. Writing that retry and rollback logic by hand, spread across services, is fragile and hard to see into: when a payment gets stuck, nobody knows which step failed. Step Functions makes the steps, their retries and their rollback a single JSON definition, and keeps a full history of each run, so the flow is both reliable and visible.
 
 ## How it works
 
 <Mermaid
-  alt="A payment state machine. Charge payment, then save the receipt to S3, then notify the customer, then succeed. If saving the receipt still fails after retries, a Catch sends the run to Refund payment, which ends in a Fail state."
+  alt="A payment state machine. Charge payment, then save the receipt to S3, then notify the customer, then succeed. If saving the receipt still fails after its retries, a Catch sends the run to Refund payment, which ends in a Fail state."
   chart={`flowchart LR
   S([Start]) --> C[Charge payment]
   C --> R[Save receipt to S3]
@@ -52,10 +67,17 @@ Charge ₹500, save the receipt, notify the customer: if step two fails after st
   R -. "Catch after retries" .-> RF[Refund payment] --> F([Fail])`}
 />
 
-- Each box is a Task state; Choice, Parallel, Map and Wait states shape the flow.
-- A Standard workflow keeps each run's history for 90 days, showing the exact path taken.
+1. You write the workflow in Amazon States Language: each state names its type, what it does, and the next state.
+2. You start an execution with some input JSON. Step Functions enters the first state and passes the input to it.
+3. A Task state does its work. If it throws an error listed in its Retry, Step Functions waits and tries again, up to the attempts you set.
+4. If the retries are used up, a Catch sends the run to another state instead of failing, for example a RefundPayment step that undoes the charge.
+5. Step Functions carries each state's output into the next state, and records the whole path, until the run reaches a Succeed or Fail state.
+
+So retries and rollback are configuration in the state machine, not code in your services.
 
 ## Example
+
+The SaveReceipt state retries twice, then on any remaining failure catches to a refund:
 
 ```json
 "SaveReceipt": {
@@ -68,12 +90,32 @@ Charge ₹500, save the receipt, notify the customer: if step two fails after st
 }
 ```
 
+What to notice:
+
+- `Retry` on `States.TaskFailed` retries any Lambda error twice; with no Retry, the first error would fail the whole execution.
+- `Catch` on `States.ALL` runs only after the retries are used up, sending the run to RefundPayment instead of failing, which is the rollback step of the saga.
+- `Payload.$: "$"` passes this state's whole input to the Lambda; the `.$` means the value comes from the run's data, not a literal string.
+- Remove the Catch and a receipt that keeps failing leaves the card charged with no refund, so the Catch is what makes the flow self-correcting.
+
+## Rules and defaults
+
+- **Retry defaults:** when you give only `ErrorEquals`, Step Functions waits 1 second, retries up to 3 times, and doubles the interval each time (BackoffRate 2.0). You can add MaxDelaySeconds and jitter.
+- **Retry and Catch states:** available on Task, Parallel and Map states, not on Pass or Wait, and not on a top-level execution failure.
+- **Standard:** up to 1 year per run, exactly-once, full history kept 90 days; billed per state transition. Use it for payments and approvals.
+- **Express:** up to 5 minutes; asynchronous runs are at-least-once and synchronous runs are at-most-once; billed per run, duration and memory. Use it for high-volume idempotent work.
+- **Payload limit:** 256 KiB per state input or output. For larger data, store it in S3 and pass the key through the workflow.
+- **Service integrations:** optimized integrations for common services, plus AWS SDK integrations that call over 200 AWS services. The .sync (run a job) and callback patterns are Standard only.
+
 ## Interview Qs
 
-### Standard or Express?
+### Standard or Express workflows?
 
-Standard: up to 1 year, exactly-once; for payments and approvals. Express: up to 5 minutes, at-least-once (async) or at-most-once (sync), priced per run and duration; for high-volume, idempotent event processing.
+Standard runs up to a year and is exactly-once, so it suits non-idempotent, auditable flows like payments and approvals; it keeps 90 days of history and is billed per state transition. Express runs up to 5 minutes, is at-least-once when asynchronous, and is billed per run and duration, so it suits high-volume, idempotent event processing.
 
-### How do you roll back a payment that spans services?
+### How do you roll back a payment that spans several services?
 
-Model a saga. Each step has a Catch that jumps to compensating steps, such as a refund, in reverse order. Retries can repeat a step, so every step must be idempotent.
+Model a saga. Each step has a Catch that, on failure, jumps to a compensating step that undoes the earlier work, such as a refund, in reverse order. Step Functions drives this, but because retries can repeat a step, every step must be idempotent so a repeat does not double-charge or double-refund.
+
+### Why use Step Functions instead of chaining Lambdas yourself?
+
+Chained Lambdas hide the flow: retries, timeouts and rollback become ad-hoc code, and a stuck run is hard to trace. Step Functions makes the steps, retries and error paths a single JSON definition and records every run's exact path, so the workflow is visible, retried consistently, and easy to change without redeploying code.

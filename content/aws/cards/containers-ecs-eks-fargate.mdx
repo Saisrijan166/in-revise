@@ -5,30 +5,42 @@ title: "Containers on AWS: ECS, EKS and Fargate"
 topic: compute
 level: intermediate
 heat: 2
-hook: "Push a Docker image to ECR, then run it with ECS (AWS's own orchestrator) or EKS (managed Kubernetes), on Fargate or EC2."
+hook: "Package the app as a Docker image in ECR, then run it with ECS (AWS's own orchestrator) or EKS (managed Kubernetes), on Fargate (no servers) or your EC2 instances."
 points:
-  - { k: "Task definition", v: "JSON blueprint: image, CPU, memory, ports, IAM roles, logging" }
-  - { k: "ECS service", v: "keeps the desired number of tasks running and replaces failed ones" }
-  - { k: "Fargate", v: "no servers to manage; each task gets its own isolation boundary", kind: plus }
-  - { k: "Capacity", v: "Fargate, your own EC2 instances, or ECS Managed Instances" }
-  - { k: "ECR", v: "AWS's private image registry; IAM controls push and pull" }
+  - { k: "Image and ECR", v: "a Docker image bundles the app and its dependencies; ECR is AWS's private registry for it" }
+  - { k: "Task definition", v: "the JSON blueprint of a task: image, CPU, memory, ports, IAM roles, logs" }
+  - { k: "ECS service", v: "keeps the desired number of task copies running and replaces failures", kind: plus }
+  - { k: "Fargate", v: "runs your tasks with no servers to manage; you set CPU and memory per task and pay for those", kind: plus }
+  - { k: "awsvpc networking", v: "each Fargate task gets its own network interface, private IP and security groups", kind: default }
+  - { k: "ECS or EKS", v: "ECS is AWS's own, simpler, no control-plane fee; EKS is real Kubernetes, per-cluster fee" }
 trap:
   wrong: "Fargate is serverless, so no servers run my containers."
-  right: "Servers still run them; AWS provisions, patches and scales them. You set CPU and memory per task and pay for those."
-sayIt: "I build the Spring Boot app as an image in ECR and run it as an ECS service on Fargate behind an ALB. I pick EKS when the team already runs Kubernetes or needs its tooling."
-confusedWith: [task-role-vs-task-execution-role, ec2-vs-lambda-vs-fargate]
+  right: "Servers still run them; AWS provisions, patches and scales those servers. You pick CPU and memory per task and pay for that."
+  why: "'Serverless' is read as 'no servers exist', but it means no servers for you to manage; the hardware is still there, just hidden and run by AWS."
+sayIt: "I build the Spring Boot app as a Docker image in ECR and run it as an ECS service on Fargate behind an ALB, with a task role for the app and an execution role for the agent. I pick EKS only for a Kubernetes team."
+cheat:
+  idea: "Package the app as a Docker image in ECR and let ECS or EKS run and heal copies of it. Fargate runs those copies with no servers to manage."
+  flow: "image in ECR → task definition → ECS service keeps N tasks"
+  remember: "ECS = AWS's own orchestrator, no control-plane fee; EKS = managed Kubernetes, per-cluster fee."
+buildsOn: [ec2, elastic-load-balancing, auto-scaling-groups]
+scenarios:
+  - q: "You deploy a task on Fargate with cpu 512 and memory 512. It is rejected. Why?"
+    a: "512 CPU units (.5 vCPU) do not allow 512 MiB of memory on Fargate; the smallest valid memory there is 1 GB. Fargate only accepts fixed CPU and memory pairs, so you must pick a valid combination, such as 512 CPU with 1 GB, or 256 CPU with 512 MiB."
+  - q: "Your team has no Kubernetes experience and wants the Spring Boot app live on AWS with the least to operate. ECS or EKS, and on what capacity?"
+    a: "ECS on Fargate. ECS uses AWS's own API with no control-plane fee and fewer moving parts, and Fargate removes the servers. EKS adds a Kubernetes control plane to learn and an hourly per-cluster fee, worth it only if you need Kubernetes itself."
+confusedWith: [task-role-vs-task-execution-role, ec2-vs-lambda-vs-fargate, ecs-vs-eks]
 tags: [containers, ecs, eks, fargate, ecr, docker]
 visual: table
 sources:
   - title: "What is Amazon Elastic Container Service?"
     url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/Welcome.html"
     verifiedOn: "2026-10-20"
-  - title: "Amazon ECS task definitions"
-    url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definitions.html"
-    verifiedOn: "2026-10-20"
-  - title: "Architect for AWS Fargate for Amazon ECS"
-    url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/AWS_Fargate.html"
-    verifiedOn: "2026-10-20"
+  - title: "Amazon ECS task definition differences for Fargate (valid CPU/memory pairs; awsvpc)"
+    url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html"
+    verifiedOn: "2026-10-22"
+  - title: "Amazon ECS task networking options for Fargate (one ENI, private IP per task)"
+    url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-task-networking.html"
+    verifiedOn: "2026-10-22"
   - title: "Amazon ECS task execution IAM role"
     url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html"
     verifiedOn: "2026-10-20"
@@ -37,19 +49,31 @@ sources:
     verifiedOn: "2026-10-20"
 ---
 
+## What it is
+
+A container image is a package that holds your app plus everything it needs to run, so it behaves the same on any machine. You store the image in ECR (Elastic Container Registry), AWS's private image store. To actually run images, keep them healthy and scale them, you need an orchestrator. AWS gives you two: ECS (Elastic Container Service), its own simpler orchestrator, and EKS (Elastic Kubernetes Service), managed Kubernetes. Either one can run your containers on Fargate (no servers for you) or on EC2 instances you own.
+
 ## Why it exists
 
-A container image runs the same everywhere, but someone must place containers, restart failed ones and scale them. ECS and EKS do that on AWS.
+An image runs the same everywhere, which solves "it worked on my machine". But running one container is not enough: in production you need many copies for load, a restart when one crashes, a rolling update to a new version, and placement across AZs. Doing that by hand on [EC2](card:ec2) is error-prone. An orchestrator does it for you: you declare "run four copies of this image and keep them healthy", and ECS or EKS makes it so and keeps it so.
 
 ## How it works
 
 <Compare id="ecs-vs-eks" />
 
-- ECS pieces: a cluster runs services, a service keeps tasks running, each task starts from a task definition.
-- Each task has two roles: [task role vs execution role](compare:task-role-vs-task-execution-role).
-- Rolling, blue/green and canary releases: [deployments on AWS](card:deployments-on-aws).
+Following the ECS path for the payment service:
+
+1. You build the Docker image and push it to an ECR repository.
+2. You write a task definition: which image, how much CPU and memory, which ports, and the IAM roles. A task is one running set of containers from that definition.
+3. You create an ECS service that says "keep 4 tasks of this definition running" and attach it to an [ALB](card:elastic-load-balancing) target group.
+4. ECS launches the tasks on Fargate. With awsvpc networking each task gets its own network interface, private IP and security groups.
+5. If a task stops or fails its health check, the service launches a replacement, so the count stays at 4.
+
+So the task definition is the recipe, the task is one running copy, and the service keeps the right number alive.
 
 ## Example
+
+A Fargate task definition for the payment service, with both IAM roles:
 
 ```json
 {
@@ -59,6 +83,7 @@ A container image runs the same everywhere, but someone must place containers, r
   "cpu": "512",
   "memory": "1024",
   "executionRoleArn": "arn:aws:iam::123456789012:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/paymentServiceTaskRole",
   "containerDefinitions": [{
     "name": "app",
     "image": "123456789012.dkr.ecr.ap-south-1.amazonaws.com/payment-service:1.4.0",
@@ -67,12 +92,38 @@ A container image runs the same everywhere, but someone must place containers, r
 }
 ```
 
+What to notice:
+
+- `cpu` 512 with `memory` 1024 is a valid Fargate pair; many combinations are rejected, so the numbers are not free to choose.
+- `executionRoleArn` lets the ECS agent pull the image and write logs; `taskRoleArn` is what the app's own AWS calls use. Mixing them up is the most common ECS mistake, covered in [task role vs execution role](compare:task-role-vs-task-execution-role).
+- `networkMode` must be `awsvpc` on Fargate, which is why each task has its own ENI and security groups.
+
+## Rules and defaults
+
+- **Fargate CPU/memory:** only fixed pairs are valid, for example 256 CPU with 512 MiB–2 GB, 512 CPU with 1–4 GB, 1024 CPU with 2–8 GB.
+- **Networking:** Fargate requires `awsvpc`; each task gets one elastic network interface with a private IP.
+- **Capacity options:** Fargate (no servers), your own EC2 instances in the cluster, or ECS Managed Instances (EC2 types you choose, run by AWS).
+- **EKS fee:** EKS charges per cluster per hour for the control plane; ECS has no orchestration charge, you pay only for compute.
+- **Image pull:** a Fargate task in a private subnet needs a NAT gateway or an ECR VPC endpoint to pull its image.
+
+## Not to be confused with
+
+ECR, ECS and EKS sound alike but do different jobs. ECR stores images. ECS and EKS run them. Fargate is not an orchestrator at all; it is a way to run ECS tasks or EKS pods without managing servers. Rule: ECR = store, ECS/EKS = orchestrate, Fargate = run without servers.
+
+## Common mistakes
+
+- **"EKS is just a better ECS."** EKS is real Kubernetes, with more power and more to operate, plus a per-cluster fee. If you are not using Kubernetes features or skills, ECS does the same job with less to run and no control-plane charge.
+
 ## Interview Qs
 
 ### ECS or EKS: which would you pick?
 
-ECS for AWS-only teams: AWS's own API, no control-plane fee, fewer parts. EKS when the team uses Kubernetes: certified Kubernetes with its community tools and plugins, but a per-cluster hourly fee and more to operate.
+ECS for AWS-only teams: AWS's own API, no control-plane fee, fewer parts to learn. EKS when the team already uses Kubernetes or needs its ecosystem of tools and plugins, accepting a per-cluster hourly fee and more operational work. Both can run on Fargate, so the choice is about the orchestrator, not the servers.
 
 ### What is the difference between a task and a service in ECS?
 
-A task is one running copy of a task definition; it can do a job and stop. A service keeps a desired number of tasks running and replaces failed ones, so it suits a long-running API.
+A task is one running copy of a task definition; it can do a job and stop. A service keeps a desired number of tasks running, replaces any that fail, and registers them with a load balancer. Use a task for a one-off job and a service for a long-running API.
+
+### What does Fargate actually remove, and what stays your job?
+
+Fargate removes the servers: AWS provisions, patches and scales the hosts, and you no longer manage EC2 instances. What stays yours is the container image, the CPU and memory you set per task, the IAM roles, and the app itself. You pay for the vCPU and memory each task uses.

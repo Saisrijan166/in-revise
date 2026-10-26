@@ -1,5 +1,5 @@
 # Coverage: AWS
-Reference: reference/aws.md  ·  Last updated: 20-10-2026
+Reference: reference/aws.md  ·  Last updated: 21-10-2026
 
 Every reference item (key list: the numbered sections, plus each question, pattern and "X vs Y" row inside them) appears in exactly
 one of Mapped, Corrected or Dropped. A section whose parts went to different places has one row here (Corrected wins over
@@ -262,3 +262,174 @@ Independently verified on 20-10-2026.
 | Reference item | Reason |
 |---|---|
 | (none) | |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id. An independent pass checked about 755 claims and fixed 4, removing none.
+
+### Unit basics
+
+**Added from the reference**
+
+- IaaS/PaaS/SaaS "who manages what" split made concrete with EC2 / Elastic Beanstalk examples and per-model responsibility table → cloud-computing-models (Example table, Not-confused, comparison explain). Reference only listed the three as one-line bullets.
+- Elastic Beanstalk named as the PaaS example (reference "Compute Services" did not cover it) → cloud-computing-models, iaas-vs-paas-vs-saas, glossary.
+- "You must stop an EC2 instance to resize it" → cloud-computing-models (point, Rules), to make the vertical-scaling limit concrete.
+- Stateless-services rule for horizontal scaling (REL05-BP06) → cloud-computing-models (point, Rules).
+- Region-choice order compliance→latency→cost→services → regions-and-azs (Rules, Interview Q). Reference had no Region-selection guidance.
+- AZ names vs AZ IDs (independently mapped per account before Nov 2025) → regions-and-azs (Rules).
+- Opt-in Regions (post 20-03-2019 disabled by default; Hyderabad opt-in, Mumbai default) → regions-and-azs (Rules, scenario).
+- Shared-responsibility control-shift across EC2 / RDS / S3+Lambda, and compliance-is-shared angle → shared-responsibility-model (table, Interview Q). Reference gave only a one-line definition.
+- Well-Architected "review not an audit", the free WA Tool, and the trade-off framing (security/ops not traded away) → well-architected-framework. Reference had no Well-Architected section; this is an added-beyond-reference topic (already in coverage file).
+- Pricing: per-second billing (60s min), Savings Plan types (Compute up to 66%, EC2 Instance up to 72%), Spot 2-minute notice via EventBridge+metadata, Reserved Instances = billing discount AWS now de-emphasises, data-transfer costs (100 GB/mo free out, cross-AZ charged both directions) → aws-pricing-models. Reference had only "pay-as-you-go".
+
+**Corrections**
+
+- Savings Plan discount figures split correctly: EC2 Instance Savings Plans up to 72%, Compute Savings Plans up to 66% (earlier draft/comparison said "72% (EC2 Instance), 66% (Compute)" — kept and confirmed). Source: https://docs.aws.amazon.com/savingsplans/latest/userguide/plan-types.html
+- Cross-AZ data transfer: confirmed charged on BOTH send and receive side (not "$0.01/GB each way" as a single direction). Stated as "charged in both directions" without a number (tech note: prices not stated). Source: https://docs.aws.amazon.com/cur/latest/userguide/cur-data-transfers-charges.html
+- Reserved Instance described as a billing discount, not a physical instance, and AWS's own recommendation of Savings Plans over RIs quoted. Source: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-reserved-instances.html
+- Multi-AZ failover time stated as typically 60-120 seconds (added precise figure). Source: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.Failover.html
+- AZs-per-Region: "at least 3, within 100 km" kept; worded as "at the time of writing" per tech note. Sources: aws-regions-availability-zones.html; global-infrastructure/regions_az.
+
+### Unit compute
+
+**Added from the reference / verified beyond the draft**
+
+- **EC2 billing model** (ec2): per-second billing with a one-minute minimum while running; stopped = no compute charge, EBS still charged. Added to points and Rules; a common interview point not in the old draft. Source: EC2 instance state changes.
+- **User data runs only at first boot; fix with systemd** (ec2): the old draft ran the jar with `nohup`, which dies on reboot. Rewrote the example to register a systemd service and added a scenario. Source: user data guide (runs once by default).
+- **ASG self-healing wording** (auto-scaling-groups): an unhealthy instance is terminated and replaced; EC2 status checks are always on and cannot be removed. Source: health-checks-overview.
+- **ASG scale-out fast / scale-in gradual** (auto-scaling-groups Example): target tracking scales out quickly but in gradually to protect availability. Source: as-scaling-target-tracking.
+- **ALB fail open** (elastic-load-balancing): if all targets are unhealthy the ALB routes to all of them. Added as a point and Rules bullet. Source: target-group-health-checks.
+- **ALB needs ≥2 AZ subnets; cross-zone always on** (elastic-load-balancing Rules). Source: application-load-balancers.
+- **Deregistration delay mechanics** (elastic-load-balancing): draining target, 300 s default, 500-level error if the app exits early. Source: edit-target-group-attributes.
+- **Lambda warm reuse / init once** (lambda): execution-environment lifecycle; create SDK clients in init. Rewrote example around a static S3Client. Source: lambda-runtime-environment.
+- **Lambda timeout 3 s default / 900 s max; memory→CPU at 1,769 MB** (lambda Rules). Sources: configuration-timeout, configuration-memory, quotas.
+- **SnapStart: Java 11+, published versions only, not with provisioned concurrency, free on Java** (lambda). Added a Common mistake that SnapStart + provisioned concurrency cannot combine. Source: snapstart.
+- **Fargate valid CPU/memory pairs + awsvpc per-task ENI** (containers): added a scenario (512 CPU needs ≥1 GB) and Rules bullets. Sources: fargate-tasks-services, fargate-task-networking.
+- **ECS Express Mode (image + 2 roles → Fargate service, ALB, HTTPS, scaling, URL); App Runner closed to new customers** (compute-choice Rules). Sources: express-service-overview, apprunner-availability-change.
+
+**Corrections**
+
+- Old `ec2` user-data example started the jar with `nohup … &`, which does not survive a reboot while user data does not re-run; replaced with a systemd unit so the app restarts on boot (reference teaches user data, not persistence). Source: user data guide + repost on running user data every boot.
+- `ecs-vs-eks` and `ecs-express/compute` drafts stated the EKS control-plane price as a number ("$0.10 per cluster per hour"). Per tech-aws.md ("Prices are not stated as numbers"), replaced with "per cluster per hour" and removed the figure from the comparison row.
+
+### Unit databases
+
+**Added from the reference**
+
+- RDS "AWS manages vs you manage" split made explicit (patching/backups/failover vs schema/queries/tuning) → rds (points, What it is). Source: RDS "What is Amazon RDS?" responsibilities table.
+- JVM DNS TTL <= 60 s on failover kept and sourced precisely → rds (Example, notice). Source: RDS Multi-AZ failover page + Best practices (TTL < 30 s for the cache, <= 60 s guidance on the failover page).
+- "max_connections scales with instance memory" context (PostgreSQL LEAST(mem/9531392, 5000)) summarised as "RDS sets it from the instance's memory" → rds (Example). Source: RDS "Maximum number of database connections".
+- DynamoDB partition-key design (pick many distinct values, hot partition) → dynamodb (points, How it works). Source: DynamoDB "Best practices for designing partition keys".
+- Scan: filter runs after the read and charges for every item scanned → dynamodb (trap.why, Rules, Not-confused, Interview Q). Source: DynamoDB "Scanning tables".
+- ElastiCache serverless always-on TLS and public endpoint (Valkey 9.0+, IAM + TLS 1.3); durability via MemoryDB or node-based Valkey 9.0+ → elasticache. Source: ElastiCache "Choosing between deployment options", "What is ElastiCache?".
+- Aurora "no replica = slow failover (recreate primary, minutes)" → aurora (points, How it works). Source: Aurora "High availability for Amazon Aurora" (fault tolerance section).
+
+**Corrections**
+
+- Aurora max cluster volume: reference/draft said 256 TiB; RDS quota page states 128 TiB per cluster while the Aurora storage page says "up to 256 TiB for specific engine versions". Reconciled to "up to 128 TiB, 256 TiB on some engine versions" in aurora.mdx; comparison rds-vs-aurora still shows 256 TiB (the storage-page figure) — both figures are documented, left as the higher ceiling in the comparison table. Sources: Aurora storage page; RDS quotas page.
+- RDS backup retention default restated exactly: 7 days (console) / 1 day (CLI/API), 0-35 allowed, 0 disables. Source: RDS "Backup retention period".
+- Read replicas per primary: 15 (quota page), noted RDS does not autoscale them. Source: RDS quotas page, "Working with DB instance read replicas".
+
+### Unit integration
+
+**Added from the reference**
+
+- SQS: "receive hides, delete ends" lifecycle made the spine of the concept (ref A7 producer/consumer/queue/visibility timeout). Added short polling vs long polling as the default-to-change point (ref A7 + docs). Added that a standard queue is cross-AZ durable (queue-types doc). Added that the DLQ must match the source queue type and that on a standard queue the message keeps its first enqueue time (DLQ docs) — a common follow-up.
+- SNS: added that a standard topic stores nothing (so the SQS-behind-SNS pattern matters), filter-policy default scope = MessageAttributes, raw message delivery vs the JSON envelope, and that a queue needs an access policy granting sns.amazonaws.com sqs:SendMessage (subscribe-sqs doc). Retry numbers split by endpoint type (SQS/Lambda 100,015 over 23 days; email/SMS/push 50 over 6 h).
+- EventBridge: reframed on the new Custom Event Bus (relaunched 24-09-2026) as AWS's pick for new apps while keeping the Classic rules model as the teaching example (docs say "For new applications, start with the Custom Event Bus"). Added event-pattern matching rules (arrays = OR, all fields = AND, exact case-sensitive, extra fields ignored), PutEvents 10-entry/1 MiB limit + FailedEntryCount, and EventBridge Scheduler for cron (scheduled rules now "legacy").
+- Kinesis: added shard capacity numbers, on-demand vs provisioned, retention 24 h–365 d, record blob up to 1 MB, enhanced fan-out (own 2 MB/s per shard, up to 20 registered consumers standard), hot-shard cause. Firehose renamed 09-02-2024.
+- Step Functions: Standard vs Express execution semantics (exactly-once vs at-least-once async / at-most-once sync), Retry defaults (1 s, 3 attempts, BackoffRate 2.0), Catch/States.ALL, 256 KiB payload, 90-day history, saga/compensation, optimized vs AWS SDK (200+ services) integrations, .sync/callback are Standard-only.
+
+**Corrections**
+
+- Prior draft SQS/SNS/EventBridge/Kinesis cards were pre-v3 (no "What it is", loose point lists, trap without `why`). Rewritten to v3; facts kept where still correct and re-verified against docs on 2026-10-22.
+- EventBridge "Custom - Classic: your app's events, by rules" kept, but the new Custom Event Bus is now the recommended default; reflected in points and Rules-and-defaults (docs: eb-event-bus.html, eb-custom-bus-what-is.html).
+- SNS message size: 256 KiB default, up to 1 MiB via topic MaximumMessageSize (General Reference) — kept and clarified.
+- No factual corrections needed to the comparisons' rows; verdicts kept.
+
+### Unit networking
+
+**Added from the reference**
+
+The owner reference (section 5 Networking) is a short flat list of definitions and traps; the
+draft already covered it. Teaching additions beyond it, all verified:
+- vpc-and-subnets: the local route cannot be deleted; one route table per subnet at a time, one
+  table can serve many subnets; subnet cannot span AZs (added as a scenario + Rules).
+- internet-and-nat-gateways: NAT gateway cannot have a security group; public vs private NAT
+  connectivity type with defaults; regional NAT gateway (19-11-2025) needs no public subnet.
+- security-groups-and-nacls: stateful vs stateless explained as the core distinction; the
+  ephemeral-port reply rule for NACLs; SG referencing to chain ALB→app→DB; "Common mistakes"
+  (NACL can't replace SG; SG can't deny an IP).
+- vpc-endpoints-privatelink: gateway endpoint does NOT use PrivateLink; endpoint policy never
+  replaces IAM/bucket policy; private DNS keeps SDK code unchanged (needs DNS enabled on VPC).
+- route-53: alias-vs-CNAME at the zone apex; alias queries free, CNAME charged; alias TTL
+  not settable (uses target TTL); failover with health checks; lower TTL before a change.
+- api-gateway: three API types; integration timeout 29 s REST / 30 s HTTP (async pattern for
+  long jobs); throttle 10,000 rps / 5,000 burst per account/Region → 429; API keys are NOT
+  authentication; Lambda proxy integration shape; VPC link to a private ALB.
+
+**Corrections**
+
+No factual corrections to the draft were needed; its numbers matched the docs on re-check.
+One wording fix: regional NAT gateway supports up to 32 IPs per AZ (zonal 8) — kept in the tree
+note, confirmed at nat-gateways-regional.html.
+
+### Unit operations
+
+**Added from the reference**
+
+| Reference item | Concept |
+|---|---|
+| A8 CloudWatch / CloudTrail / IaC / CI/CD / blue-green / canary / rolling / DR / RTO / RPO | the matching concepts (hook, points, body) |
+| A9 picker scenarios (traffic spike, multi-AZ, S3, RDS/Aurora, ElastiCache, SQS, SNS/EventBridge, Lambda, CloudTrail, CloudWatch, Secrets Manager, survive AZ failure) | aws-architecture-playbook picker table and Interview Qs |
+| I4 "don't memorise the SDK; know the service" | aws-code-templates (What it is, hook) |
+| I4 S3 put/get call shape | aws-code-templates Example (S3 block, verified output) |
+| I5 SQS send + (added) receive/delete | aws-code-templates Example (SQS block) |
+| I6 RDS is plain JDBC, not an SDK data call | aws-code-templates trap + Interview Q; aws-sdk-for-java |
+| I7 S3 + Spring Boot (S3Template) | aws-code-templates Example (Spring block) + Interview Q |
+
+**Corrections (reference vs docs; docs win)**
+
+| What | Fix | Source |
+|---|---|---|
+| Reference A8 "AWS X-Ray supports distributed tracing" (implies use the X-Ray SDK) | X-Ray SDKs and daemon are in maintenance mode (security fixes only) since 25-02-2026; AWS recommends OpenTelemetry (OTel Java agent or ADOT), traces sent to X-Ray via the CloudWatch agent or a Collector. Trap and body state this. | https://docs.aws.amazon.com/xray/latest/devguide/xray-sdk-daemon-timeline.html ; https://docs.aws.amazon.com/xray/latest/devguide/xray-sdk-migration.html |
+| Reference I6.2 hardcoded `spring.datasource.password=PASSWORD` | Shown loading the password from Secrets Manager via `spring.config.import=aws-secretsmanager:...`, never hardcoded; IAM database auth noted as the no-password option. | https://docs.awspring.io/spring-cloud-aws/docs/4.2.0/reference/html/index.html |
+
+### Unit security
+
+**Added from the reference**
+
+- "Nothing by default" (implicit deny for a new user/role) → iam-basics (point, Why, Interview Q). Reference A6 lists IAM pieces but not this; it is the core of "why is my request denied".
+- Root user: tasks that need it, no access keys, MFA → iam-basics (Rules, Interview Q). Reference only names the root user as a term.
+- Guardrails grant nothing (SCP, RCP, boundary, session policy) → iam-policy-evaluation (points, Steps, Interview Q). Reference A6 trap says "IAM vs network permissions"; the deny/allow order is the real interview topic.
+- aws:SecureTransport HTTPS-only bucket policy as a worked example of explicit deny → iam-policy-evaluation (Example). From S3 docs; good concrete explicit-deny case.
+- Envelope encryption 4 KB Encrypt limit, key-policy gate, rotation does not re-encrypt → kms-and-encryption (points, How, Rules, Interview Qs). Reference lists KMS as a term only.
+- SSE-S3 default since 2023, SSE-C disabled on new buckets since April 2026, S3 Bucket Key → kms-and-encryption (Rules, Example). Dated changes interviewers now ask.
+- RDS encryption only at creation; snapshot-copy or blue/green workaround → kms-and-encryption (point, scenario, Interview Q). Common trap.
+- ECS `secrets` field read once at container start; forced new deployment to pick up rotation → secrets-and-parameters (point, How, scenario). Practical Spring-on-ECS detail.
+- Plain `environment` values readable via DescribeTaskDefinition / docker inspect → secrets-and-parameters (Interview Q). From ECS docs.
+- RDS managed master-user secret rotates every 7 days by default; secret JSON has username/password → secrets-and-parameters (How, Rules). From RDS + Secrets Manager docs.
+- Rate-based rule window (60/120/300/600 s, 300 default), aggregates by IP; WAF cannot attach to NLB → edge-security (points, Rules, Interview Q). From WAF docs.
+- Shield Advanced covers standard WAF fees for its protected resources; 1-year commitment → edge-security (point, Rules). From Shield Advanced overview.
+
+**Corrections**
+
+- ACM validity: kept 198 days since 18-02-2026 (reference/old draft had no figure); confirmed against the AWS What's New post. Note the post also mentions renewal 45 days before expiry.
+- STS default session: confirmed 3,600 s (1 h) default, 15 min–12 h range, chained session max 1 h, against the AssumeRole API reference (old draft said "1 h default, up to 12 h, chained 1 h" — correct, kept).
+- EKS Pod Identity: confirmed it needs no OIDC provider and is NOT supported on Fargate pods (trust principal pods.eks.amazonaws.com); IRSA needs an OIDC provider per cluster. Matches the draft trap and tree notes.
+- KMS rotation default 365 days, range 90–2,560, optional for customer managed keys, AWS managed keys every ~365 days; KMS keeps old material. Confirmed against rotate-keys page.
+
+### Unit storage
+
+**Added from the reference**
+
+- S3 "prefixes are not folders" clarified as a point + Why it works (ref A3 Versioning/prefix angle) → s3. Source: S3 user guide "Organizing objects using prefixes".
+- Multipart: "retry only the failed part" and "lifecycle rule to abort incomplete uploads bills until aborted" → s3 (Rules, Common mistakes). Source: S3 "Uploading and copying objects using multipart upload".
+- EBS snapshot restore: new volume lazy-loads blocks from S3 so early reads are slower; fast snapshot restore / full read removes it → ebs-and-efs (Example). Source: EBS "Initialize Amazon EBS volumes".
+- EFS mount target: one per AZ, security group must allow inbound TCP 2049 → ebs-and-efs (Rules). Source: EFS "Managing mount targets", "Using VPC security groups".
+- CloudFront cache-key default (domain + URL path) and TTL precedence (origin Cache-Control within min/max, else default TTL) → cloudfront (How it works, Rules, Interview Q). Source: CloudFront "Understand the cache key", "Cache behavior settings".
+- AWS:SourceArn condition explained as confused-deputy protection restricting to one distribution → cloudfront (Example notes). Source: CloudFront "Restrict access to an Amazon S3 origin".
+
+**Corrections**
+
+- None against the reference beyond the earlier-verified draft. gp3 baseline restated exactly: 3,000 IOPS + 125 MiB/s included at any size, up to 80,000 IOPS / 2,000 MiB/s (EBS general-purpose doc). gp2 = 3 IOPS/GiB, burst to 3,000.
