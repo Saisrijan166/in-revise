@@ -7,16 +7,27 @@ level: beginner
 heat: 3
 hook: "Latency is how long one request takes; throughput is how many requests finish per second. More lanes carry more cars, but no car arrives sooner."
 points:
-  - { k: "Latency", v: "time for one request, in ms; track p50, p95 and p99" }
-  - { k: "Throughput", v: "work done per second: requests/s or MB/s" }
-  - { k: "p99", v: "99% of requests finish within this time" }
-  - { k: "Fan-out", v: "a call to 100 servers waits for the slowest reply", kind: minus }
-  - { k: "Near full load", v: "queues grow, so latency climbs as throughput rises", kind: minus }
-  - { k: "Little's law", v: "requests in flight = throughput × latency" }
+  - { k: "Latency", v: "time for one request, measured in ms; report it as p50, p95 and p99, not an average" }
+  - { k: "Throughput", v: "work finished per second, such as requests per second or MB per second" }
+  - { k: "p99", v: "the time within which 99% of requests finish; the slowest 1% take at least this long" }
+  - { k: "Fan-out tail", v: "a request that calls 100 servers is only fast if all 100 replies are fast, so slow tails add up", kind: minus }
+  - { k: "Near full load", v: "as load nears capacity, requests queue, so latency climbs even though throughput is flat", kind: minus }
+  - { k: "Little's law", v: "requests in flight = throughput × latency; e.g. 2000/s × 50 ms = 100 in flight" }
 trap:
-  wrong: "Average latency is 50 ms, so users are fine."
-  right: "Averages hide the slow tail. Google's SRE book shows a typical 50 ms request while 5% of requests were 20 times slower."
-sayIt: "I set latency targets on percentiles, such as p99 under 200 ms at the expected requests per second, because averages hide slow requests. When one call fans out to many servers, I cut the tail with timeouts and hedged requests."
+  wrong: "Average latency is 50 ms, so users are happy."
+  right: "The average hides the slow tail. Report p95 and p99: a few very slow requests can ruin real users' experience while the average looks fine."
+  why: "The average is the easiest single number to compute and quote, and it looks reassuring, so people report it without checking how spread out the slow requests are."
+sayIt: "I set latency targets on percentiles, such as p99 under 200 ms at the expected requests per second, because averages hide slow requests. When one request fans out to many servers, I cut the slow tail with timeouts and hedged requests."
+cheat:
+  idea: "Latency is how long one request takes (report p50, p95, p99). Throughput is how many finish per second. They trade off: near capacity, queues build and latency rises."
+  flow: "Request in → waits in queue → processed → reply out"
+  remember: "Report latency as p99, not the average; the average hides the slow tail users feel."
+buildsOn: [scalability]
+scenarios:
+  - q: "A dashboard page calls 50 backend services and shows only when all 50 reply. Each service is slow (over 1 s) just 1% of the time. Roughly how often is the page slow?"
+    a: "The page is fast only if all 50 are fast: 0.99^50 ≈ 0.61, so about 39% of page loads are slow. One request fanning out to many makes rare slow tails common. Cut it with timeouts, hedged requests or fewer calls."
+  - q: "Your service runs at 2000 requests per second with an average latency of 50 ms. About how many requests are being handled at any instant?"
+    a: "By Little's law, requests in flight = throughput × latency = 2000/s × 0.05 s = 100. This sizes thread pools and connection pools: you need capacity for about 100 concurrent requests."
 confusedWith: []
 tags: [performance, latency, fundamentals]
 visual: table
@@ -33,14 +44,8 @@ sources:
   - title: "Little's Law as Viewed on Its 50th Anniversary (John D. C. Little, Operations Research, 2011; reprint)"
     url: "https://projectproduction.org/journal/reprint-littles-law-as-viewed-on-its-50th-anniversary/"
     verifiedOn: "2026-10-16"
-  - title: "What is Amazon CloudFront? (AWS docs)"
-    url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Introduction.html"
-    verifiedOn: "2026-10-16"
   - title: "Timeouts, retries, and backoff with jitter (Amazon Builders' Library)"
     url: "https://builder.aws.com/content/3EumjoZascWd1oZiEgL8ORlv3qE/timeouts-retries-and-backoff-with-jitter"
-    verifiedOn: "2026-10-16"
-  - title: "A Word on Scalability (Werner Vogels, 2006)"
-    url: "https://www.allthingsdistributed.com/2006/03/a_word_on_scalability.html"
     verifiedOn: "2026-10-16"
   - title: "The System Design Primer: Latency vs throughput, Latency numbers (donnemartin, GitHub)"
     url: "https://github.com/donnemartin/system-design-primer"
@@ -50,50 +55,78 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+These are the two numbers that describe how a system performs under load. Latency is how long one request takes, from sending it to getting the reply, measured in milliseconds. Throughput is how many requests the system finishes per second. They are different: a system can be fast for one request yet handle few per second, or handle a huge number per second while each one waits. A design needs both numbers to be judged.
+
 ## Why it exists
 
-A system can be fast for one user but slow under many, or handle huge volume while each user waits. You need both numbers to judge a design.
+"Fast" is not one thing. The payment service might answer a single checkout in 40 ms when idle, but during a sale it must also handle thousands of checkouts per second. If you only track one number, you miss the other problem: low latency but low throughput means long queues under load, and high throughput with high latency means every user waits. Separating the two lets you set a clear target, such as "p99 under 200 ms at 5000 requests per second".
 
 ## How it works
 
 | What | Latency | Throughput |
 | --- | --- | --- |
-| Question | How long does one request take? | How many requests finish per second? |
-| Unit | ms, as p50, p95, p99 | requests/s or MB/s |
-| Improve it | Do less, in parallel, closer to the user (cache, CDN) | Add servers; remove the bottleneck |
-| Watch out | The slow tail, made worse by fan-out | Near full load, queues grow and latency rises |
+| Question it answers | How long does one request take? | How many requests finish per second? |
+| Unit | milliseconds, reported as p50, p95, p99 | requests/s or MB/s |
+| How to improve it | do less work, do it in parallel, do it closer to the user (cache, CDN) | add servers, remove the bottleneck |
+| What to watch | the slow tail, made worse by fan-out | near full load, queues grow and latency rises |
 
-- **Percentiles:** p50 is the typical request; p99 is the time within which 99% finish. Google's SRE book prefers them because the mean hides the slow tail.
-- **Little's law** links the two: at 2,000 requests/s and 50 ms each, about 100 requests are in flight at once.
+1. A request arrives. If the server is busy, it waits in a queue first, then gets processed, then the reply is sent. Latency is the whole of that time.
+2. Throughput is how many such requests complete each second across all servers.
+3. As load nears capacity, the queue in step 1 grows, so latency climbs while throughput stays flat. This is why the two trade off.
+4. Report latency as percentiles: p50 is the typical request; p99 is the time within which 99% finish, so it shows what the slowest 1% feel.
+
+So the key is to aim for the most throughput you can get while keeping p99 latency within an acceptable limit.
 
 ## Analogy
 
-<Analogy title="A highway" limit="Cars do not time out, retry or split into 100 parallel trips; requests do.">
-Latency is how long one car takes to cross. Throughput is how many cars cross per hour. A new lane carries more cars per hour, but no car drives faster. At rush hour, cars queue at the merge, so every trip gets longer.
+<Analogy title="A highway" limit="Cars do not time out, retry, or split one trip into 100 parallel trips that all must finish; requests do.">
+Latency is how long one car takes to cross the bridge. Throughput is how many cars cross per hour. Adding a lane carries more cars per hour, but no single car drives any faster. At rush hour, cars queue at the merge, so every trip takes longer, even though more cars pass in total.
 </Analogy>
 
 ## Example
 
-One server replies in 10 ms, but 1 reply in 100 takes 1 s.
+One server replies in 10 ms, except 1 reply in 100 takes 1 second. Look at what the average hides.
 
-- **Average:** (99 × 10 + 1 × 1,000) ÷ 100 ≈ 20 ms. No request actually took 20 ms.
-- **One call:** 1 user in 100 waits a full second.
-- **Fan-out to 100 such servers:** the page is fast only if all 100 replies are fast: 0.99^100 ≈ 0.37. So about 63% of pages take over 1 s (Dean and Barroso, 2013).
+```text
+Average:   (99 × 10 ms + 1 × 1000 ms) / 100 ≈ 20 ms
+           but no single request actually took 20 ms.
+
+p99:        about 1000 ms. The slowest 1% feel a full second.
+
+Fan-out:   if a page calls 100 such servers and needs all replies,
+           it is fast only if all 100 are fast: 0.99^100 ≈ 0.37.
+           So about 63% of pages take over 1 second.
+```
+
+What to notice:
+
+- The average of 20 ms describes no real request: it sits between the fast 10 ms and the rare 1000 ms, fooling you into thinking users are fine.
+- p99 exposes the slow tail: 1% of single requests already wait a full second.
+- Fan-out makes a rare tail common. Calling 100 servers turns a 1% chance of slowness into a 63% chance per page (Dean and Barroso, 2013). The fix is timeouts, [hedged requests](term:hedged-requests), or fewer calls per page.
+
+## Rules and defaults
+
+- **Report percentiles, not averages:** the Google SRE book recommends p50, p95 and p99 because the mean hides the slow tail.
+- **p99 meaning:** p99 = 800 ms means 99% of requests finished within 800 ms and the slowest 1% took at least that long.
+- **Little's law:** requests in flight = throughput × latency. At 2000 requests/s and 50 ms each, about 100 requests are in flight; use this to size thread and connection pools.
+- **Units:** throughput is per second (requests/s or MB/s); latency is per request (ms). Do not mix them up.
 
 ## Interview Qs
 
 ### Latency vs throughput?
 
-Latency is how long one request takes; throughput is how many requests finish per unit of time. They are linked: as load nears capacity, queues build and latency rises. Aim for the most throughput you can get at an acceptable latency.
+Latency is how long one request takes; throughput is how many requests finish per unit of time. They are linked: as load nears capacity, queues build and latency rises while throughput flattens. The goal is the most throughput you can get while keeping latency within an acceptable limit, usually stated as a p99 target.
 
 ### Why use p99 instead of the average?
 
-The average mixes many fast requests with a few very slow ones, so it can describe no real request. p99 shows the time within which 99% of requests finish, so you see what the slowest 1% feel. Set latency SLOs on percentiles.
+The average mixes many fast requests with a few very slow ones, so it can describe no real request and hide a painful tail. p99 shows the time within which 99% of requests finish, so you see what the slowest 1% actually experience. For this reason latency targets (SLOs) are set on percentiles, not the mean.
 
-### Every server is fast. Why is the page slow?
+### Every server is fast, so why is the page slow?
 
-The page fans out to many servers and waits for the slowest. If each is slow 1% of the time, a page that calls 100 of them is slow about 63% of the time. Use timeouts, hedged requests, or fewer calls per page.
+The page probably fans out to many servers and waits for the slowest reply. If each server is slow 1% of the time, a page calling 100 of them is slow about 63% of the time, because it needs all of them to be fast at once. Fix it with timeouts, hedged requests, or by making fewer calls per page.
 
 ### Which latency numbers should you know?
 
-Orders of magnitude from Jeff Dean's 2009 list: memory read 100 ns, round trip inside a datacentre 0.5 ms, spinning-disk seek 10 ms, California to the Netherlands and back 150 ms. Hardware has improved since, so remember the order, not the exact values.
+Orders of magnitude from Jeff Dean's 2009 list: a memory read is about 100 ns, a round trip inside one datacentre about 0.5 ms, a spinning-disk seek about 10 ms, and California to the Netherlands and back about 150 ms. Hardware has improved since, so remember the relative order, not the exact values.

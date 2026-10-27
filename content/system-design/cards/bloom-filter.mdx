@@ -7,16 +7,27 @@ level: intermediate
 heat: 2
 hook: "A small bit array that can prove an item was never added, so you skip slow lookups for things that are not there."
 points:
-  - { k: "Add", v: "k hash functions pick k bits; set them all to 1" }
-  - { k: "Check", v: "any of the k bits is 0 → definitely never added", kind: plus }
-  - { k: "False positives", v: "other items may have set all k bits: 'maybe' can be wrong", kind: minus }
-  - { k: "No delete", v: "clearing a bit can erase other items too", kind: minus }
-  - { k: "Size for 1% errors", v: "about 9.6 bits per item, 7 hashes" }
-  - { k: "Red flag", v: "if an exact set fits in memory, use the set", kind: minus }
+  - { k: "Add an item", v: "k hash functions pick k positions in the bit array; set all of them to 1" }
+  - { k: "Check an item", v: "if any of its k bits is 0, the item was definitely never added", kind: plus }
+  - { k: "False positives", v: "other items may have set all k bits, so a 'maybe' answer can be wrong", kind: minus }
+  - { k: "No delete", v: "clearing a bit could erase bits other items rely on, causing false negatives", kind: minus }
+  - { k: "Size for 1% errors", v: "about 9.6 bits per item and 7 hash functions" }
+  - { k: "When to skip it", v: "if the exact set already fits in memory, just use a real set instead", kind: minus }
 trap:
   wrong: "The filter said yes, so the item is in the set."
-  right: "Yes only means maybe. Check the real store before trusting it; only no is certain."
-sayIt: "A Bloom filter never gives false negatives, so I put it in front of expensive lookups: an LSM store skipping SSTables, a crawler skipping seen URLs. I size it from the expected item count and the error rate I can accept."
+  right: "Yes only means maybe. Check the real store before trusting a yes; only a no is certain."
+  why: "Most data structures give exact answers, so people expect yes to mean present. A Bloom filter trades that certainty on 'yes' for a much smaller size."
+sayIt: "A Bloom filter never gives false negatives, so I put it in front of expensive lookups: an LSM store skipping files, a crawler skipping seen URLs. I size it from the expected item count and the error rate I can accept."
+cheat:
+  idea: "A small bit array with several hash functions. Adding an item sets its bits; a check that finds any bit at 0 proves the item was never added."
+  flow: "add: set k bits → check: any bit 0 means absent"
+  remember: "No false negatives. A 'yes' means maybe; a 'no' is certain. You cannot delete."
+buildsOn: [indexing]
+scenarios:
+  - q: "A key-value store does a slow disk read for every GET, and most GETs are for keys that do not exist. How does a Bloom filter help?"
+    a: "Keep a Bloom filter of the keys that exist, in memory. On a GET, check the filter first: if it says 'definitely not here', skip the disk read entirely. Only when it says 'maybe' do you touch the disk, so the common miss is fast."
+  - q: "Your Bloom filter sized for 1 million items now holds 5 million. What happens to its answers, and is any answer now wrong in a new way?"
+    a: "Far more bits are set, so false positives rise sharply and 'maybe' is wrong much more often. But there are still no false negatives: a real member always finds its bits set, so a 'definitely not' answer stays correct."
 confusedWith: []
 tags: [probabilistic, data-structures, databases, redis, cassandra]
 visual: flow
@@ -32,9 +43,6 @@ sources:
     verifiedOn: "2026-10-16"
   - title: "Probabilistic configuration parameters (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/probabilistic/configuration/"
-    verifiedOn: "2026-10-16"
-  - title: "BF.ADD (Redis docs)"
-    url: "https://redis.io/docs/latest/commands/bf.add/"
     verifiedOn: "2026-10-16"
   - title: "Cuckoo filter (Redis docs)"
     url: "https://redis.io/docs/latest/develop/data-types/probabilistic/cuckoo-filter/"
@@ -56,9 +64,13 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+A Bloom filter is a small, memory-only structure that answers one question: have I seen this item before? Its answer is either "definitely not" or "maybe". It never says "definitely yes". It works on a bit array (an array of 0s and 1s) and a few hash functions, which you met when [indexing](card:indexing) turned keys into positions. In exchange for the occasional wrong "maybe", it uses far less memory than storing every item.
+
 ## Why it exists
 
-Some lookups are slow, like a disk read or a network call, and usually find nothing. A Bloom filter answers "definitely not here" from memory, so most of those lookups are skipped.
+Some lookups are slow, like reading from disk or calling another service, and most of them find nothing. Checking a real set of all known items would be exact, but that set can be too large to keep in memory. A Bloom filter stores a tiny fingerprint of the set instead, so it can answer "definitely not here" from memory in a few bit reads, letting you skip the slow lookup for the common case where the item is absent.
 
 ## How it works
 
@@ -73,13 +85,16 @@ Some lookups are slow, like a disk read or a network call, and usually find noth
   C -- "all are 1" --> M(["Maybe: a false positive, cow was never added"])`}
 />
 
-- More bits per item means fewer false positives. The best number of hash functions is about (bits ÷ items) × ln 2.
-- Bits are never cleared, so a fuller filter says "maybe" more often. Redis 8 adds a bigger sub-filter when one is full.
-- Burton Bloom described it in 1970, to keep most word lookups for a hyphenation program off a slow disk.
+1. Start with a bit array of all 0s and pick k hash functions.
+2. To add an item, run it through all k hash functions to get k positions, and set those bits to 1.
+3. To check an item, compute the same k positions and read those bits.
+4. If any of them is 0, the item was never added, because adding it would have set that bit. If all are 1, answer "maybe": those bits could have been set by other items.
+
+So the key is that a real member always has all its bits set, which is why a "no" is certain and only a "yes" can be wrong.
 
 ## Example
 
-A tiny filter: `m` bits and `k` hash functions.
+A tiny filter with `m` bits and `k` hash functions, run on 100 items.
 
 ```java
 BitSet bits = new BitSet(m);                   // m bits, all 0
@@ -88,11 +103,9 @@ int spot(String item, int i) {                 // double hashing: h1 + i * h2
     int h1 = item.hashCode() * 0x9E3779B9, h2 = (h1 >>> 16) | 1;
     return Math.floorMod(h1 + i * h2, m);
 }
-
 void add(String item) {
     for (int i = 0; i < k; i++) bits.set(spot(item, i));
 }
-
 boolean mightContain(String item) {
     for (int i = 0; i < k; i++) if (!bits.get(spot(item, i))) return false;
     return true;                               // maybe: could be a false positive
@@ -117,30 +130,43 @@ class BloomFilter:
         return all(self.bits[p] for p in self._spots(item))   # True means maybe
 ```
 
-With m = 1,000, k = 7 and 100 items, theory gives about 0.8% false positives; both demos measure close to 1%. In production, use Guava's `BloomFilter` or Redis `BF.ADD` and `BF.EXISTS`.
+```text output
+all added report present: True
+false positive rate: 0.92%
+```
 
-## Defaults
+What to notice:
+
+- The output ran the Python version with `m = 1000`, `k = 7` and 100 items, then tested 10,000 non-members.
+- Every added item reports present: there are no false negatives, as promised.
+- About 0.92% of non-members wrongly report "maybe", close to the ~0.8% the formula predicts for this size; this is the false-positive rate.
+- In production use a tested library (Guava `BloomFilter`, or Redis `BF.ADD` and `BF.EXISTS`) rather than a hand-rolled one.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
 | Filter created by `BF.ADD` | 1% error rate, room for 100 items, next sub-filter 2x bigger | Redis 8 |
-| `bloom_filter_fp_chance` | 0.01; 0.1 with LeveledCompactionStrategy | Cassandra 5.0 |
+| `bloom_filter_fp_chance` | 0.01 (0.1 with LeveledCompactionStrategy) | Cassandra 5.0 |
 | `BloomFilter.create(funnel, n)` | 3% false positives | Guava 33.7 |
+
+- **Sizing rule:** for n items at error rate p, use about `m = -n * ln(p) / (ln 2)^2` bits and `k = (m/n) * ln 2` hashes. For 1% that is roughly 9.6 bits per item and 7 hashes.
+
+## Common mistakes
+
+- **"I can remove an item by clearing its bits."** A basic Bloom filter has no delete: a bit may be shared with another item, so clearing it would make that item wrongly report absent (a false negative). Use a counting Bloom filter, a cuckoo filter (Redis `CF.DEL`), or rebuild from the data.
+- **"A bigger filter is always better."** Past a point the memory is wasted. Size it from your real item count and the error rate you can tolerate; oversizing costs memory, undersizing makes "maybe" wrong too often.
 
 ## Interview Qs
 
 ### What is a Bloom filter, and when would you use one?
 
-A compact bit array that tests set membership and answers "definitely not" or "maybe". Use it in front of a slow lookup that usually finds nothing: an LSM store skipping files, a crawler skipping seen URLs, a quick "username may be taken" check.
+A compact bit array that tests set membership and answers "definitely not" or "maybe". Use it in front of a slow lookup that usually finds nothing: an LSM store skipping files for a key, a crawler skipping already-seen URLs, or a quick "this username may be taken" check before hitting the database.
 
-### Why false positives, but never false negatives?
+### Why false positives but never false negatives?
 
-Adding an item sets all of its k bits, and bits are never cleared, so a real member always finds its bits set. An item never added can still find all its bits set by other items.
+Adding an item sets all of its k bits, and bits are never cleared, so a real member always finds every one of its bits set and reports "maybe". An item that was never added can still find all k of its bits already set by other items, which is a false positive.
 
 ### How big should it be?
 
-Pick n, the expected items, and p, the error rate. Bits m ≈ −n × ln(p) ÷ (ln 2)², and hashes k ≈ (m ÷ n) × ln 2. For 1%, that is about 9.6 bits per item and 7 hashes. Add more items than planned and false positives rise.
-
-### Can you delete from a Bloom filter?
-
-Not from a basic one: a bit may be shared with other items, so clearing it causes false negatives. Use a counting Bloom filter (small counters instead of bits), a cuckoo filter (Redis `CF.DEL`), or rebuild the filter from the data.
+Choose n, the expected number of items, and p, the error rate you can accept. Then `m ≈ -n·ln(p)/(ln2)²` bits and `k ≈ (m/n)·ln2` hashes; for 1% that is about 9.6 bits per item and 7 hashes. If you later add many more items than n, the false-positive rate rises.

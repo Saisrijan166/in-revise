@@ -5,17 +5,28 @@ title: Scalability
 topic: foundations
 level: beginner
 heat: 3
-hook: "When load grows, either make one machine bigger (scale up) or add more machines (scale out)."
+hook: "When load grows, either make one machine bigger (scale up) or add more machines (scale out). Scale out has no ceiling but needs a load balancer."
 points:
-  - { k: "Scale up", v: "one bigger machine: easy, but there is a biggest size" }
-  - { k: "Scale out", v: "more machines: no hard ceiling, survives one failure", kind: plus }
-  - { k: "Scale out needs", v: "a load balancer in front, stateless servers behind" }
-  - { k: "Resize", v: "scale up often means a restart (Azure VM, EC2)", kind: minus }
-  - { k: "Database", v: "the hard part: more web servers won't fix a slow DB", kind: minus }
+  - { k: "Scale up", v: "give one machine more CPU, memory or disk; simple, but there is a biggest machine you can buy" }
+  - { k: "Scale out", v: "add more machines that share the work; no hard ceiling, and one machine failing loses only part of capacity", kind: plus }
+  - { k: "Scale out needs", v: "a load balancer in front and stateless servers behind, so any server can handle any request" }
+  - { k: "Scale up cost", v: "resizing one machine usually needs a restart (resize an Azure VM, change an EC2 instance type)", kind: minus }
+  - { k: "Database is the hard part", v: "adding web servers does not speed up one shared database; scale it separately", kind: minus }
 trap:
-  wrong: "Just add more servers."
-  right: "Find the bottleneck first. If it is the database, more web servers will not help."
-sayIt: "Vertical scaling makes one machine bigger; horizontal scaling adds machines. I keep app servers stateless behind a load balancer so they scale out, and I scale the database separately."
+  wrong: "Load is high, so just add more servers."
+  right: "Find the bottleneck first. If the database is the limit, more web servers add load to it and make things worse."
+  why: "Adding servers is the visible, easy action, and it works when the web tier is the limit, so people reach for it before checking what is actually saturated."
+sayIt: "Vertical scaling makes one machine bigger; horizontal scaling adds machines. I keep app servers stateless behind a load balancer so they scale out, and I scale the database separately because that is usually the real bottleneck."
+cheat:
+  idea: "Scalability is handling more load by making one machine bigger (scale up) or adding more machines (scale out). Scale out has no ceiling but needs a load balancer."
+  flow: "Load grows → scale up hits a ceiling → scale out behind a balancer"
+  remember: "Find the bottleneck first; a database rarely scales by adding web servers."
+buildsOn: []
+scenarios:
+  - q: "Your payment API runs on one server at 90% CPU during a sale. You double the CPU and memory, but a month later the next sale saturates it again. What did you reach, and what is the fix?"
+    a: "You scaled up and hit the ceiling of one machine. Make the API stateless (sessions in Redis, not server memory) and run several copies behind a load balancer, so you can add machines for each sale."
+  - q: "You add five more web servers, but response times do not improve. What is the likely cause?"
+    a: "The bottleneck is probably the shared database, not the web tier. More web servers send more queries to the same database, so it stays the limit. Scale the database with read replicas, caching or sharding."
 confusedWith: [vertical-vs-horizontal-scaling]
 tags: [scaling, capacity, fundamentals]
 visual: analogy
@@ -35,9 +46,6 @@ sources:
   - title: "Change the instance type for your Amazon EC2 instance (AWS docs)"
     url: "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/change-instance-type-of-ebs-backed-instance.html"
     verifiedOn: "2026-10-15"
-  - title: "What is cloud scalability? (Microsoft Azure)"
-    url: "https://azure.microsoft.com/en-us/resources/cloud-computing-dictionary/what-is-cloud-scalability"
-    verifiedOn: "2026-10-16"
   - title: "A Word on Scalability (Werner Vogels, 2006)"
     url: "https://www.allthingsdistributed.com/2006/03/a_word_on_scalability.html"
     verifiedOn: "2026-10-16"
@@ -46,43 +54,81 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Scalability is a system's ability to handle more load, more users, more requests or more data, by adding resources. There are two ways to add resources. You can scale up (vertical scaling): give one machine more CPU, memory or disk. Or you can scale out (horizontal scaling): add more machines that share the work. A system scales well if the work it can do grows roughly in step with the resources you give it.
+
 ## Why it exists
 
-One server has fixed limits: CPU, memory, disk and network. When users grow past them, requests slow down and then fail.
+One server has fixed limits: so much CPU, memory, disk and network. The payment service starts on a single machine, which is simple. As users grow, that machine reaches its limits, requests queue, response times rise, and then requests start failing. Scaling is how you add capacity before that happens, so the service keeps up as load grows instead of falling over at the next traffic spike.
 
 ## How it works
 
 <Compare id="vertical-vs-horizontal-scaling" />
 
-- Scaling out needs a [load balancer](card:load-balancer) in front and stateless servers behind it, so any server can handle any request.
+1. Measure where the load actually lands: CPU, memory, database or network. The busiest part is the bottleneck.
+2. If scaling up (a bigger machine) is enough and simple, do that first. It usually needs no code change.
+3. When one machine is not enough, or you must survive a machine failing, scale out: run several copies of the server.
+4. Scaling out needs a [load balancer](card:load-balancer) in front to spread requests, and [stateless](term:stateless) servers behind it, so any server can handle any request.
+
+So the key is to scale the part that is actually the bottleneck, which is often the database, not the web tier.
 
 ## Analogy
 
-<Analogy title="A bigger truck vs more trucks" limit="More trucks only help if the warehouse can load them. If the database is slow, more web servers will not help.">
-Scale up is a bigger truck: easy, but there is a biggest truck, and if it breaks, nothing moves. Scale out is more trucks: no size limit and one breakdown is fine, but now you need a dispatcher (the load balancer).
+<Analogy title="A bigger truck vs more trucks" limit="More trucks only help if the warehouse can load them fast enough. If the database is the slow warehouse, more web servers (trucks) will not help.">
+Scale up is a bigger truck: easy, but there is a biggest truck, and if it breaks down, nothing moves. Scale out is more trucks: no size limit and one breakdown is fine, but now you need a dispatcher (the load balancer) to decide which truck takes which load.
 </Analogy>
 
 ## Example
 
-Traffic doubles for a sale.
+Traffic doubles for a sale. There are two ways to add capacity to the payment service.
 
-- **Scale up:** move the app from 4 to 8 CPU cores. One restart, no code change.
-- **Scale out:** run 4 copies behind a load balancer, after moving user sessions from server memory to Redis.
+```text
+Scale up:  move the service from 4 CPU cores to 8.
+           One restart, no code change. Still one machine.
+
+Scale out: run 4 copies behind a load balancer.
+           First move user sessions out of server memory into Redis,
+           so any copy can serve any user.
+```
+
+What to notice:
+
+- Scaling up is a config change and a restart; the code is untouched, but you are still limited to one machine and it is still a single point of failure.
+- Scaling out needs the servers to be stateless first. If session data lives in one server's memory, a user's next request hitting a different server would lose their session.
+- Moving sessions to [Redis](card:caching-layers) is what makes the servers interchangeable, which is what lets the load balancer send any request to any copy.
+
+## Rules and defaults
+
+- **Scale up ceiling:** the limit is the largest machine your provider offers. You cannot go past it.
+- **Scale up downtime:** resizing one machine usually needs a stop and start (resizing an Azure VM, changing an EC2 instance type).
+- **Scale out needs state moved out:** sessions, uploads and other per-user data must live in a shared store (a cache or database), not in one server's memory.
+- **Scale out does not fix a shared bottleneck:** more web servers send more work to the same database, so the database must be scaled on its own (replicas, caching, sharding).
+- **Elasticity:** autoscaling adds and removes machines automatically with demand; it only works if the servers are already stateless.
+
+## Not to be confused with
+
+Scalability is not the same as performance. Performance is how fast the system is for one user with no load. Scalability is whether it stays fast as load grows. A system can be fast for one user yet collapse under many (poor scalability), or be a bit slow for everyone but hold that speed at any load (good scalability). Rule: performance = speed for one request; scalability = holding that speed as work grows.
+
+## Common mistakes
+
+- **"Horizontal scaling is always better."** Scaling out adds networking, coordination and data-consistency problems. For a part that is hard to split, like one relational database, scaling up first is often simpler and correct.
+- **"Stateless means the server stores nothing."** It means the server keeps no per-user state between requests in its own memory. Shared state still lives in a cache or database that every server reads.
 
 ## Interview Qs
 
 ### Vertical vs horizontal scaling?
 
-Vertical adds power to one machine: simple, but it has a ceiling, often needs a restart, and stays a single point of failure. Horizontal adds machines: it goes further and survives failures, but needs a load balancer and stateless servers.
+Vertical scaling adds power to one machine: simple, usually no code change, but it has a ceiling, often needs a restart, and stays a single point of failure. Horizontal scaling adds machines: it goes much further and survives a machine failing, but it needs a load balancer and stateless servers, and it adds coordination work.
 
 ### How do you make the web tier scale out?
 
-Make servers stateless: keep sessions in Redis or a database, not in server memory. Put a load balancer in front. Now you can add or remove servers freely.
+Make the servers stateless: keep sessions and other per-user data in a shared store like Redis or a database, not in server memory. Put a load balancer in front to spread requests. Now any server can serve any request, so you can add or remove servers freely, by hand or with autoscaling.
 
-### When would you scale up instead?
+### You added servers and nothing got faster. Why?
 
-When the part is hard to split, like a single relational database, or when you need a quick fix. Scale up first, but design so you can scale out later.
+The bottleneck is probably not the web tier. If a shared database is the limit, extra web servers just send it more queries, so it stays saturated. Find what is actually at capacity first, then scale that part, often the database, using read replicas, caching or sharding.
 
 ### Performance vs scalability?
 
-A performance problem means the system is slow even for one user. A scalability problem means it is fast for one user but slow under heavy load. A scalable service handles more work in proportion to the resources you add.
+A performance problem means the system is slow even for a single user. A scalability problem means it is fast for one user but slows down under heavy load. A scalable service does more work roughly in proportion to the resources you add.

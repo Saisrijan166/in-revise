@@ -5,16 +5,29 @@ title: Write-Through
 topic: caching
 level: intermediate
 heat: 3
-hook: "Write-through saves each write to the cache and the database together: fresh reads. Write-behind saves to the cache now and the database later: faster, but riskier."
+hook: "Write-through writes to the cache and database together, so reads stay fresh. Write-behind writes to the cache now and the database later: faster, but it can lose data."
 points:
-  - { k: "Write-through", v: "cache and DB in one write; confirmed when both succeed" }
-  - { k: "Write-behind", v: "confirmed after the cache write; DB updated later, in batches" }
-  - { k: "Write-behind batches", v: "many changes to one key within the delay become one DB write", kind: plus }
-  - { k: "Write cost", v: "two writes each time; most written data is never read", kind: minus }
+  - { k: "Write-through", v: "cache and database are updated in one write; confirmed only when both have the data" }
+  - { k: "Reads stay fresh", v: "the cache always holds the latest value, so a read right after a write sees it", kind: plus }
+  - { k: "Write-behind", v: "confirmed after the cache write; the database is updated later, in batches" }
+  - { k: "Batching", v: "many changes to one key within the delay collapse into one database write", kind: plus }
+  - { k: "Crash loss", v: "with write-behind, a cache crash before the flush loses the unsaved writes", kind: minus }
+  - { k: "Cold cache", v: "write-through fills the cache with data nobody reads, so pair it with a TTL", kind: minus }
 trap:
   wrong: "Write-behind is just a faster write-through."
-  right: "It confirms before the database has the data. Until the flush, the cache holds the only copy, so a crash loses the write."
-sayIt: "Write-through updates the cache and the database in one write: fresh reads, slower writes, and cold data in the cache, so I add a TTL. Write-behind gives the fastest writes but can lose the latest ones, so I keep it for data like view counts."
+  right: "Write-behind confirms before the database has the write, so a crash loses it. Write-through confirms only after the database is written."
+  why: "Both update the cache on a write, so they look alike, but they differ in when the write is durable, which is the part that matters."
+sayIt: "Write-through updates the cache and the database in one write, so reads are fresh but writes are slower and the cache holds cold data, which I bound with a TTL. Write-behind gives the fastest writes but can lose the latest ones, so I keep it for data like view counts."
+cheat:
+  idea: "Write-through writes the cache and database together and confirms only when both succeed, so reads are always fresh. Write-behind confirms after the cache and writes the database later."
+  flow: "Write-through: app → cache → DB → confirm. Write-behind: app → cache → confirm, DB later"
+  remember: "Write-through = fresh reads, slower writes. Write-behind = fast writes, risk of losing unflushed data."
+buildsOn: [caching-strategies, cache-aside]
+scenarios:
+  - q: "A view counter is updated 500 times in 10 seconds. Compare the database writes under write-through and under write-behind that flushes every 10 seconds."
+    a: "Write-through does 500 cache writes and 500 database writes, and every read is fresh. Write-behind does 500 cache writes but only 1 database write, collapsing the changes; the cost is that a cache crash before the flush loses up to 10 seconds of counts."
+  - q: "Would you use write-behind for recording payment transactions? Why or why not?"
+    a: "No. Write-behind confirms before the database is written, so a crash can lose a confirmed payment, which is unacceptable. Payments need the database to hold the write before you confirm it, so use write-through or a durable write path, not write-behind."
 confusedWith: [cache-aside-vs-write-through]
 tags: [caching, consistency, redis]
 visual: flow
@@ -45,47 +58,68 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Write-through and write-behind are two write strategies: they decide what happens to the cache and the database when the app writes data. With **write-through**, a write goes to the cache and the database together, and is confirmed only when both have it. With **write-behind** (also called write-back), a write goes to the cache and is confirmed at once, and the database is updated a little later. Both keep the cache updated on writes, unlike [cache-aside](card:cache-aside), which deletes the key instead.
+
 ## Why it exists
 
-With [cache-aside](card:cache-aside), the cache changes only on reads, so a read right after a write can miss or see old data. Write-through keeps the cache current on every write; write-behind also makes writes fast.
+With cache-aside, the cache changes only on reads, so a read right after a write can miss or see the old value until the key is reloaded. For data where a read must immediately see the latest write, that is not good enough. Write-through fixes it by updating the cache on every write, so the latest value is always there to read. Write-behind goes further for write-heavy data: it makes the write return fast and batches many changes into far fewer database writes, at the cost of durability.
 
 ## How it works
 
 <Mermaid
-  alt="Two write paths. Write-through: the app writes to the cache, the same write goes on to the database, and only then is the write confirmed. Write-behind: the app writes to the cache and is confirmed at once; later the cache writes the changes to the database in batches."
+  alt="Two write paths. Write-through: the app writes, the cache is updated, the same write goes on to the database, and only then is the write confirmed. Write-behind: the app writes, the cache is updated and the write is confirmed at once; later the cache writes the batched changes to the database."
   chart={`flowchart TD
   subgraph WT["Write-through"]
-    A1([App writes]) --> C1[Cache]
-    C1 -->|same write| D1[(Database)]
-    D1 --> OK1([Confirmed])
+    A1([App writes]) --> C1[Update cache]
+    C1 -->|same write| D1[(Update database)]
+    D1 --> OK1([Confirm])
   end
   subgraph WB["Write-behind"]
-    A2([App writes]) --> C2[Cache]
-    C2 --> OK2([Confirmed at once])
-    C2 -.->|"later, in batches"| D2[(Database)]
+    A2([App writes]) --> C2[Update cache]
+    C2 --> OK2([Confirm at once])
+    C2 -.->|"later, in batches"| D2[(Update database)]
   end`}
 />
 
-- **Write-through** can run inside the cache product, or in the app: write the database, then set the key (the AWS example).
-- **Write-behind** (write-back) queues changes; several changes to one key in the delay become one database write.
+1. In write-through, the app issues one write. The cache is updated, the same change is written to the database, and only when both succeed is the write confirmed.
+2. A later read of that key is a hit with the fresh value, because the cache was updated as part of the write.
+3. In write-behind, the app writes to the cache and the write is confirmed straight away, before the database is touched.
+4. The cache flushes the changes to the database later, often batching several changes to one key into a single database write.
+
+So write-through trades write speed for fresh reads, while write-behind trades durability for write speed.
 
 ## Example
 
 A view counter changes 500 times in 10 seconds.
 
-- **Write-through:** 500 cache writes and 500 database writes. Every read is fresh.
-- **Write-behind**, flushing every 10 seconds: 500 cache writes, 1 database write. A cache crash before the flush loses those 500 views.
+- **Write-through:** 500 cache writes and 500 database writes. Every read is fresh, but the database takes every write.
+- **Write-behind**, flushing every 10 seconds: 500 cache writes but 1 database write, because the changes collapse. If the cache crashes before the flush, those 500 views are lost.
+
+What to notice:
+
+- Write-through does one database write per change, so a write-heavy counter floods the database; write-behind collapses them into one.
+- The saving of write-behind comes from batching repeated changes to the same key within the delay window.
+- The risk of write-behind is the gap before the flush, when the cache holds the only copy. For a view count that is fine; for a payment it is not.
+
+## Rules and defaults
+
+- **Write-through durability:** the write is durable when confirmed, because the database already has it.
+- **Write-behind durability:** the write is not durable until the flush; size the flush interval by how much loss you can accept.
+- **Cold data:** write-through caches everything written, much of it never read, so set a TTL to drop cold entries.
+- **Empty cache node:** write-through only fills keys that are written after the node starts, so pair it with lazy loading to serve keys written before.
 
 ## Interview Qs
 
 ### Write-through vs write-behind?
 
-Write-through confirms a write only after the cache and the database both have it: fresh reads, slower writes. Write-behind confirms after the cache write and flushes later: fast writes and fewer database writes, but data is lost if the cache fails before the flush.
+Write-through confirms a write only after the cache and the database both have it: fresh reads, but slower writes. Write-behind confirms after the cache write and flushes to the database later in batches: fast writes and far fewer database writes, but data is lost if the cache fails before the flush.
 
 ### When would you use write-behind?
 
-For write-heavy data where losing the last few seconds is acceptable, such as view counts, likes or metrics. Not for payments or orders, where the database must hold the write before you confirm it.
+For write-heavy data where losing the last few seconds is acceptable, such as view counts, likes or metrics. The batching turns many writes into one and keeps the write path fast. Not for payments or orders, where the database must hold the write before you confirm it to the user.
 
 ### What problems does write-through bring?
 
-Every write pays for two writes, and most written data is never read, so the cache fills with cold data; add a TTL. A new cache node also starts empty until data is written again, so pair it with lazy loading.
+Every write pays for two writes, cache and database, so it is slower. It also caches everything written, most of which is never read, so the cache fills with cold data; a TTL drops it. And a new cache node starts empty for keys written earlier, so you pair write-through with lazy loading.

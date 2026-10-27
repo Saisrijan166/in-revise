@@ -5,18 +5,29 @@ title: Cache Invalidation
 topic: caching
 level: interview
 heat: 3
-hook: "A cached copy goes stale the moment the database changes. Invalidation removes or replaces it: after a time (TTL), on each write, or from a stream of change events."
+hook: "A cached copy goes stale the moment the database changes. Invalidation removes or replaces the copy: after a time (TTL), on each write, or from a stream of change events."
 points:
-  - { k: "TTL", v: "simplest: stale for at most the TTL" }
-  - { k: "Delete on write", v: "update the DB, then delete the key" }
-  - { k: "Delete, not set", v: "deletes are idempotent; Facebook deletes rather than updates" }
-  - { k: "Versioned keys", v: "bump the version in the key; old keys go unread" }
-  - { k: "Hot key expires", v: "thundering herd: all its readers hit the DB at once", kind: minus }
-  - { k: "Stampede fix", v: "one request reloads; others wait or get the stale copy", kind: plus }
+  - { k: "Invalidation", v: "removing or replacing a cached copy once the database it came from has changed" }
+  - { k: "TTL", v: "the simplest way: a key is stale for at most its TTL, then deletes itself" }
+  - { k: "Delete on write", v: "after updating the database, delete the key so the next read reloads it" }
+  - { k: "Delete, not update", v: "deletes are idempotent, so retried or reordered deletes do no harm; Facebook deletes" }
+  - { k: "Thundering herd", v: "when a hot key is removed, all its readers miss and hit the database at once", kind: minus }
+  - { k: "Stampede fix", v: "let one request reload the key while the others wait or get the old copy", kind: plus }
 trap:
   wrong: "A short TTL keeps the cache correct."
   right: "A TTL only caps how long data stays stale. If readers must see a write at once, also delete or update the key on each write."
-sayIt: "I give every key a TTL as a safety net and delete the key after each database write, so the next read loads fresh data. For hot keys, one request reloads while the others wait or get the stale value."
+  why: "A short TTL feels like freshness because stale data clears quickly, but between the write and the next expiry the cache still serves the old value."
+sayIt: "I give every key a TTL as a safety net and delete the key after each database write, so the next read loads fresh data. For hot keys I let one request reload while the others wait or get the stale value, to avoid flooding the database."
+cheat:
+  idea: "Invalidation keeps the cache in step with the database by removing or replacing a copy once the data changes: by TTL, on each write, or from a change-event stream."
+  flow: "Write DB → delete key → next read reloads fresh"
+  remember: "Keep a TTL even with delete-on-write; delete rather than update, because deletes are idempotent."
+buildsOn: [cache-aside, write-through, eviction]
+scenarios:
+  - q: "A product's price is cached and you update it in the database, but users keep seeing the old price for minutes. You only set a TTL. What is wrong, and how do you fix it?"
+    a: "A TTL alone leaves the stale price until it expires, which is why users see it for minutes. Delete the cached key right after the database write, so the next read reloads the new price, and keep the TTL as a safety net for missed deletes."
+  - q: "You deploy a change that warms the cache, giving thousands of keys the same 1-hour TTL. An hour later the database spikes. What happened, and how do you prevent it?"
+    a: "This is a cache avalanche: all those keys expired at the same instant, so every request missed and hit the database together. Spread the expiry by adding a small random jitter to each TTL, so the keys expire at different times instead of all at once."
 confusedWith: []
 tags: [caching, consistency, invalidation, memcached]
 visual: table
@@ -26,7 +37,7 @@ sources:
     verifiedOn: "2026-10-16"
   - title: "Caching challenges and strategies (Amazon Builders' Library)"
     url: "https://aws.amazon.com/builders-library/caching-challenges-and-strategies/"
-    verifiedOn: "2026-10-16"
+    verifiedOn: "2026-10-27"
   - title: "Caching strategies for Memcached: adding TTL (Amazon ElastiCache docs)"
     url: "https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Strategies.html"
     verifiedOn: "2026-10-16"
@@ -51,14 +62,21 @@ sources:
   - title: "Optimal Probabilistic Cache Stampede Prevention (Vattani et al., VLDB 2015)"
     url: "https://www.vldb.org/pvldb/vol8/p886-vattani.pdf"
     verifiedOn: "2026-10-16"
+  - title: "Cache Validity: add time jitter to TTLs (Database Caching Strategies Using Redis, AWS whitepaper)"
+    url: "https://docs.aws.amazon.com/whitepapers/latest/database-caching-strategies-using-redis/cache-validity.html"
+    verifiedOn: "2026-10-27"
   - title: "Caching (Hello Interview, system design core concepts)"
     url: "https://www.hellointerview.com/learn/system-design/core-concepts/caching"
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Cache invalidation is keeping the cache in step with the database by removing or replacing a cached copy once the data has changed. A cache holds copies, and a copy is correct only until the original changes; after that it is stale. Invalidation gets rid of the stale copy, so a later read does not keep serving the old value. The hard part is that removing a popular key can send all its readers to the database at once.
+
 ## Why it exists
 
-A cache holds copies. When the database changes, each copy is wrong until something removes or replaces it, and removing a hot key can flood the database.
+A cache speeds reads by serving a saved copy, but that copy does not know when the database behind it changes. Without invalidation, a price change or profile edit would never reach readers: they would keep seeing the old value until the key happened to be dropped. Invalidation makes the change visible, on a schedule you choose, from "within the TTL" to "on the next read". It is tricky because you must also avoid the flood of traffic that removing a hot key causes.
 
 ## How it works
 
@@ -70,12 +88,16 @@ A cache holds copies. When the database changes, each copy is wrong until someth
 | **Versioned key** | Keys carry a version, like `user:42:v7`; a change bumps it | Old keys are never read again |
 | **Change events** | A process reads the database's change log and deletes keys | Until the event is applied |
 
-- Keep a TTL even with the others: if a delete is lost, the key still expires.
-- **Thundering herd:** when a hot key expires or is deleted, many requests miss at once. Fix it with [request coalescing](card:request-coalescing) or [leases](card:cache-lease) (one request reloads, the others wait), by [serving the stale copy](card:serve-stale) during the reload, or by [refreshing early](card:early-expiration).
+1. Give every key a TTL, so even if nothing else fires, a stale key clears itself within that time.
+2. On a write, update the database and then delete (or update) the key, so the next read sees the change, not the TTL wait.
+3. For many caches at once, drive deletes from the database's change log, so every cache, even in another region, drops the key.
+4. Guard against the herd: when a hot key is removed, use a lock or lease so one request reloads it while others wait.
+
+So a TTL is the floor of freshness, and write-time deletes or change events raise it.
 
 ## Example
 
-A hot key expires. A simple lease with Redis `SET ... NX EX` lets one caller reload it; the others wait 50 ms and try again.
+A hot key expires. A simple lease with Redis `SET ... NX EX` lets one caller reload it; the others wait 50 ms and retry.
 
 ```java
 String get(String key) throws InterruptedException {
@@ -109,9 +131,13 @@ def get(key):
         time.sleep(0.05)                                     # others wait, then retry
 ```
 
-At Facebook, memcache leases cut the peak database load for hot keys from 17,000 to 1,300 queries per second.
+What to notice:
 
-## Defaults
+- `SET ... NX` sets the lock only if it does not exist, so exactly one caller wins and reloads; the rest see the lock and wait.
+- The `EX 10` on the lock is a safety net: if the winner crashes before releasing it, the lock expires and another caller takes over.
+- At Facebook, memcache leases cut the peak database load for one hot key from 17,000 to 1,300 queries per second.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
@@ -119,20 +145,29 @@ At Facebook, memcache leases cut the peak database load for hot keys from 17,000
 | Serve stale while refreshing (`proxy_cache_use_stale updating`) | Off | nginx |
 | Lease tokens per key | At most one every 10 s | Facebook memcache (NSDI 2013) |
 
+- **Keep a TTL even with delete-on-write:** if a delete is ever lost, the key still expires on its own.
+- **Spread the TTLs:** add a small random jitter to each TTL so many keys do not all expire at once and cause an avalanche.
+- **Cache misses too (negative caching):** when the database returns nothing, cache a short-lived "not found" marker, or repeated lookups for a missing key hit the database every time.
+
+## Common mistakes
+
+- **"Update the cached value on a write."** Two racing updates can land out of order, leaving the older value. Deleting the key is idempotent and avoids this, which is why Facebook deletes rather than updates.
+- **"A missing row is nothing to cache."** Without negative caching, requests for data that does not exist (cache penetration) skip the cache and pound the database. Cache the "not found" result with a short TTL.
+
 ## Interview Qs
 
 ### How do you keep a cache consistent with the database?
 
-Choose by how fresh the data must be. A TTL alone allows staleness up to the TTL. Delete the key after each database write for near-fresh reads, or write through when a read must see the write at once. Keep a TTL as a safety net.
+Choose by how fresh the data must be. A TTL alone allows staleness up to the TTL. Delete the key after each database write for near-fresh reads, or write through when a read must see the write at once. Keep a TTL as a safety net; drive deletes from the change log when many caches must agree.
 
 ### Why delete the cached value on a write instead of updating it?
 
-Deletes are idempotent, so a retried or reordered delete does no harm. Two racing updates, by contrast, can leave the older value in the cache. Facebook's memcache deletes on writes for this reason.
+Deletes are idempotent, so a retried or reordered delete does no harm. Two racing updates, by contrast, can leave the older value in the cache. Facebook's memcache deletes on writes for this reason, and lets the next read reload the fresh value.
 
 ### What is a cache stampede, and how do you prevent it?
 
-A hot key expires and many requests miss at once, all hitting the database. Let only one request reload it (request coalescing, a lock or a lease), serve the old value meanwhile, or refresh hot keys a little before they expire.
+A hot key expires and many requests miss at once, all hitting the database together. Let one request reload it ([request coalescing](card:request-coalescing), a lock or a [lease](card:cache-lease)), [serve the old value](card:serve-stale) while it reloads, or [refresh hot keys early](card:early-expiration).
 
 ### How do you invalidate caches across many servers or regions?
 
-Drive deletes from the database itself: a process reads committed changes and sends deletes to every cache. Facebook runs such a daemon, mcsqueal, on every database and batches its deletes.
+Drive deletes from the database itself: a process reads committed changes and sends deletes to every cache. Facebook runs such a daemon, mcsqueal, on every database and batches its deletes, so caches in every region drop the stale key.

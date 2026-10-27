@@ -7,16 +7,27 @@ level: intermediate
 heat: 2
 hook: "One front door for many services: it checks who is calling, limits how often, and sends each request to the right service."
 points:
-  - { k: "One endpoint", v: "clients call the gateway, never each service directly" }
-  - { k: "Routing", v: "picks the service by path, host or header (layer 7)" }
-  - { k: "Offloading", v: "auth, TLS, rate limits and logs done once, at the gateway" }
-  - { k: "Aggregation", v: "one client call; the gateway combines several replies" }
-  - { k: "Extra hop", v: "adds latency, and can become a bottleneck", kind: minus }
-  - { k: "AWS API Gateway throttle", v: "10,000 req/s, burst 5,000, per account per Region", kind: default }
+  - { k: "One endpoint", v: "clients call only the gateway; they never need the address of each service" }
+  - { k: "Routing", v: "it reads the request and picks the service by path, host or header (layer 7)" }
+  - { k: "Offloading", v: "auth, TLS, rate limits and logging are done once at the gateway, not in every service", kind: plus }
+  - { k: "Aggregation", v: "the client makes one call; the gateway calls several services and combines their replies", kind: plus }
+  - { k: "Extra hop", v: "every request goes through it, so it adds latency and can become a bottleneck", kind: minus }
+  - { k: "AWS throttle default", v: "10,000 req/s with a burst of 5,000, per account per Region", kind: default }
 trap:
   wrong: "Put business logic in the gateway so the services stay simple."
   right: "Keep business logic in the services. A gateway full of service rules must change with every service and becomes everyone's bottleneck."
+  why: "The gateway already touches every request, so adding one more rule there feels convenient; the cost shows up later when one shared component must change for every team."
 sayIt: "I put an API gateway in front of the services. Clients get one endpoint; the gateway handles auth, rate limiting, TLS and logging, then routes by path. I run several gateway instances behind a load balancer and keep business logic out of it."
+cheat:
+  idea: "One entry point in front of many services. It authenticates, rate-limits and logs, then routes each request to its service."
+  flow: "Client → gateway (auth, rate limit, log) → the owning service"
+  remember: "Shared edge jobs go in the gateway; business logic stays in the services. Run several instances to avoid a single point of failure."
+buildsOn: [reverse-proxy, load-balancer]
+scenarios:
+  - q: "A mobile home screen needs a user's profile, recent orders and current offers, held by three different services. How does a gateway reduce the mobile round trips from three to one?"
+    a: "Use gateway aggregation: the phone makes one call to the gateway, which calls the three services over the fast internal network and returns one combined reply. The phone pays for one slow mobile round trip instead of three, and any per-service retries happen server-side."
+  - q: "Someone proposes putting the 'can this user refund this order' check in the gateway. Why push back?"
+    a: "That is business logic and it belongs in the orders service. In the gateway it would need the gateway to change whenever refund rules change, couple the gateway to one service, and grow into a shared monolith every team must edit. The gateway should only validate identity and pass a trusted caller through."
 confusedWith: [lb-vs-proxy-vs-gateway]
 tags: [api-gateway, microservices, security, networking]
 visual: flow
@@ -48,14 +59,15 @@ sources:
   - title: "Quotas for configuring and running a REST API (Amazon API Gateway docs)"
     url: "https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-execution-service-limits-table.html"
     verifiedOn: "2026-10-16"
-  - title: "API Gateway deep dive (Hello Interview)"
-    url: "https://www.hellointerview.com/learn/system-design/deep-dives/api-gateway"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+An API gateway is a single entry point that sits in front of many backend services. Clients send every request to the gateway instead of to the services directly. For each request the gateway does the shared edge jobs, checking the caller's identity, applying rate limits and logging, then reads the request and routes it to the service that owns it. It is a [reverse proxy](card:reverse-proxy) with API-aware features, so it builds on the same "one front door" idea but adds per-API routing, authentication and quotas.
 
 ## Why it exists
 
-With many services, clients would need every address, and every service would repeat auth, TLS and rate limiting. A gateway gives clients one endpoint and does those shared jobs once.
+In a system of many services, without a gateway each client must know the address of every service, and every service must repeat authentication, TLS and rate limiting. That duplicates the same edge code everywhere and makes clients fragile, because any change to the service layout breaks them. A gateway gives clients one stable endpoint and does those shared jobs once, so services can be added, split or moved without the clients noticing.
 
 ## How it works
 
@@ -70,39 +82,53 @@ With many services, clients would need every address, and every service would re
   A --> O`}
 />
 
-- Azure names three gateway patterns: **routing** (one endpoint, layer 7 rules), **offloading** (shared jobs) and **aggregation** (one call, many services).
-- Azure suggests a separate aggregator service behind the gateway, so heavy fan-out does not slow routing.
+1. A client sends its request to the gateway's single endpoint.
+2. The gateway validates the caller, usually by checking a token, and rejects anyone unauthenticated.
+3. It applies rate limits and logs the call, so every service gets this protection for free.
+4. It reads the path, host or header and routes the request to the owning service: `/users` to the users service, `/orders` to the orders service.
+5. For a screen that needs several services, it can call an aggregator that fans out to them and returns one combined reply.
+
+So the key is that clients see one endpoint while the services behind it can change freely.
 
 ## Example
 
-A mobile home screen needs profile, orders and offers.
+A mobile home screen needs the user's profile, recent orders and current offers, each from a different service.
 
-- **No gateway:** the phone makes 3 calls over a slow mobile network, and each one can fail.
-- **With aggregation:** the phone makes 1 call. The gateway calls the 3 services over the fast internal network and returns one reply.
+- **No gateway:** the phone makes 3 separate calls over a slow mobile network, and each one can fail or time out on its own.
+- **With gateway aggregation:** the phone makes 1 call. The gateway calls the 3 services over the fast internal network and returns one combined reply.
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Throttle limit | 10,000 requests/s, burst 5,000, per account per Region | AWS API Gateway (most Regions) |
-| Over the limit | `429 Too Many Requests` | AWS API Gateway |
-| Backend (integration) timeout | 50 ms to 29 s; Regional and private APIs can ask for more | AWS API Gateway REST APIs |
-| Largest payload | 10 MB | AWS API Gateway REST APIs |
+- The slow, unreliable hop is the mobile network, so cutting 3 mobile round trips to 1 is the real win.
+- The 3 internal calls still happen, but on a fast, reliable network where a retry is cheap.
+- Azure suggests putting aggregation in a separate service behind the gateway, so heavy fan-out does not slow down plain routing.
+
+## Rules and defaults
+
+- **Throttle limit:** AWS API Gateway defaults to 10,000 requests/s with a burst of 5,000, per account per Region (some Regions start lower, such as 2,500 with a burst of 1,250).
+- **Over the limit:** AWS API Gateway returns `429 Too Many Requests`.
+- **Backend timeout:** on AWS API Gateway REST APIs the integration timeout ranges from 50 ms to 29 s; Regional and private APIs can request more than 29 s.
+- **Largest payload:** 10 MB on AWS API Gateway REST APIs.
+- **Run several instances:** the gateway is on the path of every request, so run several instances behind a load balancer or it is a single point of failure.
+
+## Not to be confused with
+
+A [load balancer](card:load-balancer) spreads traffic across identical copies of one service and does not understand your APIs. A [reverse proxy](card:reverse-proxy) is one front door that adds TLS, caching and compression. An API gateway adds API-level features on top: routing to different services, authentication, quotas and request transformation. Rule: load balancer spreads load, reverse proxy adds edge features, gateway manages APIs. They often stack, with a load balancer in front of several gateway instances.
 
 ## Interview Qs
 
-### API gateway vs load balancer?
+### Why use an API gateway if we already have a load balancer?
 
-A load balancer spreads traffic across copies of one service. A gateway manages APIs: it routes to different services and adds auth, rate limits and logging. They often work together, with a load balancer in front of several gateway instances.
+A load balancer only spreads traffic across copies of one service; it does not know your APIs. A gateway adds API-level work: routing to different services by path, authenticating callers, enforcing quotas and transforming requests. They are complementary, and a common setup puts a load balancer in front of several gateway instances.
 
 ### What are the downsides of an API gateway?
 
-An extra hop on every request, a possible bottleneck and single point of failure, and one more thing to run. Run several instances, load-test it, and keep business logic out, or it becomes a shared monolith every team must change.
+It adds a hop on every request, so it costs latency, and it can become a bottleneck and a single point of failure. It is also one more thing to run. Mitigate by running several instances, load-testing it, and keeping business logic out so it does not grow into a shared monolith.
+
+### Where should authentication happen, at the gateway or in each service?
+
+Validate the token once at the gateway so unauthenticated callers never reach a service. Each service still decides what that caller may do, using the trusted identity the gateway passes, never an unverified header. Make services reachable only through the gateway so nobody can bypass its checks.
 
 ### What is the Backend for Frontend (BFF) pattern?
 
-A separate backend layer for each client type, such as mobile and web, shaped to that client's needs. It suits clients with very different needs; the cost is more services and some duplicated code.
-
-### Where should authentication happen: gateway or service?
-
-Validate the token once at the gateway. Each service still decides what that caller may do, using a trusted identity, never an unverified header. Make services reachable only through the gateway, so nobody can bypass its checks.
+A separate gateway or backend per client type, such as one for mobile and one for web, each shaped to that client's needs so a screen gets exactly the data it wants. It suits clients with very different needs; the cost is more services to run and some duplicated code between them.

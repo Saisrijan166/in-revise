@@ -5,18 +5,28 @@ title: "Distributed Transactions: 2PC and Sagas"
 topic: distributed-systems
 level: interview
 heat: 2
-hook: "Two-phase commit makes several databases commit together, but stalls if its coordinator dies. A saga commits step by step and undoes failures with compensating actions."
+hook: "Two-phase commit makes several databases commit together but stalls if its coordinator dies. A saga commits step by step and undoes a failure with compensating actions."
 points:
-  - { k: "2PC phase 1", v: "prepare: each participant saves its work to disk and votes" }
-  - { k: "2PC phase 2", v: "all voted yes: commit everywhere; any no: roll back everywhere" }
-  - { k: "Blocking", v: "coordinator dies after prepare: participants wait, locks held", kind: minus }
-  - { k: "Compensation", v: "a new action that undoes a step, like a refund; make it idempotent" }
-  - { k: "Two saga styles", v: "choreography (services react to events) or orchestration (a coordinator)" }
-  - { k: "PostgreSQL 18", v: "max_prepared_transactions = 0: prepared (2PC) transactions are off", kind: default }
+  - { k: "2PC phase 1 (prepare)", v: "each participant saves its work to disk, locks it, and votes yes or no" }
+  - { k: "2PC phase 2 (commit)", v: "all voted yes: everyone commits; any no: everyone rolls back" }
+  - { k: "2PC blocking", v: "if the coordinator dies after prepare, participants wait with locks held until it recovers", kind: minus }
+  - { k: "Compensation", v: "a new action that undoes a committed step, such as a refund; it must be idempotent" }
+  - { k: "Two saga styles", v: "choreography (services react to each other's events) or orchestration (one coordinator drives them)" }
+  - { k: "PostgreSQL 18 default", v: "max_prepared_transactions = 0, so prepared (2PC) transactions are turned off until you raise it", kind: default }
 trap:
-  wrong: "If a saga step fails, the earlier steps roll back like one database transaction."
-  right: "Earlier steps are already committed. Run compensating actions, like a refund; others may have seen the middle state."
-sayIt: "Across services that own their databases, I use a saga: local transactions with compensating actions, idempotent steps and an outbox for events. 2PC is atomic but blocks if the coordinator fails, so I keep it for a few databases that support it."
+  wrong: "If a saga step fails, the earlier steps roll back automatically like one database transaction."
+  right: "Earlier steps are already committed. You must run their compensating actions, such as a refund, and other services may have already seen the in-between state."
+  why: "People picture a saga as one big transaction because it achieves a similar end result, and forget that each local step committed on its own along the way."
+sayIt: "Across services that each own a database, I use a saga: local transactions, each with a compensating action, idempotent steps, and an outbox so no event is lost. I keep 2PC for a few databases that support it, because it blocks if the coordinator fails."
+cheat:
+  idea: "A distributed transaction spans several databases or services. 2PC commits them atomically but blocks on coordinator failure; a saga runs local commits and undoes failures with compensations."
+  remember: "Across microservices use a saga with idempotent, compensatable steps; keep 2PC for a few local databases."
+buildsOn: [acid-transactions, consensus]
+scenarios:
+  - q: "An order saga reserves stock, then charges the card, and the charge is declined. The stock was already reserved and committed. What does the saga do?"
+    a: "It cannot roll back the committed reservation, so it runs the compensating action for that step: release the reserved stock. Each completed step has its own compensation, and the saga runs them in reverse order. The order ends cancelled, with stock freed and no charge."
+  - q: "Why not just wrap a charge in one service and a stock update in another service inside a single @Transactional block?"
+    a: "A local transaction only covers one database. The two services own separate databases, so one @Transactional cannot make both commit or both roll back atomically. You need 2PC across those databases, or a saga with compensations, to keep them consistent."
 confusedWith: [two-phase-commit-vs-saga]
 tags: [distributed-systems, transactions, microservices, consistency]
 visual: table
@@ -33,9 +43,6 @@ sources:
   - title: "Two-Phase Commit (Unmesh Joshi, Patterns of Distributed Systems, martinfowler.com)"
     url: "https://martinfowler.com/articles/patterns-of-distributed-systems/two-phase-commit.html"
     verifiedOn: "2026-10-16"
-  - title: "Consensus on Transaction Commit (Gray & Lamport, Microsoft Research)"
-    url: "https://arxiv.org/abs/cs/0408036"
-    verifiedOn: "2026-10-16"
   - title: "Sagas (Garcia-Molina & Salem, SIGMOD 1987)"
     url: "https://www.cs.cornell.edu/andru/cs711/2002fa/reading/sagas.pdf"
     verifiedOn: "2026-10-16"
@@ -51,29 +58,30 @@ sources:
   - title: "Pattern: Transactional outbox (Chris Richardson, microservices.io)"
     url: "https://microservices.io/patterns/data/transactional-outbox.html"
     verifiedOn: "2026-10-16"
-  - title: "Sharding pattern: cross-shard transactions (Azure Architecture Center)"
-    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding"
-    verifiedOn: "2026-10-16"
-  - title: "Multi-step processes (Hello Interview, system design patterns)"
-    url: "https://www.hellointerview.com/learn/system-design/patterns/multi-step-processes"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+A distributed transaction is one logical action that must change data in more than one database or service and stay all-or-nothing across them. A normal [ACID transaction](card:acid-transactions) covers only a single database, so it cannot do this. There are two common approaches. Two-phase commit (2PC) makes several databases commit together as one atomic step. A saga gives up that single atomic step and instead runs a chain of local commits, undoing any failure with compensating actions.
 
 ## Why it exists
 
-One business action, like placing an order, can change data in several databases or services. A local ACID transaction cannot cover them all, so you need another way to stay consistent when one step fails.
+One business action, such as placing an order, can touch several stores: reserve stock in one, charge the card in another, create the order in a third. If you just run three separate local transactions, a failure in the third leaves the first two committed, so stock is held and the card charged for an order that does not exist. You need a way to keep the whole action consistent when one step fails, either by committing all of them atomically (2PC) or by cleanly undoing the committed steps (saga).
 
 ## How it works
 
 <Compare id="two-phase-commit-vs-saga" />
 
-- **2PC in practice:** databases expose it to a transaction manager, as XA in MySQL or `PREPARE TRANSACTION` in PostgreSQL.
-- **Saga recovery:** after a failure, run the compensations of the steps that already committed, often in reverse order.
-- **Outbox:** each step writes its event to an outbox table in the same local transaction; a relay publishes it, so no event is lost.
+1. **2PC, phase 1 (prepare):** a coordinator asks each participant to do its work, save it to disk and lock it, then vote yes or no.
+2. **2PC, phase 2 (commit):** if every vote is yes, the coordinator tells all to commit; if any vote is no, it tells all to roll back. Locks are held the whole time.
+3. **Saga:** each service runs its own local transaction and commits, then triggers the next step.
+4. **Saga recovery:** if a later step fails, the saga runs the compensating action of each already-committed step, usually in reverse order, to undo its effect.
+
+So the key is atomic-but-blocking (2PC) versus committed-step-by-step-and-undoable (saga).
 
 ## Example
 
-An order saga across three services. Step 3 fails, so the saga refunds the card, then cancels the order.
+An order saga runs across three services. Step 3 fails, so the saga refunds the card and cancels the order.
 
 | Step | Local transaction | Compensation |
 | --- | --- | --- |
@@ -81,39 +89,45 @@ An order saga across three services. Step 3 fails, so the saga refunds the card,
 | 2. Payment service | Charge the card | Refund the card |
 | 3. Stock service | Reserve items: fails, out of stock | Nothing to undo |
 
-The same idea with 2PC on PostgreSQL, run by a transaction manager:
+The same idea with 2PC on PostgreSQL, driven by a transaction manager:
 
 ```sql
 -- On each participant (needs max_prepared_transactions > 0)
 BEGIN;
 UPDATE accounts SET balance = balance - 100 WHERE id = 1;
-PREPARE TRANSACTION 'tx-42';  -- phase 1: saved to disk, locks still held
+PREPARE TRANSACTION 'tx-42';  -- phase 1: work saved to disk, locks still held
 
--- When every participant has prepared:
+-- Once every participant has prepared:
 COMMIT PREPARED 'tx-42';      -- phase 2 (or ROLLBACK PREPARED 'tx-42')
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Prepared transactions (`max_prepared_transactions`) | 0: `PREPARE TRANSACTION` is disabled | PostgreSQL 18 |
-| XA (2PC) transactions | Supported by the InnoDB engine | MySQL 8.4 |
+- In the saga, step 2 already committed the charge, so recovery is a refund, a new action, not an automatic rollback.
+- In the 2PC block, `PREPARE TRANSACTION` ends phase 1 but keeps the locks; the row stays locked until `COMMIT PREPARED` or `ROLLBACK PREPARED`.
+- If the coordinator crashes between the two statements, that prepared transaction sits locked until it recovers, which is the blocking problem.
+
+## Rules and defaults
+
+- **PostgreSQL 18:** `max_prepared_transactions` defaults to 0, so `PREPARE TRANSACTION` is disabled until you set it higher and restart.
+- **MySQL 8.4:** the InnoDB engine supports XA (2PC) transactions for use with an external transaction manager.
+- **Saga steps must be idempotent:** a retry after a timeout must not charge or refund twice, so each step and each compensation keys off a request id.
+- **Outbox for events:** write each step's event to an outbox table inside the same local transaction, then a relay publishes it, so an event is never lost if the service crashes after committing.
 
 ## Interview Qs
 
 ### How do you keep data consistent across microservices?
 
-Not with one ACID transaction, because each service owns its database. Use a saga: local transactions, each with a compensating action, plus idempotent steps and a transactional outbox so events are not lost. Accept that data is eventually consistent.
+Not with one ACID transaction, because each service owns its own database. Use a saga: local transactions, each with a compensating action, plus idempotent steps and a transactional outbox so events are not lost. Accept that the data is eventually consistent across services.
 
 ### Why avoid two-phase commit across services?
 
-It blocks: if the coordinator fails after participants prepare, they wait with locks held until it recovers. Every participant must support prepare, which some databases and message brokers do not, and the extra round trips add latency.
+It blocks: if the coordinator fails after participants prepare, they wait with locks held until it recovers. Every participant must support prepare, which some databases and message brokers do not, and the extra round trips add latency and reduce throughput.
 
-### Choreography or orchestration?
+### Choreography or orchestration for a saga?
 
-Choreography: each service reacts to the previous event; no extra component, but the flow gets hard to follow as steps grow. Orchestration: one orchestrator sends each command and runs compensations; clearer for complex flows, but it is one more part that can fail.
+Choreography: each service reacts to the previous service's event, with no extra component, but the flow gets hard to follow as steps grow. Orchestration: one orchestrator sends each command and runs compensations, which is clearer for complex flows but adds a component that can itself fail.
 
 ### A compensation fails. What now?
 
-Retry it: compensations must be idempotent, and the saga saves its progress so it can resume from the failed step. If retries keep failing, raise an alert for a person to fix it.
+Retry it, which is why compensations must be idempotent, and the saga saves its progress so it can resume from the failed step. If retries keep failing, raise an alert for a person to resolve it manually.

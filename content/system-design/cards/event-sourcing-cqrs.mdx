@@ -5,18 +5,28 @@ title: Event Sourcing and CQRS
 topic: messaging
 level: interview
 heat: 2
-hook: "Event sourcing saves every change as an event and rebuilds state by replaying them. CQRS uses separate models for writing and reading."
+hook: "Event sourcing saves every change as an event and rebuilds state by replaying them. CQRS uses separate models for writing and for reading."
 points:
-  - { k: "Event sourcing", v: "append-only events are the truth; state = replay them" }
-  - { k: "CQRS", v: "commands go to a write model; queries to a read model" }
-  - { k: "Projection", v: "a read view built from events; rebuild it any time" }
-  - { k: "Snapshot", v: "saved state every N events, so replay stays short", kind: plus }
-  - { k: "Audit and time travel", v: "full history; replay up to any past moment", kind: plus }
-  - { k: "Read side lags", v: "eventually consistent: a new order can show up late", kind: minus }
+  - { k: "Event sourcing", v: "store each change as an immutable event; current state is the replay of those events" }
+  - { k: "CQRS", v: "commands (writes) go to one model; queries (reads) go to a separate model for screens" }
+  - { k: "Projection", v: "a read view built by replaying events; rebuild it from scratch any time" }
+  - { k: "Snapshot", v: "saved state every N events so replay starts from there instead of the beginning", kind: plus }
+  - { k: "Audit and time travel", v: "the full history is kept, so you can see the state at any past moment", kind: plus }
+  - { k: "Read side lags", v: "the read model updates after the write, so a just-written change can appear a little late", kind: minus }
 trap:
   wrong: "CQRS and event sourcing always go together and suit every service."
-  right: "Each works alone, and most CRUD apps need neither. Use them where audit history or very uneven reads and writes justify it."
-sayIt: "Event sourcing stores each change as an immutable event: I get an audit trail and can rebuild any view by replay. CQRS serves reads from a separate query model. Both add complexity and a lagging read side, so I use them for ledgers, not plain CRUD."
+  right: "Each works on its own, and most plain CRUD apps need neither. Use them where an audit history, or very uneven reads and writes, justify the extra complexity."
+  why: "The two are often taught together and pair well, so people assume one requires the other. In fact CQRS can use ordinary tables with no events, and event sourcing can answer reads by replay with no read model."
+sayIt: "Event sourcing stores each change as an immutable event, so I get an audit trail and can rebuild any view by replay. CQRS serves reads from a separate query model. Both add complexity and a lagging read side, so I use them for ledgers, not plain CRUD."
+cheat:
+  idea: "Event sourcing keeps every change as an immutable event and rebuilds state by replay. CQRS splits the write model from the read model. They are separate ideas that often pair."
+  remember: "Neither requires the other, and most CRUD apps need neither. Use them for audit history or very uneven reads and writes."
+buildsOn: [event-streaming]
+scenarios:
+  - q: "A payments team must prove, for any past date, exactly how an account balance was reached, and must never lose that history. Why does event sourcing fit, and how is a wrong charge fixed?"
+    a: "Event sourcing keeps every change as an immutable event, so replaying up to any date gives the exact balance then, which is the audit trail they need. A wrong charge is not deleted; you append a compensating event (a reversal), so history stays intact and the new balance is the sum of all events including the reversal."
+  - q: "You add CQRS so reads come from a fast search index updated by events. A user places an order and immediately refreshes their orders page but does not see it. Why, and what do you tell them in the design?"
+    a: "The write committed, but the event has not yet updated the read model, so the read side lags: this is eventual consistency. The design must decide how to handle the gap, for example by showing the just-created order from the write response, or a short 'processing' state, until the read model catches up."
 confusedWith: []
 tags: [messaging, architecture, patterns, event-driven]
 visual: flow
@@ -38,59 +48,85 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+These are two separate patterns that often appear together. **Event sourcing** stores each change to an entity as an immutable **event**, like `PaymentCaptured`, in an append-only log; the current state is not stored but computed by replaying that entity's events. **CQRS** (Command Query Responsibility Segregation) splits one data model into two: a **write model** for commands (changes) and a separate **read model** shaped for what queries need. Each pattern can be used without the other.
+
 ## Why it exists
 
-A normal table keeps only the latest value, so the history of how it got there is lost. One data model also struggles to serve strict writes and many fast, differently shaped reads.
+A normal table keeps only the latest value of a row, so the history of how it got there is gone, which hurts a ledger or anything audited. Separately, one model that serves both strict writes and many fast, differently shaped reads tends to serve both badly. Event sourcing keeps the full history as events; CQRS lets the write and read sides each be optimised. Together, events from the write side feed the read side.
 
 ## How it works
 
 <Mermaid
-  alt="Event sourcing with CQRS. A command such as PlaceOrder goes to the write model, which checks the rules and appends events to the event store. A projector reads new events and updates a read database. A query such as my orders reads only from the read database."
+  alt="A command such as CapturePayment goes to the write model, which checks the rules and appends events to the event store. A projector reads new events and updates a read database. A query such as my payments reads only from the read database."
   chart={`flowchart TD
-  C(["Command: PlaceOrder"]) --> W[Write model checks the rules]
+  C(["Command: CapturePayment"]) --> W[Write model checks the rules]
   W -- append event --> ES[(Event store)]
   ES -- new events --> P[Projector]
   P --> RD[(Read database)]
-  Q(["Query: my orders"]) --> RD`}
+  Q(["Query: my payments"]) --> RD`}
 />
 
-- **Event sourcing:** each change is an immutable event, like `OrderPlaced`, appended to that entity's stream. Current state = replay its events; a [snapshot](card:event-snapshot) every N events keeps replay short.
-- **CQRS:** commands go to the write model; queries read a separate model shaped for screens. With separate stores, events update the read side a little later.
-- Each works alone: CQRS can use one database, and event sourcing can answer reads by replaying.
+1. A command arrives at the write model, which checks the business rules and decides what happened.
+2. The write model appends immutable events to the entity's stream in the event store; it never overwrites past events.
+3. A **projector** reads the new events and updates a **read model** shaped for queries (a table, a search index, a cache).
+4. Queries read only from the read model, so reads are fast and never touch the event log.
+5. Because the read model is updated after the write, a just-written change can appear in reads a little later; this is the lag you design for.
 
 ## Analogy
 
-<Analogy title="A ledger, not a whiteboard" limit="A ledger is small and read by people. A real event store also needs versioned event formats, snapshots and projections.">
+<Analogy title="A ledger, not a whiteboard" limit="A ledger is small and read by people. A real event store also needs versioned event formats, snapshots and projections to stay fast and evolvable.">
 A whiteboard shows only today's balance; rub it out and the past is gone. An accountant's ledger lists every entry, and the balance is their sum. A mistake is fixed by adding a reversing entry, never by erasing a line.
 </Analogy>
 
 ## Example
 
-One bank account's event stream:
+One account's event stream, with the balance you get by replaying it:
 
 | # | Event | Balance after replay |
 | --- | --- | --- |
 | 1 | `AccountOpened` | 0 |
 | 2 | `Deposited 500` | 500 |
-| 3 | `Withdrew 200` (a wrong charge) | 300 |
-| 4 | `WithdrawalReversed 200` | 500 |
+| 3 | `Charged 200` (a wrong charge) | 300 |
+| 4 | `ChargeReversed 200` | 500 |
 
-Event 4 is a compensating event: event 3 stays in history. A projection keeps `balance = 500` in the read database, so reads skip the replay.
+What to notice:
+
+- The balance is never stored on its own; it is the sum of replaying events 1 to 4, which is how event sourcing rebuilds state.
+- Event 3 is wrong, but it is not edited or deleted. Event 4 is a **compensating event** that reverses it, so the full history, including the mistake and its fix, stays visible for audit.
+- A **projection** would keep `balance = 500` in the read database, so normal reads skip the replay and are fast; the replay is only needed to rebuild the projection.
+
+## Rules and defaults
+
+- **Events are immutable:** never edit or delete a stored event. To correct a mistake, append a compensating event that reverses its effect.
+- **Snapshots:** save state every N events so replay starts from the latest snapshot, keeping replay fast for long-lived entities.
+- **Read side is eventually consistent:** the read model trails the write model, so design the UI for the gap (read-your-write, a processing state, or polling).
+- **Event versioning:** when an event's shape changes, add a version and upcast old versions when reading; do not rewrite stored events.
+
+## Not to be confused with
+
+**CQRS** splits the write and read models; it can use ordinary tables and no events. **Event sourcing** stores changes as events and replays them; it can answer reads by replay with no separate read model. Rule: CQRS separates read from write; event sourcing makes events the source of truth. They combine well but neither needs the other.
+
+## Common mistakes
+
+- **"Use event sourcing for every service."** For plain CRUD, short-lived MVPs and screens that must show a write immediately, it adds event versioning, projections and a lagging read side for little gain. Fowler warns that CQRS adds risky complexity for most systems.
+- **"Delete the bad event and move on."** Editing a stored event breaks the audit trail and any projection already built from it. Append a compensating event instead.
 
 ## Interview Qs
 
 ### What is event sourcing?
 
-Instead of overwriting the current state, store each change as an immutable event in an append-only log. State is rebuilt by replaying an entity's events, with snapshots to keep it fast. You get a full audit trail and the state at any past time.
+Instead of overwriting the current state, you store each change as an immutable event in an append-only log. State is rebuilt by replaying an entity's events, with snapshots to keep replay fast. You get a full audit trail and the state at any past moment, at the cost of more complexity.
 
 ### What is CQRS, and does it need event sourcing?
 
-CQRS uses separate models for writes (commands) and reads (queries), sometimes in separate databases kept in sync by events. It does not need event sourcing, but they pair well: the events can feed the read model.
+CQRS uses separate models for writes (commands) and reads (queries), sometimes in separate databases kept in sync by events. It does not need event sourcing: it can run on ordinary tables. They pair well because the write side's events are a natural way to update the read model.
 
-### When would you not use them?
+### When would you not use these patterns?
 
-For simple CRUD domains, short-lived MVPs, and screens that must show a write immediately. They add event versioning, projections, replays and a lagging read side. Fowler warns that for most systems CQRS adds risky complexity.
+For simple CRUD domains, short-lived MVPs, and screens that must show a write immediately. They add event versioning, projections, replays and a lagging read side. Fowler cautions that for most systems CQRS adds complexity not justified by the benefit.
 
-### How do you fix a wrong event or change an event's format?
+### How do you fix a wrong event or change its format?
 
-Never edit stored events. Append a compensating event that reverses the effect. For a new format, add a version to each event and upcast old versions to the new shape when reading them.
+Never edit stored events. To fix a wrong value, append a compensating event that reverses its effect, so history is preserved. To change the format, add a version number to each event and upcast old versions to the new shape when you read them.

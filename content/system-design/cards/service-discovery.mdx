@@ -5,18 +5,29 @@ title: Service Discovery
 topic: apis
 level: intermediate
 heat: 1
-hook: "Service instances start, stop and move all the time, so callers look up a live address by name instead of hardcoding IPs."
+hook: "Service instances start, stop and move all the time, so a caller looks up a live address by service name instead of hardcoding an IP that soon breaks."
 points:
-  - { k: "Registry", v: "live list of instances: service name to IP and port" }
-  - { k: "Register", v: "on start; removed on shutdown or a failed health check" }
-  - { k: "Client-side", v: "the caller asks the registry, then load-balances itself" }
-  - { k: "Server-side", v: "the caller hits a router or load balancer that looks up for it" }
-  - { k: "Kubernetes", v: "a Service gives Pods one stable DNS name and virtual IP", kind: default }
-  - { k: "Registry down", v: "new lookups fail; run 3 or 5 servers (Raft in etcd, Consul)", kind: minus }
+  - { k: "Registry", v: "a live list mapping a service name to the IP and port of each running instance" }
+  - { k: "Register and deregister", v: "an instance adds itself on start; removed on shutdown or a failed health check" }
+  - { k: "Client-side discovery", v: "the caller asks the registry for instances and load-balances itself" }
+  - { k: "Server-side discovery", v: "the caller hits a router or load balancer that looks up the registry" }
+  - { k: "Kubernetes Service", v: "gives a set of Pods one stable DNS name and virtual IP; callers never see Pod IPs", kind: default }
+  - { k: "Registry availability", v: "if the registry is down, new lookups fail; run 3 or 5 servers (Raft)", kind: minus }
 trap:
-  wrong: "Plain DNS round robin is enough."
-  right: "Plain DNS has no health checks, and clients often cache answers past the TTL. Use a health-checked registry or a stable virtual IP."
-sayIt: "Instances register with a registry such as Consul, etcd or the Kubernetes API, and health checks drop dead ones. Callers look up by name: the client picks an instance itself, or a load balancer does. In Kubernetes I call the Service's DNS name."
+  wrong: "Plain DNS round robin is enough to find service instances."
+  right: "Plain DNS has no health checks and clients often cache answers past the TTL, so they keep hitting dead instances. Use a health-checked registry or virtual IP."
+  why: "DNS already maps names to addresses, so it looks like it solves discovery; people miss that it does not drop unhealthy instances fast and that clients cache stale records."
+sayIt: "Instances register with a registry such as Consul, etcd or the Kubernetes API, and health checks drop the dead ones. Callers look up by name: the client picks an instance, or a load balancer does. In Kubernetes I just call the Service's DNS name."
+cheat:
+  idea: "Service discovery lets a caller find a live instance by name. Instances register, health checks drop dead ones, callers look up healthy ones."
+  flow: "instance registers → registry health-checks → caller looks up name → calls one"
+  remember: "Prefer a health-checked registry or Kubernetes Service over DNS round robin, which has no health checks."
+buildsOn: [microservices, load-balancer, dns]
+scenarios:
+  - q: "An orders service autoscales from 3 to 10 instances during a sale, each with a new IP. A caller hardcoded the 3 original IPs. What breaks, and what fixes it?"
+    a: "The caller never uses the 7 new instances and keeps hitting the old IPs, some of which may be gone. Service discovery fixes it: instances register on start, so the caller looks up 'orders' by name and gets all 10 healthy addresses, including the new ones."
+  - q: "Your service registry cluster goes completely down. What still works and what stops?"
+    a: "Callers that cached addresses can keep calling them, but those entries go stale as instances move, and any new lookup fails. That is why the registry runs 3 or 5 servers using Raft, so one failure does not take it down."
 confusedWith: []
 tags: [microservices, networking, kubernetes, discovery]
 visual: flow
@@ -29,12 +40,6 @@ sources:
     verifiedOn: "2026-10-16"
   - title: "Pattern: Service registry (Chris Richardson, microservices.io)"
     url: "https://microservices.io/patterns/service-registry.html"
-    verifiedOn: "2026-10-16"
-  - title: "Pattern: Self Registration (Chris Richardson, microservices.io)"
-    url: "https://microservices.io/patterns/self-registration.html"
-    verifiedOn: "2026-10-16"
-  - title: "Pattern: 3rd Party Registration (Chris Richardson, microservices.io)"
-    url: "https://microservices.io/patterns/3rd-party-registration.html"
     verifiedOn: "2026-10-16"
   - title: "Service (Kubernetes docs)"
     url: "https://kubernetes.io/docs/concepts/services-networking/service/"
@@ -54,32 +59,24 @@ sources:
   - title: "Service discovery use case (HashiCorp Consul docs)"
     url: "https://developer.hashicorp.com/consul/docs/use-case/service-discovery"
     verifiedOn: "2026-10-16"
-  - title: "Perform static DNS queries (HashiCorp Consul docs)"
-    url: "https://developer.hashicorp.com/consul/docs/discover/service/static"
-    verifiedOn: "2026-10-16"
   - title: "Consensus protocol: Raft (HashiCorp Consul docs)"
     url: "https://developer.hashicorp.com/consul/docs/concept/consensus"
     verifiedOn: "2026-10-16"
   - title: "etcd: a distributed, reliable key-value store (etcd.io)"
     url: "https://etcd.io/"
     verifiedOn: "2026-10-16"
-  - title: "etcd API: leases and watches (etcd v3.6 docs)"
-    url: "https://etcd.io/docs/v3.6/learning/api/"
-    verifiedOn: "2026-10-16"
-  - title: "ZooKeeper Programmer's Guide: ephemeral nodes and watches (Apache ZooKeeper 3.9)"
-    url: "https://zookeeper.apache.org/doc/current/zookeeperProgrammers.html"
-    verifiedOn: "2026-10-16"
   - title: "Eureka (Netflix, GitHub)"
     url: "https://github.com/Netflix/eureka"
     verifiedOn: "2026-10-16"
-  - title: "The System Design Primer: Service discovery (donnemartin, GitHub)"
-    url: "https://github.com/donnemartin/system-design-primer"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+Service discovery is how a caller finds a live network address for a service it wants to call, using the service's name rather than a fixed IP. In a [microservices](card:microservices) system, instances come and go constantly, so there is a **registry**: a live list that maps each service name to the addresses of its running, healthy instances. Instances add themselves on start, and the registry removes them when they stop or fail a health check. A caller then asks "where is `orders`?" and gets back addresses it can actually reach.
 
 ## Why it exists
 
-Instances get new IP addresses whenever they autoscale, crash or redeploy. A hardcoded address breaks the moment that instance goes away.
+Instances get a new IP address whenever they autoscale, crash and restart, or redeploy. If a caller hardcodes an instance's address, that address breaks the moment the instance goes away, and the caller cannot see new instances that appeared. You would be editing config every time the fleet changes. Service discovery removes this: instances keep the registry up to date automatically, and callers always look up the current, healthy set by name, so the system heals itself as instances move.
 
 ## How it works
 
@@ -93,13 +90,14 @@ Instances get new IP addresses whenever they autoscale, crash or redeploy. A har
   C -->|"4. call one"| I`}
 />
 
-- **Client-side discovery:** the caller queries the registry and picks an instance (Netflix Eureka). Fewer hops, but every language needs the discovery code.
-- **Server-side discovery:** the caller hits a router or load balancer that queries the registry (AWS ELB, Kubernetes). Simpler clients, one more hop.
-- Registries keep only live instances: etcd deletes keys when a lease is not renewed; ZooKeeper deletes ephemeral nodes when the session ends.
+1. An instance starts and registers its address with the registry (Consul, etcd, Eureka or the Kubernetes API).
+2. The registry health-checks each instance and drops any that fail, so the list holds only reachable instances.
+3. A caller looks up the service by name and receives the current healthy addresses.
+4. The caller sends the request: in **client-side discovery** it picks an instance and load-balances itself; in **server-side discovery** it calls a router or load balancer that does the lookup and forwarding.
 
 ## Example
 
-A Kubernetes Service named `orders` in the `shop` namespace:
+In Kubernetes you rarely run a registry by hand: a Service does discovery for you. This Service named `orders` groups the ready Pods behind one stable name.
 
 ```yaml
 apiVersion: v1
@@ -109,39 +107,43 @@ metadata:
   namespace: shop
 spec:
   selector:
-    app: orders        # Pods with this label; only ready ones get traffic
+    app: orders        # groups Pods with this label; only ready ones get traffic
   ports:
     - port: 80
       targetPort: 8080
 ```
 
-Callers use `http://orders.shop.svc.cluster.local`, or just `http://orders` from the same namespace. A Pod that fails its readiness probe is removed from the Service until it passes.
+What to notice:
 
-## Defaults
+- Callers use the DNS name `http://orders.shop.svc.cluster.local`, or just `http://orders` from the same namespace, and never touch a Pod IP.
+- `selector: app: orders` picks the Pods; a Pod that fails its readiness probe is dropped from the Service until it passes, so traffic only goes to healthy Pods.
+- Scaling the Pods up or down changes nothing for the caller: the name stays the same and the Service tracks which Pods are ready.
 
-| What | Default | Where |
-| --- | --- | --- |
-| Service type | ClusterIP: reachable only inside the cluster | Kubernetes |
-| `targetPort` | Same as `port` | Kubernetes |
-| Service DNS name | `<service>.<namespace>.svc.<cluster domain>` | Kubernetes |
-| Cluster domain | `cluster.local` | kubeadm `dnsDomain` |
-| DNS lookup name | `<service>.service.consul` | Consul |
-| Unhealthy instances | Left out of DNS answers | Consul |
+## Rules and defaults
+
+- **Default Service type is ClusterIP:** reachable only inside the cluster; the Service gets a stable virtual IP and DNS name.
+- **Service DNS name:** `<service>.<namespace>.svc.<cluster-domain>`, where the cluster domain defaults to `cluster.local` (kubeadm `dnsDomain`).
+- **Registries hold only live instances:** etcd deletes a key when its lease is not renewed; ZooKeeper deletes an ephemeral node when the session ends; Consul leaves unhealthy instances out of DNS answers.
+- **The registry must be highly available:** run 3 or 5 servers that agree via Raft (etcd, Consul), because if the registry is down, new lookups fail.
+
+## Not to be confused with
+
+Service discovery is not the same as load balancing, though they work together. Service discovery answers "which instances exist and are healthy right now?" A load balancer answers "which one of those should get this request?" In client-side discovery the caller does both; in server-side discovery and Kubernetes a load balancer or kube-proxy does the balancing over the instances discovery found. Rule: discovery finds the list, load balancing picks from it.
 
 ## Interview Qs
 
 ### How do services find each other in a microservices system?
 
-Through service discovery. Instances register with a registry such as Consul, etcd, Eureka or the Kubernetes API, and health checks remove dead ones. Callers look up a name and get healthy addresses, either directly or through a load balancer.
+Through service discovery. Instances register with a registry such as Consul, etcd, Eureka or the Kubernetes API, and health checks remove the dead ones. A caller looks up a service by name and gets the current healthy addresses, then calls one directly (client-side) or through a load balancer (server-side).
 
-### Client-side vs server-side discovery?
+### Client-side versus server-side discovery: what's the trade-off?
 
-Client-side: the caller queries the registry and load-balances itself, with fewer hops but a library per language (Eureka). Server-side: the caller hits a router that looks up and forwards (AWS ELB, Kubernetes), with simpler clients but one more hop.
+Client-side: the caller queries the registry and load-balances itself, so there are fewer network hops, but every language needs the discovery library (Netflix Eureka). Server-side: the caller hits a router or load balancer that does the lookup and forwards (AWS ELB, Kubernetes), so clients stay simple at the cost of one extra hop.
 
 ### How does Kubernetes do service discovery?
 
-A Service selects Pods by label and gets a stable virtual IP and DNS name, like `orders.shop.svc.cluster.local`. kube-proxy on each node forwards traffic to one of the ready Pods.
+A Service selects Pods by label and gets a stable virtual IP and DNS name like `orders.shop.svc.cluster.local`. kube-proxy on each node forwards traffic to one of the ready Pods. Pods that fail their readiness probe are dropped, so callers use one name and never deal with changing Pod IPs.
 
 ### What happens if the registry goes down?
 
-Callers can keep using addresses they cached, but those go stale and new lookups fail. So the registry must be highly available: run 3 or 5 Consul or etcd servers, which use Raft to stay in agreement.
+Callers can keep using addresses they already cached, but those entries go stale as instances move, and any new lookup fails. So the registry must be highly available: run 3 or 5 Consul or etcd servers that use Raft to stay in agreement, so losing one server does not lose discovery.

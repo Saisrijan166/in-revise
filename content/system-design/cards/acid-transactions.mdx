@@ -5,18 +5,29 @@ title: ACID and Isolation Levels
 topic: databases
 level: intermediate
 heat: 3
-hook: "A transaction is all or nothing and survives crashes. The isolation level sets what it sees of concurrent transactions: weaker is faster but allows anomalies."
+hook: "A transaction is all-or-nothing and survives crashes. The isolation level sets what it sees of other running transactions: weaker is faster but allows anomalies."
 points:
-  - { k: "Atomicity", v: "all of the changes commit, or none do" }
-  - { k: "Consistency", v: "constraints hold; a transaction that breaks one rolls back" }
-  - { k: "Isolation", v: "uncommitted changes stay hidden from other transactions" }
-  - { k: "Durability", v: "once committed, data survives a crash (write-ahead log)" }
+  - { k: "Atomicity", v: "all of a transaction's changes commit together, or none of them do" }
+  - { k: "Consistency", v: "constraints hold; a transaction that would break a rule is rolled back" }
+  - { k: "Isolation", v: "a transaction's uncommitted changes stay hidden from other transactions" }
+  - { k: "Durability", v: "once committed, the data survives a crash, because it is in the write-ahead log first" }
   - { k: "PostgreSQL 18 default", v: "Read Committed; its Repeatable Read is snapshot isolation", kind: default }
   - { k: "MySQL 8.4 InnoDB default", v: "Repeatable Read", kind: default }
 trap:
-  wrong: "Inside a transaction, my read-then-write is safe from other users."
-  right: "Not at the default level. Under Read Committed, two read-then-write transactions can lose an update. Use an atomic UPDATE, a row lock or a stronger level."
+  wrong: "Inside one transaction, my read-then-write is safe from other users."
+  right: "Not at the default level. Under Read Committed, two read-then-write transactions can lose an update. Use one atomic UPDATE, a row lock, or Serializable."
+  why: "The word 'transaction' sounds like a private bubble, and in a quick test with one user it always works, so the race only appears under real concurrent load."
 sayIt: "ACID covers one transaction; isolation covers many at once. I keep the default level for most work and protect hot read-then-write paths with an atomic UPDATE or SELECT FOR UPDATE. Where a rule spans many rows, I use Serializable and retry on serialization failures."
+cheat:
+  idea: "A transaction commits all its changes or none (ACID: Atomicity, Consistency, Isolation, Durability). The isolation level sets how much concurrent transactions see of each other."
+  flow: "Read Uncommitted → Read Committed → Repeatable Read → Serializable"
+  remember: "The default is not Serializable, so read-then-write can race. Make the critical step one atomic UPDATE or lock it."
+buildsOn: [sql-vs-nosql]
+scenarios:
+  - q: "Stock is 10. Two transactions each read 10, then each write stock = 9 and commit. What is the final value, and what went wrong?"
+    a: "Stock is 9, but two items were sold, so it should be 8. Both read the old value before either wrote, so the second write overwrote the first: a lost update. Read Committed does not stop this. Use UPDATE stock = stock - 1 WHERE stock > 0 in one statement, which re-reads the current value."
+  - q: "Two on-call doctors each check 'is anyone else on call?', see the other, and each go off call. Which isolation level allows this, and which stops it?"
+    a: "This is write skew. They read the same rows and each update a different row, so neither overwrites the other, yet the rule 'at least one on call' breaks. Snapshot isolation (PostgreSQL Repeatable Read) allows it; Serializable stops it by failing one transaction, which you retry."
 confusedWith: [isolation-levels]
 tags: [databases, transactions, isolation, consistency]
 visual: table
@@ -42,9 +53,6 @@ sources:
   - title: "Transaction Isolation Levels (MySQL 8.4 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/8.4/en/innodb-transaction-isolation-levels.html"
     verifiedOn: "2026-10-16"
-  - title: "Consistent Nonlocking Reads (MySQL 8.4 Reference Manual)"
-    url: "https://dev.mysql.com/doc/refman/8.4/en/innodb-consistent-read.html"
-    verifiedOn: "2026-10-16"
   - title: "InnoDB and the ACID Model (MySQL 8.4 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/8.4/en/mysql-acid.html"
     verifiedOn: "2026-10-16"
@@ -56,58 +64,82 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+A transaction is a group of database changes treated as one unit: they all commit together or all undo together. ACID is four guarantees a relational database gives a transaction: **Atomicity** (all or none), **Consistency** (rules and constraints still hold), **Isolation** (other transactions do not see your half-finished work), and **Durability** (once committed, it survives a crash). The **isolation level** is a dial that sets how strict that isolation is. A weaker level lets more happen at once but allows certain wrong results, called anomalies.
+
 ## Why it exists
 
-Money and stock counts must never end up half-changed, and many users change the same rows at once. Transactions make each change all or nothing; isolation levels decide how much concurrent transactions can see of each other.
+Money and stock counts must never end up half-changed: a transfer that debits one account must credit the other or do neither. At the same time, many users change the same rows at once, and if every transaction had to run completely alone, the database would be slow. ACID makes each change all-or-nothing and crash-safe. Isolation levels let you trade strictness for speed: you relax isolation where races cannot hurt, and tighten it where a wrong result would cost money.
 
 ## How it works
 
+The comparison shows what each level allows; read it, then the notes.
+
 <Compare id="isolation-levels" />
 
-- **Anomalies:** a dirty read sees uncommitted data, a non-repeatable read sees a row change between two reads, and a phantom read sees the set of matching rows change.
-- **PostgreSQL Serializable** uses SSI: no extra blocking, but a conflicting transaction fails with SQLSTATE `40001` and must be retried.
+1. You open a transaction and make reads and writes. Nothing is visible to others yet.
+2. The isolation level decides what your transaction sees of changes others commit while you run: a lower level sees more, a higher level sees a fixed snapshot.
+3. Known anomalies: a **dirty read** sees another transaction's uncommitted data; a **non-repeatable read** sees a row change between two reads; a **phantom read** sees the set of matching rows change.
+4. You commit. Durability writes the change to the write-ahead log, so a crash right after commit does not lose it.
+
+So the key is: the default level is not the strictest, so you must protect the few paths where a race would be wrong.
 
 ## Example
 
-A lost update under Read Committed:
+A lost update under Read Committed, shown as a timeline:
 
 ```text
 stock = 10
 T1: SELECT stock        -> 10
 T2: SELECT stock        -> 10
 T2: UPDATE stock = 9; COMMIT
-T1: UPDATE stock = 9; COMMIT    -- two sales, but stock is 9
+T1: UPDATE stock = 9; COMMIT    -- two sales, but stock is 9, not 8
 ```
 
-Do the check and the write in one statement. PostgreSQL makes the second one wait, then re-checks `WHERE` on the new row:
+Do the check and the write in one statement instead. PostgreSQL makes the second one wait, then re-checks `WHERE` on the new row:
 
 ```sql
 UPDATE items SET stock = stock - 1
-WHERE id = 7 AND stock > 0;   -- 0 rows updated means sold out
+WHERE id = 7 AND stock > 0;   -- 0 rows updated means it was already sold out
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Isolation level | Read Committed | PostgreSQL 18 |
-| Isolation level | Repeatable Read | MySQL 8.4 (InnoDB) |
-| Read Uncommitted | Runs as Read Committed | PostgreSQL 18 |
-| Serialization failure | Error SQLSTATE 40001: retry the whole transaction | PostgreSQL 18 |
+- In the timeline both transactions read 10 before either wrote, so T1's commit silently overwrites T2's: the lost update.
+- The single `UPDATE` computes `stock - 1` from the current row at write time, not from a value read earlier, so the two sales cannot both see 10.
+- If the row is already 0, the `WHERE` matches nothing and 0 rows change, which the application reads as "sold out" instead of overselling.
+
+## Rules and defaults
+
+- **Default isolation level:** Read Committed in PostgreSQL 18; Repeatable Read in MySQL 8.4 InnoDB.
+- **Read Uncommitted in PostgreSQL:** there is no true dirty-read mode; this level runs as Read Committed.
+- **PostgreSQL Repeatable Read:** is snapshot isolation; it still allows write skew.
+- **PostgreSQL Serializable:** uses SSI with no extra blocking, but a conflicting transaction fails with SQLSTATE `40001` and must be retried.
+- **Durability:** a change is written to the write-ahead log before commit returns, which is how it survives a crash.
+
+## Not to be confused with
+
+- **ACID vs isolation level:** ACID is the set of guarantees for one transaction; the isolation level only tunes the Isolation part, how transactions interleave.
+- **Consistency (ACID) vs consistency (CAP):** here it means "constraints hold after each commit", not the distributed-systems meaning. Rule: ACID = one database, one transaction; CAP consistency is about replicas agreeing.
+
+## Common mistakes
+
+- **"Serializable is always safest, so I should use it everywhere."** It is the safest, but it causes the most aborts or lock waits and needs retry logic. Use Read Committed plus atomic updates for most paths, and reserve Serializable for rules that span many rows.
 
 ## Interview Qs
 
 ### What does ACID mean?
 
-Atomicity: all of a transaction's changes commit, or none do. Consistency: constraints hold after every commit. Isolation: others do not see its changes before it commits. Durability: once committed, data survives a crash, because the change is in the write-ahead log first.
+Atomicity: all of a transaction's changes commit, or none do. Consistency: constraints hold after every commit. Isolation: others do not see its changes before it commits. Durability: once committed, data survives a crash, because the change is written to the write-ahead log first.
 
 ### Dirty read, non-repeatable read, phantom read?
 
-Dirty: you read a change another transaction has not committed. Non-repeatable: you read a row twice and a commit in between changed it. Phantom: you rerun a query and other commits added or removed matching rows.
+Dirty: you read a change another transaction has not committed. Non-repeatable: you read a row twice and a commit in between changed it. Phantom: you rerun a query and other commits added or removed matching rows. Stronger isolation levels prevent more of these.
 
-### Which isolation level would you use for payments?
+### Which isolation level would you use for payments, and why?
 
-Keep transactions short at Read Committed and make each critical step safe: an atomic conditional UPDATE, or SELECT ... FOR UPDATE on the rows you change. If a rule spans many rows, use Serializable and retry on serialization failures.
+Keep transactions short at Read Committed and make each critical step safe on its own: an atomic conditional UPDATE, or SELECT ... FOR UPDATE on the rows you change. If a rule spans many rows, such as a balance check across accounts, use Serializable and retry on serialization failures.
 
 ### What is write skew?
 

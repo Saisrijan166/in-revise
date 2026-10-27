@@ -5,18 +5,28 @@ title: Consistency Models
 topic: distributed-systems
 level: intermediate
 heat: 3
-hook: "A consistency model is a promise about what a read can return: always the latest write (strong), or maybe an older value for a short while (eventual)."
+hook: "A consistency model is the promise about what a read may return: always the newest write (strong), or maybe an older value for a short while (eventual)."
 points:
-  - { k: "Strong (linearizable)", v: "every read sees the latest completed write, like one copy" }
-  - { k: "Eventual", v: "if writes stop, all copies converge; until then reads can be stale" }
-  - { k: "Read-your-writes", v: "you always see your own writes, even if others do not yet" }
-  - { k: "Monotonic reads", v: "your reads never go back to an older value" }
-  - { k: "Strong costs", v: "writes wait for other replicas: more latency, less availability", kind: minus }
-  - { k: "DynamoDB default", v: "eventually consistent reads; a strong read costs 2x read units", kind: default }
+  - { k: "Strong (linearizable)", v: "every read returns the latest completed write, as if there were one single copy" }
+  - { k: "Eventual", v: "reads can be stale for a while; once writes stop, all copies end up the same" }
+  - { k: "Read-your-writes", v: "you always see your own latest write, even if other users still see the old value" }
+  - { k: "Monotonic reads", v: "your own reads never jump back to an older value than one you already saw" }
+  - { k: "Strong has a cost", v: "a write must reach other replicas before it is confirmed, adding latency and failing if they are unreachable", kind: minus }
+  - { k: "DynamoDB default", v: "reads are eventually consistent; set ConsistentRead for a strong read, at twice the read cost", kind: default }
 trap:
-  wrong: "Eventually consistent means replicas catch up within a few seconds."
-  right: "There is no time bound. Copies agree once writes stop; the gap depends on load, network delays and replica count."
-sayIt: "I choose consistency per operation. Balances, stock and bookings get strong reads; likes, feeds and view counts are fine with eventual. For a user's own edits I add read-your-writes, so a change never seems to vanish."
+  wrong: "Eventually consistent means replicas catch up within a second or two."
+  right: "There is no time bound. Copies agree only once writes stop; the gap depends on load, network delay and the number of replicas."
+  why: "In a quiet test system replicas do catch up almost at once, so people assume that small gap is guaranteed under real load too."
+sayIt: "I choose a consistency model per operation. Balances, stock and bookings get strong reads; likes, feeds and view counts are fine with eventual. For a user's own edits I add read-your-writes, so their change never seems to disappear."
+cheat:
+  idea: "A consistency model is the rule for what a read may return when data is replicated. Strong returns the latest write; eventual may return an older value until replicas sync."
+  remember: "Strong = correct but slower and less available; eventual = fast and always up, but can be stale."
+buildsOn: [cap-theorem, sharding-and-replication]
+scenarios:
+  - q: "A user edits their profile name, then refreshes and sees the old name. Which guarantee is missing, and how do you add it?"
+    a: "Read-your-writes is missing: the refresh hit a replica that had not received the update yet. Route that user's reads to the primary for a short time, or use session guarantees such as MongoDB causally consistent sessions, so a user always sees their own latest write."
+  - q: "You store like counts on posts across many replicas. Would you pay for strong consistency here? Why or why not?"
+    a: "No. A like count that is briefly a few behind harms nothing, and strong reads would add latency and reduce availability for no real benefit. Eventual consistency is the right fit for counts, feeds and view numbers."
 confusedWith: [strong-vs-eventual-consistency]
 tags: [consistency, replication, distributed-systems, trade-offs]
 visual: table
@@ -27,14 +37,14 @@ sources:
   - title: "Linearizability (Jepsen consistency models)"
     url: "https://jepsen.io/consistency/models/linearizable"
     verifiedOn: "2026-10-16"
-  - title: "Causal (Jepsen consistency models)"
-    url: "https://jepsen.io/consistency/models/causal"
-    verifiedOn: "2026-10-16"
   - title: "Read Your Writes (Jepsen consistency models)"
     url: "https://jepsen.io/consistency/models/read-your-writes"
     verifiedOn: "2026-10-16"
   - title: "Monotonic Reads (Jepsen consistency models)"
     url: "https://jepsen.io/consistency/models/monotonic-reads"
+    verifiedOn: "2026-10-16"
+  - title: "Causal (Jepsen consistency models)"
+    url: "https://jepsen.io/consistency/models/causal"
     verifiedOn: "2026-10-16"
   - title: "DynamoDB read consistency (Amazon DynamoDB docs)"
     url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadConsistency.html"
@@ -54,44 +64,36 @@ sources:
   - title: "KV API guarantees (etcd v3.6 docs)"
     url: "https://etcd.io/docs/v3.6/learning/api_guarantees/"
     verifiedOn: "2026-10-16"
-  - title: "Causal Consistency and Read and Write Concerns (MongoDB Manual)"
-    url: "https://www.mongodb.com/docs/manual/core/causal-consistency-read-write-concerns/"
-    verifiedOn: "2026-10-16"
-  - title: "Read Concern \"linearizable\" (MongoDB Manual)"
-    url: "https://www.mongodb.com/docs/manual/reference/read-concern-linearizable/"
-    verifiedOn: "2026-10-16"
-  - title: "Consistency Tradeoffs in Modern Distributed Database System Design (Daniel Abadi, IEEE Computer, 2012)"
-    url: "https://www.cs.umd.edu/~abadi/papers/abadi-pacelc.pdf"
-    verifiedOn: "2026-10-15"
-  - title: "The System Design Primer: Consistency patterns (donnemartin, GitHub)"
-    url: "https://github.com/donnemartin/system-design-primer"
-    verifiedOn: "2026-10-16"
-  - title: "CAP Theorem: levels of consistency (Hello Interview, system design core concepts)"
-    url: "https://www.hellointerview.com/learn/system-design/core-concepts/cap-theorem"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+A consistency model is the exact promise a replicated store makes about what a read may return. When data is copied to several machines, each copy gets a write at a slightly different moment. The model tells you whether a read is guaranteed to return the newest value, or may return an older one for a while. Picking a model lets you trade fresh data against speed and availability, the choice that [CAP](card:cap-theorem) describes during a partition.
 
 ## Why it exists
 
-Replicas receive each write at slightly different moments. A consistency model says what a read may return in that gap, so you can trade fresh data against speed and availability.
+Say your payment service keeps a copy of each account balance on two replicas for faster reads. A write updates one replica first; the other lags by a few milliseconds, sometimes more under load. Without a stated model you cannot reason about what a read sees in that gap, so one operation might act on an old balance by accident. A consistency model removes the guessing: it names what a read may return, so you can demand strong reads where staleness is dangerous and allow stale reads where it is harmless.
 
 ## How it works
 
 <Compare id="strong-vs-eventual-consistency" />
 
-- In between sit per-client guarantees: **read-your-writes** (you see your own changes) and **monotonic reads** (your reads never go back in time).
-- **Causal consistency** keeps cause before effect: nobody sees a reply before the message it answers. Unrelated writes may show in different orders.
-- You can often choose per request: DynamoDB's `ConsistentRead`, [Cassandra's consistency levels](card:tunable-consistency), MongoDB's read concerns.
+1. **Strong (linearizable)** behaves as if there were one copy: once a write completes, every later read anywhere returns that value or a newer one.
+2. **Eventual** lets reads return an older value for a while; if writes stop, all replicas end up equal.
+3. Between them sit per-client promises: **read-your-writes** (you always see your own latest write) and **monotonic reads** (your reads never go backwards to an older value).
+4. **Causal consistency** keeps cause before effect: no one sees a reply before the message it answers, though unrelated writes may appear in different orders on different nodes.
+
+So the key is a ladder from strong to eventual, and you climb only as high as each operation needs.
 
 ## Example
 
-A balance check must not read an old value; a product page can. A DynamoDB strong read:
+A balance check must not read an old value; a list of past payments can. DynamoDB chooses per read with one flag.
 
 ```java
 GetItemRequest req = GetItemRequest.builder()
     .tableName("Accounts")
     .key(Map.of("id", AttributeValue.builder().s("acc-42").build()))
-    .consistentRead(true)   // strong; leave it out for eventual (half the cost)
+    .consistentRead(true)   // strong read; omit it for an eventual read at half the cost
     .build();
 Map<String, AttributeValue> account = dynamo.getItem(req).item();
 ```
@@ -99,33 +101,42 @@ Map<String, AttributeValue> account = dynamo.getItem(req).item();
 ```python
 resp = table.get_item(
     Key={"id": "acc-42"},
-    ConsistentRead=True,   # strong; leave it out for eventual (half the cost)
+    ConsistentRead=True,   # strong read; omit it for an eventual read at half the cost
 )
 account = resp.get("Item")
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Read consistency | Eventual; set `ConsistentRead` for strong (tables and local secondary indexes only) | Amazon DynamoDB |
-| Read cost per 4 KB | Strong: 1 read unit; eventual: 0.5 | Amazon DynamoDB |
-| Reads | Linearizable; opt-in `serializable` reads are faster but may be stale | etcd v3.6 |
+- `ConsistentRead=True` asks for a strong read, so the balance is the latest committed value, never a stale replica.
+- Removing that line gives an eventual read: faster and half the read cost, but it may return an older balance.
+- The choice is per call, so the same table serves strong reads for money and eventual reads for low-risk data.
+
+## Rules and defaults
+
+- **DynamoDB read default:** eventually consistent. Pass `ConsistentRead` for a strong read on a table or local secondary index; global secondary indexes support only eventual reads.
+- **DynamoDB read cost:** a strong read uses 1 read unit per 4 KB; an eventual read uses 0.5.
+- **etcd read default:** linearizable; an opt-in `serializable` read is faster but may be stale.
+- **Strong is not free:** a strong write waits for other replicas, so it adds latency and fails when they are unreachable. Cosmos DB even blocks strong consistency by default across regions more than 8,000 km apart.
+
+## Not to be confused with
+
+Consistency models describe **what a read may return** over time. The C in [CAP](card:cap-theorem) is one specific model, linearizability, named during a partition. Isolation levels (in [ACID](card:acid-transactions)) describe how concurrent transactions on one database interleave, which is a different question. Rule: consistency models = which value a read sees across replicas; isolation levels = how transactions overlap on one node.
 
 ## Interview Qs
 
-### Strong vs eventual consistency?
+### What is the difference between strong and eventual consistency?
 
-Strong: every read returns the latest completed write, as if there were one copy. Eventual: replicas may return old values for a while, but agree once writes stop. Strong costs latency and availability; eventual is faster and keeps answering.
+Strong: every read returns the latest completed write, as if there were one copy. Eventual: replicas may return old values for a while but agree once writes stop. Strong costs latency and availability; eventual is faster and keeps answering.
 
 ### When is eventual consistency acceptable?
 
-When a slightly old value does no harm: like counts, feeds, view counts, DNS. Not for balances, stock or seat bookings, where acting on an old value sells the same thing twice.
+When a slightly old value does no harm: like counts, feeds, view counts, DNS records. Not for balances, stock levels or seat bookings, where acting on an old value can sell the same thing twice or overdraw an account.
 
 ### What is read-your-writes, and how do you get it?
 
-After you write, your own reads show it, even if others still see the old value. Send that user's reads to the primary, or use session guarantees such as MongoDB causally consistent sessions or Cosmos DB session tokens.
+After you write, your own reads show your change even if other users still see the old value. Route that user's reads to the primary for a short time, or use session guarantees such as MongoDB causally consistent sessions or Cosmos DB session tokens.
 
 ### Why not make everything strongly consistent?
 
-Each write must reach other replicas before it is confirmed, which adds latency, and when they cannot be reached the request fails. Azure Cosmos DB even blocks strong consistency by default for regions more than 8,000 km apart.
+Each write must reach other replicas before it is confirmed, which adds latency, and when those replicas cannot be reached the write fails. For data that can safely lag, that is a cost with no benefit, so you reserve strong reads for operations where staleness is harmful.

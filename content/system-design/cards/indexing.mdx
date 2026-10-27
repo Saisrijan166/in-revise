@@ -5,18 +5,28 @@ title: Database Indexes
 topic: databases
 level: intermediate
 heat: 3
-hook: "An index is a separate sorted structure that points to rows, so the database jumps to the matching rows instead of reading the whole table."
+hook: "An index is a separate sorted structure that points to rows, so the database jumps straight to the matching rows instead of reading the whole table."
 points:
-  - { k: "Read win", v: "a few page reads, not all rows", kind: plus }
-  - { k: "Write cost", v: "each insert, update and delete must change every index", kind: minus }
-  - { k: "Composite (a, b)", v: "serves a, or a + b; usually not b alone" }
-  - { k: "Covering index", v: "has every column the query needs: can skip the table" }
-  - { k: "PostgreSQL 18", v: "CREATE INDEX builds a B-tree; PK and UNIQUE get one automatically", kind: default }
-  - { k: "MySQL 8.4 InnoDB", v: "rows live in the primary-key B-tree; other indexes store the PK", kind: default }
+  - { k: "Full table scan", v: "with no index the database reads every row to find matches; slower as the table grows", kind: minus }
+  - { k: "Read win", v: "an index turns a lookup into a few page reads instead of reading all rows", kind: plus }
+  - { k: "Write cost", v: "every insert, update and delete must also change each index on the table", kind: minus }
+  - { k: "Composite (a, b)", v: "serves queries on a, or on a and b together; usually not on b alone (leftmost prefix)" }
+  - { k: "Covering index", v: "holds every column a query needs, so it is answered from the index without touching the table" }
+  - { k: "PostgreSQL 18", v: "CREATE INDEX builds a B-tree; primary keys and UNIQUE columns get one automatically", kind: default }
 trap:
-  wrong: "Index every column, just in case."
-  right: "Each index slows every write and uses space. Index what frequent queries filter, join or sort on; check with EXPLAIN."
-sayIt: "An index, usually a B-tree, maps column values to rows, so lookups and range scans avoid a full table scan. I index what hot queries filter and sort on, order composite columns for the leftmost prefix, and accept slower writes."
+  wrong: "Index every column, just in case a query needs it."
+  right: "Each index slows every write and uses space. Index only what frequent queries filter, join or sort on, and confirm with EXPLAIN."
+  why: "An index makes a slow read fast, so more indexes feels like more speed, and the write cost and wasted space of an unused index are invisible until writes slow down."
+sayIt: "An index, usually a B-tree, maps column values to rows, so lookups and range scans avoid a full table scan. I index what hot queries filter and sort on, order composite columns for the leftmost prefix, and accept slightly slower writes."
+cheat:
+  idea: "An index is a sorted side structure mapping column values to their rows, so the database finds matches in a few page reads, not a full table scan. Usually a B-tree."
+  remember: "Index what queries filter, join or sort on. Each index speeds reads but slows every write."
+buildsOn: [sql-vs-nosql]
+scenarios:
+  - q: "You have an index on (user_id, created_at). Which of these use it: filter by user_id; filter by user_id and created_at; filter by created_at alone?"
+    a: "The first two use it, because the index is sorted by user_id first, then created_at, so any query that starts from user_id can walk it. Filtering by created_at alone usually cannot, because the index is not sorted by created_at at the top level. This is the leftmost-prefix rule."
+  - q: "A query on an indexed email column is still slow. It runs WHERE lower(email) = 'a@b.com'. Why, and what fixes it?"
+    a: "The index is on email, but the query filters on lower(email), a different value, so the planner cannot use the plain index and scans the table. Fix it with an expression index on lower(email), or store the email already lowercased. Run EXPLAIN to confirm which plan the database picks."
 confusedWith: [btree-vs-lsm]
 tags: [databases, indexing, performance, b-tree, lsm-tree]
 visual: flow
@@ -32,9 +42,6 @@ sources:
     verifiedOn: "2026-10-16"
   - title: "Index-Only Scans and Covering Indexes (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/current/indexes-index-only-scans.html"
-    verifiedOn: "2026-10-16"
-  - title: "Unique Indexes (PostgreSQL 18 documentation)"
-    url: "https://www.postgresql.org/docs/current/indexes-unique.html"
     verifiedOn: "2026-10-16"
   - title: "Indexes on Expressions (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/current/indexes-expressional.html"
@@ -60,23 +67,11 @@ sources:
   - title: "How MySQL Uses Indexes (MySQL 8.4 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/8.4/en/mysql-indexes.html"
     verifiedOn: "2026-10-16"
-  - title: "Avoiding Full Table Scans (MySQL 8.4 Reference Manual)"
-    url: "https://dev.mysql.com/doc/refman/8.4/en/table-scan-avoidance.html"
-    verifiedOn: "2026-10-16"
   - title: "FOREIGN KEY Constraints (MySQL 8.4 Reference Manual)"
     url: "https://dev.mysql.com/doc/refman/8.4/en/create-table-foreign-keys.html"
     verifiedOn: "2026-10-16"
   - title: "Storage Engine (Apache Cassandra 5.0 documentation)"
     url: "https://cassandra.apache.org/doc/5.0/cassandra/architecture/storage-engine.html"
-    verifiedOn: "2026-10-16"
-  - title: "RocksDB Overview (RocksDB wiki, GitHub)"
-    url: "https://github.com/facebook/rocksdb/wiki/RocksDB-Overview"
-    verifiedOn: "2026-10-16"
-  - title: "The Log-Structured Merge-Tree (O'Neil, Cheng, Gawlick, O'Neil; Acta Informatica)"
-    url: "https://www.cs.umb.edu/~poneil/lsmtree.pdf"
-    verifiedOn: "2026-10-16"
-  - title: "Indexes (MongoDB Manual)"
-    url: "https://www.mongodb.com/docs/manual/indexes/"
     verifiedOn: "2026-10-16"
   - title: "Database Indexing (Hello Interview, system design core concepts)"
     url: "https://www.hellointerview.com/learn/system-design/core-concepts/db-indexing"
@@ -86,11 +81,17 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+An index is a separate, sorted data structure the database keeps alongside a table. It maps the values of one or more columns to the rows that hold them, like a book index maps words to page numbers. The usual kind is a **B-tree**: a shallow tree you walk from a root page down to a leaf in a few steps. With an index a lookup reads a handful of pages; without one, the database does a **full table scan**, reading every row to find the few that match.
+
 ## Why it exists
 
-Without an index, the database reads every row to find the few that match (a full table scan). That gets slower as the table grows.
+Without an index, `WHERE user_id = 42` makes the database read every row in the table, because it has no way to know where the matching rows are. On a small table that is fine, but as the table grows to millions of rows, every such query reads all of them and gets slower and slower. An index gives the database a sorted map, so it jumps to the matching rows directly. The cost is real but bounded: the index must be kept up to date on every write.
 
 ## How it works
+
+A B-tree lookup walks from the root to a leaf; the diagram traces `user_id = 42`.
 
 <Mermaid
   alt="A B-tree lookup for user_id 42. The query starts at the root page, which sends keys under 50 to the left. An internal page says keys 40 to 49 are in leaf 7. Leaf 7 holds key 42 and a pointer to its row. Three page reads find the row instead of reading the whole table."
@@ -101,15 +102,18 @@ Without an index, the database reads every row to find the few that match (a ful
   L --> T[("Row for user 42")]`}
 />
 
-- Keys stay sorted, so `=`, ranges, `ORDER BY` and `LIKE 'abc%'` can use a B-tree; `LIKE '%abc'` cannot.
-- A composite index on `(a, b)` is sorted by `a`, then by `b`, so a query must start from `a`: the leftmost-prefix rule.
-- Write-heavy stores such as Cassandra use an LSM tree instead:
+1. The query starts at the root page, which narrows the range in one comparison.
+2. It follows pointers down through internal pages, each step narrowing further, to the right leaf.
+3. The leaf holds the key and a pointer to the row, so a few page reads replace reading the whole table.
+4. Because keys stay sorted, the same index serves `=`, ranges, `ORDER BY` and `LIKE 'abc%'`; a leading wildcard like `LIKE '%abc'` cannot use it.
+
+So the key is: an index trades a little write cost for turning full scans into a few page reads. Write-heavy stores such as Cassandra use an LSM tree instead of a B-tree:
 
 <Compare id="btree-vs-lsm" />
 
 ## Example
 
-PostgreSQL 18, an `orders` table:
+A covering composite index on PostgreSQL 18, and three queries against it:
 
 ```sql
 -- Equality column first, then the range/sort column; INCLUDE makes it covering
@@ -124,32 +128,39 @@ ORDER BY created_at DESC LIMIT 20;
 SELECT * FROM orders WHERE created_at >= '2026-10-01';
 ```
 
-Run `EXPLAIN` to see the plan the database picks.
+What to notice:
 
-## Defaults
+- The column order `(user_id, created_at)` matches the query: equality on `user_id`, then a range and sort on `created_at`, so the index does the filtering and the ordering.
+- `INCLUDE (total)` puts `total` in the index, so the second query reads only the index, never the table: an index-only scan.
+- The third query starts from `created_at`, skipping `user_id`, so it cannot use this index and falls back to a full scan. Run `EXPLAIN` to see the plan the database actually picks.
 
-| What | Default | Where |
-| --- | --- | --- |
-| Index type of `CREATE INDEX` | B-tree | PostgreSQL 18 |
-| Index for `PRIMARY KEY` and `UNIQUE` | Created automatically | PostgreSQL 18 |
-| Index on foreign-key columns | Not created: add it yourself | PostgreSQL 18 |
-| Index on foreign-key columns | Created automatically if missing | MySQL 8.4 |
-| Where table rows are stored | Inside the primary-key B-tree (clustered index) | MySQL 8.4 InnoDB |
-| Building an index | Blocks writes until done; `CREATE INDEX CONCURRENTLY` does not | PostgreSQL 18 |
+## Rules and defaults
+
+- **Default index type:** `CREATE INDEX` builds a B-tree in PostgreSQL 18.
+- **Automatic indexes:** PostgreSQL creates one for every `PRIMARY KEY` and `UNIQUE` constraint.
+- **Foreign keys:** PostgreSQL does not index foreign-key columns automatically; add it yourself. MySQL 8.4 does create one if it is missing.
+- **MySQL InnoDB storage:** table rows live inside the primary-key B-tree (a clustered index), and every other index stores the primary key to find the row.
+- **The planner decides:** an index is not guaranteed to be used; the query planner may choose a full scan when most rows match. Confirm with `EXPLAIN`.
+- **Building an index:** in PostgreSQL a plain `CREATE INDEX` blocks writes until done; `CREATE INDEX CONCURRENTLY` does not.
+
+## Not to be confused with
+
+- **Primary key vs index:** a primary key is a uniqueness-and-identity constraint; it happens to be backed by an index. An index can also be non-unique and on any columns.
+- **B-tree vs LSM tree:** both are index structures, but a B-tree changes pages in place (read-friendly) while an LSM tree buffers writes and merges files (write-friendly). Rule: default to a B-tree; choose an LSM tree when writes far outnumber reads.
 
 ## Interview Qs
 
 ### Why not index every column?
 
-Every insert, update and delete must also change each index, and each index takes disk and memory. An unused index is pure cost. Index what frequent queries filter, join or sort on, and drop indexes nobody uses.
+Every insert, update and delete must also change each index, and each index takes disk and memory. An unused index is pure cost with no benefit. Index what frequent queries filter, join or sort on, and drop indexes that `EXPLAIN` and usage stats show nobody uses.
 
 ### How do you order columns in a composite index?
 
-Equality columns first, then the range or sort column, as in `(user_id, created_at)`. It serves queries on `user_id`, or on both, but usually not on `created_at` alone. PostgreSQL 18 can skip-scan, but generally only when the first column has few distinct values.
+Equality columns first, then the range or sort column, as in `(user_id, created_at)`. It serves queries on `user_id`, or on both columns, but usually not on `created_at` alone. PostgreSQL 18 can skip-scan, but generally only when the first column has few distinct values.
 
 ### A query on an indexed column is still slow. Why?
 
-Run `EXPLAIN`. Common causes: a function on the column, like `lower(email)`, without an expression index; a leading wildcard, `LIKE '%x'`; a query that skips the leftmost column; or so many matching rows that a full scan is cheaper.
+Run `EXPLAIN`. Common causes: a function on the column, like `lower(email)`, without a matching expression index; a leading wildcard, `LIKE '%x'`; a query that skips the leftmost column of a composite index; or so many matching rows that a full scan is actually cheaper.
 
 ### B-tree or LSM tree?
 

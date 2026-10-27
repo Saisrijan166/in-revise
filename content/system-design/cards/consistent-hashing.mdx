@@ -5,18 +5,29 @@ title: Consistent Hashing
 topic: databases
 level: intermediate
 heat: 3
-hook: "Put servers and keys on one hash ring; each key belongs to the next server clockwise. Add a server and only the keys next to it move."
+hook: "Put servers and keys on one hash ring; each key belongs to the next server clockwise. Add a server and only the keys next to it move, not all of them."
 points:
-  - { k: "Ring", v: "the hash range bent into a circle; the top value wraps to 0" }
-  - { k: "Owner", v: "the first server point clockwise from the key's hash" }
-  - { k: "Add a server", v: "only about 1/(N+1) of keys move, all to the new server", kind: plus }
-  - { k: "Virtual nodes", v: "many points per server: even spread, failures shared out" }
-  - { k: "Cassandra 4.0+", v: "num_tokens: 16 vnodes per node (256 in 3.11)", kind: default }
-  - { k: "Redis Cluster", v: "not a ring: 16,384 fixed hash slots", kind: minus }
+  - { k: "The ring", v: "the hash range bent into a circle, so the top value wraps around back to 0" }
+  - { k: "Which server owns a key", v: "the first server point you reach going clockwise from the key's hash" }
+  - { k: "Add a server", v: "only the keys in its new arc move (about 1/(N+1)), and only to it", kind: plus }
+  - { k: "Virtual nodes", v: "give each server many ring points so arcs are even and a failure spreads out" }
+  - { k: "Cassandra 4.0+", v: "num_tokens default is 16 virtual nodes per server (was 256 in 3.11)", kind: default }
+  - { k: "Redis Cluster differs", v: "not a ring; uses 16,384 fixed hash slots shared among primaries", kind: minus }
 trap:
-  wrong: "Consistent hashing spreads keys evenly on its own."
-  right: "With one random point per server, arcs differ in size, so load is uneven. Give each server many virtual nodes."
-sayIt: "I put servers on a hash ring with many virtual nodes each. A key goes to the next server clockwise, so adding or removing a server moves only the keys in its arcs. Dynamo, Cassandra and nginx's consistent hash work this way."
+  wrong: "Consistent hashing spreads keys evenly by itself."
+  right: "With one random point per server, the arcs between points differ in size, so some servers get far more keys. Give each server many virtual nodes to even it out."
+  why: "People picture servers placed neatly around the circle. In reality each point is a hash, so it lands randomly, and random points leave uneven gaps."
+sayIt: "I put servers on a hash ring, each with many virtual nodes. A key goes to the next server clockwise, so adding or removing a server only moves the keys in its arcs, not everything. Dynamo, Cassandra and nginx's consistent hash all work this way."
+cheat:
+  idea: "Servers and keys are hashed onto a circle. A key goes to the next server clockwise, so adding a server only moves the keys in its arc."
+  flow: "hash key → clockwise → first server owns it"
+  remember: "Give each server many virtual nodes, or load is uneven. Adding a server moves only ~1/(N+1) of keys."
+buildsOn: [sharding-and-replication]
+scenarios:
+  - q: "A cache cluster uses hash(key) % N across 10 servers. You add an eleventh. Why does the hit rate collapse?"
+    a: "Changing N from 10 to 11 changes hash(key) % N for almost every key, so almost every key now maps to a different server and misses. With a consistent-hashing ring only the keys in the new server's arc would move."
+  - q: "One server on the ring is handling twice the load of the others. The ring is 'consistent', so why?"
+    a: "It has one random point, giving it a large arc. Fix it with virtual nodes: give every server many points, so each server's share of the circle is close to equal and no single arc is huge."
 confusedWith: []
 tags: [databases, sharding, partitioning, caching]
 visual: flow
@@ -36,9 +47,6 @@ sources:
   - title: "cassandra.yaml file configuration (Apache Cassandra 3.11 docs)"
     url: "https://cassandra.apache.org/doc/3.11/cassandra/configuration/cass_yaml_file.html"
     verifiedOn: "2026-10-16"
-  - title: "cassandra.yaml file configuration (Apache Cassandra 5.0 docs)"
-    url: "https://cassandra.apache.org/doc/latest/cassandra/managing/configuration/cass_yaml_file.html"
-    verifiedOn: "2026-10-16"
   - title: "Module ngx_http_upstream_module: hash (nginx docs)"
     url: "https://nginx.org/en/docs/http/ngx_http_upstream_module.html#hash"
     verifiedOn: "2026-10-16"
@@ -48,14 +56,8 @@ sources:
   - title: "Redis cluster specification (Redis docs)"
     url: "https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/"
     verifiedOn: "2026-10-16"
-  - title: "Sharding pattern (Azure Architecture Center)"
-    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding"
-    verifiedOn: "2026-10-16"
   - title: "TreeMap (Java SE 21 API)"
     url: "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/TreeMap.html"
-    verifiedOn: "2026-10-16"
-  - title: "Checksum.update(byte[]) (Java SE 21 API)"
-    url: "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/zip/Checksum.html"
     verifiedOn: "2026-10-16"
   - title: "bisect (Python docs)"
     url: "https://docs.python.org/3/library/bisect.html"
@@ -68,9 +70,13 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Consistent hashing is a way to decide which server holds each key so that adding or removing a server moves as few keys as possible. You hash every server and every key onto the same circle, called a ring. A key belongs to the first server you meet going clockwise from the key's position. It is the standard answer to the problem that plain `hash(key) % N` has when N changes, which you met when sharding the payment service.
+
 ## Why it exists
 
-With `hash(key) % N`, changing N sends most keys to a different server, so adding one cache or database node moves most of the data. Consistent hashing moves only the keys the new node takes over.
+The simple rule `hash(key) % N` picks a server from the key and the server count N. But if you add or remove one server, N changes, and `hash(key) % N` changes for almost every key. For a cache that means nearly every key suddenly maps to a different server and misses; for a sharded database it means moving almost all the data. Consistent hashing changes the rule so that one extra server only takes over the keys next to it, and the rest stay put.
 
 ## How it works
 
@@ -84,9 +90,18 @@ With `hash(key) % N`, changing N sends most keys to a different server, so addin
   K2["key hash 90"] -.-> A`}
 />
 
-- **Owner:** from the key's hash, walk clockwise; the first server point owns it. So C owns 41 to 75.
-- **Change:** add D at 60, and only keys 41 to 60 move, from C to D. Remove C, and its keys go to A, the next point.
-- **Virtual nodes:** each server gets many points, like `A#0` to `A#99`. Arcs even out, and a failed server's keys spread over all the others.
+1. Hash each server to a position on the ring. Here A is at 10, B at 40 and C at 75.
+2. To place a key, hash it, then walk clockwise to the first server point. So C owns every key from 41 up to 75.
+3. A key whose hash is past the last point, such as 90, wraps around and belongs to A, the first point.
+4. Add server D at 60: only keys from 41 to 60 move, from C to D. Everything else stays. Remove C and its keys go to the next point clockwise, A.
+
+So the key is that a change touches only the arc next to it, not the whole ring.
+
+## Analogy
+
+<Analogy title="Seats around a round table" limit="Real servers are placed by a hash, not by hand, so without virtual nodes the gaps between them are uneven.">
+Guests (keys) each sit at the next named chair (server) going clockwise. Add one more chair and only the guests between it and the previous chair move seats; everyone else stays where they are.
+</Analogy>
 
 ## Example
 
@@ -124,29 +139,34 @@ def server_for(key: str) -> str:
     return ring[i % len(ring)][1]            # wrap around
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Virtual nodes per node (`num_tokens`) | 16 (was 256 in 3.11) | Apache Cassandra 4.0 and later |
-| Hash used to place rows (`partitioner`) | Murmur3Partitioner | Apache Cassandra 5.0 |
-| `hash $key` without `consistent` | Adding or removing a server can remap most keys | nginx 1.7.2 and later |
-| `hash $key consistent` | Ketama ring: only a few keys remap | nginx 1.7.2 and later |
+- `ceilingEntry` (Java) and `bisect_left` (Python) both find the first ring point at or after the key's hash; that is "walk clockwise".
+- When the key is past the last point, the code wraps to the first entry, which is the ring closing the circle.
+- `vnodes` adds many points per server. With three servers at 100 points each, adding a fourth moved about a third of 10,000 keys in a test run, close to the 1/4 you would expect; one point each would be far more uneven.
+
+## Rules and defaults
+
+- **Virtual nodes are needed for balance:** one random point per server leaves uneven arcs, so give each server many points.
+- **Cassandra `num_tokens`:** 16 virtual nodes per server by default since 4.0 (it was 256 in 3.11).
+- **Cassandra `partitioner`:** `Murmur3Partitioner` is the default hash that places rows (Cassandra 5.0).
+- **nginx `hash $key`:** remaps most keys when a server changes; add the `consistent` flag (`hash $key consistent`) to get a ketama ring where only a few keys move. Both available since nginx 1.7.2.
+- **Redis Cluster is different:** it does not use a ring; each key maps to one of 16,384 fixed hash slots via `CRC16(key) mod 16384`, and primaries own slot ranges.
 
 ## Interview Qs
 
 ### Why not just use hash(key) % N?
 
-Changing N changes the result for most keys, so adding or removing a server reshuffles most of the data or cache. A ring moves only the keys in the arcs next to the change, about 1/(N+1) of them when you add one server.
+Changing N changes the result for almost every key, so adding or removing one server reshuffles almost all of the cache or data. A ring moves only the keys in the arc next to the change, about 1/(N+1) of them when you add one server, and leaves the rest where they are.
 
 ### What are virtual nodes, and why use them?
 
-Each physical server gets many points on the ring. Data and load spread more evenly, a failed server's keys go to many servers instead of one, and a bigger server can take more points.
+Each physical server gets many points on the ring instead of one. The load spreads more evenly because no server gets one huge arc, a failed server's keys go to many servers rather than piling on one neighbour, and a bigger server can be given more points to take a larger share.
 
-### How do you replicate data on a ring?
+### How do you keep replicas with consistent hashing?
 
-Store each key on its owner and on the next N-1 servers clockwise. Dynamo calls this the preference list, and it skips extra points of the same server so the copies land on distinct machines.
+Store each key on its owner and the next N-1 distinct servers clockwise. Dynamo calls this the preference list and skips extra virtual points of a server already chosen, so the copies land on different physical machines, not the same one twice.
 
 ### Does Redis Cluster use consistent hashing?
 
-No. Every key maps to one of 16,384 hash slots, `CRC16(key) mod 16384`, and each primary owns some slots. To add a node, you move some slots to it, with no downtime.
+No. Every key maps to one of 16,384 fixed hash slots, `CRC16(key) mod 16384`, and each primary owns a set of slots. To add a node you move some slots to it, with no downtime; it is slot-based, not a clockwise ring.

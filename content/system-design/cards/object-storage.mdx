@@ -7,16 +7,27 @@ level: beginner
 heat: 3
 hook: "Object storage keeps files as objects in a bucket, each found by its key over HTTP. It holds any number of files and is built to almost never lose one."
 points:
-  - { k: "Object", v: "data + metadata, found by bucket + key (+ version ID)" }
-  - { k: "Presigned URL", v: "time-limited link: the client uploads or downloads directly" }
-  - { k: "Multipart upload", v: "parts in parallel, resend only failed ones; AWS: from 100 MB" }
-  - { k: "S3 Standard (designed for)", v: "99.999999999% durability, 99.99% availability a year", kind: default }
-  - { k: "S3 consistency", v: "strong read-after-write for PUT and DELETE, since Dec 2020", kind: default }
-  - { k: "Same key, two PUTs", v: "the latest wins; no atomic update across keys", kind: minus }
+  - { k: "Object", v: "one file plus its metadata, found by bucket + key (and version id); not editable in place" }
+  - { k: "Presigned URL", v: "a short-lived link that lets the client upload or download straight from the bucket" }
+  - { k: "Multipart upload", v: "split a big file into parts, send them in parallel, resend only the parts that failed" }
+  - { k: "S3 Standard durability", v: "designed for 99.999999999% durability and 99.99% availability a year", kind: default }
+  - { k: "S3 consistency", v: "strong read-after-write for PUT and DELETE since December 2020; a read sees the latest write", kind: default }
+  - { k: "Two PUTs to one key", v: "the latest write wins; there is no atomic update across several keys", kind: minus }
 trap:
-  wrong: "Stream every upload through the API servers into storage."
-  right: "Return a presigned URL so the client uploads straight to the bucket; the servers only sign it and record metadata."
+  wrong: "Stream every upload through the API servers and then into storage."
+  right: "Hand the client a presigned URL so it uploads straight to the bucket; the servers only sign the URL and save the metadata."
+  why: "The server feels like the natural place to receive a file, as it does with form data. But a big file through the server wastes its bandwidth and memory, and the bucket can take the upload directly."
 sayIt: "Files go to object storage like S3, and the database keeps the key, owner, size and status. Clients upload straight to the bucket with presigned URLs, multipart for big files, and download through a CDN. Lifecycle rules move old files to cheaper classes."
+cheat:
+  idea: "Object storage keeps files as objects in a bucket, each addressed by a key over HTTP, with very high durability at any scale."
+  flow: "client asks → server signs URL → client PUTs to bucket → server saves metadata"
+  remember: "File in the bucket, only its key and metadata in the database. Upload direct via presigned URL."
+buildsOn: [sql-vs-nosql, cdn]
+scenarios:
+  - q: "A user needs to upload a 2 GB video. Walk through a design that does not overload the API servers."
+    a: "The server authorises the user and returns a presigned URL. The client uploads straight to the bucket using multipart upload, so parts go in parallel and only failed parts are resent. The client then tells the server, which marks the file ready and saves its metadata."
+  - q: "You store product images as base64 strings inside a Postgres row. What goes wrong at scale?"
+    a: "Rows and backups bloat, queries pull large blobs into memory, and every image byte flows through the database. Move the files to object storage and keep only the key and metadata in the row."
 confusedWith: []
 tags: [storage, s3, files, cdn]
 visual: flow
@@ -39,9 +50,6 @@ sources:
   - title: "Work with Amazon S3 pre-signed URLs (AWS SDK for Java 2.x Developer Guide)"
     url: "https://docs.aws.amazon.com/sdk-for-java/latest/developer-guide/examples-s3-presign.html"
     verifiedOn: "2026-10-16"
-  - title: "Uploading objects (Amazon S3 User Guide)"
-    url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html"
-    verifiedOn: "2026-10-16"
   - title: "Uploading and copying objects using multipart upload (Amazon S3 User Guide)"
     url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html"
     verifiedOn: "2026-10-16"
@@ -54,15 +62,6 @@ sources:
   - title: "Managing the lifecycle of objects (Amazon S3 User Guide)"
     url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html"
     verifiedOn: "2026-10-16"
-  - title: "Restrict access to an Amazon S3 origin (Amazon CloudFront Developer Guide)"
-    url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html"
-    verifiedOn: "2026-10-16"
-  - title: "Best practices for storing large items and attributes (Amazon DynamoDB docs)"
-    url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-use-s3-too.html"
-    verifiedOn: "2026-10-16"
-  - title: "Valet Key pattern (Azure Architecture Center)"
-    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/valet-key"
-    verifiedOn: "2026-10-16"
   - title: "What's the difference between block, object and file storage? (AWS)"
     url: "https://aws.amazon.com/compare/the-difference-between-block-file-object-storage/"
     verifiedOn: "2026-10-16"
@@ -71,9 +70,13 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Object storage is a service that keeps files, called objects, in containers called buckets. Each object is one file plus its metadata (size, type, owner), and you reach it over HTTP by its bucket and key, like a path. Amazon S3 is the best-known example. Unlike a database row, you do not edit an object in place: you write the whole file or replace it. It is where large files belong, while the database keeps only the small record that points to them.
+
 ## Why it exists
 
-Photos, videos and backups are too big for database rows and too many for one server's disk. Object storage keeps any number of files durably behind a simple HTTP API.
+Photos, videos and backups are too big to sit in database rows and too many to fit on one server's disk. If you push them through your API servers into a database, you bloat the database and its backups, and every byte flows through your own machines and memory. Object storage removes that: it holds any number of files durably behind a simple HTTP API, so your servers only handle the small metadata and the file traffic goes elsewhere.
 
 ## How it works
 
@@ -89,13 +92,16 @@ Photos, videos and backups are too big for database rows and too many for one se
   CDN -- "cache miss" --> S`}
 />
 
-- **Big files:** multipart upload sends parts in parallel; only a failed part is resent.
-- **Cost:** lifecycle rules move old objects to cheaper storage classes, or delete them.
-- **No shared transaction** between the bucket and the database: clean up orphaned objects if a step fails.
+1. The client asks the app server for permission to upload a file.
+2. The app checks the user and returns a presigned URL: a link that allows one upload to one key for a few minutes.
+3. The client uploads the file straight to the bucket using that URL, so the bytes never pass through the app server. A big file is split into parts (multipart upload).
+4. The client tells the app it finished; the app saves the key and metadata in the database and marks the file ready.
+
+So the server signs and records, while the bucket does the heavy lifting and a [CDN](card:cdn) serves downloads close to users.
 
 ## Example
 
-Give the client a URL that can PUT one file for 10 minutes:
+The app gives the client a URL that can PUT one file for ten minutes.
 
 ```java
 String uploadUrl(S3Presigner presigner, String key) {
@@ -117,33 +123,40 @@ def upload_url(s3, key):  # s3 = boto3.client("s3")
     )
 ```
 
-The client must send the same `Content-Type` with its `PUT`, or the signature check fails.
+What to notice:
 
-## Defaults
+- The URL is signed for one bucket, one key and one operation (PUT), so it cannot be reused to upload anything else.
+- The lifetime is short on purpose; after it expires the link is dead, which limits what a leaked URL can do.
+- The client must send the same `Content-Type` it was signed with, `image/jpeg` here; a different one fails the signature check.
+- The file bytes go client-to-bucket, never through the app server, which is the whole point of the pattern.
+
+## Rules and defaults
 
 | What | Default or limit | Where |
 | --- | --- | --- |
-| New bucket access | Private; Block Public Access on | Amazon S3 |
+| New bucket access | Private, with Block Public Access on | Amazon S3 |
 | Storage class on upload | S3 Standard | Amazon S3 |
-| One PUT | Up to 5 GB | Amazon S3 |
-| Multipart parts | 5 MiB to 5 GiB each, up to 10,000 | Amazon S3 |
+| One PUT (single upload) | Up to 5 GB | Amazon S3 |
+| Multipart parts | 5 MiB to 5 GiB each, up to 10,000 parts | Amazon S3 |
 | Largest object | 48.8 TiB (10,000 parts of 5 GiB) | Amazon S3 |
-| Presigned URL lifetime | Up to 7 days (SDK, CLI); 12 hours (console) | Amazon S3, Signature Version 4 |
+| Presigned URL lifetime | Up to 7 days (SDK, CLI); 12 hours (console) | Amazon S3, Signature V4 |
+
+- **No shared transaction:** the bucket and the database are separate systems, so a step can fail between them. Clean up orphaned objects, and use a lifecycle rule to delete uploads that never finished.
+
+## Not to be confused with
+
+Block, file and object storage are different. Block storage is a raw disk volume a single server mounts, like Amazon EBS, used by databases and virtual machines. File storage is a shared folder many machines mount at once, like Amazon EFS. Object storage is whole files by key over HTTP, like S3. Rule: block for one machine's disk, file for a shared mount, object for lots of large unstructured files.
 
 ## Interview Qs
 
 ### Why not store images in the database?
 
-Large files bloat the database, its backups and its memory, and every byte flows through your servers. Object storage holds any number of objects, is built for very high durability and works with a CDN. Keep only the key and metadata in the database.
+Large files bloat the database, its backups and its memory, and every byte flows through your servers. Object storage holds any number of objects, is built for very high durability, and pairs with a CDN. Keep only the key and metadata (owner, size, status) in the database.
 
 ### How does a user upload a 2 GB video?
 
-The app hands out presigned URLs, and the client uploads straight to the bucket with multipart upload: parts in parallel, resending only failed parts. Then the app marks the file ready, on the client's call or a bucket event. A lifecycle rule removes uploads that never finish.
+The app hands out a presigned URL, and the client uploads straight to the bucket with multipart upload: parts in parallel, resending only failed parts. Then the app marks the file ready, from the client's call or a bucket event. A lifecycle rule removes uploads that never completed.
 
 ### Is S3 eventually consistent?
 
-Not since December 2020. After a successful PUT or DELETE, every read and list sees the change. Bucket settings are still eventually consistent, and two writes to the same key at once end with the latest one winning.
-
-### Object, block or file storage?
-
-Block: a disk volume a server mounts, like Amazon EBS, for databases and virtual machines. File: shared folders many machines use at once, like Amazon EFS. Object: whole files by key over HTTP, like S3, for large amounts of unstructured data such as media and backups.
+Not since December 2020. After a successful PUT or DELETE, every later read and list sees the change (strong read-after-write). Two writes to the same key at the same time still end with the latest one winning, and there is no atomic update spanning several keys.

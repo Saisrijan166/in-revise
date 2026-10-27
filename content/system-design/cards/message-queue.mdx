@@ -5,18 +5,28 @@ title: Message Queues
 topic: messaging
 level: beginner
 heat: 3
-hook: "The producer drops a job in the queue and moves on; workers take jobs one at a time, at their own pace."
+hook: "The producer drops a job in the queue and moves on; workers take jobs one at a time and process them at their own pace."
 points:
-  - { k: "Decouple", v: "the producer never waits for a worker, even one that is down" }
-  - { k: "Load levelling", v: "bursts wait in the queue; size workers for the average load", kind: plus }
-  - { k: "Competing consumers", v: "many workers share one queue; each message goes to one" }
-  - { k: "No ack in time", v: "the message is delivered again: make jobs idempotent", kind: minus }
-  - { k: "Dead-letter queue", v: "after N failed tries, the message is set aside" }
-  - { k: "SQS visibility timeout", v: "30 s default, max 12 h; extend it for long jobs", kind: default }
+  - { k: "Producer and worker", v: "the producer puts a job on the queue and does not wait; a worker takes one job off and does it" }
+  - { k: "Load levelling", v: "a burst waits in the queue, so you size workers for the average load, not the peak", kind: plus }
+  - { k: "Competing consumers", v: "many workers read one queue, and each message goes to exactly one of them" }
+  - { k: "Ack after success", v: "the worker deletes the message only when the job succeeds; a crash re-runs the job", kind: minus }
+  - { k: "SQS visibility timeout", v: "a received message is hidden 30 s by default (max 12 h); if not deleted, it reappears", kind: default }
 trap:
-  wrong: "A queue absorbs any load, so let it grow."
-  right: "If producers outpace workers, the queue and the wait grow without limit. Cap it, push back (HTTP 503), add workers."
-sayIt: "I put slow work like emails or video encoding on a queue, so the API answers at once. Workers delete a message only after the job succeeds, so a crash means a retry, not a loss. I scale workers on queue depth."
+  wrong: "A queue absorbs any amount of load, so just let it grow."
+  right: "If producers are faster than workers, the queue and the wait grow without limit. Cap the queue, reject new work (HTTP 503), and add workers."
+  why: "A queue does smooth out short bursts, so people assume it has no limit. But it only buffers work; it never makes workers faster, so a steady overload piles up forever."
+sayIt: "I put slow work like sending receipts or encoding video on a queue, so the API replies at once. A worker deletes a message only after the job succeeds, so a crash means a retry, not a loss, and I make the job idempotent. I scale workers on queue depth."
+cheat:
+  idea: "A message queue holds jobs between the producer that creates them and workers that do them later. A worker takes one job, does it, then deletes it."
+  flow: "Producer → Queue → one worker does the job → delete on success"
+  remember: "A worker deletes only after success, so a crash re-delivers the job. Make jobs idempotent."
+buildsOn: [idempotency]
+scenarios:
+  - q: "Your checkout API sends a receipt email inside the request. The email provider is slow tonight, so checkout takes 6 seconds. How does a queue help?"
+    a: "Put the email on a queue and return from checkout at once; a worker sends it a moment later. Checkout no longer waits for the email, so its latency drops back to normal, and a slow or down email provider no longer slows down paying customers."
+  - q: "A worker pulls a payment-receipt job, sends the email, then crashes before it deletes the message. What happens?"
+    a: "The message was never deleted, so after the visibility timeout the broker delivers it again and another worker sends the same email. To avoid a duplicate receipt the job must be idempotent, for example by recording which receipts were already sent."
 confusedWith: [queue-vs-pubsub-vs-stream]
 tags: [messaging, async, queues, sqs, rabbitmq]
 visual: flow
@@ -45,100 +55,112 @@ sources:
   - title: "Quorum Queues: poison message handling (RabbitMQ docs)"
     url: "https://www.rabbitmq.com/docs/quorum-queues"
     verifiedOn: "2026-10-16"
-  - title: "Work Queues tutorial (RabbitMQ)"
-    url: "https://www.rabbitmq.com/tutorials/tutorial-two-python"
-    verifiedOn: "2026-10-16"
   - title: "Queue-Based Load Leveling pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/queue-based-load-leveling"
     verifiedOn: "2026-10-16"
   - title: "Competing Consumers pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/competing-consumers"
     verifiedOn: "2026-10-16"
-  - title: "The System Design Primer: Asynchronism (donnemartin, GitHub)"
-    url: "https://github.com/donnemartin/system-design-primer"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+A message queue is a line of jobs that sits between the code that creates work and the code that does it. The code that adds a job is the **producer**; the processes that take jobs off the queue and run them are the **workers** (also called consumers). The producer adds a job and moves on at once; it does not wait for the work to finish. This is how you do work **asynchronously**: the result is ready a moment later, not inside the request.
 
 ## Why it exists
 
-Some work is slow, like sending email or encoding video, or it arrives in bursts. Doing it inside the request makes users wait and can overload the service; a queue holds the work until a worker is free.
+Some work is slow, like sending a receipt email or encoding a video, or it arrives in sudden bursts. If you do it inside the request, the user waits for the whole thing, and a flood of requests can overload the service until it falls over. With a queue, the request just adds a job and returns; a fixed set of workers drains the queue at a steady pace, so slow work and bursts no longer hurt the user-facing service.
 
 ## How it works
 
 <Mermaid
-  alt="Message queue flow. A producer sends a message to the queue. A worker receives it, and the message is hidden from other workers. When the job is done, the worker deletes or acks it, and it is removed from the queue. If the worker crashes or runs past the timeout, the message becomes visible in the queue again. A message that fails too many times moves to a dead-letter queue."
+  alt="A producer sends a job to the queue. A worker receives it, and the message is hidden from other workers while it is processed. When the job succeeds the worker deletes the message and it leaves the queue. If the worker crashes or runs past the timeout, the message becomes visible again. A message that fails too many times moves to a dead-letter queue."
   chart={`flowchart TD
   P[Producer] -- send --> Q[(Queue)]
   Q -- "receive: now hidden" --> W[Worker]
-  W -- "done: delete or ack" --> X([Removed from queue])
+  W -- "success: delete" --> X([Leaves the queue])
   W -. "crash or timeout: visible again" .-> Q
   Q -- "failed too many times" --> DLQ[(Dead-letter queue)]`}
 />
 
-- A received message stays in the queue until the worker acks it. Amazon SQS hides it for the visibility timeout; if it is not deleted by then, it shows again.
-- **Back pressure:** when workers fall behind, cap the queue and reject new work (for example HTTP 503) so clients retry later.
-- A task queue, such as Celery or a RabbitMQ work queue, is the same idea for background jobs.
+1. The producer sends a job to the queue and returns immediately, without waiting for it to run.
+2. A free worker receives the message. The broker hides it from other workers so two do not run the same job.
+3. The worker does the job, then acknowledges it: it tells the broker "done", and the message is deleted.
+4. If the worker crashes or takes too long, it never acknowledges, so the broker makes the message visible again and another worker picks it up. That is why a job can run more than once and must be idempotent.
+5. A message that keeps failing is moved to a **dead-letter queue** after a set number of tries, so one bad message does not block the rest.
 
 ## Example
 
-The API enqueues a resize job and replies at once; many workers share the queue.
+The checkout API puts a receipt-email job on the queue and returns at once; a pool of workers shares the queue.
 
 ```java
-int upload(long imageId) {
-    queue.send(new ResizeJob(imageId));   // enqueue the job
-    return 202;                           // Accepted: done later
+int checkout(long paymentId) {
+    queue.send(new ReceiptJob(paymentId));   // add the job, do not wait
+    return 202;                               // Accepted: the email is sent later
 }
 
-void workOnce() {                         // each worker calls this in a loop
-    Message msg = queue.receive();        // waits; now hidden from others
+void workOnce() {                             // each worker loops over this
+    Message msg = queue.receive();            // blocks; now hidden from others
     try {
-        resize(msg.body());
-        queue.delete(msg);                // ack only after success
+        sendReceipt(msg.body());
+        queue.delete(msg);                    // acknowledge only after success
     } catch (Exception e) {
-        log.warn("will retry", e);        // no delete: it comes back later
+        log.warn("will retry", e);            // no delete: it reappears later
     }
 }
 ```
 
 ```python
-def upload(image_id):
-    queue.send({"image_id": image_id})    # enqueue the job
-    return 202                            # Accepted: done later
+def checkout(payment_id):
+    queue.send({"payment_id": payment_id})    # add the job, do not wait
+    return 202                                # Accepted: the email is sent later
 
-def work_once():                          # each worker calls this in a loop
-    msg = queue.receive()                 # waits; now hidden from others
+def work_once():                              # each worker loops over this
+    msg = queue.receive()                     # blocks; now hidden from others
     try:
-        resize(msg.body)
-        queue.delete(msg)                 # ack only after success
+        send_receipt(msg.body)
+        queue.delete(msg)                     # acknowledge only after success
     except Exception:
-        log.warning("will retry")         # no delete: it comes back later
+        log.warning("will retry")             # no delete: it reappears later
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Visibility timeout | 30 s (0 s to 12 h) | Amazon SQS |
-| How long a message is kept | 4 days (1 minute to 14 days) | Amazon SQS |
-| Largest message | 1 MiB | Amazon SQS |
-| Receive wait | 0 s, short polling (long polling waits up to 20 s) | Amazon SQS |
-| Deliveries before drop or dead-letter | 20 | RabbitMQ 4.0+ quorum queues |
-| Time to ack a delivery | 30 minutes, then the channel is closed | RabbitMQ (quorum queues only from 4.3) |
+- `checkout` returns `202 Accepted`, not `200 OK`: the work is accepted, not finished. The caller must not assume the email is sent yet.
+- `queue.delete` runs only after `sendReceipt` succeeds. Move the delete before the send and a crash in between would lose the receipt instead of retrying it.
+- Nothing in the code limits how fast producers add jobs. If they outrun the workers, the queue grows; you cap it and add workers separately.
+
+## Rules and defaults
+
+- **Delivery is at-least-once:** a message reappears after a crash, so the same job can run more than once. Make jobs idempotent (see [idempotency](card:idempotency)).
+- **Visibility timeout:** in Amazon SQS a received message is hidden for 30 seconds by default (0 s to 12 h). Set it longer than your slowest job, or the job reappears and runs twice while still in progress.
+- **Retention:** SQS keeps a message for 4 days by default (1 minute to 14 days); after that it is dropped.
+- **Dead-letter queue:** configure it so a poison message is set aside after N tries instead of looping forever.
+- **Back pressure:** a queue does not make workers faster. When workers fall behind, cap the queue and reject new work (HTTP 503) so clients retry later.
+
+## Not to be confused with
+
+A message queue gives each job to **one** worker, so workers share the load. [Publish-subscribe](card:pub-sub) gives **every** subscriber its own copy of each message. An [event stream](card:event-streaming) keeps messages in a log after they are read, so many readers can replay them. Rule: queue to share work, pub/sub to notify many services, stream to keep and replay an ordered log.
+
+## Common mistakes
+
+- **"If the API returned 202, the work is done."** No. `202 Accepted` means only that the job was queued. The worker may still fail, so the user needs a way to see the final result or error.
+- **"Retry every failure forever."** A poison message would loop forever and waste workers. Cap retries and send it to a dead-letter queue instead.
 
 ## Interview Qs
 
 ### Why put a queue between two services?
 
-The caller does not wait for slow work, bursts wait in the queue instead of overloading the worker, and nothing is lost while a worker is down. You can also scale workers on their own. The cost: one more system to run, and results arrive later.
+The caller does not wait for slow work, a burst waits in the queue instead of overloading the worker, and nothing is lost while a worker is down. You can also scale workers on their own. The cost is one more system to run and results that arrive later.
 
 ### A worker crashes halfway through a job. What happens?
 
-It never deleted or acked the message, so the broker delivers it again: SQS after the visibility timeout, RabbitMQ when the connection closes. Another worker runs the job, so the job must be idempotent.
+It never acknowledged the message, so the broker delivers it again: SQS after the visibility timeout, RabbitMQ when the connection drops. Another worker runs the same job, so the job must be idempotent or the user gets a duplicate effect, like two receipts.
 
-### What is a dead-letter queue?
+### What is a dead-letter queue, and why use one?
 
-A side queue for messages that keep failing. SQS moves a message there after `maxReceiveCount` receives; RabbitMQ 4.0+ quorum queues dead-letter (or drop) it after 20 deliveries by default. Alert on it, fix the bug, then redrive the messages.
+A side queue for messages that keep failing. After a set number of tries, the broker moves the message there instead of retrying forever. This stops one poison message from blocking the queue, and lets you alert on it, fix the bug, then re-process the held messages.
 
 ### The queue keeps growing. What do you do?
 
-Producers are faster than workers. Add workers and scale them on queue depth, then set a limit: when the queue is full, reject new work with HTTP 503 so clients retry later with backoff. Watch the age of the oldest message.
+Producers are faster than workers. Add workers and scale them on queue depth. Then set a limit: when the queue is full, reject new work with HTTP 503 so clients retry with backoff. Watch the age of the oldest message.

@@ -7,16 +7,27 @@ level: beginner
 heat: 3
 hook: "Run two or more of everything that matters, in places that fail separately, and switch to a healthy copy when one dies."
 points:
-  - { k: "Single point of failure", v: "one part whose failure stops everything; run a second copy" }
-  - { k: "Active-passive", v: "only the primary serves; a standby takes over on failure" }
-  - { k: "Active-active", v: "all copies serve; each needs room for a lost peer's load" }
-  - { k: "Fail separately", v: "spread copies over zones or regions, not one rack", kind: plus }
-  - { k: "Split brain", v: "two nodes both act as primary; fence one or use a majority vote", kind: minus }
-  - { k: "RDS Multi-AZ failover", v: "typically 60–120 s; the DNS name moves to the standby", kind: default }
+  - { k: "Single point of failure", v: "one part whose failure stops the whole system; the cure is to run a second copy" }
+  - { k: "Redundancy", v: "running more than one copy of a part so a spare is ready when one fails", kind: plus }
+  - { k: "Failover", v: "the switch of traffic from a failed copy to a healthy one, by hand or automatically" }
+  - { k: "Fail separately", v: "put copies in different zones or regions, not two servers on one rack", kind: plus }
+  - { k: "Split brain", v: "two nodes both act as primary and accept writes; prevent it with a majority vote and fencing", kind: minus }
+  - { k: "RDS Multi-AZ failover", v: "typically 60-120 seconds; the database's DNS name is moved to the standby", kind: default }
 trap:
-  wrong: "With a standby, failover is instant and loses nothing."
-  right: "Detection, promotion and DNS caching take time, and an asynchronous standby can miss the last writes."
-sayIt: "I find each single point of failure and run it at least twice across zones. Stateless servers run active-active behind a load balancer; the database runs active-passive with automatic failover and fencing, so there is never more than one primary."
+  wrong: "With a standby ready, failover is instant and loses nothing."
+  right: "Detection, promotion and cached DNS take time, and an asynchronous standby can be missing the last few writes."
+  why: "People picture a clean instant switch, because they only see the healthy end state, not the 1-2 minutes of detecting the failure and moving traffic."
+sayIt: "I find each single point of failure and run it at least twice across zones. Stateless servers run active-active behind a load balancer; the database runs active-passive with automatic failover and fencing, so there is never more than one primary accepting writes."
+cheat:
+  idea: "Redundancy runs a second copy of every important part. Failover switches traffic to a healthy copy when one dies, so no single failure takes the system down."
+  flow: "Detect → promote standby → fence old one → redirect"
+  remember: "Put copies in different zones so they fail separately; fence the old primary so two never both write."
+buildsOn: [availability, load-balancer]
+scenarios:
+  - q: "Your database has one primary and one asynchronous standby. The primary's disk dies. What can you lose, and why is the switch not instant?"
+    a: "You can lose the last few writes that the primary had not yet copied to the standby, because the copy is asynchronous. The switch is not instant because the system must notice several missed health checks, promote the standby, and wait for clients to drop the old cached DNS answer."
+  - q: "Peak traffic needs 6 servers, spread over 3 zones. You run active-active. How many servers should you provision so one lost zone still serves the peak?"
+    a: "Nine. If one of the three zones fails, only two-thirds of the capacity remains, so you need 6 divided by (2/3) = 9 servers. Running just 6 would leave you unable to serve the peak the moment a zone goes down."
 confusedWith: [active-passive-vs-active-active]
 tags: [reliability, availability, failover, redundancy]
 visual: flow
@@ -30,17 +41,11 @@ sources:
   - title: "REL11-BP02 Fail over to healthy resources (AWS Well-Architected, Reliability Pillar)"
     url: "https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_withstand_component_failures_failover2good.html"
     verifiedOn: "2026-10-16"
-  - title: "Disaster recovery options in the cloud (AWS whitepaper: Disaster Recovery of Workloads on AWS)"
-    url: "https://docs.aws.amazon.com/whitepapers/latest/disaster-recovery-workloads-on-aws/disaster-recovery-options-in-the-cloud.html"
-    verifiedOn: "2026-10-16"
   - title: "HealthCheckConfig: RequestInterval and FailureThreshold (Amazon Route 53 API Reference)"
     url: "https://docs.aws.amazon.com/Route53/latest/APIReference/API_HealthCheckConfig.html"
     verifiedOn: "2026-10-16"
   - title: "Values specific for failover records: TTL (Amazon Route 53 Developer Guide)"
     url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/resource-record-sets-values-failover.html"
-    verifiedOn: "2026-10-16"
-  - title: "Active-active and active-passive failover (Amazon Route 53 Developer Guide)"
-    url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover-types.html"
     verifiedOn: "2026-10-16"
   - title: "Failing over a Multi-AZ DB instance (Amazon RDS User Guide)"
     url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.Failover.html"
@@ -57,69 +62,74 @@ sources:
   - title: "Fencing (Pacemaker Explained, ClusterLabs)"
     url: "https://clusterlabs.org/projects/pacemaker/doc/3.0/Pacemaker_Explained/html/fencing.html"
     verifiedOn: "2026-10-16"
-  - title: "The System Design Primer: Fail-over (donnemartin, GitHub)"
-    url: "https://github.com/donnemartin/system-design-primer"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+Redundancy means running more than one copy of each important part, so that if one copy fails, a spare is ready to take its place. Failover is the act of moving traffic from a failed copy to a healthy one. Our growing payment service starts on one server; the moment that server dies, the whole service is down. Redundancy and failover are how you stop one dead machine from stopping everyone.
 
 ## Why it exists
 
-Every server, disk, network link and data centre fails sometimes. If only one copy of a part exists, its failure takes the whole system down.
+Every server, disk, network link and data centre fails sometimes. If only one copy of a part exists, that part is a [single point of failure](term:single-point-of-failure): its failure takes the whole system down, however reliable everything else is. Running a second copy, in a place that fails separately, means a failure of one copy is survivable instead of fatal.
 
 ## How it works
 
 <Steps label="Automatic failover in four steps">
 <Step title="Detect">
-Health checks or heartbeats fail several times in a row. A short grace period avoids failing over just because a node was busy.
-</Step>
-<Step title="Decide">
-A tool or a person triggers failover. For a whole region, teams often press the button themselves, because a false alarm also costs downtime.
+Health checks or heartbeats to a copy fail several times in a row. A short grace period avoids failing over just because a node was briefly busy.
 </Step>
 <Step title="Promote one">
-One standby becomes the new primary. The old primary is fenced off, so two primaries never accept writes.
+A tool or a person makes one standby the new primary. For a whole region, teams often trigger this themselves, because a false alarm also causes downtime.
+</Step>
+<Step title="Fence the old one">
+The old primary is fenced off, meaning it is forcibly stopped or blocked from writing, so two nodes never both accept writes.
 </Step>
 <Step title="Redirect">
-The load balancer, a moved IP address or a DNS record now points to the new primary. Clients with a cached DNS answer wait until its TTL runs out.
+A load balancer, a moved IP address or a DNS record now points at the new primary. Clients holding a cached DNS answer keep using the old one until its [TTL](term:ttl) runs out.
 </Step>
 </Steps>
 
-<Compare id="active-passive-vs-active-active" />
-
-- Copies must fail separately: different [zones](card:multi-az) or [regions](card:multi-region), not two servers on one rack.
+So the key is that copies must fail separately: put them in different [zones](card:multi-az) or [regions](card:multi-region), not two servers on one rack.
 
 ## Example
 
-How long until users reach the standby with DNS failover? With Amazon Route 53 defaults:
+How long until users reach the standby when failover is driven by DNS? With Amazon Route 53 defaults:
 
-- **Detect:** a check every 30 s, unhealthy after 3 failures in a row, so about 90 s.
-- **Redirect:** resolvers may serve the old answer until its TTL ends; AWS advises 60 s or less, so up to 60 s more.
-- **Total:** about 2.5 minutes before most clients reach the standby. Plan the RTO around it.
+- **Detect:** a health check every 30 seconds, marked unhealthy after 3 failures in a row, so about 90 seconds.
+- **Redirect:** resolvers may keep serving the old answer until its record TTL ends; AWS advises a TTL of 60 seconds or less, so up to 60 seconds more.
 
-How much spare room does active-active need? Peak load needs 6 servers spread over 3 zones. If one zone fails, only 2 of 3 zones remain, so run 6 × 3/2 = 9 servers (Azure guidance).
+What to notice:
 
-## Defaults
+- The total is about 2.5 minutes before most clients reach the standby, so your [RTO](term:rto) must be at least that long for DNS-based failover.
+- Lowering the health-check interval and the DNS TTL shortens both parts, at the cost of more checks and more DNS lookups.
+- A load balancer in front of the servers redirects faster than DNS, because clients do not cache its routing decisions.
 
-| What | Default | Where |
-| --- | --- | --- |
-| Failover time | Typically 60–120 s | Amazon RDS Multi-AZ DB instance |
-| Can the standby serve reads? | No, it only waits for failover | Amazon RDS Multi-AZ DB instance |
-| When an election starts | Primary unreachable for 10 s; median election ≤ 12 s | MongoDB 9.0 replica set |
-| Failure detection and failover | Not built in; use external tools | PostgreSQL 18 |
+## Rules and defaults
+
+- **Amazon RDS Multi-AZ failover:** typically 60-120 seconds; the standby is promoted and the database endpoint is moved to it.
+- **Amazon RDS Multi-AZ standby:** it does not serve reads; it only waits to take over. To offload reads you add separate read replicas.
+- **MongoDB 9.0 replica set:** an election starts when the primary is unreachable for about 10 seconds; the median election completes in 12 seconds or less.
+- **PostgreSQL 18:** failure detection and failover are not built in; you add an external tool to detect failure and promote a standby.
+
+## Not to be confused with
+
+Redundancy is having spare copies; failover is the switch to one of them. Replication (copying data between nodes) is what keeps a standby's data current, but on its own it does not detect failure or redirect traffic. Rule: replication keeps a copy ready, failover is the act of using it.
+
+## Common mistakes
+
+- **"Two copies are enough, wherever they sit."** Two servers on one rack or in one zone still share a power supply or a network switch. Copies must sit in independent [failure domains](term:failure-domain) to fail separately.
+- **"A split brain is rare, so we can ignore it."** After a network split, both sides may try to be primary and accept conflicting writes. You must prevent it with a majority [quorum](card:quorum) and by fencing the loser.
 
 ## Interview Qs
 
-### How do you remove single points of failure?
+### How do you remove single points of failure from a design?
 
-List every part on the request path: DNS, load balancer, app servers, cache, database. Run each at least twice, in different zones. Stateless parts go active-active behind a load balancer; the database gets a standby with automatic failover.
-
-### Active-passive or active-active?
-
-Active-passive is simpler and has one writer, but the standby sits idle and failover takes time. Active-active uses all capacity and needs no failover step, but each copy needs spare room and concurrent writes must be reconciled.
+List every part on the request path: DNS, load balancer, app servers, cache, database. Run each at least twice, in different zones. Stateless parts go active-active behind a load balancer; the database gets a standby with automatic failover and fencing.
 
 ### What is split brain, and how do you prevent it?
 
-After a network split, two nodes both act as primary and accept writes, so the data diverges. Prevent it with a majority vote, where only the side with a [quorum](card:quorum) may elect a primary, and by fencing the old primary.
+After a network split, two nodes both act as primary and accept writes, so their data diverges and cannot be cleanly merged. Prevent it with a majority vote, where only the side holding a [quorum](card:quorum) may elect a primary, and by fencing the old primary so it stops writing.
 
 ### Why is failover not instant?
 
-Detection needs several missed checks, promotion takes time, and clients keep cached DNS answers until the TTL expires. Amazon RDS Multi-AZ typically takes 60–120 seconds. Size your RTO around it.
+Detection needs several missed health checks, promotion of a standby takes time, and clients keep cached DNS answers until the TTL expires. Amazon RDS Multi-AZ typically takes 60-120 seconds. Size your RTO around this, and use a load balancer rather than DNS when you need a faster switch.

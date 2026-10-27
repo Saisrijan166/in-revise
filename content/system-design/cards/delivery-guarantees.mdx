@@ -7,16 +7,26 @@ level: interview
 heat: 3
 hook: "When an acknowledgement is lost, the sender cannot tell lost from slow: give up and risk losing the message, or resend and risk a duplicate."
 points:
-  - { k: "At-most-once", v: "ack first, then work: a crash loses the message" }
-  - { k: "At-least-once", v: "work first, then ack: a crash brings it back" }
-  - { k: "Exactly-once", v: "really effectively once: at-least-once + skip repeats" }
-  - { k: "Kafka", v: "at-least-once by default; idempotent producer on (4.3)", kind: default }
-  - { k: "SQS FIFO", v: "a resend with the same dedupe ID within 5 min adds no copy", kind: default }
-  - { k: "Side effects", v: "a broker cannot undo an email, a charge or your DB write", kind: minus }
+  - { k: "At-most-once", v: "acknowledge first, then do the work; a crash in between loses the message" }
+  - { k: "At-least-once", v: "do the work first, then acknowledge; a crash in between re-delivers the message" }
+  - { k: "Exactly-once", v: "the effect happens once: at-least-once delivery plus detecting and skipping repeats" }
+  - { k: "Idempotent consumer", v: "handling the same message twice gives the same result as handling it once", kind: plus }
+  - { k: "Kafka default", v: "at-least-once; the idempotent producer is on by default (enable.idempotence=true, Kafka 4.3)", kind: default }
+  - { k: "Side effects can't be undone", v: "a broker cannot take back an email you sent or a card you charged, so dedupe before the effect", kind: minus }
 trap:
-  wrong: "Kafka has exactly-once, so my consumer will never see a duplicate."
+  wrong: "Kafka gives exactly-once, so my consumer will never see a duplicate."
   right: "Kafka's exactly-once covers reads and writes inside Kafka. Your own database writes, emails and payments still need an idempotent consumer."
-sayIt: "I use at-least-once delivery with idempotent consumers: each message has a stable ID, saved in the same transaction as the change, so a redelivery is skipped. I accept at-most-once only for data like metrics."
+  why: "Kafka advertises exactly-once semantics, so people assume it covers everything. In fact it only makes a chain of Kafka reads and writes atomic; the moment you touch an outside system, that guarantee stops."
+sayIt: "I design for at-least-once delivery with idempotent consumers: each message has a stable ID, saved in the same transaction as the change, so a redelivery is detected and skipped. I accept at-most-once only for cheap-to-lose data like metrics."
+cheat:
+  idea: "A delivery guarantee says what happens when an ack is lost: at-most-once may lose a message, at-least-once may repeat it, exactly-once makes the effect happen once."
+  remember: "End to end you get at-least-once plus an idempotent consumer. Exactly-once is built, not a switch."
+buildsOn: [message-queue, event-streaming, idempotency]
+scenarios:
+  - q: "Your payment worker charges a card, then crashes before it acknowledges the message. The broker redelivers it. Without any safeguard, what goes wrong, and how do you fix it?"
+    a: "Another worker charges the card a second time, because the broker cannot know the first charge succeeded. Fix it with an idempotent consumer: record the message ID in the same transaction as the charge, and skip a message whose ID is already recorded, so the second delivery charges nothing."
+  - q: "You see 'exactly-once' promised by a broker and want to rely on it for sending receipt emails. Is that safe?"
+    a: "No. A broker's exactly-once only covers its own internal reads and writes; it cannot un-send an email. For an external side effect you still need to deduplicate yourself, for example by recording which payment IDs have already had a receipt sent before sending another."
 confusedWith: [delivery-semantics]
 tags: [messaging, kafka, sqs, idempotency, reliability]
 visual: table
@@ -51,34 +61,37 @@ sources:
   - title: "Pattern: Idempotent Consumer (Chris Richardson, microservices.io)"
     url: "https://microservices.io/patterns/communication-style/idempotent-consumer.html"
     verifiedOn: "2026-10-16"
-  - title: "Message Queues Delivery Semantics (ByteByteGo guides)"
-    url: "https://bytebytego.com/guides/delivery-semantics/"
-    verifiedOn: "2026-10-16"
-  - title: "Kafka (Hello Interview, system design deep dives)"
-    url: "https://www.hellointerview.com/learn/system-design/deep-dives/kafka"
-    verifiedOn: "2026-10-16"
+  - title: "Pattern: Transactional outbox (Chris Richardson, microservices.io)"
+    url: "https://microservices.io/patterns/data/transactional-outbox.html"
+    verifiedOn: "2026-10-27"
 ---
+
+## What it is
+
+A delivery guarantee describes what a messaging system promises when things go wrong. There are three levels. **At-most-once**: a message arrives zero or one time, so it may be lost but never repeated. **At-least-once**: it arrives one or more times, so it is never lost but may repeat. **Exactly-once**: the final effect happens once, built by combining at-least-once delivery with a way to detect and skip repeats. Which one you get depends on **when the consumer acknowledges** a message.
 
 ## Why it exists
 
-Networks drop messages and consumers crash mid-work. Every queue or stream must pick what happens then: lose the message, or deliver it again.
+Networks drop packets and consumers crash mid-work, and when an acknowledgement is lost the sender cannot tell whether the message was lost or just slow. Each choice is wrong some of the time: give up, and sometimes lose a real message; or resend, and sometimes deliver a duplicate. Every queue and stream picks one of these, so you need to know which one you have and design the consumer to match.
 
 ## How it works
 
 <Compare id="delivery-semantics" />
 
-- The difference is **when the consumer acknowledges** (commits its offset or deletes the message): before the work, or after it.
-- Duplicates come from retries: a producer with no reply resends, and a consumer that crashes before its ack gets the message again.
-- **Exactly-once** is really *effectively once*. Kafka's idempotent producer and transactions cover writes inside Kafka; anything outside needs an [idempotent consumer](card:idempotent-consumer).
+1. The only real difference is **when the consumer acknowledges** (commits its offset or deletes the message): before doing the work, or after it.
+2. Acknowledge first (at-most-once): a crash before the work loses the message, because the broker already thinks it is done.
+3. Acknowledge after (at-least-once): a crash before the ack re-delivers the message, because the broker never heard it was done.
+4. Duplicates always come from retries: a producer with no reply resends, and a consumer that crashes before acknowledging is sent the message again.
+5. To reach an **exactly-once effect**, keep at-least-once delivery and add deduplication, so a repeat is recognised and skipped.
 
 ## Example
 
-An idempotent consumer: the message ID and the change commit together.
+An idempotent consumer makes at-least-once safe by recording the message ID and the change together in one transaction.
 
 ```java
 void handle(Message msg) {
     db.inTransaction(tx -> {
-        // unique key on message_id: a repeat cannot insert it again
+        // unique key on message_id: a repeat cannot insert the same id twice
         boolean isNew = tx.insertIfAbsent("processed_messages", msg.id());
         if (isNew) {
             tx.addToBalance(msg.accountId(), msg.amount());
@@ -91,41 +104,50 @@ void handle(Message msg) {
 ```python
 def handle(msg):
     with db.transaction() as tx:
-        # unique key on message_id: a repeat cannot insert it again
+        # unique key on message_id: a repeat cannot insert the same id twice
         is_new = tx.insert_if_absent("processed_messages", msg.id)
         if is_new:
             tx.add_to_balance(msg.account_id, msg.amount)
     msg.ack()    # only after the commit; a repeat is acked and skipped
 ```
 
-If two copies arrive at once, the unique key lets only one insert win.
+What to notice:
 
-## Defaults
+- The ID insert and the balance change are in **one** transaction, so either both happen or neither does; a crash cannot record the ID without applying the change.
+- The unique key on `message_id` blocks a duplicate: the second delivery fails the insert, so `isNew` is false and the balance is left alone.
+- `msg.ack()` runs only after the commit, so a crash before it just re-delivers the message and the dedupe handles it.
 
-| What | Default | Where |
-| --- | --- | --- |
-| Delivery guarantee | At-least-once | Kafka |
-| `enable.idempotence` (producer) | `true`, unless other settings conflict | Kafka 4.3 |
-| `isolation.level` (consumer) | `read_uncommitted`: also sees aborted transactional writes | Kafka 4.3 |
-| `processing.guarantee` | `at_least_once`; `exactly_once_v2` needs brokers 2.5+ | Kafka Streams 4.3 |
-| Standard queue | At-least-once: a copy can arrive again | Amazon SQS |
-| FIFO deduplication interval | 5 minutes | Amazon SQS |
-| Visibility timeout | 30 s; not deleted in time, it is delivered again | Amazon SQS |
+## Rules and defaults
+
+- **Kafka delivery:** at-least-once by default; the idempotent producer is on by default (`enable.idempotence=true`), so the broker drops producer resends inside Kafka.
+- **Kafka consumer isolation:** `isolation.level` is `read_uncommitted` by default, so a consumer sees writes from a transaction that later aborts unless you set `read_committed`.
+- **Kafka Streams:** `processing.guarantee` is `at_least_once` by default; `exactly_once_v2` still covers only Kafka-internal reads and writes.
+- **SQS:** standard queues are at-least-once; FIFO queues deduplicate a resend with the same deduplication ID within a 5-minute window.
+- **Outside systems:** a broker cannot undo an email, a charge or your database write, so deduplicate before the side effect.
+
+## Not to be confused with
+
+**Delivery** is how many times the message reaches the consumer; **processing** is how many times its effect is applied. Kafka's exactly-once makes a chain of Kafka reads and writes atomic, not delivery over the network. Rule: across a network you get at-least-once; exactly-once is an effect you build with idempotency, not a delivery the broker promises end to end.
+
+## Common mistakes
+
+- **"Publish the event right after the database write, in the code."** If the write commits but the publish fails (or the reverse), the two disagree. The **transactional outbox** pattern fixes this: write the change and an outbox row in one transaction, and a relay publishes outbox rows later, so the event is never lost though it may be published more than once.
+- **"An idempotent producer makes my consumer idempotent."** No. It only stops duplicate writes inside Kafka; a consumer that applies the same message twice to your database still needs its own dedupe.
 
 ## Interview Qs
 
 ### Explain at-most-once, at-least-once and exactly-once.
 
-At-most-once: zero or one delivery, so a message may be lost. At-least-once: one or more, so nothing is lost but repeats happen. Exactly-once: the effect happens once, built from at-least-once plus deduplication or transactions.
+At-most-once: zero or one delivery, so a message can be lost but never repeated. At-least-once: one or more, so nothing is lost but repeats happen. Exactly-once: the effect happens once, built from at-least-once plus deduplication. The level depends on whether the consumer acknowledges before or after the work.
 
 ### Is exactly-once delivery really possible?
 
-Not end to end across a network: an acknowledgement can be lost, so someone must resend or give up. What systems offer is exactly-once processing: Kafka within Kafka, or at-least-once plus an idempotent consumer everywhere else.
+Not end to end across a network. An acknowledgement can be lost, so someone must resend or give up, forcing either a possible duplicate or a possible loss. What systems actually offer is exactly-once **processing**: Kafka within Kafka, or at-least-once plus an idempotent consumer everywhere else.
 
 ### How do you make a consumer idempotent?
 
-Give each message a stable ID. In one transaction, insert the ID into a processed-messages table with a unique key and apply the change; a repeat fails the insert and is skipped. Or use naturally idempotent writes, like an upsert that sets an absolute value.
+Give each message a stable ID. In one transaction, insert the ID into a processed-messages table with a unique key and apply the change; a repeat fails the insert and is skipped. Alternatively use naturally idempotent writes, like an upsert that sets an absolute value.
 
-### How does Kafka provide exactly-once?
+### What is the transactional outbox pattern?
 
-The idempotent producer adds a producer ID and sequence numbers, so the broker drops resent copies. Transactions write to many partitions and commit the consumer offset atomically. Consumers set to `read_committed` see only committed data.
+It solves the risk that a service commits a database change but then fails to publish the matching event. You write the change and an outbox row in the same transaction, and a separate relay reads the outbox and publishes the event. The relay may publish more than once, so consumers must be idempotent.

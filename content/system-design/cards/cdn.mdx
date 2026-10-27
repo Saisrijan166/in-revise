@@ -7,16 +7,27 @@ level: beginner
 heat: 3
 hook: "A CDN keeps copies of your files near users, so a user in Chennai is served from a nearby city, not from your far-away origin."
 points:
-  - { k: "Edge (PoP)", v: "a cache server near users; a hit never touches the origin" }
-  - { k: "Origin", v: "where the real file lives: your server or an S3 bucket" }
-  - { k: "Cache time", v: "set by the origin's Cache-Control: max-age or s-maxage" }
-  - { k: "Hit ratio", v: "share of requests the edge answers; higher means less origin load" }
-  - { k: "Stale copies", v: "the old file stays until its TTL ends or you purge it", kind: minus }
-  - { k: "CloudFront default TTL", v: "24 hours when the origin sends no max-age", kind: default }
+  - { k: "Edge server", v: "a cache server near users; a request it already holds never reaches your origin" }
+  - { k: "Origin", v: "where the real file lives: your own server or a storage bucket" }
+  - { k: "Cache time", v: "the origin sets it with Cache-Control: max-age for any cache, s-maxage for shared caches like a CDN" }
+  - { k: "Hit ratio", v: "the share of requests the edge answers itself; higher means less work for the origin", kind: plus }
+  - { k: "Stale copies", v: "the old file keeps being served until its cache time ends or you purge it", kind: minus }
+  - { k: "CloudFront default TTL", v: "24 hours when the origin sends no max-age; the ceiling is 1 year", kind: default }
 trap:
   wrong: "Cache-Control: no-cache tells the CDN not to cache the response."
-  right: "no-cache means store it, but recheck with the origin before each reuse. Never store it: use no-store."
-sayIt: "I serve static files through a CDN, so users get them from a nearby edge and the origin sees only misses. Assets get hashed names and a one-year max-age; HTML is rechecked each time."
+  right: "no-cache means store it, but recheck with the origin before each reuse. To forbid storing at all, use no-store."
+  why: "The name reads like plain English, so people expect it to mean do not cache; it actually means cache, then always revalidate."
+sayIt: "I serve static files through a CDN, so users get them from a nearby edge and the origin only sees misses. Versioned assets get a one-year max-age; HTML is marked no-cache so it is rechecked every time."
+cheat:
+  idea: "A CDN caches your files on edge servers near users. A hit is served from the edge; a miss is fetched once from the origin, then cached."
+  flow: "User → nearby edge → hit, or miss fetches origin then caches"
+  remember: "Update a file with a new versioned name, not a purge."
+buildsOn: [latency-and-throughput, availability]
+scenarios:
+  - q: "You ship a CSS change, but users still see the old styles for hours. The file is served by a CDN. What went wrong, and how do you avoid it next time?"
+    a: "The edge is still serving the old file within its cache time. Give each build a content-hashed name (app.3f9c2b.css) and point the HTML at the new name. A new name is a new cache entry everywhere, so the change is instant with no purge."
+  - q: "Should a CDN cache your logged-in account page?"
+    a: "No. It is personalised per user, so one cached copy would be shown to the wrong people. Mark it no-store (or no-cache with auth checks). CDNs are for files that are the same for everyone: images, CSS, JS, and public pages."
 confusedWith: [push-vs-pull-cdn]
 tags: [cdn, caching, performance, networking]
 visual: flow
@@ -29,9 +40,6 @@ sources:
     verifiedOn: "2026-10-16"
   - title: "Cache behavior settings: Default and Maximum TTL (Amazon CloudFront docs)"
     url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/DownloadDistValuesCacheBehavior.html"
-    verifiedOn: "2026-10-16"
-  - title: "Use managed cache policies (Amazon CloudFront docs)"
-    url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html"
     verifiedOn: "2026-10-16"
   - title: "Invalidate files to remove content (Amazon CloudFront docs)"
     url: "https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/Invalidation.html"
@@ -48,77 +56,91 @@ sources:
   - title: "Default cache behavior (Cloudflare Cache docs)"
     url: "https://developers.cloudflare.com/cache/concepts/default-cache-behavior/"
     verifiedOn: "2026-10-16"
-  - title: "Purge cache (Cloudflare Cache docs)"
-    url: "https://developers.cloudflare.com/cache/how-to/purge-cache/"
-    verifiedOn: "2026-10-16"
   - title: "HTTP caching (MDN)"
     url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching"
     verifiedOn: "2026-10-16"
   - title: "Cache-Control header (MDN)"
     url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control"
     verifiedOn: "2026-10-16"
-  - title: "The System Design Primer: Content delivery network (donnemartin, GitHub)"
-    url: "https://github.com/donnemartin/system-design-primer"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+A CDN (Content Delivery Network) is a large set of cache servers, spread around the world, that keep copies of your files close to users. Each of those cache servers sits at an edge location, near a group of users. The place where the real, original file lives, your own server or a storage bucket, is called the origin. When a user asks for a file, the CDN serves it from the nearest edge instead of from your origin.
 
 ## Why it exists
 
-A user far from your servers waits for every round trip, and every request adds load to your origin. A CDN serves files such as images, CSS, JavaScript and video from edge servers close to the user.
+Every request to a far-away origin pays for the full round trip, and every request also adds load to that origin. A user in Chennai fetching a file from a server in Virginia waits for data to cross the planet, and your origin handles the load of all users everywhere. A CDN fixes both: the file is served from an edge near the user, so the round trip is short, and the origin only sees the first miss per edge, so its load drops sharply.
 
 ## How it works
 
+DNS sends the user to a nearby edge, and the edge either already has the file or fetches it once.
+
 <Mermaid
-  alt="CDN request flow. A user's request is routed by DNS to a nearby edge server. If the file is cached there (a hit), the edge returns it. On a miss, the edge fetches the file from the origin server or bucket, stores it for its TTL, and returns it."
+  alt="CDN request flow. A user's request is routed by DNS to a nearby edge server. If the file is cached there (a hit), the edge returns it. On a miss, the edge fetches the file from the origin server or bucket, stores it for its cache time, then returns it."
   chart={`flowchart TD
   U([User request]) --> D[DNS picks a nearby edge]
   D --> E{File cached at the edge?}
   E -- hit --> R([Edge returns the file])
   E -- miss --> O[(Origin server or bucket)]
-  O --> S[Edge stores it for its TTL]
+  O --> S[Edge stores it for its cache time]
   S --> R`}
 />
 
-- The origin decides the cache time with `Cache-Control`: `max-age` for every cache, `s-maxage` for shared caches such as CDNs.
-- To change a cached file early, purge it, or better, publish it under a new file name.
+1. DNS resolves your CDN name to the edge nearest the user.
+2. The edge checks whether it already has the file. A hit is returned straight away.
+3. On a miss, the edge fetches the file once from the origin, stores it for the time the origin's `Cache-Control` header allows, and returns it.
+4. The next nearby user gets a hit, so the origin is never asked again until the cache time runs out.
 
 ## Example
 
-Two headers from the origin, as MDN recommends:
+These are the two cache headers the origin sends for a versioned asset and for the HTML, following the pattern MDN recommends.
 
 ```text
-# app.3f9c2b.js: the name changes whenever the content changes
+# app.3f9c2b.js: the file name changes whenever its content changes
 Cache-Control: public, max-age=31536000, immutable
 
-# index.html: keep it, but recheck with the origin before each use
+# index.html: store it, but recheck with the origin before each use
 Cache-Control: no-cache
 ```
 
-On deploy, upload `app.4a1d7e.js` and point `index.html` to it. No purge is needed: nobody asks for the old name any more.
+What to notice:
 
-## Defaults
+- The JavaScript file carries a one-year `max-age` because its name is content-hashed; a new build produces a new name, so the long cache time is safe.
+- On deploy you upload `app.4a1d7e.js` and point `index.html` at it. Nobody requests the old name any more, so no purge is needed.
+- `index.html` uses `no-cache`, so the edge always revalidates it with the origin, which is how users pick up the new asset name quickly.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
 | Cache time when the origin sends no `max-age` | 24 hours (86,400 s) | CloudFront default TTL |
 | Longest cache time | 1 year (31,536,000 s) | CloudFront maximum TTL |
-| Free invalidation paths | 1,000 a month; then paid per path (`/images/*` counts as one) | CloudFront |
+| Free invalidation paths | 1,000 a month, then paid per path (`/images/*` counts as one) | CloudFront |
 | HTML and JSON | Not cached unless you add a rule | Cloudflare |
+
+- **Changing a file early:** purge (invalidate) it, or better, publish it under a new name so every cache treats it as new.
+- **Not everything is cacheable:** personalised or authorised responses must not be shared from one cached copy; mark them `no-store`.
+
+## Not to be confused with
+
+A CDN is a cache *near users*, which is different from an application [cache](card:caching-layers) near your backend. The application cache (for example Redis) saves a database query or computed result close to your services; a CDN saves finished files close to the user's city. You often use both: the CDN cuts network distance, the application cache cuts repeated work.
+
+## Common mistakes
+
+- **"A CDN caches every response automatically."** It only caches what the cache rules and headers allow. API responses, authorised content and personalised pages are not cached unless you explicitly make them cacheable.
+- **"Purging is how you update files."** Purging works but is slow and metered, and it does not touch browser caches. Versioned file names update everywhere instantly, so keep purging for emergencies.
 
 ## Interview Qs
 
 ### How does a CDN work?
 
-DNS sends the user to a nearby edge. On a hit, the edge returns the file at once. On a miss, it fetches the file from the origin, returns it, and caches it for its TTL so the next nearby user gets a hit.
+DNS sends the user to a nearby edge. On a hit the edge returns the file at once. On a miss it fetches the file from the origin, returns it, and caches it for its cache time, so the next nearby user gets a hit. The origin's load drops because it only serves misses.
 
 ### How do you update a file that the CDN has cached?
 
-Prefer versioned file names: a new name is a new cache entry everywhere, even in browsers. A purge clears the CDN only, not browser caches. Keep it for emergencies; CloudFront charges per path after 1,000 a month.
-
-### Push CDN or pull CDN?
-
-Pull: the CDN fetches from your origin on the first miss; no upload step, and it suits heavy traffic. Push: you upload files to the CDN yourself; it suits large files that rarely change.
+Prefer versioned file names: a new name is a new cache entry everywhere, including browsers, so the change is instant. A purge clears the CDN only, not browser caches, and CloudFront charges per path after 1,000 a month, so keep purging for emergencies.
 
 ### Many edges miss the same file at once. How do you protect the origin?
 
-Add a mid-tier cache such as CloudFront Origin Shield. Edges ask it first, and it merges identical misses into as few as one request to the origin.
+Add a mid-tier cache such as CloudFront Origin Shield. Edges ask it first, and it collapses identical misses into as few as one request to the origin, so a sudden surge of misses does not hammer your backend.

@@ -7,16 +7,27 @@ level: intermediate
 heat: 3
 hook: "Count each client's requests over time and turn away the extras, so one noisy client cannot slow the service for everyone else."
 points:
-  - { k: "Count per", v: "API key, user ID or IP address" }
-  - { k: "Token bucket", v: "refills at a steady rate; allows short bursts (AWS, Stripe)" }
-  - { k: "Over the limit", v: "reply 429 Too Many Requests, with Retry-After" }
-  - { k: "Many servers", v: "share counters in Redis and update them atomically" }
-  - { k: "nginx limit_req", v: "rejects with 503 unless you set limit_req_status 429", kind: default }
-  - { k: "Counting by IP", v: "users behind one NAT share a single limit", kind: minus }
+  - { k: "Count per key", v: "track requests per API key, user ID or IP, not for the whole service at once" }
+  - { k: "Token bucket", v: "a bucket refills at a steady rate and allows a short burst up to its size (AWS, Stripe)", kind: key }
+  - { k: "Over the limit", v: "reply 429 Too Many Requests with a Retry-After header giving the seconds to wait" }
+  - { k: "Many servers", v: "keep counters in one shared store such as Redis and update them atomically" }
+  - { k: "Counting by IP", v: "users behind one office or mobile NAT share one IP, and so one limit", kind: minus }
+  - { k: "nginx default status", v: "limit_req rejects with 503 until you set limit_req_status 429", kind: default }
 trap:
   wrong: "A limit of 100 per minute never lets more than 100 through in any 60 seconds."
-  right: "With a fixed window, 100 at 0:59 and 100 at 1:00 both pass: 200 in two seconds. A sliding window counts the last 60 seconds instead."
+  right: "With a fixed window, 100 at 0:59 and 100 at 1:00 both pass: 200 requests in two seconds. A sliding window counts the last rolling 60 seconds instead."
+  why: "People picture the limit as one smooth cap, but a fixed window resets its counter on the clock, so a burst on each side of a reset is counted as two separate windows."
 sayIt: "I put a token bucket per API key at the gateway: short bursts pass, the average stays capped. Buckets live in Redis so every gateway agrees, rejected calls get 429 with Retry-After, and if Redis is down I fail open."
+cheat:
+  idea: "Counts each client's requests over a time window and rejects the extras, so one client cannot starve the others."
+  flow: "Request → find key → token in bucket? → yes: forward · no: 429"
+  remember: "Token bucket allows short bursts, caps the average. Share counters in Redis and update atomically, or servers race on the last token."
+buildsOn: [api-gateway]
+scenarios:
+  - q: "A bucket holds 10 tokens and refills at 5 per second, starting full. A client fires 13 requests instantly. How many are allowed?"
+    a: "10. The full bucket has 10 tokens, so the first 10 requests each spend one and pass; the burst arrives faster than the 5-per-second refill, so the last 3 find an empty bucket and get 429. After about 0.6 s, 3 tokens have refilled and 3 more would pass."
+  - q: "Your rate-limit counters live in Redis and Redis goes down. Should the gateway reject every call or allow every call?"
+    a: "Usually fail open: allow calls so a limiter outage does not take down the whole API. You lose protection briefly, which is less harmful than a full outage. For abuse-sensitive endpoints such as login you might fail closed instead; it is a deliberate trade-off."
 confusedWith: [rate-limit-algorithms]
 tags: [rate-limiting, api, security, redis]
 visual: flow
@@ -45,17 +56,8 @@ sources:
   - title: "Rate limiting rules (Cloudflare docs)"
     url: "https://developers.cloudflare.com/waf/rate-limiting-rules/"
     verifiedOn: "2026-10-16"
-  - title: "Rate limiting parameters (Cloudflare docs)"
-    url: "https://developers.cloudflare.com/waf/rate-limiting-rules/parameters/"
-    verifiedOn: "2026-10-16"
-  - title: "Request rate calculation (Cloudflare docs)"
-    url: "https://developers.cloudflare.com/waf/rate-limiting-rules/request-rate/"
-    verifiedOn: "2026-10-16"
   - title: "How we built rate limiting capable of scaling to millions of domains (Cloudflare blog, 2017)"
     url: "https://blog.cloudflare.com/counting-things-a-lot-of-different-things/"
-    verifiedOn: "2026-10-16"
-  - title: "An alternative approach to rate limiting (Nikrad Mahdi, Figma blog, 2017)"
-    url: "https://www.figma.com/blog/an-alternative-approach-to-rate-limiting/"
     verifiedOn: "2026-10-16"
   - title: "Scripting with Lua: atomic execution (Redis docs)"
     url: "https://redis.io/docs/latest/develop/programmability/eval-intro/"
@@ -71,11 +73,17 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Rate limiting counts how many requests a client makes over a time window and turns away the ones above an allowed number. The "client" is picked out by a key, usually an API key, user ID or IP address, so each client has its own count. When a client goes over its limit, the service replies with 429 Too Many Requests instead of processing the request. Limits usually live at the [API gateway](card:api-gateway), so every service behind it is protected.
+
 ## Why it exists
 
-One buggy script or attacker can send thousands of requests and slow the service for everyone. Limits keep usage fair, slow down brute-force logins and protect the servers behind the API.
+Without limits, one buggy script, a retry storm, or an attacker can send thousands of requests and use up the servers' capacity, so ordinary users get slow or failed responses. On your payment service, an attacker could also hammer the login endpoint to guess passwords, or run up your cloud bill. A rate limit caps how fast any one client can call, which keeps capacity fair, slows brute-force attempts, and protects the services behind the API.
 
 ## How it works
+
+This shows the token-bucket method, the most common one.
 
 <Mermaid
   alt="Token bucket rate limiter. A request arrives and the limiter finds its key: API key, user or IP. If that key's bucket has a token left, it takes one and forwards the request to the service. If the bucket is empty, it replies 429 Too Many Requests with a Retry-After header. Separately, tokens refill at a steady rate r, up to the bucket size N."
@@ -88,74 +96,84 @@ One buggy script or attacker can send thousands of requests and slow the service
   F["Refill r tokens per second, up to N"] -.-> B`}
 />
 
-- **Bucket size N** is the biggest burst; **refill rate r** is the average limit. AWS API Gateway and Stripe both use a token bucket.
-- Other algorithms trade accuracy for memory: see [leaky bucket and the window counters](compare:rate-limit-algorithms).
-- **Many servers:** keep counters in one store such as Redis and change them in one atomic step (a Lua script). With a separate read and write, two servers can both spend the last token.
+1. A request arrives and the limiter works out its key, such as the API key.
+2. It looks up that key's bucket, which holds up to N tokens and refills at r tokens per second.
+3. If the bucket has at least one token, it takes one and forwards the request.
+4. If the bucket is empty, it rejects the request with 429 and a [Retry-After](term:retry-after) header.
+5. Across many servers, the bucket lives in a shared store such as Redis, and step 3 is done as one atomic update so two servers cannot both spend the last token.
+
+So the key is that the bucket size sets the biggest burst and the refill rate sets the long-run average.
 
 ## Example
 
-A bucket of 10 tokens refilled at 5 per second: a client can send 10 requests at once, then about 5 per second.
+A bucket of 10 tokens that refills at 5 per second starts full. We fire 13 requests instantly and count how many pass before the refill can help.
 
 ```java
-class TokenBucket {
-    private final double capacity, perSecond;
-    private double tokens;
-    private long last = System.nanoTime();
-    TokenBucket(double capacity, double perSecond) {
-        this.capacity = capacity; this.perSecond = perSecond; this.tokens = capacity;
-    }
-    synchronized boolean allow() {
-        long now = System.nanoTime();
-        tokens = Math.min(capacity, tokens + (now - last) / 1e9 * perSecond);  // refill
-        last = now;
-        if (tokens < 1) return false;            // empty: reply 429
-        tokens -= 1; return true;                // spend one token
-    }
+double capacity = 10, perSecond = 5, tokens = 10;
+long last = System.nanoTime();
+int allowed = 0, rejected = 0;
+for (int i = 0; i < 13; i++) {
+    long now = System.nanoTime();
+    tokens = Math.min(capacity, tokens + (now - last) / 1e9 * perSecond);  // refill
+    last = now;
+    if (tokens >= 1) { tokens -= 1; allowed++; }   // spend a token
+    else rejected++;                               // empty: would reply 429
 }
+System.out.println("burst of 13: allowed=" + allowed + " rejected=" + rejected);
 ```
 
 ```python
 import time
-
-class TokenBucket:
-    def __init__(self, capacity, per_second):
-        self.capacity, self.per_second = capacity, per_second
-        self.tokens, self.last = capacity, time.monotonic()
-
-    def allow(self):
-        now = time.monotonic()
-        self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.per_second)
-        self.last = now
-        if self.tokens < 1:
-            return False                         # empty: reply 429
-        self.tokens -= 1                         # spend one token
-        return True
+capacity, per_second, tokens = 10, 5, 10
+last = time.monotonic()
+allowed = rejected = 0
+for _ in range(13):
+    now = time.monotonic()
+    tokens = min(capacity, tokens + (now - last) * per_second)  # refill
+    last = now
+    if tokens >= 1:
+        tokens -= 1; allowed += 1                  # spend a token
+    else:
+        rejected += 1                              # empty: would reply 429
+print(f"burst of 13: allowed={allowed} rejected={rejected}")
 ```
 
-## Defaults
+```text output
+burst of 13: allowed=10 rejected=3
+```
 
-| What | Default | Where |
-| --- | --- | --- |
-| Algorithm | Leaky bucket | nginx `limit_req` |
-| Burst allowed | 0: at `rate=10r/s`, one request per 100 ms | nginx `limit_req` |
-| Status when rejected | 503; set `limit_req_status 429` | nginx (directive since 1.3.15) |
-| Account limit, per Region | 10,000 requests/s, burst 5,000 (token bucket) | AWS API Gateway (some Regions: 2,500 and 1,250) |
-| Status when blocked | 429; counters kept per data centre | Cloudflare rate limiting rules |
+What to notice:
+
+- 10 pass and 3 are rejected: the burst arrives far faster than 5 tokens per second refill, so only the starting 10 tokens are available.
+- Wait about 0.6 s and 3 tokens refill, so 3 more requests would pass; the bucket size caps the burst, the refill rate caps the average.
+- `tokens -= 1` and the empty check must happen as one step. On a shared Redis counter across servers, split them and two servers can both see the last token and both spend it.
+
+## Rules and defaults
+
+- **Status code:** the standard reply when limited is `429 Too Many Requests` (RFC 6585), ideally with a `Retry-After` header.
+- **nginx limit_req:** rejects with `503` by default; set `limit_req_status 429` to return 429 instead.
+- **AWS API Gateway:** a token bucket defaulting to 10,000 requests/s with a burst of 5,000, per account per Region (some Regions 2,500 and 1,250).
+- **Cloudflare:** rejects with 429; its counters are kept per data centre, so a global limit is approximate.
+- **Shared counters:** across many servers the count must live in one store and be updated atomically (for example a Redis Lua script), or concurrent requests undercount.
+
+## Not to be confused with
+
+Rate limiting and load shedding both reject requests, but for different reasons: a rate limit rejects a client who has exceeded its own quota, while load shedding (which you will see later) drops low-priority work only when the whole system is overloaded, regardless of who sent it. The different algorithms (token bucket, leaky bucket, fixed and sliding windows) are compared below. Rule: rate limiting is per-client and always on; load shedding is system-wide and kicks in only under stress.
 
 ## Interview Qs
 
 ### How would you design a rate limiter for an API?
 
-Put it at the API gateway and key it by API key or user. Keep a token bucket per key in Redis, updated atomically with a Lua script. Reject extra calls with 429 and Retry-After. If Redis is down, fail open so the API keeps working.
+Put it at the API gateway and key it by API key or user. Keep a token bucket per key in Redis, updated atomically with a Lua script so servers do not race. Reject extra calls with 429 and Retry-After. If Redis is down, fail open so the API keeps serving while you lose protection briefly.
 
-### Token bucket vs leaky bucket?
+### Token bucket versus leaky bucket?
 
-A token bucket lets a client burst up to the bucket size, then holds it to the refill rate. A leaky bucket queues requests and lets them out at a fixed rate, so bursts wait or are dropped. AWS API Gateway uses a token bucket; nginx uses a leaky bucket.
+A token bucket lets a client burst up to the bucket size, then holds it to the refill rate, so short spikes pass. A leaky bucket queues requests and releases them at a fixed rate, so bursts wait or are dropped and the output is smooth. AWS API Gateway uses a token bucket; nginx `limit_req` uses a leaky bucket.
 
-### Fixed window vs sliding window?
+### Fixed window versus sliding window?
 
-A fixed window resets a counter on the clock: one number per key, but bursts on both sides of a reset can pass twice the limit. A sliding window counts the last N seconds: the log is exact but stores every timestamp; the counter estimates it from two numbers.
+A fixed window keeps one counter per key and resets it on the clock; it is cheap but bursts on both sides of a reset can pass up to twice the limit. A sliding window counts the last rolling N seconds: a log of timestamps is exact but heavy, while a counter estimates it from the current and previous windows with little memory.
 
-### What should a limited client receive?
+### What should a rate-limited client receive back?
 
-HTTP 429 Too Many Requests, a short message, and Retry-After with the seconds to wait. Many APIs, such as GitHub's, also send headers with the limit, the requests left and the reset time, so clients can slow down before they hit it.
+HTTP 429 Too Many Requests, a short message, and a `Retry-After` header with the seconds to wait. Many APIs, such as GitHub's, also return headers with the limit, the number of requests left and the reset time, so a well-behaved client can slow down before it is blocked.

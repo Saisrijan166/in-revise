@@ -5,18 +5,29 @@ title: Batch vs Stream Processing
 topic: messaging
 level: intermediate
 heat: 2
-hook: "Batch waits for all the data, then processes it in one go. Stream processes each event as it arrives, so the answer is ready in seconds."
+hook: "Batch waits for all the data, then processes it in one run. Stream processes each event as it arrives, so the answer is ready in seconds."
 points:
-  - { k: "Batch", v: "bounded data, run on a schedule: simple, just rerun it" }
-  - { k: "Stream", v: "unbounded data, always running, keeps state" }
-  - { k: "Windows", v: "turn an endless stream into groups: tumbling, sliding, session" }
-  - { k: "Event time", v: "when it happened, not when it arrived; watermarks track it" }
-  - { k: "Spark", v: "runs streams as micro-batches: latency from about 100 ms", kind: default }
-  - { k: "Stream cost", v: "late events, state and checkpoints make it harder to run", kind: minus }
+  - { k: "Batch", v: "process a fixed, bounded dataset on a schedule; simple, and you just rerun it if it fails" }
+  - { k: "Stream", v: "process an endless flow of events as they arrive, in a job that runs all the time" }
+  - { k: "Window", v: "cuts an endless stream into finite groups: tumbling, sliding or session" }
+  - { k: "Event time + watermark", v: "group by when an event happened; a watermark says no older events are still expected" }
+  - { k: "Spark micro-batch", v: "Spark Structured Streaming runs streams as tiny batches, latency from about 100 ms", kind: default }
+  - { k: "Stream is harder", v: "late events, kept state and checkpoints make a stream job harder to run than a batch job", kind: minus }
 trap:
-  wrong: "Real-time sounds better, so use stream processing."
-  right: "Ask how fresh the result must be. A daily report is simpler and cheaper as a batch job. Stream only when seconds matter."
-sayIt: "Batch jobs process a bounded dataset on a schedule, like a nightly Spark job: easy to rerun, but only as fresh as the last run. Stream jobs in Flink or Kafka Streams handle events as they arrive, with windows and checkpoints. I choose by how fresh the answer must be."
+  wrong: "Real-time sounds better, so always use stream processing."
+  right: "Ask how fresh the result must be. A daily report is simpler and cheaper as a batch job; use a stream only when seconds matter."
+  why: "'Real-time' sounds strictly better than 'once a day', so people reach for streaming by default. But streaming adds state, late-event handling and checkpoints, so it costs more when the freshness is not actually needed."
+sayIt: "Batch jobs process a bounded dataset on a schedule, like a nightly settlement run: easy to rerun, but only as fresh as the last run. Stream jobs in Flink or Kafka Streams handle events as they arrive. I choose by how fresh the answer must be."
+cheat:
+  idea: "Batch processing runs over a fixed dataset on a schedule, then stops. Stream processing runs continuously over an endless flow of events, with results in seconds."
+  flow: "Batch: collect → run job → report. Stream: event → update state → live result"
+  remember: "Pick by freshness: batch is simpler for daily results; stream only when seconds matter."
+buildsOn: [event-streaming]
+scenarios:
+  - q: "You need a daily payouts report and a live fraud alert on card payments. Which is batch and which is stream, and why?"
+    a: "The daily payouts report is batch: it runs once over yesterday's bounded data, and 'yesterday' is fresh enough. The fraud alert is stream: it must flag a suspicious payment within seconds, so it processes each payment event as it arrives rather than waiting for a scheduled run."
+  - q: "Events arrive 12:01, 12:03, 12:04, 12:09, 12:11. Using tumbling 5-minute windows by event time, what counts come out?"
+    a: "Window 12:00-12:05 gets the first three events (count 3), window 12:05-12:10 gets the 12:09 event (count 1), and window 12:10-12:15 gets the 12:11 event (count 1). Tumbling windows do not overlap, so each event falls in exactly one window."
 confusedWith: [batch-vs-stream]
 tags: [messaging, data-processing, streaming, flink, spark]
 visual: table
@@ -51,58 +62,73 @@ sources:
   - title: "Big data architectures: batch, stream, Lambda and Kappa (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/databases/guide/big-data-architectures"
     verifiedOn: "2026-10-16"
-  - title: "Flink (Hello Interview, system design deep dives)"
-    url: "https://www.hellointerview.com/learn/system-design/deep-dives/flink"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+Batch and stream are two ways to process a lot of data. **Batch processing** takes a fixed, bounded dataset, such as yesterday's payments, and processes it in one run on a schedule, then stops. **Stream processing** runs all the time over an endless flow of events, handling each one soon after it arrives. The split comes from the data: batch data has an end to wait for, while a stream never ends.
 
 ## Why it exists
 
-Some answers can wait for all the data, like a monthly bill. Others must come while events are still arriving, like a fraud alert. Each needs a different kind of job.
+Some answers can wait until all the data is in, like a monthly bill or a nightly settlement total. Others must be ready while events are still arriving, like a fraud alert that is useless an hour later. A batch job cannot give a second-fresh answer, because it runs only on its schedule; a stream job gives that freshness but costs more to build and run. Having both lets you match the tool to how fresh each answer must be.
 
 ## How it works
 
 <Compare id="batch-vs-stream" />
 
-- **Batch:** [MapReduce](card:mapreduce) splits one job across many machines: *map* turns each record into key/value pairs, *reduce* merges all values for a key. Spark runs batch and streaming with the same DataFrame API.
-- **Stream:** an endless stream has no end to wait for, so you group events into **windows** and use **event time** with **watermarks** to decide when a window is complete.
-- Events behind the watermark are late. Flink drops them by default; you can allow some lateness or send them to a side output.
+1. A **batch** job reads a bounded input, processes it (often split across many machines, as in [MapReduce](card:mapreduce)), writes the result, and exits. On failure you rerun it on the same input.
+2. A **stream** job never ends, so it cannot wait for "all the data"; instead it groups events into **windows** (fixed slices, overlapping slices, or bursts of activity).
+3. It groups by **event time**, when the event happened, not when it arrived, so a delayed event still lands in the right window.
+4. A **watermark** tells the job that no events older than time T are still expected, so it can close windows up to T and emit their results.
+5. Events that arrive after the watermark are **late**; Flink drops them by default, or you allow some lateness or send them to a side output.
 
 ## Example
 
-Clicks at 12:01, 12:03, 12:04, 12:09 and 12:11. Count them per window:
+Five clicks arrive at 12:01, 12:03, 12:04, 12:09 and 12:11. Different window types group them differently:
 
 | Window | Groups | Counts |
 | --- | --- | --- |
-| Tumbling, 5 min | 12:00–12:05, 12:05–12:10, 12:10–12:15 | 3, 1, 1 |
-| Sliding, 10 min, every 5 min | 12:00–12:10, 12:05–12:15 (and more) | 4, 2 |
-| Session, 3 min gap | clicks 12:01, 12:03, 12:04; then 12:09, 12:11 | 3, 2 |
+| Tumbling, 5 min | 12:00-12:05, 12:05-12:10, 12:10-12:15 | 3, 1, 1 |
+| Sliding, 10 min, every 5 min | 12:00-12:10, 12:05-12:15 | 4, 2 |
+| Session, 3 min gap | 12:01, 12:03, 12:04; then 12:09, 12:11 | 3, 2 |
 
-A nightly batch job gives one number, 5, the next morning.
+What to notice:
 
-## Defaults
+- **Tumbling** windows do not overlap, so each click is counted once; totals across windows add up to all five clicks.
+- **Sliding** windows overlap, so a click can be counted in two windows (the 12:04 and later clicks appear twice here).
+- **Session** windows have no fixed size: they grow while clicks keep coming and close after a 3-minute gap, so the gap after 12:04 splits the data into two sessions.
+- A nightly **batch** job over the same clicks would give one number, 5, the next morning instead of these live per-window counts.
 
-| What | Default | Where |
-| --- | --- | --- |
-| Allowed lateness | 0: events behind the watermark are dropped | Apache Flink 2.3 |
-| Checkpointing | Off until you enable it | Apache Flink 2.3 |
-| Structured Streaming mode | Micro-batch, latency from about 100 ms | Apache Spark 4.2 |
-| Continuous processing | About 1 ms, but only at-least-once | Apache Spark 4.2 |
+## Rules and defaults
+
+- **Allowed lateness:** 0 by default in Apache Flink 2.3, so events behind the watermark are dropped unless you configure lateness or a side output.
+- **Checkpointing:** off until you enable it in Flink; without it a failed stream job cannot restore its state.
+- **Spark Structured Streaming:** micro-batch by default, latency from about 100 ms; continuous processing reaches about 1 ms but only at-least-once.
+- **Reprocessing:** a batch job reruns on the same input; a stream job replays the retained log (for example a Kafka topic) through the fixed code.
+
+## Not to be confused with
+
+**Event time** is when the event happened; **processing time** is when the job handled it. Windowing by event time keeps results correct even when events arrive out of order, whereas windowing by processing time is simpler but wrong for delayed events. Rule: for correct counts under delay and retries, window by event time and use watermarks.
+
+## Common mistakes
+
+- **"Streaming replaces batch."** Many systems keep both, and batch is still simpler for large, non-urgent jobs like nightly reports.
+- **"Window by when the event arrived."** Arrival time drifts with network delay and retries, so counts jump around. Window by event time, with a watermark to decide when a window is complete.
 
 ## Interview Qs
 
 ### Batch or stream: how do you choose?
 
-Ask how fresh the result must be. Daily reports, billing and model training fit batch. Fraud checks, alerts and live counts fit stream. Many systems use both.
+Ask how fresh the result must be. Daily reports, billing and model training fit batch, which is simpler and cheaper and reruns on failure. Fraud checks, alerts and live counts fit stream, which processes events within seconds but adds state and checkpoints. Many systems use both.
 
 ### What are tumbling, sliding and session windows?
 
-Tumbling: fixed size, no overlap, so each event is in one window. Sliding: fixed size, but a new window starts every slide, so windows overlap. Session: keeps growing while events arrive and closes after a gap with no events.
+Tumbling windows are fixed size with no overlap, so each event is in one window. Sliding windows are fixed size but start every slide interval, so they overlap. Session windows grow while events arrive and close after a gap with no events.
 
 ### How do you handle late or out-of-order events?
 
-Window by event time, not arrival time. A watermark says no events older than t are expected, so windows up to t can close. Events after that are late: allow some lateness, send them to a side output, or drop them (Flink's default).
+Window by event time, not arrival time, so a delayed event still lands in the right window. A watermark says no events older than T are expected, so windows up to T can close. Later events are late: allow lateness, use a side output, or drop them (Flink's default).
 
-### Lambda vs Kappa architecture?
+### What is the difference between Lambda and Kappa architecture?
 
-Lambda runs a batch system and a stream system side by side and merges their results, so the same logic lives in two codebases. Kappa (Jay Kreps, 2014) keeps only the stream job and reprocesses by replaying the retained log, for example in Kafka.
+Lambda runs a batch system and a stream system side by side and merges their results, so the same logic lives in two codebases. Kappa (Jay Kreps, 2014) keeps only the stream job and reprocesses by replaying the retained log, so there is one codebase.

@@ -5,21 +5,32 @@ title: Sharding vs Replication
 topic: databases
 level: interview
 heat: 3
-hook: "Replication copies the same data to many nodes (availability, more reads). Sharding splits different data across nodes (more writes, more storage)."
+hook: "Replication keeps the same data on many nodes (for availability and more reads). Sharding splits different data across nodes (for more writes and storage)."
 points:
-  - { k: "Replication", v: "same data on many nodes: availability and more reads" }
-  - { k: "Sharding", v: "different data on each node: more writes and storage" }
-  - { k: "Shard key", v: "never changes, many values, used in most queries" }
-  - { k: "Async replicas", v: "the default in PostgreSQL and RDS: they can lag", kind: default }
-  - { k: "hash % N", v: "changing N moves most keys: use consistent hashing", kind: minus }
-  - { k: "Not a backup", v: "a delete is copied to every replica", kind: minus }
+  - { k: "Replication", v: "every node keeps a full copy of the same data; used for availability and more read capacity" }
+  - { k: "Sharding", v: "each node keeps a different slice of the data; used to scale writes and total storage" }
+  - { k: "Writes with replicas", v: "all writes still go to one primary; replicas only add read capacity", kind: minus }
+  - { k: "Shard key", v: "the field that picks the shard; choose one that rarely changes and has many values" }
+  - { k: "Async replicas lag", v: "default in PostgreSQL 18 and Amazon RDS; a replica can return slightly stale data", kind: default }
+  - { k: "Replication is not a backup", v: "a wrong delete is copied to every replica; keep real backups too", kind: minus }
 trap:
-  wrong: "Add read replicas to handle more writes."
-  right: "Replicas add read capacity only; every write still goes to the primary. Shard to scale writes."
-sayIt: "Replication copies the same data for availability and read throughput; sharding splits data by a shard key to scale writes and storage. I start with replicas and caching, and shard only when one primary cannot keep up."
+  wrong: "Add read replicas to handle more write traffic."
+  right: "Replicas add read capacity only; every write still goes to the primary. To scale writes, shard the data."
+  why: "Both words sound like 'add more database machines', so people assume any extra node helps every kind of load. Replicas copy writes, they do not share the write work."
+sayIt: "Replication copies the same data to many nodes for availability and read throughput; sharding splits data by a shard key to scale writes and storage. I add replicas and caching first, and shard only when one primary cannot keep up."
+cheat:
+  idea: "Replication keeps full copies of the same data on many nodes for availability and reads. Sharding splits different rows across nodes to scale writes and storage."
+  flow: "Index → Cache → Replica → Shard"
+  remember: "Replicas scale reads; shards scale writes. Large systems do both: every shard is replicated."
+buildsOn: [acid-transactions, indexing]
+scenarios:
+  - q: "The payments database handles reads fine but write latency keeps rising as traffic grows. You already have two read replicas. What do you do?"
+    a: "Replicas will not help: writes all go to the one primary. Shard the payments table by a key such as merchant_id so writes spread across several primaries, each with its own replicas."
+  - q: "You shard the payments table by an auto-incrementing payment_id. Why is this a poor shard key?"
+    a: "Every new payment has the largest id, so all new writes land on the last shard while the others stay idle. That shard becomes hot. Pick a key with many values that spreads writes, such as merchant_id or a hash of it."
 confusedWith: [sharding-vs-replication]
 tags: [databases, sharding, replication, partitioning]
-visual: flow
+visual: table
 sources:
   - title: "Sharding pattern (Azure Architecture Center)"
     url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding"
@@ -51,75 +62,78 @@ sources:
   - title: "zlib.crc32 (Python docs)"
     url: "https://docs.python.org/3/library/zlib.html#zlib.crc32"
     verifiedOn: "2026-10-16"
-  - title: "Data model: object.__hash__ and hash randomisation (Python docs)"
-    url: "https://docs.python.org/3/reference/datamodel.html#object.__hash__"
-    verifiedOn: "2026-10-16"
-  - title: "Consistent Hashing and Random Trees (Karger et al., STOC 1997)"
-    url: "https://doi.org/10.1145/258533.258660"
-    verifiedOn: "2026-10-15"
   - title: "Sharding (Hello Interview, system design core concepts)"
     url: "https://www.hellointerview.com/learn/system-design/core-concepts/sharding"
     verifiedOn: "2026-10-15"
 ---
 
+## What it is
+
+Replication and sharding are two ways to spread a database across more than one machine, and they solve different problems. Replication means every node keeps a full copy of the same data. Sharding means each node keeps a different slice of the data: one node holds some rows, another node holds the rest. A large system usually does both, because each fixes a different limit.
+
 ## Why it exists
 
-One database server eventually runs out of room for reads, writes or data, and if it dies, everything stops. Replication and sharding solve different parts of that.
+One database server has a fixed amount of CPU, memory, disk and network. As the payment service grows, that one server runs out of room: too many reads, too many writes, or too much data to store. And if it dies, everything stops because there is only one copy. Replication removes the single copy and spreads read load; sharding spreads writes and storage across many servers so no single one is the limit.
 
 ## How it works
 
-<Mermaid
-  alt="Two diagrams. Replication: a primary database copies every write to replica 1 and replica 2, so all three hold the same data. Sharding: a router sends users A to M to shard 1 and users N to Z to shard 2, so each shard holds different data."
-  chart={`flowchart TD
-  subgraph REP [Replication: same data, many copies]
-    P[(Primary)] -- copies writes --> R1[(Replica 1)]
-    P -- copies writes --> R2[(Replica 2)]
-  end
-  subgraph SHD [Sharding: different data on each node]
-    RT[Router] -- users A to M --> S1[(Shard 1)]
-    RT -- users N to Z --> S2[(Shard 2)]
-  end`}
-/>
+<Compare id="sharding-vs-replication" />
 
-- **Replication:** full copies. In leader-based setups all writes go to the primary; replicas serve reads and can take over.
-- **Sharding:** each shard holds a slice of the rows, picked by a shard key such as `user_id`.
-- **Together:** real systems replicate each shard. In MongoDB, every shard must be a replica set.
+1. With replication, every write goes to one node called the primary. The primary copies each change to its replicas, so they slowly become full copies of the same data.
+2. Reads can go to any replica, which multiplies read capacity. If the primary fails, a replica is promoted to take its place, called failover.
+3. With sharding, a router looks at the shard key of each row (such as `merchant_id`) and sends the row to the shard that owns that key's range or hash.
+4. A query that knows the shard key goes straight to one shard; a query without it must ask every shard and combine the results.
+
+So replication answers "how do I survive failure and serve more reads", and sharding answers "how do I handle more writes and more data than one node holds".
 
 ## Example
 
-Pick a shard from a key with a stable hash:
+In the payment service, you pick which shard a merchant's payments live on from the shard key, using a stable hash so the same merchant always maps to the same shard.
 
 ```java
-int shardFor(String userId, int shards) {
+int shardFor(String merchantId, int shards) {
     // hashCode() is stable across runs; floorMod keeps the result >= 0
-    return Math.floorMod(userId.hashCode(), shards);
+    return Math.floorMod(merchantId.hashCode(), shards);
 }
 ```
 
 ```python
 import zlib
 
-def shard_for(user_id: str, shards: int) -> int:
-    # crc32: stable across runs (str hash() is not); fine for a demo
-    return zlib.crc32(user_id.encode()) % shards
+def shard_for(merchant_id: str, shards: int) -> int:
+    # crc32 is stable across runs (str hash() is not); fine for a demo
+    return zlib.crc32(merchant_id.encode()) % shards
 ```
 
-With hash 1337: `1337 % 4 = 1` (shard 1), but `1337 % 5 = 2`. Add one shard and most keys move; [consistent hashing](card:consistent-hashing) moves only about 1 in 5.
+What to notice:
+
+- The shard key is hashed, not used raw, so merchants spread evenly instead of clustering by name.
+- `floorMod` (Java) and `%` (Python) map the hash into `0..shards-1`, one slot per shard.
+- The weakness: with `% shards`, adding one shard changes the result for most keys, so almost all data must move. [Consistent hashing](card:consistent-hashing) fixes this by moving only a small fraction.
+- A plain `str` `hash()` in Python is randomised per run, so it would send the same merchant to different shards on restart; `crc32` is stable.
+
+## Rules and defaults
+
+- **Writes go to the primary:** in leader-based replication, only the primary accepts writes; replicas are read-only copies.
+- **Replicas are asynchronous by default:** PostgreSQL 18 and Amazon RDS replicas apply changes after the write commits, so they can briefly lag behind and return stale data. Synchronous replication removes the lag but makes writes wait.
+- **Shard key cannot change easily:** moving a row to another shard means deleting and re-inserting it, so pick a key that rarely changes.
+- **Replication is not a backup:** a bad `DELETE` is copied to every replica. Keep separate point-in-time backups ([see Backups and Disaster Recovery](card:disaster-recovery)).
+
+## Common mistakes
+
+- **"Sharding and replication are alternatives; I pick one."** They are not. Real systems replicate each shard: sharding spreads the data, replication protects each slice. In MongoDB every shard must be a replica set.
+- **"I should shard from day one for scale."** Sharding adds cross-shard queries, resharding pain and a harder operational story. Add an index, a cache and read replicas first; shard only when one primary truly cannot keep up.
 
 ## Interview Qs
 
-### Sharding vs replication?
+### What is the difference between sharding and replication?
 
-Replication keeps copies of the same data on several nodes, for availability and reads. Sharding splits different data across nodes, to scale writes and storage. Large systems do both: each shard is replicated.
+Replication keeps copies of the same data on several nodes, for availability and read capacity. Sharding splits different data across nodes, to scale writes and total storage. Large systems do both: each shard is also replicated.
 
 ### How do you choose a shard key?
 
-One that never changes, has many distinct values, spreads load evenly, and appears in most queries. Avoid ever-increasing keys like timestamps: all new writes would hit one shard.
+Pick a field that rarely changes, has many distinct values, spreads load evenly, and appears in most queries, such as `merchant_id`. Avoid ever-increasing keys like timestamps or auto-increment ids, because all new writes would pile onto one shard and make it hot.
 
-### Range or hash sharding?
+### A user updates their profile but then sees the old value. Why?
 
-Range keeps nearby keys on one shard, so range queries are fast, but ever-increasing keys pile onto the last shard. Hash spreads writes evenly, but a range query usually has to ask every shard.
-
-### A user updates their profile but sees the old one. Why?
-
-The read hit an asynchronous replica that has not caught up (replication lag). Read your own writes from the primary for a short time, or use stronger read settings.
+The read hit an asynchronous replica that has not yet applied the latest write, called replication lag. Fix it by reading your own recent writes from the primary for a short window, or by using a replica with stronger read guarantees.

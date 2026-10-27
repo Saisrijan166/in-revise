@@ -5,18 +5,31 @@ title: Optimistic vs Pessimistic Locking
 topic: databases
 level: interview
 heat: 3
-hook: "Pessimistic: lock the row first, so others wait. Optimistic: take no lock; when you write, check the version is unchanged, or retry."
+hook: "Pessimistic: lock the row first, so other writers wait. Optimistic: take no lock, but at write time check the row is unchanged since you read it, and retry if not."
 points:
-  - { k: "Pessimistic", v: "SELECT ... FOR UPDATE locks rows until the transaction ends" }
-  - { k: "Optimistic", v: "UPDATE ... WHERE version = old; 0 rows means a conflict" }
-  - { k: "Few conflicts", v: "optimistic: no waiting, only rare retries", kind: plus }
-  - { k: "Many conflicts", v: "optimistic keeps failing and retrying: lock instead", kind: minus }
-  - { k: "Deadlock", v: "rows locked in opposite order; the database aborts one", kind: minus }
-  - { k: "Lock wait limit", v: "MySQL 8.4 InnoDB: 50 s; PostgreSQL: none (lock_timeout 0)", kind: default }
+  - { k: "Pessimistic locking", v: "SELECT ... FOR UPDATE locks the rows until the transaction ends; other writers wait" }
+  - { k: "Optimistic locking", v: "UPDATE ... WHERE version = old; if 0 rows change, someone else won, so reload and retry" }
+  - { k: "Few conflicts", v: "optimistic wins: no waiting, and a retry happens only on the rare clash", kind: plus }
+  - { k: "Many conflicts", v: "optimistic keeps failing and retrying; lock the row instead", kind: minus }
+  - { k: "Deadlock", v: "two transactions lock rows in opposite order and wait on each other; the database aborts one", kind: minus }
+  - { k: "Lock wait limit", v: "MySQL 8.4 InnoDB waits 50 s then errors; PostgreSQL waits forever unless lock_timeout is set", kind: default }
 trap:
   wrong: "Lock the row while the user fills in the edit form."
-  right: "Never hold a lock across user think time. Keep the version the user loaded and check it when they save."
+  right: "Never hold a lock across user think time. Keep the version the user loaded and check it when they save (optimistic locking)."
+  why: "Locking feels like the obvious way to stop two people editing at once, and it works in a demo, but a real user may leave the form open for minutes while every other writer is blocked."
 sayIt: "If conflicts are rare, I use optimistic locking: the update succeeds only if the version is unchanged, else reload and retry. For hot rows, like the last seats of a show, I lock with SELECT FOR UPDATE in a short transaction, or use one atomic conditional update."
+cheat:
+  idea: "Two ways to stop two writers clobbering each other. Pessimistic locks the row first so others wait. Optimistic takes no lock but checks a version column at write time and retries on a clash."
+  code: |
+    UPDATE pages SET body = ?, version = version + 1
+    WHERE id = ? AND version = ?;   -- 0 rows = conflict
+  remember: "Optimistic for rare conflicts or long edits; pessimistic for hot rows. Never lock across user think time."
+buildsOn: [acid-transactions]
+scenarios:
+  - q: "Users edit a wiki page that is rarely edited by two people at once, but an edit takes minutes. Which locking approach fits, and why?"
+    a: "Optimistic. Conflicts are rare, so retries are rare, and you must not hold a database lock for the minutes a user spends typing. Store the version the user loaded, and on save run UPDATE ... WHERE version = that value. If 0 rows change, someone saved first, so show a conflict and let them reload."
+  - q: "A flash sale has thousands of buyers fighting over the last few seats. Optimistic locking retries keep failing. What do you do instead?"
+    a: "Switch to pessimistic locking or a single atomic update. Under heavy contention optimistic retries pile up and waste work. Lock the seat row with SELECT ... FOR UPDATE in a short transaction, or do UPDATE seats SET holder = ? WHERE id = ? AND holder IS NULL and check one row changed."
 confusedWith: [optimistic-vs-pessimistic-locking]
 tags: [databases, concurrency, locking, transactions]
 visual: table
@@ -45,18 +58,6 @@ sources:
   - title: "Annotation Interface Version (Jakarta Persistence 3.2 API)"
     url: "https://jakarta.ee/specifications/persistence/3.2/apidocs/jakarta.persistence/jakarta/persistence/Version.html"
     verifiedOn: "2026-10-16"
-  - title: "Hibernate ORM 7.0 User Guide: Locking"
-    url: "https://docs.hibernate.org/orm/7.0/userguide/html_single/"
-    verifiedOn: "2026-10-16"
-  - title: "Handling Concurrency Conflicts (EF Core, Microsoft Learn)"
-    url: "https://learn.microsoft.com/en-us/ef/core/saving/concurrency"
-    verifiedOn: "2026-10-16"
-  - title: "DynamoDB and optimistic locking with version number (Amazon DynamoDB docs)"
-    url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBMapper.OptimisticLocking.html"
-    verifiedOn: "2026-10-16"
-  - title: "Condition expressions (Amazon DynamoDB docs)"
-    url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.ConditionExpressions.html"
-    verifiedOn: "2026-10-16"
   - title: "Distributed Locks with Redis (Redis docs)"
     url: "https://redis.io/docs/latest/develop/clients/patterns/distributed-locks/"
     verifiedOn: "2026-10-16"
@@ -66,9 +67,6 @@ sources:
   - title: "PEP 249: Python Database API Specification v2.0 (Cursor.rowcount)"
     url: "https://peps.python.org/pep-0249/"
     verifiedOn: "2026-10-16"
-  - title: "Basic module usage (Psycopg 3 docs)"
-    url: "https://www.psycopg.org/psycopg3/docs/basic/usage.html"
-    verifiedOn: "2026-10-16"
   - title: "Constraints: unique constraints (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/current/ddl-constraints.html"
     verifiedOn: "2026-10-16"
@@ -77,21 +75,30 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Concurrency control is how a database stops two users who change the same row at once from clobbering each other. It uses one of two strategies. **Pessimistic locking** assumes clashes are likely, so it locks the row before changing it; anyone else waits. **Optimistic locking** assumes clashes are rare, so it takes no lock: it reads a version number with the row and, at write time, retries unless the version is unchanged. You saw in [ACID](card:acid-transactions) that the default level can lose an update; this stops that.
+
 ## Why it exists
 
-Two users read the same row and both write it back. Without control, the last write silently wins: a seat is sold twice, or stock goes wrong.
+Two users read the same row, both change it in memory, and both write it back. Without any control, the second write silently overwrites the first: a seat is sold twice, or a stock count is wrong. This is a lost update. You could force every writer to wait in line with a lock, but locking is expensive when clashes are actually rare, and dangerous if a lock is held while a human thinks. Having both strategies lets you lock only when contention is real, and otherwise check-and-retry, which costs nothing when nothing clashes.
 
 ## How it works
 
+The comparison shows the two flows side by side; read it, then the notes.
+
 <Compare id="optimistic-vs-pessimistic-locking" />
 
-- **Often simplest:** one atomic conditional update, such as `UPDATE seats SET holder = 42 WHERE id = 7 AND holder IS NULL`. The check and the write happen together.
-- **MVCC** in PostgreSQL: plain reads never block writers, and row locks block only other writers and lockers.
-- **Across services**, a [distributed lock](card:distributed-lock) such as Redis `SET key value NX PX 30000` expires by itself if its holder dies.
+1. Optimistic: read the row and its `version`. Later, run `UPDATE ... SET version = version + 1 WHERE id = ? AND version = ?`. If 1 row changes you won; if 0 rows change, someone else wrote first, so reload and retry.
+2. Pessimistic: run `SELECT ... FOR UPDATE` to lock the row, make your change, then commit, which releases the lock. Other writers wait at the `SELECT`.
+3. Often the simplest option is neither explicit lock: one atomic conditional update, such as `UPDATE seats SET holder = 42 WHERE id = 7 AND holder IS NULL`, where the check and the write happen together.
+4. Across separate services, a [distributed lock](card:distributed-lock) such as Redis `SET key value NX PX 30000` expires on its own if its holder dies.
+
+So the key is: lock only hot rows in short transactions; everywhere else, check a version or use one atomic update.
 
 ## Example
 
-Optimistic save of a page, with a `version` column:
+Optimistic save of a page, with a `version` column, in application code:
 
 ```java
 boolean savePage(Connection db, long id, String body, int readVersion)
@@ -119,29 +126,35 @@ def save_page(conn, page_id, body, read_version):
         return cur.rowcount == 1  # 0 rows: conflict, reload and retry
 ```
 
-Pessimistic: lock first, and others wait.
+What to notice:
 
-```sql
-BEGIN;
-SELECT stock FROM items WHERE id = 7 FOR UPDATE;  -- other writers wait here
-UPDATE items SET stock = stock - 1 WHERE id = 7;
-COMMIT;                                           -- lock released
-```
+- `read_version` is the version the user had when they loaded the page. The `WHERE version = ?` is the whole safety check: it passes only if nobody wrote in between.
+- The row count is the signal: `1` means saved, `0` means a conflict. There is no lock, so no other writer was blocked.
+- Remove `AND version = ?` and the last writer always wins silently, which is the lost update this prevents.
+- Pessimistic locking instead would be `SELECT ... FOR UPDATE` first, which makes other writers wait rather than retry.
 
-## Defaults
+## Rules and defaults
 
-| What | Default | Where |
-| --- | --- | --- |
-| Wait for a row lock | 50 s, then error 1205; only that statement rolls back | MySQL 8.4 InnoDB (`innodb_lock_wait_timeout`) |
-| Wait for a lock | No limit (`lock_timeout` = 0 turns it off) | PostgreSQL 18 |
-| Deadlock check | After 1 s of waiting (`deadlock_timeout`) | PostgreSQL 18 |
-| Deadlock detection | On: InnoDB rolls back a small transaction | MySQL 8.4 InnoDB |
+- **Lock wait timeout:** MySQL 8.4 InnoDB waits `innodb_lock_wait_timeout` (50 s by default), then errors 1205 and rolls back only that statement. PostgreSQL waits indefinitely unless you set `lock_timeout` (0, off, by default).
+- **Deadlock handling:** PostgreSQL checks for a deadlock after `deadlock_timeout` (1 s) of waiting; InnoDB detects them and rolls back the smaller transaction. The aborted one must be retried.
+- **Avoid deadlocks:** lock rows in the same order everywhere, and keep transactions short.
+- **JPA `@Version`:** adds the version column and the version-check UPDATE for you (Jakarta Persistence 3.2).
+- **Last safety net:** a unique constraint, for example on (show, seat), rejects a double booking even if the application logic has a gap.
+
+## Not to be confused with
+
+- **Optimistic vs pessimistic:** optimistic acts at write time and retries on a clash; pessimistic acts first and makes others wait.
+- **A row lock vs an atomic update:** `SELECT ... FOR UPDATE` then update is two steps holding a lock; one conditional `UPDATE` does the check and write together. Rule: prefer the single atomic update when the logic fits in one statement.
+
+## Common mistakes
+
+- **"Optimistic locking is always better because it never blocks."** Under heavy contention its retries pile up and waste work; for hot rows, pessimistic locking or a queue is faster.
 
 ## Interview Qs
 
 ### Optimistic or pessimistic locking: when do you use each?
 
-Optimistic when conflicts are rare or edits are long, like forms: no waiting, just retry on a version mismatch. Pessimistic when many writers fight over the same rows and retries would pile up: lock with SELECT ... FOR UPDATE in a short transaction.
+Optimistic when conflicts are rare or edits are long, like forms: no waiting, just retry on a version mismatch. Pessimistic when many writers fight over the same rows and retries would pile up: lock with SELECT ... FOR UPDATE in a short transaction. Never hold a lock across user think time.
 
 ### How does optimistic locking work?
 
@@ -149,8 +162,8 @@ Each row carries a version. Read it with the data. Write with `UPDATE ... SET ve
 
 ### How do you stop two users booking the same seat?
 
-Make the claim one atomic step: update the seat only WHERE it is still free and check that 1 row changed, or lock it with SELECT ... FOR UPDATE. Add a unique constraint on (show, seat) as the last safety net.
+Make the claim one atomic step: update the seat only WHERE it is still free and check that 1 row changed, or lock it with SELECT ... FOR UPDATE in a short transaction. Add a unique constraint on (show, seat) as the last safety net against a double booking.
 
 ### What is a deadlock, and how do you avoid it?
 
-Two transactions each hold a lock the other needs. PostgreSQL and InnoDB detect this and abort one. Avoid it by locking rows in the same order everywhere, keeping transactions short, and retrying the aborted one.
+Two transactions each hold a lock the other needs, so neither can proceed. PostgreSQL and InnoDB detect this and abort one of them. Avoid it by locking rows in the same order everywhere, keeping transactions short, and retrying the aborted transaction.

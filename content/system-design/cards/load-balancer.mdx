@@ -7,16 +7,27 @@ level: beginner
 heat: 3
 hook: "One front door that spreads requests across healthy servers, so no single server gets overloaded."
 points:
-  - { k: "One address", v: "clients call the load balancer, never the servers" }
-  - { k: "Health checks", v: "servers that fail checks stop getting traffic" }
-  - { k: "Layer 4", v: "routes by IP and port: fast (e.g. AWS NLB)" }
-  - { k: "Layer 7", v: "reads HTTP: route by path or header (e.g. AWS ALB)" }
-  - { k: "Default method", v: "round robin in nginx and AWS ALB", kind: default }
-  - { k: "Only one LB", v: "it becomes a single point of failure", kind: minus }
+  - { k: "One address", v: "clients call the load balancer's address; they never know or call the individual servers" }
+  - { k: "Health checks", v: "a server that fails its health check stops getting traffic until it passes again" }
+  - { k: "Layer 4", v: "routes by IP and port without reading the request; fast and works for any TCP or UDP traffic" }
+  - { k: "Layer 7", v: "reads the HTTP request, so it can route by path, host or header (for example /api vs /images)" }
+  - { k: "Default method", v: "round robin: it sends each new request to the next server in turn, in both nginx and AWS ALB", kind: default }
+  - { k: "Single point of failure", v: "with only one load balancer, if it goes down everything behind it is unreachable", kind: minus }
 trap:
   wrong: "Round robin spreads the load evenly."
-  right: "It spreads requests evenly, not work. When request times vary, use least connections."
-sayIt: "I put a Layer 7 load balancer in front of stateless servers, with health checks so failed servers drop out. To avoid a single point of failure, I use a managed multi-zone load balancer or a redundant pair."
+  right: "Round robin spreads the number of requests evenly, not the amount of work. If some requests take much longer, use least connections instead."
+  why: "Equal counts look like equal load, and in a demo every request is cheap, so the imbalance only shows up once some requests are far heavier than others."
+sayIt: "I put a Layer 7 load balancer in front of stateless servers, with health checks so a failed server drops out automatically. To avoid it being a single point of failure, I use a managed load balancer that runs across several availability zones."
+cheat:
+  idea: "A load balancer is one address in front of many servers. It picks a healthy server per request, so none is overloaded and a failed one gets no traffic."
+  flow: "Client → load balancer → skip unhealthy → pick one"
+  remember: "Round robin balances counts, not work; one load balancer is a single point of failure."
+buildsOn: [scalability, availability]
+scenarios:
+  - q: "Three servers sit behind a round-robin load balancer. One request type runs a 2-second report, the rest finish in 10 ms. Users complain one server is slow. Why, and what do you change?"
+    a: "Round robin gives each server an equal count, so the slow reports pile up unevenly and one server stays busy. Switch to least connections, which sends the next request to the server with the fewest in-flight requests, so the heavy ones spread out."
+  - q: "You run exactly one load balancer in one zone. What is the risk, and how do you fix it?"
+    a: "It is a single point of failure: if that load balancer or its zone fails, every server behind it is unreachable even though they are healthy. Run a redundant pair (active-passive or active-active), or use a managed load balancer spread across several availability zones."
 confusedWith: [layer-4-vs-layer-7, lb-vs-proxy-vs-gateway]
 tags: [load-balancing, availability, networking]
 visual: flow
@@ -30,19 +41,13 @@ sources:
   - title: "What is a Network Load Balancer? (AWS docs)"
     url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/network/introduction.html"
     verifiedOn: "2026-10-16"
-  - title: "Edit target group attributes for your Application Load Balancer (AWS docs)"
-    url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-target-group-attributes.html"
-    verifiedOn: "2026-10-15"
   - title: "Health checks for Application Load Balancer target groups (AWS docs)"
     url: "https://docs.aws.amazon.com/elasticloadbalancing/latest/application/target-group-health-checks.html"
     verifiedOn: "2026-10-15"
   - title: "Module ngx_http_upstream_module (nginx docs)"
     url: "https://nginx.org/en/docs/http/ngx_http_upstream_module.html"
     verifiedOn: "2026-10-15"
-  - title: "Module ngx_http_upstream_hc_module (nginx docs, NGINX Plus)"
-    url: "https://nginx.org/en/docs/http/ngx_http_upstream_hc_module.html"
-    verifiedOn: "2026-10-15"
-  - title: "HAProxy 3.4 Configuration Manual (balance keyword; compare with the 3.2 manual)"
+  - title: "HAProxy 3.4 Configuration Manual (balance keyword)"
     url: "https://docs.haproxy.org/3.4/configuration.html"
     verifiedOn: "2026-10-15"
   - title: "The System Design Primer: Load balancer, Reverse proxy (donnemartin, GitHub)"
@@ -50,70 +55,114 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+A load balancer is a single network address that sits in front of a group of servers and hands each incoming request to one of them. Clients only ever talk to the load balancer; they do not know how many servers there are behind it, or which one served them. It also watches the servers with health checks, so it can stop sending requests to any server that is down.
+
 ## Why it exists
 
-Once you scale out, clients need one address to call, and something must pick a server for each request while avoiding servers that are down.
+Once you [scale out](card:scalability) to many servers, two problems appear. First, clients need one stable address to call, not a list of server IPs that keeps changing as you add or remove machines. Second, something must pick a server for each request and avoid the ones that have failed. Without a load balancer you would hard-code server addresses into clients and keep sending traffic to dead machines. The load balancer solves both: one address in, healthy servers chosen automatically.
 
 ## How it works
 
+Each request flows through the load balancer, which filters out unhealthy servers and then picks one.
+
 <Steps label="One request through a load balancer">
 <Step title="Client calls one address">
-The client knows only the load balancer's address, often found through [DNS](card:dns).
+The client knows only the load balancer's address, usually found through [DNS](card:dns), and sends its request there.
 </Step>
 <Step title="Skip unhealthy servers">
-Servers that fail their health checks get no traffic until they pass again.
+The load balancer ignores any server that is currently failing its health check, so those get no traffic until they pass again.
 </Step>
 <Step title="Pick a server">
-An algorithm picks one healthy server, such as round robin or least connections.
+It chooses one healthy server using its method, such as round robin or least connections.
 </Step>
 <Step title="Forward and reply">
-The request goes to that server, and the response comes back to the client.
+It forwards the request to that server, and the response comes back to the client through the load balancer.
 </Step>
 </Steps>
 
-- **Layer 4** routes by IP and port without reading the request. **Layer 7** reads HTTP, so `/api` and `/images` can go to different servers.
+A Layer 4 load balancer does this by IP and port without reading the request; a Layer 7 one reads the HTTP request, so `/api` and `/images` can go to different servers.
 
 ## Example
 
-A tiny nginx setup. No method line means weighted round robin, the default.
+This is round robin, the default method, in a few lines: it keeps a counter and sends each new request to the next server in turn.
+
+```java
+String[] servers = {"app1", "app2", "app3"};
+int i = 0;
+String next() { return servers[i++ % servers.length]; }
+// 5 requests:
+// -> app1, app2, app3, app1, app2
+```
+
+```python
+servers = ["app1", "app2", "app3"]
+i = 0
+def next_server():
+    global i
+    s = servers[i % len(servers)]
+    i += 1
+    return s
+# 5 requests -> app1, app2, app3, app1, app2
+```
+
+```text output
+[app1, app2, app3, app1, app2]
+```
+
+What to notice:
+
+- The counter wraps with `% servers.length`, so after the last server it starts again at the first; each server gets an equal share of requests.
+- It balances the **count** of requests, not their cost. If one request is far heavier, this even split still overloads whichever server happened to get it, which is why least connections exists.
+- A real load balancer also removes a failed server from this list first, so the counter only ever lands on healthy servers.
+
+## Rules and defaults
+
+A tiny nginx upstream shows the same idea in config, with weights and a backup server:
 
 ```nginx
 upstream backend {
-    server app1.example.com weight=2;  # gets 2x the requests of app2
+    server app1.example.com weight=2;  # gets twice the requests of app2
     server app2.example.com;
     server app3.example.com backup;    # used only if the others are down
 }
-
 server {
     listen 80;
     location / { proxy_pass http://backend; }
 }
 ```
 
-## Defaults
-
 | What | Default | Where |
 | --- | --- | --- |
 | How a server is picked | Round robin (weighted) | nginx, AWS ALB |
-| How a server is picked | Random (was round robin before 3.3) | HAProxy 3.3 and later |
 | When nginx skips a server | 1 failed request within 10 s, then skipped for 10 s | nginx `max_fails`, `fail_timeout` |
 | Health check timing | Every 30 s; unhealthy after 2 fails; healthy after 5 passes | AWS ALB |
-| Active health checks | Only in the paid NGINX Plus | nginx |
+| Active health checks | Paid NGINX Plus only | nginx |
+
+## Not to be confused with
+
+A load balancer spreads requests across **identical copies** of one service. A [reverse proxy](card:reverse-proxy) is one front door that adds TLS, caching or compression in front of servers, and an [API gateway](card:api-gateway) routes and secures **many different** APIs. One product (like nginx) can play all three roles, but the jobs are distinct: balance load, front servers, or manage APIs.
+
+## Common mistakes
+
+- **"Add a load balancer and sessions just work."** If a server stores session state in memory, a later request routed to a different server loses it. Keep servers stateless (store sessions in a shared cache), or use sticky sessions.
+- **"The load balancer removes the single point of failure."** It removes it for the servers, but the single load balancer becomes the new one. Run it redundantly or use a managed, multi-zone load balancer.
 
 ## Interview Qs
 
 ### What does a load balancer do?
 
-It gives clients one address, spreads requests across servers, and stops sending traffic to servers that fail health checks. That is what makes scaling out work.
+It gives clients one stable address, spreads requests across several servers, and stops sending traffic to servers that fail their health checks. That is what makes scaling out usable: you can add or remove servers behind it without clients noticing.
 
 ### Layer 4 vs Layer 7?
 
-Layer 4 routes by IP and port without reading the request, so it is fast and works for any TCP or UDP traffic. Layer 7 reads HTTP, so it can route by path, host, header or cookie.
+Layer 4 routes by IP and port without reading the request, so it is fast and works for any TCP or UDP traffic. Layer 7 reads the HTTP request, so it can route by path, host, header or cookie, and terminate TLS. Web apps usually want Layer 7; non-HTTP traffic needs Layer 4.
 
 ### Which algorithm would you pick?
 
-Round robin when requests and servers are similar. Least connections when request times vary. A hash of the client IP or a key when the same client must reach the same server.
+Round robin when requests and servers are similar. Least connections when request times vary, so busy servers get fewer new requests. A hash of the client IP or a key when the same client must keep reaching the same server.
 
 ### Isn't the load balancer a single point of failure?
 
-Yes, if there is only one. Run a redundant pair (active-passive or active-active), or use a managed load balancer that runs across several availability zones.
+Yes, if there is only one. Run a redundant pair (active-passive or active-active), or use a managed load balancer that runs across several availability zones, so one instance or zone failing does not take the whole system down.

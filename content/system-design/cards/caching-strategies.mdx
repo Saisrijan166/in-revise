@@ -5,18 +5,28 @@ title: Caching Strategies
 topic: caching
 level: beginner
 heat: 3
-hook: "A caching strategy answers two questions: who loads the cache on a read miss, and when a write reaches the cache and the database."
+hook: "A caching strategy answers two questions: on a read miss, who loads the data into the cache; and on a write, when does the cache change compared with the database."
 points:
-  - { k: "Cache-Aside (Lazy Loading)", v: "the app loads a miss from the DB and fills the cache" }
-  - { k: "Read-Through", v: "the cache itself loads a miss from the DB" }
-  - { k: "Refresh-Ahead", v: "a key read near expiry is reloaded in the background" }
-  - { k: "Write-Through", v: "cache and DB are both updated before the write is confirmed" }
-  - { k: "Write-Behind (Write-Back)", v: "confirmed after the cache write; a crash before the flush loses it", kind: minus }
-  - { k: "Write-Around", v: "writes go to the DB only; the cache fills on a later read miss" }
+  - { k: "Read: cache-aside", v: "the app checks the cache, and on a miss loads from the DB and fills the cache" }
+  - { k: "Read: read-through", v: "the cache loads a miss from the DB; the app talks only to the cache" }
+  - { k: "Read: refresh-ahead", v: "a key read near its expiry is reloaded in the background before it expires" }
+  - { k: "Write: write-through", v: "cache and DB are both updated before the write is confirmed" }
+  - { k: "Write: write-behind", v: "confirmed after the cache write; the DB is updated later, so a crash can lose it", kind: minus }
+  - { k: "Write: write-around", v: "the write goes to the DB only; the cache fills on a later read miss" }
 trap:
-  wrong: "A system uses one caching strategy everywhere."
-  right: "Strategies combine: one for reads and one for writes. Write-around usually goes with cache-aside."
-sayIt: "I pick one read and one write strategy per kind of data: usually cache-aside for reads, then write-through, write-behind or write-around, depending on how fresh reads must be and how much loss is acceptable."
+  wrong: "A system picks one caching strategy and uses it for everything."
+  right: "You combine one read strategy and one write strategy per kind of data. Write-around, for example, usually pairs with cache-aside."
+  why: "Each strategy has a single name, so they sound mutually exclusive, but reads and writes are separate decisions that stack together."
+sayIt: "I pick one read and one write strategy per kind of data: usually cache-aside for reads, then write-through, write-behind or write-around, depending on how fresh reads must be and how much write loss I can accept."
+cheat:
+  idea: "A caching strategy decides who fills the cache on a read miss and when the cache changes on a write. Read and write are two separate choices you combine."
+  remember: "The name tells the path: aside = app fills it, through = cache fills it, behind = DB updated later, around = cache skipped on write."
+buildsOn: [caching-layers]
+scenarios:
+  - q: "For a product catalogue that is read constantly and updated a few times a day, which read and write strategy would you combine, and why?"
+    a: "Cache-aside for reads, because only read items are cached and the cache stays small. For writes, delete the key on each update so the next read reloads fresh data; a short write-through is overkill here since updates are rare and brief staleness is fine."
+  - q: "Audit records are written on every action but almost never read. Which write strategy fits, and what is the cost?"
+    a: "Write-around: send writes straight to the database and skip the cache, so rarely read records do not push hot keys out. The cost is that the first read of any record after it is written is a miss, which is acceptable because reads are rare."
 confusedWith: [cache-aside-vs-write-through]
 tags: [caching, strategies, consistency]
 visual: table
@@ -41,39 +51,60 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+A caching strategy is the rule that decides how a cache is kept in step with its [source of truth](card:caching-layers), the database. It has two separate parts. The **read** part decides who loads data into the cache when a read is not found there: the app, or the cache itself. The **write** part decides what happens to the cache when data is written: is the cache updated together with the database, later than it, or skipped. You choose one of each and combine them.
+
 ## Why it exists
 
-A cache holds a copy of the database. Every design must decide how the copy gets filled and how writes keep it close to the database, trading fresh reads against fast writes.
+A cache holds a copy of the data, and a copy can go out of step with the original. If you never thought about it, the cache could serve data that was changed long ago, or a write could leave a stale copy behind. Naming the strategies turns a vague worry into a clear choice: you decide, per kind of data, how fresh reads must be and how fast writes must be, and pick the read and write rule that match. That trade-off, fresh reads against fast writes, is the heart of caching.
 
 ## How it works
 
-| Strategy | Path | What happens | Watch out |
+| Part | Strategy | What happens | Watch out |
 | --- | --- | --- | --- |
-| [Cache-Aside (Lazy Loading)](card:cache-aside) | Read | The app checks the cache; on a miss it reads the database and fills the cache | The first read of each key is slow |
-| Read-Through | Read | The cache loads a miss from the database through a loader | The cache must know how to load |
-| Refresh-Ahead | Read | A key read close to its expiry is reloaded in the background | Wasted loads if the guess is wrong |
-| [Write-Through](card:write-through) | Write | The cache and the database are both updated, then the write is confirmed | Every write is slower |
-| Write-Behind (Write-Back) | Write | Confirmed after the cache write; the database is updated later, in batches | A crash before the flush loses writes |
-| Write-Around | Write | Only the database is written; the cache fills on a later read miss | The next read of that key misses |
+| Read | [Cache-aside](card:cache-aside) | The app checks the cache; on a miss it reads the database and fills the cache | The first read of each key is slow |
+| Read | Read-through | The cache loads a miss from the database through a loader | The cache must know how to load |
+| Read | Refresh-ahead | A key read close to its expiry is reloaded in the background | Wasted loads if the guess is wrong |
+| Write | [Write-through](card:write-through) | The cache and the database are both updated, then the write is confirmed | Every write is slower |
+| Write | Write-behind | Confirmed after the cache write; the database is updated later, in batches | A crash before the flush loses writes |
+| Write | Write-around | Only the database is written; the cache fills on a later read miss | The next read of that key misses |
 
-- The name tells the path. Reads: the app loads the cache from *aside*, the cache loads *through* to the database, or it reloads *ahead* of expiry. Writes go *through* the cache, reach the database *behind* it (later), or go *around* it.
-- Refresh-ahead only helps when the cache can guess which keys will be read again; each wrong guess costs a database read.
+1. For reads, pick who fills the cache: the app (cache-aside), the cache through a loader (read-through), or a background reload before expiry (refresh-ahead).
+2. For writes, pick when the cache changes: with the database (write-through), after it (write-behind), or not at all on the write (write-around).
+3. Combine the two. A common pair is cache-aside with write-around: the cache holds only read data, and writes skip it.
+
+So the name of each strategy tells you the path the data takes.
+
+## Example
+
+Think of the growing payment service. Its product catalogue and its payment records need different strategies.
+
+- **Product catalogue:** read constantly, changed rarely. Use cache-aside: the cache fills from reads and stays small. On the rare update, delete the key so the next read reloads it.
+- **Payment write-counts shown on a dashboard:** written very often, read occasionally, and a few seconds of loss is acceptable. Use write-behind: confirm fast and flush to the database in batches.
+
+What to notice:
+
+- The same system uses different strategies for different data; there is no single right answer for the whole service.
+- Refresh-ahead only helps when the cache can guess which keys will be read again; each wrong guess costs a database read for nothing.
 - Write-around keeps data that is written but rarely read from pushing hot keys out of the cache.
+
+## Not to be confused with
+
+Cache-aside and read-through both load the database on a read miss, but differ in who does the loading. In cache-aside the application code checks the cache, loads the database on a miss and fills the cache. In read-through the cache does this itself through a loader, so the application only ever talks to the cache. Rule: cache-aside puts the logic in your app; read-through hides it inside the cache.
+
+<Compare id="cache-aside-vs-write-through" />
 
 ## Interview Qs
 
 ### What caching strategies do you know?
 
-For reads: cache-aside (the app loads misses) and read-through (the cache loads them); refresh-ahead reloads hot keys before they expire. For writes: write-through (cache and database together), write-behind (database later, in batches) and write-around (database only).
+For reads: cache-aside, where the app loads misses, and read-through, where the cache loads them; refresh-ahead reloads hot keys in the background before they expire. For writes: write-through, which updates cache and database together, write-behind, which updates the database later in batches, and write-around, which writes only the database.
 
-### Cache-aside vs read-through?
+### Why would you use write-around?
 
-Both load from the database on a miss. In cache-aside the app does it; in read-through the cache does it through a loader, so the app talks only to the cache.
-
-### When would you use write-around?
-
-When data is written often but read rarely or much later, such as audit logs, so it does not push hot keys out of the cache. The first read after a write misses, so pair it with cache-aside.
+When data is written often but read rarely or much later, such as audit logs. Writing it straight to the database keeps it from filling the cache and pushing out hot keys. The first read after a write misses, so write-around is paired with cache-aside, which reloads the key on that miss.
 
 ### What is refresh-ahead, and when does it hurt?
 
-The cache reloads a key that is read close to its expiry, in the background, so readers do not wait. It hurts when it guesses wrong: keys nobody reads again still cost a database load each time.
+The cache reloads a key that is read close to its expiry, in the background, so a reader never waits for the reload. It hurts when the guess is wrong: keys that nobody reads again are reloaded anyway, each reload costing a database read for a value no one uses.

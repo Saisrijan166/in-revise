@@ -7,15 +7,26 @@ level: interview
 heat: 2
 hook: "Turn 2D locations into searchable keys: grid cells (geohash, H3) or a tree of shrinking boxes (quadtree, R-tree). Then check the exact distance."
 points:
-  - { k: "B-tree on (lat, lng)", v: "narrows by latitude only, then scans a strip around the globe", kind: minus }
-  - { k: "Geohash", v: "lat/long as one base32 string; a longer string is a smaller cell" }
-  - { k: "Quadtree", v: "a square splits into 4 when it holds too many points" }
-  - { k: "R-tree", v: "nested bounding boxes for shapes; PostGIS builds it on GiST" }
-  - { k: "Candidates only", v: "every index returns a rough set: filter by exact distance", kind: minus }
+  - { k: "Plain index fails", v: "a B-tree on (lat, lng) narrows by latitude only, then scans a strip around the globe", kind: minus }
+  - { k: "Geohash", v: "encodes a lat/long point as one short string; a longer string means a smaller cell" }
+  - { k: "Quadtree", v: "a square that splits into 4 smaller squares whenever it holds too many points" }
+  - { k: "R-tree", v: "nested bounding boxes for shapes, not just points; PostGIS builds it on GiST" }
+  - { k: "Always filter exactly", v: "every geo index returns a rough candidate set; compute real distance to finish", kind: minus }
 trap:
-  wrong: "Same geohash prefix means near, so a different prefix means far."
-  right: "Near does not mean a shared prefix: two points 22 m apart across the equator share none. Always search the 8 neighbouring cells too."
+  wrong: "A shared geohash prefix means two points are near, and a different prefix means they are far."
+  right: "A different prefix does not mean far: two points 22 m apart across the equator can share no prefix. Always search the 8 neighbouring cells too."
+  why: "A longer shared prefix does mean a smaller shared cell, so it feels like prefix length measures distance. But cell boundaries are fixed lines, and two close points can fall on opposite sides of one."
 sayIt: "For nearby search I store a geohash per place, query the user's cell plus its 8 neighbours, then filter by exact distance. If density is very uneven, a quadtree splits busy areas finer. For shapes like delivery zones I use PostGIS, an R-tree."
+cheat:
+  idea: "Geospatial indexes turn 2D points into searchable keys: grid cells like geohash, or trees of shrinking boxes like quadtree, to find nearby places fast."
+  flow: "encode point → search cell + 8 neighbours → filter by exact distance"
+  remember: "A geo index returns candidates only; finish with an exact distance check, and search neighbour cells too."
+buildsOn: [indexing]
+scenarios:
+  - q: "Find all drivers within 3 km of a rider. Why can't you just put a B-tree index on (lat, lng)?"
+    a: "A B-tree sorts by one key at a time. It can narrow to the right latitude band, but within that band every longitude is scanned, so you read a thin strip wrapping the whole globe. A geo index keeps points that are near on the map near in the index."
+  - q: "You store a 6-character geohash per driver and search only the rider's own cell. Riders near a cell edge see no drivers just across the border. Why, and how do you fix it?"
+    a: "The driver sits in the neighbouring cell, which has a different key, so the single-cell search misses them. Search the rider's cell plus its 8 neighbouring cells, then filter all candidates by exact distance."
 confusedWith: [geohash-vs-quadtree]
 tags: [geospatial, indexing, location, redis, postgis]
 visual: flow
@@ -50,9 +61,6 @@ sources:
   - title: "Spatial indexes: GiST (PostGIS manual)"
     url: "https://postgis.net/docs/using_postgis_dbmanagement.html"
     verifiedOn: "2026-10-16"
-  - title: "Spatial Indexing (PostGIS workshop)"
-    url: "https://postgis.net/workshops/postgis-intro/indexing.html"
-    verifiedOn: "2026-10-16"
   - title: "H3: Uber's Hexagonal Hierarchical Spatial Index (Uber Engineering blog, 2018)"
     url: "https://www.uber.com/blog/h3/"
     verifiedOn: "2026-10-16"
@@ -64,9 +72,13 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+A geospatial index is a special [index](card:indexing) for locations on a map, so you can ask "what is near this point" quickly. A location has two values at once, latitude and longitude, and a normal index sorts by one value at a time, so it cannot handle "near" well. Geospatial indexes solve this two ways: encode each point as a single key that keeps nearby points together (geohash, H3), or store points in a tree of boxes that shrink where points are dense (quadtree, R-tree).
+
 ## Why it exists
 
-"Find drivers within 3 km" needs closeness in two dimensions. A normal index sorts one value, so an index on `(lat, lng)` narrows by latitude only and still scans a strip around the globe.
+A query like "find drivers within 3 km" is about closeness in two dimensions. If you put a normal index on `(lat, lng)`, it can narrow to the right band of latitude, but within that band it still scans every longitude, so it reads a thin strip wrapping the whole globe. That is slow and reads far too many rows. A geospatial index keeps points that are near on the map near in the index, so a nearby search touches only a small region.
 
 ## How it works
 
@@ -81,18 +93,18 @@ Take the user's cell and the 8 cells around it, so places just across an edge ar
 Fetch places whose geohash starts with one of those 9 prefixes, from a B-tree or a Redis sorted set.
 </Step>
 <Step title="Filter exactly">
-Compute the real distance for each candidate, drop those outside the radius, and sort.
+Compute the real distance for each candidate, drop those outside the radius, and sort by distance.
 </Step>
 </Steps>
 
 <Compare id="geohash-vs-quadtree" />
 
 - **Shapes** such as delivery zones need an R-tree of bounding boxes. PostGIS builds it on GiST: `USING GIST (geom)`.
-- **Uber's H3** uses hexagons: a cell's centre is the same distance from all six neighbours.
+- **Uber's H3** uses hexagons, so a cell's centre is the same distance from all six of its neighbours.
 
 ## Example
 
-Redis GEO (`GEOSEARCH` needs Redis 6.2+). Longitude comes first:
+Redis GEO stores points and searches a radius for you (`GEOSEARCH` needs Redis 6.2+). Longitude comes first.
 
 ```text
 GEOADD drivers 77.5946 12.9716 driver:17
@@ -103,26 +115,33 @@ GEOSEARCH drivers FROMLONLAT 77.6000 12.9700 BYRADIUS 3 km ASC
 2) "driver:8"      # about 1.6 km away; driver:42 (4.7 km) is outside
 ```
 
-## Defaults
+What to notice:
+
+- `GEOADD` takes longitude before latitude; swapping them silently stores the wrong place.
+- `GEOSEARCH ... BYRADIUS 3 km ASC` returns only points within 3 km, nearest first, so Redis does the encode-and-filter work for you.
+- `driver:42` is 4.7 km away and is correctly left out, showing the radius filter at work.
+- Each driver update is one `GEOADD` that overwrites the old position, which is why Redis GEO suits points that move every few seconds.
+
+## Rules and defaults
 
 | What | Default or limit | Where |
 | --- | --- | --- |
 | Argument order | Longitude, then latitude | Redis `GEOADD` |
 | Latitudes you can index | -85.05112878 to 85.05112878 (no poles) | Redis GEO |
 | Distance error | Up to 0.5%: Earth is treated as a sphere | Redis GEO |
-| Spatial index | R-tree built on GiST | PostGIS |
+| Spatial index type | R-tree built on GiST | PostGIS |
 | Index for `point` with SP-GiST | `quad_point_ops`, a quadtree | PostgreSQL 18 |
 
 ## Interview Qs
 
 ### Why can't a normal index find nearby places?
 
-A B-tree sorts by one value. With an index on `(lat, lng)`, the latitude range limits the scan, but longitude is only checked inside it, so you read a strip around the globe. A geospatial index keeps nearby points close together.
+A B-tree sorts by one value at a time. With an index on `(lat, lng)`, the latitude range limits the scan, but longitude is only checked inside that range, so you still read a strip wrapping the globe. A geospatial index keeps points that are near on the map next to each other, so a nearby search stays local.
 
 ### Geohash or quadtree?
 
-Geohash: a fixed grid stored as plain keys in any database or Redis, with cheap updates for moving points. Quadtree: adapts to density by splitting busy areas finer, but is usually kept in memory and changes shape as points move.
+Geohash is a fixed grid stored as plain string keys in any database or Redis, with a cheap one-key update when a point moves. Quadtree adapts to density by splitting busy areas into smaller cells, but it is usually held in memory and changes shape as points are added or removed.
 
 ### How do you find nearby drivers when locations change every few seconds?
 
-Keep current locations in memory, for example Redis GEO: each update is one `GEOADD` that overwrites the old position, and `GEOSEARCH` returns drivers within a radius, nearest first.
+Keep current locations in memory, for example in Redis GEO. Each update is a single `GEOADD` that overwrites the driver's old position, and `GEOSEARCH` returns the drivers within a radius, nearest first, so both the write and the query stay fast under constant movement.

@@ -5,18 +5,31 @@ title: Unique ID Generation
 topic: distributed-systems
 level: intermediate
 heat: 2
-hook: "Many servers must create IDs that never clash. Use one counter, a random UUID, or a time-first ID like UUID v7 or Snowflake that sorts by time."
+hook: "Many servers must create IDs that never clash. Use one database counter, a random UUID, or a time-first ID like UUID v7 or Snowflake that sorts by creation time."
 points:
-  - { k: "Auto-increment", v: "short and ordered, but one central counter", kind: minus }
-  - { k: "UUID v4", v: "122 random bits: made anywhere, but no order" }
-  - { k: "UUID v7", v: "48-bit ms timestamp first: sorts by creation time", kind: plus }
-  - { k: "Snowflake", v: "41-bit time + 10-bit machine id + 12-bit sequence = 64 bits" }
-  - { k: "Clock goes back", v: "Twitter's generator refuses IDs until time catches up", kind: minus }
+  - { k: "Auto-increment", v: "short and ordered, but comes from one central database counter every server shares", kind: minus }
+  - { k: "UUID v4", v: "122 random bits, so any server makes one with no coordination, but IDs have no order" }
+  - { k: "UUID v7", v: "starts with a 48-bit millisecond timestamp, so the IDs sort by creation time", kind: plus }
+  - { k: "Snowflake", v: "packs 41-bit time + 10-bit machine id + 12-bit sequence into 64 bits" }
+  - { k: "Clock moving back", v: "Snowflake refuses to make IDs until the clock passes the last timestamp used", kind: minus }
   - { k: "Built-in UUID v7", v: "Python 3.14 uuid7(), Java 26 UUID.ofEpochMillis, PostgreSQL 18 uuidv7()", kind: default }
 trap:
-  wrong: "Random UUIDs (v4) are ideal primary keys because they never clash."
-  right: "Unique, yes, but new keys land at random places in the index. Prefer time-ordered UUID v7 or Snowflake IDs."
-sayIt: "With one database, auto-increment is fine. When many servers create IDs, I use UUID v7 or Snowflake-style 64-bit IDs (time, machine id, sequence). Both sort roughly by time, so index inserts stay close together. I never use IDs as secrets."
+  wrong: "Random UUIDs (v4) make the best primary keys because they never clash."
+  right: "They are unique, but each new key lands at a random place in the index, which slows inserts. Prefer time-ordered UUID v7 or Snowflake IDs."
+  why: "Uniqueness is the obvious requirement, so v4 looks ideal until you see that random keys scatter writes across the index."
+sayIt: "With one database, auto-increment is fine. When many servers create IDs, I use UUID v7 or Snowflake-style 64-bit IDs of time, a machine id and a sequence. Both sort roughly by time, so index inserts stay close, and I never treat an ID as a secret."
+cheat:
+  idea: "Unique ID generation gives every new row an ID that never clashes, even when many servers create IDs at once. The main options are a central counter, a random UUID, or a time-ordered ID."
+  code: |
+    // Snowflake: time, machine id and sequence packed into 64 bits
+    id = ((nowMs - EPOCH) << 22) | (machineId << 12) | sequence;
+  remember: "Many servers making IDs: prefer time-ordered UUID v7 or Snowflake, not random v4, so index inserts stay local."
+buildsOn: [sharding-and-replication]
+scenarios:
+  - q: "Your payment rows use random UUID v4 primary keys and insert performance is poor as the table grows. Why, and what would you change?"
+    a: "A v4 key is fully random, so each insert lands at a random point in the B-tree index, touching a different page each time and causing page splits and cache misses. Switch to UUID v7 or a Snowflake ID: both start with a timestamp, so new keys are near each other and inserts stay in the same hot part of the index."
+  - q: "A teammate wants to use the payment ID in a public URL as the only access check, since the IDs are random and hard to guess. Is that safe?"
+    a: "No. RFC 9562 says UUIDs must not be used as security capabilities. Hard to guess is not the same as access control, so you must still check that the logged-in user is allowed to see that payment on every request, whatever the ID looks like."
 confusedWith: [id-generation-options]
 tags: [distributed-systems, ids, databases]
 visual: table
@@ -26,9 +39,6 @@ sources:
     verifiedOn: "2026-10-16"
   - title: "Snowflake README and IdWorker.scala (Twitter, archived repo, snowflake-2010 tag)"
     url: "https://github.com/twitter-archive/snowflake/tree/snowflake-2010"
-    verifiedOn: "2026-10-16"
-  - title: "Snowflakes (Discord developer docs, API reference)"
-    url: "https://docs.discord.com/developers/reference"
     verifiedOn: "2026-10-16"
   - title: "Ticket Servers: Distributed Unique Primary Keys on the Cheap (Flickr Engineering, 2010)"
     url: "https://code.flickr.net/2010/02/08/ticket-servers-distributed-unique-primary-keys-on-the-cheap/"
@@ -45,15 +55,6 @@ sources:
   - title: "UUID Functions (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/current/functions-uuid.html"
     verifiedOn: "2026-10-16"
-  - title: "PostgreSQL 18.0 release notes"
-    url: "https://www.postgresql.org/docs/release/18.0/"
-    verifiedOn: "2026-10-16"
-  - title: "Sharding pattern: shard keys and auto-increment IDs (Azure Architecture Center)"
-    url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/sharding"
-    verifiedOn: "2026-10-16"
-  - title: "Idempotent requests (Stripe API reference)"
-    url: "https://docs.stripe.com/api/idempotent_requests"
-    verifiedOn: "2026-10-16"
   - title: "Insecure Direct Object Reference Prevention Cheat Sheet (OWASP)"
     url: "https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html"
     verifiedOn: "2026-10-16"
@@ -62,21 +63,28 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Unique ID generation is how a system gives each new row, order or message an identifier that no other one shares. With a single database, a built-in counter does this easily. The hard case is a system split across many servers and [shards](card:sharding-and-replication): each server must create IDs on its own, without asking a central counter every time, and still never produce the same ID twice. The common choices are a database counter, a random UUID, and a time-ordered ID such as UUID v7 or Snowflake.
+
 ## Why it exists
 
-Rows, orders and messages need an ID the moment they are created. With one database, a counter is enough; with many servers and shards, each server must make IDs on its own without ever repeating one.
+A row needs an ID the instant it is created, before it is saved. With one database you let the database assign the next number, and that is simple and compact. But once writes are spread across many servers or shards, a single shared counter becomes a bottleneck and a single point of failure: every insert would have to wait on it. So you need IDs that each server can mint locally, that never clash, and ideally that still sort by time so they do not scatter writes across the whole index.
 
 ## How it works
 
 <Compare id="id-generation-options" />
 
-- **UUID v7** (RFC 9562, 2024) starts with a 48-bit Unix time in milliseconds, then random bits, so IDs sort by creation time, to the millisecond.
-- **Snowflake:** each generator packs time, its machine id and a sequence into 64 bits, and makes up to 4,096 IDs per millisecond.
-- **Counters across servers:** Flickr ran two ticket servers, one handing out odd IDs and one even (step 2, offsets 1 and 2).
+1. **Auto-increment** asks one database for the next number: compact and ordered, but central.
+2. **UUID v4** fills 122 bits with randomness, so any server makes one alone, but the IDs have no order.
+3. **UUID v7** (RFC 9562, 2024) puts a 48-bit Unix millisecond time first, then random bits, so IDs sort by creation time to the millisecond.
+4. **Snowflake** packs 41 bits of time, a 10-bit machine id and a 12-bit per-millisecond sequence into 64 bits, letting each generator make up to 4,096 IDs per millisecond with no coordination.
+
+So the key is: go local to avoid the central counter, and keep a timestamp first so IDs stay roughly ordered.
 
 ## Example
 
-Pack a Snowflake ID, and make UUIDs:
+A Snowflake ID packs three fields into one 64-bit number, and you can read the fields back out.
 
 ```java
 static final long EPOCH = 1288834974657L;     // Twitter's custom epoch (Nov 2010), ms
@@ -84,10 +92,10 @@ static final long EPOCH = 1288834974657L;     // Twitter's custom epoch (Nov 201
 long snowflake(long nowMs, long machineId, long sequence) {
     return ((nowMs - EPOCH) << 22)   // 41 bits: ms since EPOCH
          | (machineId << 12)         // 10 bits: 0 to 1023
-         | sequence;                 // 12 bits: 0 to 4095 in the same ms
+         | sequence;                 // 12 bits: 0 to 4095 within the same ms
 }
 
-UUID random = UUID.randomUUID();                              // v4
+UUID random = UUID.randomUUID();                              // v4, no order
 UUID timed = UUID.ofEpochMillis(System.currentTimeMillis());  // v7, Java 26+
 ```
 
@@ -99,34 +107,48 @@ EPOCH = 1288834974657  # Twitter's custom epoch (Nov 2010), ms
 def snowflake(now_ms: int, machine_id: int, sequence: int) -> int:
     return ((now_ms - EPOCH) << 22) | (machine_id << 12) | sequence
 
-random_id = uuid.uuid4()  # v4
+random_id = uuid.uuid4()  # v4, no order
 timed_id = uuid.uuid7()   # v7, Python 3.14+
 ```
 
-Read the time back with `(id >> 22) + EPOCH`. 41 bits of milliseconds last about 69 years.
+```text output
+1724551110456266752
+1724551110456266753
+machine id back: 5
+ms back: 1700000000000
+```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Counter step (`auto_increment_increment`) | 1 | MySQL 8.4 |
-| Counter start (`auto_increment_offset`) | 1; set to the server ID in multi-primary Group Replication | MySQL 8.4 |
-| `gen_random_uuid()` | Version 4 (random); `uuidv7()` added for version 7 | PostgreSQL 18 |
+- The two Snowflake IDs in the output differ only by their sequence (0 then 1) in the same millisecond, so they are unique and adjacent.
+- `(id >> 12) & 0x3FF` reads the machine id back (5), and `(id >> 22) + EPOCH` reads the timestamp back; the fields are just bit ranges.
+- 41 bits of milliseconds lasts about 69 years from the epoch, which is why Snowflake uses a recent custom epoch rather than 1970.
+
+## Rules and defaults
+
+- **MySQL 8.4 counter:** `auto_increment_increment` defaults to 1 and `auto_increment_offset` to 1; in multi-primary Group Replication you set the offset per server so counters do not collide.
+- **PostgreSQL 18:** `gen_random_uuid()` returns a version 4 (random) UUID; `uuidv7()` was added for time-ordered version 7.
+- **Built-in v7:** Python 3.14 added `uuid.uuid7()`, and Java 26 added `UUID.ofEpochMillis`.
+- **Clock safety:** if the server clock steps backwards, a time-based generator could repeat or reorder IDs. Twitter's Snowflake refuses to issue IDs until the clock passes the last timestamp used, so run NTP in a mode that never steps the clock backwards.
+
+## Not to be confused with
+
+A unique ID guarantees that two IDs do not clash. An [idempotency](card:idempotency) key guarantees that retrying the same request has the same effect as sending it once. They are different jobs: an idempotency key is supplied by the client for one specific operation, while a unique ID is minted for each new entity. Rule: unique ID = this row is distinct; idempotency key = this request is the same one as before.
 
 ## Interview Qs
 
 ### Design a unique ID generator for a distributed system.
 
-Use Snowflake-style 64-bit IDs: 41 bits of milliseconds since a custom epoch, 10 bits of machine id, 12 bits of sequence. Each server makes IDs locally, up to 4,096 per millisecond, with no coordination, and IDs sort roughly by time.
+Use Snowflake-style 64-bit IDs: 41 bits of milliseconds since a custom epoch, 10 bits of machine id, 12 bits of sequence. Each server makes IDs locally, up to 4,096 per millisecond, with no coordination, and the IDs sort roughly by time, which keeps index inserts close together.
 
 ### UUID or auto-increment for a primary key?
 
-Auto-increment is small and ordered, but needs one central counter and reveals how many rows exist. UUIDs can be made anywhere. If you pick UUIDs, prefer v7: time-ordered keys keep index inserts close together; random v4 keys do not.
+Auto-increment is small and ordered but needs one central counter and reveals how many rows exist. UUIDs can be made anywhere with no coordination. If you choose UUIDs, prefer v7: time-ordered keys keep index inserts near each other, while random v4 keys scatter them across the index.
 
 ### What if the server clock moves backwards?
 
-The generator could repeat or reorder IDs. Twitter's Snowflake refuses to make IDs until the clock passes the last timestamp it used. Run NTP in a mode that never steps the clock backwards.
+A time-based generator could then repeat or reorder IDs. Twitter's Snowflake refuses to issue IDs until the clock passes the last timestamp it used. Run NTP in a mode that slews the clock gradually and never steps it backwards.
 
-### Can a UUID be a secret token?
+### Can a UUID be used as a secret access token?
 
-No. RFC 9562 says UUIDs must not be used as security capabilities. Random IDs make guessing harder, but you must still check permissions on every request.
+No. RFC 9562 states that UUIDs must not be used as security capabilities. Random IDs make guessing harder, but you must still check permissions on every request rather than trusting that the ID is unguessable.

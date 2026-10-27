@@ -5,18 +5,28 @@ title: Cache Eviction (LRU, LFU)
 topic: caching
 level: intermediate
 heat: 3
-hook: "A full cache must drop something to make room. The eviction policy chooses: LRU drops the key unused the longest, LFU the key used the least."
+hook: "When a cache runs out of memory it must drop a key to make room. The eviction policy chooses which: LRU drops the least recently used, LFU the least often used."
 points:
-  - { k: "Eviction", v: "removes keys because memory is full, even if still valid" }
-  - { k: "LRU", v: "drop the least recently used key: the usual default" }
-  - { k: "LFU", v: "drop the least often used key: keeps steady favourites" }
-  - { k: "Approximated", v: "Redis samples 5 keys and evicts the best candidate" }
-  - { k: "Redis OSS default", v: "noeviction: once maxmemory is reached, writes fail", kind: default }
-  - { k: "Memcached default", v: "64 MB, then it evicts with a segmented LRU", kind: default }
+  - { k: "Eviction", v: "dropping a key because the cache is out of memory, even if the key is still valid" }
+  - { k: "LRU", v: "drops the key not used for the longest time; the usual default, since a few keys get most reads" }
+  - { k: "LFU", v: "drops the key used the fewest times; keeps steady favourites, forgets old popularity" }
+  - { k: "Approximate LRU", v: "real caches sample a few keys and drop the oldest of them; close enough and cheaper", kind: plus }
+  - { k: "Redis default policy", v: "noeviction: once maxmemory is reached, writes that add data fail; reads still work", kind: default }
+  - { k: "Memcached default", v: "64 MB limit, then it evicts with a segmented LRU", kind: default }
 trap:
   wrong: "Eviction and expiry are the same thing."
-  right: "Expiry deletes a key when its TTL runs out. Eviction deletes keys early, even valid ones, because memory is full."
-sayIt: "When the cache reaches its memory limit, an eviction policy picks what to drop. I default to LRU, since a few keys get most reads; LFU suits keys that stay popular. In Redis I set maxmemory and allkeys-lru, because the default noeviction makes writes fail."
+  right: "Expiry deletes a key when its TTL runs out, by time. Eviction deletes keys early, even still-valid ones, because the cache is out of memory."
+  why: "Both make a key disappear, so they get blurred, but one is driven by the clock and the other by memory pressure."
+sayIt: "When the cache reaches its memory limit, an eviction policy picks what to drop. I default to LRU, since a few keys get most reads; LFU suits long-term favourites. In Redis I set maxmemory and allkeys-lru, since the default noeviction fails writes."
+cheat:
+  idea: "When a cache runs out of memory it evicts keys to make room. LRU drops the least recently used key; LFU drops the least frequently used. Eviction is memory-driven, not time-driven."
+  remember: "Eviction = out of memory; expiry = TTL ran out. In Redis set maxmemory and a policy, or the default noeviction fails writes."
+buildsOn: [cache-aside]
+scenarios:
+  - q: "You run Redis with the default settings and no maxmemory, and it slowly fills the machine's RAM. What happens, and what should you have set?"
+    a: "On 64-bit Redis maxmemory defaults to 0, meaning no limit, so Redis keeps growing until the operating system kills it or swaps. Set maxmemory to a safe size and a policy like allkeys-lru, so Redis evicts old keys instead of running the machine out of memory."
+  - q: "One analytics job scans millions of rarely read rows and your hit ratio collapses for a while. Which eviction behaviour caused it, and what mitigates it?"
+    a: "Plain LRU treated every scanned row as recently used and pushed the genuinely hot keys out. A segmented LRU, like Memcached's HOT/WARM/COLD queues, shields busy keys from a one-off scan, and LFU also resists it because scanned keys are read only once."
 confusedWith: []
 tags: [caching, eviction, redis, memcached]
 visual: table
@@ -56,9 +66,13 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Eviction is a cache dropping a key to free memory. A cache holds far less than the database it fronts, so it cannot keep everything. When it reaches its memory limit, it throws out some keys to make room for new ones, even keys that are still valid. The rule that chooses which key to drop is the **eviction policy**. The two most common are LRU, which drops the key not used for the longest time, and LFU, which drops the key used the fewest times.
+
 ## Why it exists
 
-A cache has far less memory than the database has data, so it cannot keep everything. When it is full it must throw keys away, and a bad choice drops the data people still read.
+A cache is meant to hold the hot, frequently read data in fast memory, but memory is limited while the database is not. Without eviction, the cache would fill up and then either refuse new writes or crash the machine. Eviction lets the cache keep running by making room automatically, and a good policy makes room by dropping the data least likely to be read again, so the keys people still want stay in the cache.
 
 ## How it works
 
@@ -67,15 +81,18 @@ A cache has far less memory than the database has data, so it cannot keep everyt
 | **LRU** | The key not used for the longest time | A few keys get most reads (most apps) |
 | **LFU** | The key used the fewest times | Some keys stay popular for a long time |
 | **Random** | Any key | All keys are read about equally |
-| **Shortest TTL** | The key closest to expiring | Your code gives short TTLs to keys it can lose |
+| **Shortest TTL** | The key closest to expiring | Your code gives short TTLs to keys it can afford to lose |
 
-- Real caches approximate LRU: Redis samples 5 keys (`maxmemory-samples`) and drops the oldest. That is close to true LRU and uses less memory.
-- One big scan can push every hot key out of plain LRU. Memcached's segmented LRU (HOT, WARM, COLD queues) shields busy keys from such scans.
-- In Redis, `allkeys-*` policies may drop any key; `volatile-*` only keys with a TTL, and act like `noeviction` if no key has one.
+1. On a write, the cache checks whether it is at its memory limit. If there is room, it just stores the key.
+2. If it is full, it applies the policy to pick a victim and removes it, then stores the new key.
+3. Real caches approximate the policy rather than tracking every key exactly: Redis samples a few keys (`maxmemory-samples`, 5 by default) and drops the oldest of the sample, which is close to true LRU but cheaper.
+4. A one-off scan can still flush hot keys out of plain LRU, so Memcached uses a segmented LRU (HOT, WARM, COLD queues) that shields busy keys from such scans.
+
+So eviction is driven by memory pressure, and the policy decides whose turn it is to go.
 
 ## Example
 
-A tiny LRU cache: it drops the least recently used entry once it holds more than `capacity`.
+A tiny LRU cache in each language: it drops the least recently used entry once it holds more than its capacity.
 
 ```java
 class LruCache<K, V> extends LinkedHashMap<K, V> {
@@ -111,7 +128,19 @@ class LruCache:
             self.data.popitem(last=False)        # drop the least recent
 ```
 
-## Defaults
+With capacity 2, after `put a`, `put b`, `get a`, `put c`, both versions print:
+
+```text output
+a:1 b:null c:3
+```
+
+What to notice:
+
+- The sequence touches `a` just before inserting `c`, so `b` is the least recently used and is the one evicted; `a` and `c` survive.
+- In Java, `LinkedHashMap(16, 0.75f, true)` keeps entries in access order, and `removeEldestEntry` returning true drops the oldest. Pass `false` and it keeps insertion order, so `a` would be evicted instead.
+- In Python, `move_to_end` on every get and put marks a key as most recent, and `popitem(last=False)` removes the least recent. Both give an O(1) LRU.
+
+## Rules and defaults
 
 | What | Default | Where |
 | --- | --- | --- |
@@ -122,20 +151,22 @@ class LruCache:
 | Memory limit (`-m`) | 64 MB; when full it evicts (`-M` returns errors instead) | Memcached 1.6 |
 | Function cache size (`maxsize`) | 128 entries, LRU | Python `functools.lru_cache` |
 
+- `allkeys-*` policies may drop any key; `volatile-*` only keys that have a TTL, and behave like `noeviction` when no key has one.
+
 ## Interview Qs
 
 ### What is the difference between LRU and LFU?
 
-LRU drops the key unused for the longest time; LFU drops the key used the fewest times. LFU keeps steady favourites but must forget old popularity, so Redis decays its LFU counters over time (lfu-decay-time, 1 minute by default).
+LRU drops the key not used for the longest time; LFU drops the key used the fewest times. LFU keeps steady favourites but must forget old popularity, so Redis decays its LFU counters over time (`lfu-decay-time`, one minute by default), or a key that was once popular would never be evicted.
 
 ### How would you build an LRU cache with O(1) get and put?
 
-A hash map for lookups plus a doubly linked list in use order. On each get or put, move the entry to the front; when full, remove the entry at the back. Java's LinkedHashMap in access order does exactly this.
+Use a hash map for lookups plus a doubly linked list in use order. On each get or put, move the entry to the front; when the cache is full, remove the entry at the back. Java's `LinkedHashMap` in access order does exactly this, which is why the example subclasses it.
 
-### Which Redis eviction policy would you pick for a cache?
+### Which Redis eviction policy would you pick for a cache, and what else must you set?
 
-`allkeys-lru` when unsure: Redis recommends it for the common case where a few keys get most reads. Also set `maxmemory`, because Redis Open Source has no limit on 64-bit and defaults to `noeviction`.
+`allkeys-lru` when unsure: Redis recommends it for the common case where a few keys get most reads. You must also set `maxmemory`, because Redis Open Source has no limit on 64-bit and defaults to `noeviction`, which makes writes fail once the machine fills up.
 
 ### What happens when Redis is full and the policy is noeviction?
 
-Commands that add data return an error, while reads keep working. A `volatile-*` policy behaves the same way when no key has a TTL.
+Commands that add data return an error, while reads keep working. A `volatile-*` policy behaves the same way when no key has a TTL, because there is then nothing it is allowed to evict.

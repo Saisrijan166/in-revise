@@ -5,18 +5,28 @@ title: Normalisation vs Denormalisation
 topic: databases
 level: intermediate
 heat: 2
-hook: "Normalise: store each fact once and join tables when you read. Denormalise: copy data to where it is read, so reads get faster and writes get harder."
+hook: "Normalise: store each fact once and join tables when you read. Denormalise: copy a fact to where it is read, so reads get faster and writes get harder."
 points:
-  - { k: "1NF", v: "one value per cell; no repeating groups like phone1, phone2" }
-  - { k: "2NF", v: "each non-key column depends on the whole primary key" }
+  - { k: "Normalise", v: "store each fact in exactly one place, and join tables to bring them together when reading" }
+  - { k: "1NF", v: "one value per cell: no repeating groups like phone1, phone2 in one row" }
+  - { k: "2NF", v: "every non-key column depends on the whole primary key, not just part of it" }
   - { k: "3NF", v: "non-key columns depend only on the key, not on each other" }
-  - { k: "Denormalise", v: "copy chosen fields on purpose to skip joins on hot reads", kind: plus }
-  - { k: "Cost", v: "every write must update every copy, or rows disagree", kind: minus }
-  - { k: "MongoDB document limit", v: "16 MiB: an ever-growing embedded array will not fit", kind: default }
+  - { k: "Denormalise", v: "copy chosen fields on purpose so a hot read can skip a join", kind: plus }
+  - { k: "Cost of a copy", v: "every write must update every copy, or the copies disagree (an update anomaly)", kind: minus }
 trap:
   wrong: "Joins are slow, so denormalise everything from the start."
-  right: "Start normalised. Denormalise only a hot read path you have measured; joins on indexed keys are often fast."
-sayIt: "I start normalised so each fact lives in one place and updates stay simple. If a hot read needs too many joins, I denormalise just that path: copy a few rarely changing fields, embed in a document or keep a precomputed count, and accept harder writes."
+  right: "Start normalised. Denormalise only a hot read path you have measured, and copy only fields that rarely change; joins on indexed keys are often fast."
+  why: "Joins look expensive on paper, and a flat table reads simply, so people assume copying is always faster and forget the write cost and the risk of copies drifting apart."
+sayIt: "I start normalised so each fact lives in one place and updates stay simple. If a measured hot read needs too many joins, I denormalise just that path: copy a few rarely changing fields, or keep a precomputed count, and accept that writes now update every copy."
+cheat:
+  idea: "Normalise: store each fact once and join to read it. Denormalise: copy a fact to where it is read, trading harder writes for faster reads. 1NF, 2NF, 3NF remove duplicates step by step."
+  remember: "Denormalise only a measured hot read, and only fields that rarely change; keep every copy in sync."
+buildsOn: [sql-vs-nosql]
+scenarios:
+  - q: "An order-list page runs five joins and is slow. Should you denormalise by copying the customer's name onto each order row?"
+    a: "Only if you have measured that the joins are the problem, and the name rarely changes. Copying a stable field like a name is a reasonable denormalisation. The cost is that renaming a customer must now update all their order rows; if names change often, keep the join instead."
+  - q: "A table has primary key (part, warehouse) but also a warehouse_address column. What is wrong, and which normal form does it break?"
+    a: "The address depends on warehouse alone, not on the full key (part, warehouse), so it repeats for every part in that warehouse. That breaks 2NF. Editing one row leaves the warehouse with two addresses: an update anomaly. Move the address into a warehouses table."
 confusedWith: [normalisation-vs-denormalisation]
 tags: [databases, data-modeling, schema]
 visual: table
@@ -36,60 +46,81 @@ sources:
   - title: "MongoDB Limits and Thresholds: BSON document size (MongoDB Manual)"
     url: "https://www.mongodb.com/docs/manual/reference/limits/"
     verifiedOn: "2026-10-16"
-  - title: "Data modeling in Azure Cosmos DB (Microsoft Learn)"
-    url: "https://learn.microsoft.com/en-us/azure/cosmos-db/modeling-data"
-    verifiedOn: "2026-10-16"
   - title: "Materialized Views (PostgreSQL 18 documentation)"
     url: "https://www.postgresql.org/docs/current/rules-materializedviews.html"
-    verifiedOn: "2026-10-16"
-  - title: "The System Design Primer: Denormalization (donnemartin, GitHub)"
-    url: "https://github.com/donnemartin/system-design-primer"
     verifiedOn: "2026-10-16"
   - title: "Data Modeling (Hello Interview, system design core concepts)"
     url: "https://www.hellointerview.com/learn/system-design/core-concepts/data-modeling"
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Normalisation is organising tables so each fact is stored in exactly one place; when you need facts together, you join the tables. The normal forms (1NF, 2NF, 3NF) are rules that remove duplicate data step by step, and most designs stop at 3NF. Denormalisation is the opposite move, done on purpose: you copy a fact to where it is read, or keep a precomputed value, so a read can avoid a join. You met the SQL model in [SQL vs NoSQL](card:sql-vs-nosql).
+
 ## Why it exists
 
-When the same fact sits in many rows, an update can miss some of them and the data stops agreeing. Normalising removes the copies; denormalising adds a few back when joins make hot reads too slow.
+If the same fact sits in many rows, one update can miss some of them and the rows start to disagree. This is called an update anomaly: a warehouse ends up with two different addresses because one row was changed and the rest were not. Normalising removes the duplicate so there is nothing to keep in sync. But fully normalised data can need many joins to read, and on a hot, read-heavy path those joins can be slow. Denormalisation adds a few copies back, by choice, to make that one path fast.
 
 ## How it works
 
+The comparison shows the trade-off; read it, then the two rules below.
+
 <Compare id="normalisation-vs-denormalisation" />
 
-- **Normal forms** are rules that remove duplicates step by step. Most designs stop at [3NF](card:third-normal-form).
-- **Document stores:** embed data that is read together and stays small; reference data that grows without limit or changes often.
+1. Design normalised first: give each fact one home, so writes touch one row and nothing can drift.
+2. Measure your real read paths. Most joins on indexed keys are fast and need no change.
+3. If one hot read is genuinely slow because of joins, copy a few fields that rarely change onto the table that is read, or keep a precomputed count or a materialized view.
+4. From then on, every write to the original fact must also update the copy.
+
+So the key is that normalisation protects writes, denormalisation speeds one read, and you pay for the copy on every write.
 
 ## Example
 
-The key is (part, warehouse), but the address depends on the warehouse alone, so it repeats for every part (this breaks 2NF):
+This table's key is (part, warehouse), but the address depends on the warehouse alone, so it repeats for every part. That breaks 2NF:
 
 | part | warehouse | qty | warehouse_address |
 | --- | --- | --- | --- |
 | P1 | W1 | 10 | 5 MG Road |
 | P2 | W1 | 4 | 5 MG Road |
 
-Change the address in one row only, and W1 now has two addresses: an update anomaly. Normalise by moving the address into a `warehouses` table.
-
-Denormalise the other way when a read is hot:
+Change the address in one row only, and W1 now has two addresses: an update anomaly. Normalise by moving the address into a `warehouses` table. Denormalise the other way only when a read is hot:
 
 ```sql
--- the order list shows the customer's name: copy it to skip a join
+-- the order list shows the customer's name on every row: copy it to skip a join
 ALTER TABLE orders ADD COLUMN customer_name TEXT;
--- now renaming a customer must also update all their orders
+-- the price: renaming a customer must now also update all their orders
 ```
+
+What to notice:
+
+- In the first table the address is duplicated by accident, which is the bug; normalising removes it.
+- The `ALTER TABLE` duplicates `customer_name` on purpose, to serve a hot read without a join.
+- The comment is the whole cost: the name now lives in two places, so a rename must update every order row or they disagree. Copy only fields, like a name, that change rarely.
+
+## Rules and defaults
+
+- **Normal forms:** 1NF = one value per cell; 2NF = every non-key column depends on the whole key; 3NF = non-key columns depend only on the key. Most schemas stop at 3NF.
+- **When to denormalise:** only a read path measured to be too slow, copying fields that change rarely.
+- **Document stores:** embed data that is read together and stays small; reference data that grows without limit or changes often.
+- **MongoDB document limit:** a single document can be at most 16 MiB, so an ever-growing embedded array eventually will not fit.
+- **Precomputed values:** a PostgreSQL materialized view is a stored, denormalised query result you refresh on a schedule.
+
+## Not to be confused with
+
+- **Normalisation vs denormalisation:** normalisation removes copies to protect writes; denormalisation adds copies back to speed one read.
+- **An accidental duplicate vs a deliberate copy:** the repeated address above is a design mistake; a copied `customer_name` is a measured choice. Rule: remove duplicates you did not plan, add only the ones you did.
 
 ## Interview Qs
 
 ### What is normalisation? Explain 1NF, 2NF and 3NF.
 
-Organising tables so each fact is stored once. 1NF: one value per cell, no repeating groups. 2NF: every non-key column depends on the whole primary key. 3NF: non-key columns depend only on the key, not on other non-key columns.
+Organising tables so each fact is stored once. 1NF: one value per cell, no repeating groups. 2NF: every non-key column depends on the whole primary key, not part of it. 3NF: non-key columns depend only on the key, not on each other. The goal is to stop the same fact from drifting apart across rows.
 
-### When would you denormalise?
+### When would you denormalise, and what does it cost?
 
-When a read-heavy path needs many joins and you have measured it to be too slow. Copy a few fields that rarely change, or keep a precomputed value. Avoid it for data that changes often: every write must update every copy.
+When a read-heavy path needs many joins and you have measured it to be too slow. Copy a few fields that rarely change, or keep a precomputed value. The cost is that every write must now update every copy, so avoid it for data that changes often.
 
 ### Embed or reference in a document database?
 
-Embed when data is read together, is one-to-few and stays bounded. Reference when it grows without limit, is shared by many documents or changes often. In MongoDB a document can be at most 16 MiB.
+Embed when data is read together, is one-to-few and stays bounded, so one read returns it. Reference when it grows without limit, is shared by many documents or changes often. In MongoDB a document can be at most 16 MiB, so unbounded arrays must be referenced.

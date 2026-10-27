@@ -5,18 +5,29 @@ title: Where Caches Live
 topic: caching
 level: beginner
 heat: 2
-hook: "Caches sit all along a request's path: browser, CDN, reverse proxy, app memory, a shared cache like Redis, and the database. A hit at any stop skips the rest."
+hook: "A cache is a copy of data kept somewhere faster to reach. In a web system copies sit at many stops: browser, CDN, reverse proxy, app memory, Redis, and the database."
 points:
-  - { k: "Browser", v: "a private cache for one user; Cache-Control says how long" }
-  - { k: "CDN, reverse proxy", v: "shared HTTP caches: one stored copy serves many users" }
-  - { k: "In-process", v: "inside the app's own memory: fastest, no network hop", kind: plus }
-  - { k: "Many servers", v: "each local cache holds its own copy, so values drift", kind: minus }
-  - { k: "Distributed", v: "Redis or Memcached: one shared copy for every server" }
-  - { k: "Worth caching", v: "data read often, changed rarely, slow to fetch" }
+  - { k: "Cache", v: "a copy of data kept closer or faster than the original source" }
+  - { k: "Hit / miss", v: "a hit finds the data in the cache; a miss has to fetch it from the source" }
+  - { k: "Browser cache", v: "private to one user; the Cache-Control header says how long to keep a copy" }
+  - { k: "CDN and reverse proxy", v: "shared HTTP caches: one stored copy is served to many users", kind: plus }
+  - { k: "In-process cache", v: "data in the app's own memory: fastest, but each server keeps its own copy", kind: minus }
+  - { k: "Distributed cache", v: "Redis or Memcached: one shared copy every server reads over the network" }
 trap:
-  wrong: "Cache-Control: no-cache means do not cache."
-  right: "no-cache stores the copy but revalidates it before each reuse; no-store stores nothing."
-sayIt: "I cache at several layers: static files in the browser and CDN, whole responses at a reverse proxy, and hot objects in a shared Redis so every server sees the same copy. I add a small local cache only for very hot data, and I watch the hit ratio."
+  wrong: "Cache-Control: no-cache means do not store the response."
+  right: "no-cache stores the copy but rechecks it with the server before each reuse. no-store is the header that stores nothing."
+  why: "The name reads like an instruction not to cache, so people assume it disables caching, when it only forces revalidation."
+sayIt: "I cache at several layers: static files in the browser and a CDN, whole responses at a reverse proxy, and hot objects in a shared Redis so every server sees the same copy. I add an in-process cache only for very hot keys, and watch the hit ratio."
+cheat:
+  idea: "A cache is a faster copy of data. Copies sit at many stops from the browser to the database; a hit at any stop skips the rest."
+  flow: "Browser → CDN → reverse proxy → app memory → Redis → database"
+  remember: "Shared caches (CDN, Redis) serve one copy to all; in-process is fastest but drifts per server."
+buildsOn: [cdn, reverse-proxy]
+scenarios:
+  - q: "A product page is the same for everyone and a profile page is personal. Where should each be cached, and why?"
+    a: "The product page can be cached at a shared CDN or reverse proxy, because one stored copy is correct for every user. The profile page must be marked private, so only that user's browser keeps it; a shared cache would serve one person's data to another."
+  - q: "You run ten app servers, each with its own in-process cache, and users complain they see different values. What is happening?"
+    a: "Each server filled its local cache separately, so the copies have drifted. Move the data to a shared cache like Redis, which gives every server the same copy, and keep the in-process layer only for data that is safe to see slightly stale."
 confusedWith: []
 tags: [caching, http, performance, redis]
 visual: flow
@@ -48,25 +59,23 @@ sources:
   - title: "Key eviction: using the INFO command (Redis docs)"
     url: "https://redis.io/docs/latest/develop/reference/eviction/"
     verifiedOn: "2026-10-16"
-  - title: "Scaling Memcache at Facebook (Nishtala et al., NSDI 2013)"
-    url: "https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf"
-    verifiedOn: "2026-10-16"
-  - title: "The System Design Primer: Cache (donnemartin, GitHub)"
-    url: "https://github.com/donnemartin/system-design-primer"
-    verifiedOn: "2026-10-16"
   - title: "Caching (Hello Interview, system design core concepts)"
     url: "https://www.hellointerview.com/learn/system-design/core-concepts/caching"
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+A cache is a copy of data kept somewhere faster to reach than its original source, so the same data does not have to be fetched or computed again. A **hit** means the data was found in the cache; a **miss** means it was not there and has to be fetched from the source. In a web system there is not one cache but many, sitting at different stops along a request's path, from the user's browser down to the database.
+
 ## Why it exists
 
-Every trip to the database costs time, and most apps fetch the same data again and again. A copy kept closer to the user saves that trip; the design question is where to keep it.
+Every trip to the database costs time, and most apps read the same data again and again. Without caches, a popular product page would hit the database on every view, and the database would become the bottleneck as traffic grows. A copy kept closer to the user answers the common reads in a fraction of the time and takes that load off the database. The design question is not whether to cache, but where.
 
 ## How it works
 
 <Mermaid
-  alt="A request passes caches in order. The user's browser cache comes first. On a miss the request goes to a CDN edge cache, then to a reverse-proxy cache, then to the app server and its in-process cache, then to a shared cache such as Redis, and finally to the database, which keeps its own buffer cache. A hit at any stop returns the answer without going further."
+  alt="A request passes caches in order. The user's browser cache comes first. On a miss the request goes to a CDN edge cache, then to a reverse-proxy cache, then to the app server and its in-process cache, then to a shared cache such as Redis, and finally to the database, which keeps its own buffer cache. A hit at any stop returns the answer without going further down."
   chart={`flowchart TD
   U([User]) --> B[Browser cache]
   B -->|miss| CDN[CDN edge cache]
@@ -76,47 +85,57 @@ Every trip to the database costs time, and most apps fetch the same data again a
   R -->|miss| DB[("Database, buffer cache")]`}
 />
 
-- **Shared HTTP caches** ([CDN](card:cdn), [reverse proxy](card:reverse-proxy)) keep one response for many users. Personal pages must say `private`, so only the browser keeps them.
-- **In-process vs distributed:** a local copy is fastest but differs per server; Redis or Memcached gives every server the same copy for one network hop. Many systems check local first, then shared.
-- Watch the **hit ratio**: hits ÷ (hits + misses). If most requests miss, checking the cache costs more than it saves.
+1. The request first checks the user's own browser cache. A hit here needs no network at all.
+2. On a miss it reaches a shared HTTP cache, a [CDN](card:cdn) edge near the user and then a [reverse proxy](card:reverse-proxy) in front of the app. These keep one stored copy that serves many users, so a page marked `private` is never kept here.
+3. Still a miss, so the request reaches an app server, which may keep a small in-process cache in its own memory: fastest to read, but each server has a separate copy that can drift.
+4. The app then checks a distributed cache such as Redis, one shared copy every server reads over the network, and only on a miss there does it read the database, which keeps its own buffer cache of recent pages.
+
+So caches closer to the user save more trips, but you control their freshness less.
 
 ## Example
 
-Two `Cache-Control` headers, as MDN recommends:
+Two `Cache-Control` headers, as MDN recommends, for a static script and for an HTML page.
 
 ```text
 # app.3f9a1c.js: the file name changes with every release
 Cache-Control: public, max-age=31536000, immutable
 
-# The HTML page: personal, so browser only; check before reuse
+# The HTML page: personal, so browser only; recheck before reuse
 Cache-Control: private, no-cache
 ```
 
-- The script is cached for a year (31,536,000 seconds); a new release gets a new name, so users still get it.
-- The HTML is checked every time; if it has not changed, the server answers `304 Not Modified` with no body.
+What to notice:
 
-## Defaults
+- `public, max-age=31536000` lets shared caches keep the script for a year (31,536,000 seconds); `immutable` tells the browser never to recheck it.
+- A new release gives the file a new hashed name, so users fetch the new file instead of a stale cached one. This is why a version in the name is safe to cache for so long.
+- `private` on the HTML keeps it out of shared CDN and proxy caches, so one user's page is never served to another.
+- `no-cache` stores the page but rechecks it every time; if it has not changed, the server answers `304 Not Modified` with no body, saving the download.
 
-| What | Default | Where |
-| --- | --- | --- |
-| No `Cache-Control` or `Expires` | Caches may guess a lifetime, typically 10% of the time since `Last-Modified` | HTTP caching (RFC 9111) |
-| Reverse-proxy caching | Off; entries unused for 10 minutes are removed (`inactive`) | nginx `proxy_cache`, `proxy_cache_path` |
-| Database buffer cache | 128 MB (`shared_buffers`) | PostgreSQL 18 |
+## Rules and defaults
+
+- **No freshness header:** with no `Cache-Control` or `Expires`, a cache may guess a lifetime, commonly 10% of the time since `Last-Modified` (RFC 9111 heuristic freshness).
+- **Reverse-proxy cache:** off by default in nginx; once enabled, entries unused for 10 minutes are removed (`proxy_cache_path inactive`).
+- **Database buffer cache:** PostgreSQL 18 keeps recent pages in `shared_buffers`, 128 MB by default, so repeated reads of the same rows avoid the disk.
+- **Hit ratio:** measure hits ÷ (hits + misses). Redis reports `keyspace_hits` and `keyspace_misses` in `INFO stats`. A low ratio means the cache is paying its cost without saving trips.
+
+## Not to be confused with
+
+An in-process cache and a distributed cache both store hot data, but differ in reach. An in-process cache lives inside one app server's memory: no network hop, so the fastest, but every server has its own copy that can drift. A distributed cache like Redis is one shared store that all servers read over the network: one network hop, but one copy everyone agrees on. Rule: shared cache for correctness across servers, in-process only for very hot keys that tolerate drift.
 
 ## Interview Qs
 
 ### Where can you add a cache in a web system?
 
-At every hop: the browser, a CDN, a reverse proxy, the app's own memory, a shared cache such as Redis, and the database's buffer cache. Caches closer to the user save more trips, but you control their freshness less.
+At every hop: the browser, a CDN, a reverse proxy, the app's own memory, a shared cache such as Redis, and the database's buffer cache. Caches closer to the user save more trips, but you control their freshness less, so personal data must stay in private caches.
 
 ### In-process cache or distributed cache?
 
-In-process is fastest, but each server keeps its own copy: values drift between servers and new servers start empty. A distributed cache like Redis gives one shared copy for one network hop. Default to shared; add a small local layer for very hot keys.
+In-process is fastest because there is no network hop, but each server keeps its own copy, so values drift between servers and a new server starts empty. A distributed cache like Redis gives one shared copy for one network hop. Default to a shared cache; add a small in-process layer only for very hot keys.
 
-### How do you know a cache is working?
+### How do you know a cache is actually helping?
 
-Measure the hit ratio: hits divided by hits plus misses. Redis reports `keyspace_hits` and `keyspace_misses` in `INFO stats`. If the ratio is low, check whether keys are evicted too early or TTLs are too short.
+Measure the hit ratio, hits divided by hits plus misses. Redis reports `keyspace_hits` and `keyspace_misses` in `INFO stats`. If the ratio is low, keys may be evicted too early or TTLs may be too short, and the cache is adding a lookup without saving a database trip.
 
 ### How do you cache static files but still ship updates?
 
-Put a version or hash in the file name and cache it for a year with `immutable`. A release changes the name, so browsers fetch the new file. Keep the HTML on `no-cache` so it always points to the latest names.
+Put a version or hash in the file name and cache it for a year with `immutable`. A new release changes the name, so browsers fetch the new file. Keep the HTML on `no-cache` so it always points to the latest file names.

@@ -5,18 +5,29 @@ title: Load Shedding and Graceful Degradation
 topic: reliability
 level: interview
 heat: 2
-hook: "When overloaded, say no fast to some requests so the rest still get fast answers. When a part fails, serve a simpler page, not an error page."
+hook: "When overloaded, say no quickly to some requests so the rest still get fast answers; when a part fails, serve a simpler page instead of an error."
 points:
-  - { k: "Goodput", v: "answers that arrive before the client gives up; overload kills it" }
-  - { k: "Reject early and cheaply", v: "return 503 before doing any real work for the request" }
-  - { k: "Shed by priority", v: "drop batch and crawler traffic first; keep health checks and users" }
-  - { k: "Drop expired work", v: "skip queued requests whose caller has already timed out" }
-  - { k: "Graceful degradation", v: "cached, partial or simpler results instead of an error", kind: plus }
-  - { k: "Rarely used paths", v: "degraded modes break if never tested; exercise them", kind: minus }
+  - { k: "Goodput", v: "the rate of useful answers that arrive before the client gives up; overload destroys it" }
+  - { k: "Reject early and cheaply", v: "return 503 before doing any real work, so a shed request costs almost nothing" }
+  - { k: "Shed by priority", v: "drop batch jobs and crawler traffic first; keep health checks and real users" }
+  - { k: "Drop expired work", v: "skip a queued request whose caller has already timed out, since its answer is now useless" }
+  - { k: "Graceful degradation", v: "return cached, partial or simpler results instead of a hard error when a part fails", kind: plus }
+  - { k: "Test degraded paths", v: "a fallback that only runs during failures rots silently unless you exercise it", kind: minus }
 trap:
-  wrong: "Load shedding is just rate limiting."
-  right: "Rate limiting caps each client for fairness. Load shedding guards the server's total load, even when every client is within its limit."
-sayIt: "Each server watches its own load. Past a limit it rejects low-priority work early with a 503, so accepted requests stay fast. If a dependency fails, the page degrades to cached or partial data, so one overload does not cascade."
+  wrong: "Load shedding is just another name for rate limiting."
+  right: "Rate limiting caps each client for fairness; load shedding guards the server's total load, even when every client is within its own limit."
+  why: "Both reject requests with a status code, so they look the same from outside, but one is per-client fairness (429) and the other is whole-server self-protection (503)."
+sayIt: "Each server watches its own load, and past a limit it rejects low-priority work early with a 503 so accepted requests stay fast. If a dependency fails, the page degrades to cached or partial data, so one overload does not cascade into a full outage."
+cheat:
+  idea: "An overloaded server rejects some requests fast (a 503) so the rest stay fast, instead of slowing until every answer is too late. Degrade to a simpler result on failure."
+  flow: "Watch load → over limit → reject low-priority early (503)"
+  remember: "Shed total overload (503), unlike per-client rate limiting (429); reject before any work."
+buildsOn: [rate-limiting, circuit-breaker]
+scenarios:
+  - q: "A server can finish 1,000 requests per second within the client's 1-second timeout, but 1,500 arrive each second. With no shedding, what happens to goodput?"
+    a: "The backlog grows every second, so requests wait longer and longer; soon most answers arrive after the 1-second timeout and are thrown away. The server works at full tilt but its goodput (useful answers in time) collapses toward zero. Shedding 500 requests early keeps about 1,000 fast answers plus 500 quick 503s."
+  - q: "Your recommendations service is down. Should the product page return an error, and what is the better option?"
+    a: "No. The product page's core job is to show the product, so it should degrade: render the page without the recommendations block rather than fail the whole page. This is graceful degradation. The missing feature is far less harmful than an unusable page, and it keeps the failure from spreading to checkout."
 confusedWith: []
 tags: [reliability, overload, availability]
 visual: flow
@@ -39,49 +50,50 @@ sources:
   - title: "RFC 6585 Additional HTTP Status Codes: 4. 429 Too Many Requests"
     url: "https://www.rfc-editor.org/rfc/rfc6585.html#section-4"
     verifiedOn: "2026-10-16"
-  - title: "The System Design Primer: Back pressure (donnemartin, GitHub)"
-    url: "https://github.com/donnemartin/system-design-primer#back-pressure"
-    verifiedOn: "2026-10-16"
-  - title: "Resiliency patterns: load shedding (ByteByteGo guides)"
-    url: "https://bytebytego.com/guides/resiliency-patterns/"
-    verifiedOn: "2026-10-16"
+  - title: "Kubernetes: Configure Liveness, Readiness and Startup Probes (Kubernetes documentation)"
+    url: "https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/"
+    verifiedOn: "2026-10-27"
 ---
+
+## What it is
+
+Load shedding means that when a server has more work than it can handle, it deliberately refuses some requests straight away, so the requests it does accept still finish quickly. Graceful degradation is the related idea of doing less rather than failing: if a part is missing, serve a simpler, cached or partial result instead of an error. Both choose "a worse answer now" over "a good answer too late, or none".
 
 ## Why it exists
 
-An overloaded server that accepts everything gets slower until most answers arrive after the client gave up. It works hard and helps no one, and its load then moves to other servers, which fall over too.
+A server that accepts every request when overloaded just gets slower and slower. Soon most answers arrive after the client has already given up, so the work is wasted: its [goodput](term:goodput), the useful answers delivered in time, drops toward zero. Worse, its backlog and slowness spread to the servers calling it, and they fall over too. Shedding the excess early keeps the server fast for the requests it accepts, and stops the overload from cascading.
 
 ## How it works
 
 <Steps label="What an overloaded server does">
 <Step title="Watch its own load">
-Count requests in flight, CPU or queue length on each server.
+Track a cheap signal of load on each server: requests in flight, CPU use, or queue length.
 </Step>
-<Step title="Reject early">
-Past the limit, return 503 at once, before any real work. Rejecting must cost almost nothing.
+<Step title="Reject early and cheaply">
+Past the limit, return 503 at once, before doing any real work. Rejecting must cost almost nothing, or shedding adds load instead of removing it.
 </Step>
 <Step title="Shed low priority first">
-Batch jobs and crawlers go first. Health checks stay, or the load balancer pulls healthy servers out.
+Drop batch jobs and crawler traffic before real users. Keep health checks answering, so the load balancer does not think the server is dead.
 </Step>
 <Step title="Skip dead work">
-Drop queued requests whose caller already timed out. Keep queues short.
+Drop a queued request whose caller has already timed out: its answer can no longer be used, so producing it only steals capacity.
 </Step>
 <Step title="Degrade, do not fail">
-If a dependency is down or slow, do less: cached, partial or simpler results.
+If a dependency is down or slow, do less: cached, partial or simpler results, instead of failing the whole response.
 </Step>
 </Steps>
 
-- **Graceful degradation example:** recommendations are down, so the product page shows without them. Under heavy load, search can query a smaller cached index.
+So the key is that rejecting must be far cheaper than serving, so the server can shed a flood without the shedding itself becoming the bottleneck.
 
 ## Example
 
-Shed by counting requests in flight:
+Shedding by capping the number of requests in flight with a semaphore:
 
 ```java
-private final Semaphore inFlight = new Semaphore(100);   // max requests at once
+private final Semaphore inFlight = new Semaphore(100);   // at most 100 at once
 
 Response handle(Request req) {
-    if (!inFlight.tryAcquire()) {                        // full: shed at once
+    if (!inFlight.tryAcquire()) {                        // full: shed immediately
         return Response.status(503).header("Retry-After", "1").build();
     }
     try {
@@ -95,10 +107,10 @@ Response handle(Request req) {
 ```python
 import threading
 
-in_flight = threading.BoundedSemaphore(100)      # max requests at once
+in_flight = threading.BoundedSemaphore(100)      # at most 100 at once
 
 def handle(request):
-    if not in_flight.acquire(blocking=False):    # full: shed at once
+    if not in_flight.acquire(blocking=False):    # full: shed immediately
         return Response(status=503, headers={"Retry-After": "1"})
     try:
         return process(request)
@@ -106,29 +118,38 @@ def handle(request):
         in_flight.release()
 ```
 
-Illustration: a server can answer 1,000 requests a second within the 1 s client timeout, and 1,500 arrive. Without shedding, queues grow and most answers come too late. With shedding, about 1,000 get fast answers and 500 get a quick 503.
+What to notice:
 
-## Defaults
+- `tryAcquire` (and `acquire(blocking=False)`) never waits: if all 100 permits are taken, the request is shed in one cheap check, with no queueing.
+- The 503 carries `Retry-After`, telling a well-behaved client to wait a second before trying again, which spreads the load out.
+- The permit is released in a `finally` block, so a failing request still frees its slot. Drop the `finally` and a few errors would leak permits until the server sheds everything.
 
-| Situation | Status code | Spec |
-| --- | --- | --- |
-| Server overloaded, shedding load | 503 Service Unavailable, optional `Retry-After` | RFC 9110 |
-| One client over its rate limit | 429 Too Many Requests, optional `Retry-After` | RFC 6585 |
+## Rules and defaults
+
+- **Server overloaded, shedding:** return 503 Service Unavailable, optionally with a `Retry-After` header (RFC 9110).
+- **One client over its rate limit:** return 429 Too Many Requests, optionally with `Retry-After` (RFC 6585). This is a different concern from shedding.
+- **Keep queues short and bounded:** a long queue only adds waiting time; by the time a deep-queued request runs, its caller has often timed out.
+- **Readiness vs liveness (Kubernetes):** a failing readiness probe stops new traffic to a busy instance (a form of shedding), while a failing liveness probe restarts it. Do not fail liveness just because a downstream dependency is briefly unavailable, or you restart healthy instances.
+
+## Not to be confused with
+
+Load shedding protects one server from its total incoming load, whoever is sending it, and uses 503. Rate limiting caps each individual client for fairness and abuse control, and uses 429. A [circuit breaker](card:circuit-breaker) is the outbound side: it stops a client from calling a failing dependency. Rule: rate limit per client, shed by total load, break per failing dependency.
+
+## Common mistakes
+
+- **"Just queue everything and serve it eventually."** A long queue turns overload into high latency. The request is served only after its caller has timed out, so the work is wasted. Keep queues short and shed the overflow.
+- **"We built a degraded mode, so we are covered."** A degraded path that is never exercised quietly breaks, and then fails on the day it is finally needed. Test degraded and fallback modes regularly, for example with periodic game-day drills.
 
 ## Interview Qs
 
-### What is load shedding, and why not just queue everything?
+### What is load shedding, and why not just queue the extra requests?
 
-Rejecting excess requests early so accepted ones stay fast. A long queue only adds waiting: by the time a request is served, its caller may have timed out, so the work is wasted. Keep queues short and bounded.
+Load shedding rejects excess requests early so accepted ones stay fast. A long queue only adds waiting: by the time a deeply queued request is served, its caller has often timed out, so the work is wasted and the server is busy producing answers nobody can use. Keep queues short and bounded, and shed the overflow with a cheap 503.
 
-### Load shedding vs rate limiting?
+### Load shedding versus rate limiting: how are they different?
 
-Rate limiting caps each client, for fairness and abuse control, usually with 429. Load shedding protects the server from total load, whoever sends it, usually with 503. Use both: rate limits at the gateway, shedding on every server.
-
-### What is graceful degradation? Give an example.
-
-Keeping the core feature working during a failure by doing less. If recommendations are down, show the product page without them. Under heavy load, search a smaller cached index. Test these modes often, or they break when needed.
+Rate limiting caps each client, for fairness and abuse control, usually returning 429. Load shedding protects the server from its total load, whoever sends it, usually returning 503, and it fires even when every client is within its own limit. Use both: rate limits at the gateway, shedding on every server.
 
 ### What is a cascading failure, and how do you prevent it?
 
-One part fails or slows down, its load moves to the others, and they fail too. Prevent it with load shedding, timeouts, limited retries with backoff and jitter, circuit breakers, and spare capacity.
+One part fails or slows, its load or its callers' retries pile onto the others, and they fail too, until the whole system is down. Prevent it with load shedding, timeouts, limited retries with backoff and jitter, circuit breakers, bulkheads, and enough spare capacity to absorb a lost peer.

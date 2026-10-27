@@ -5,18 +5,29 @@ title: Publish-Subscribe
 topic: messaging
 level: beginner
 heat: 3
-hook: "Publish an event once to a topic; every subscriber gets its own copy, and the publisher never knows who is listening."
+hook: "Publish an event once to a topic; every subscriber gets its own copy, and the publisher never knows or cares who is listening."
 points:
-  - { k: "Topic", v: "publishers send to a named channel, not to a service" }
-  - { k: "Push or pull", v: "the broker calls your endpoint, or your client asks for messages" }
-  - { k: "New subscriber", v: "joins with no change to the publisher", kind: plus }
-  - { k: "Filter policy", v: "an SNS subscription can take only the messages it wants" }
-  - { k: "Order, duplicates", v: "Google Pub/Sub: at-least-once, unordered unless ordering keys", kind: minus }
-  - { k: "Pub/Sub ack deadline", v: "10 s by default, up to 600 s (Google Cloud Pub/Sub)", kind: default }
+  - { k: "Topic", v: "a named channel; publishers send to the topic, not to any specific service" }
+  - { k: "Subscriber", v: "a service that signs up to a topic and gets its own copy of every message" }
+  - { k: "Fan-out", v: "one event reaches many services at once, each handling it on its own" }
+  - { k: "Add a subscriber freely", v: "a new service subscribes without any change to the publisher", kind: plus }
+  - { k: "One copy per subscription", v: "workers inside one subscription share its messages like a queue; different subscriptions do not", kind: minus }
+  - { k: "Pub/Sub ack deadline", v: "Google Cloud Pub/Sub hides a delivered message for 10 s by default (up to 600 s) before redelivering", kind: default }
 trap:
-  wrong: "Pub/sub is a queue where the subscribers share the messages."
-  right: "Every subscription gets every message. Only the workers inside one subscription share its messages, like a queue."
-sayIt: "When one event matters to many services, like an order placed, I publish it once to a topic. Billing, stock and email each subscribe through their own durable queue, so a slow service does not hold up the others, and a new service can join without touching the publisher."
+  wrong: "Pub/sub is just a queue where all the subscribers share the messages between them."
+  right: "Every subscription gets every message. Only the workers inside one subscription share that subscription's copy, like a queue."
+  why: "Both sit on a broker and both have consumers, so people picture one shared line. The difference is that pub/sub copies each message once per subscription, while a queue hands each message to just one consumer."
+sayIt: "When one event matters to many services, like a payment captured, I publish it once to a topic. Each service subscribes through its own durable subscription, so a slow one does not hold up the others, and a new service can join without touching the publisher."
+cheat:
+  idea: "Publish-subscribe sends one event to a named topic, and the broker gives a copy to every subscribed service. The publisher does not know who subscribes."
+  flow: "Publisher → Topic → a copy to every subscription → each service reacts"
+  remember: "Every subscription gets its own copy of every message. A queue gives each message to one consumer."
+buildsOn: [message-queue]
+scenarios:
+  - q: "After a payment is captured you must update the ledger, send a receipt, and refresh a fraud model. With a plain queue, how is that awkward, and how does pub/sub fix it?"
+    a: "A single queue gives each message to one worker, so you cannot make all three react to the same payment without three queues and the payment service writing to each. Publish one PaymentCaptured event to a topic; ledger, receipt and fraud each subscribe and get their own copy, and the payment service sends it once."
+  - q: "The email service is down for an hour. With an SNS topic feeding one SQS queue per service, do the other services or the emails suffer?"
+    a: "No. Ledger and fraud read their own queues and are unaffected. The email service's queue keeps its messages (SQS retains them for 4 days by default), so when it comes back it processes the backlog. A durable subscription is what prevents the loss."
 confusedWith: [queue-vs-pubsub-vs-stream]
 tags: [messaging, events, pub-sub, sns]
 visual: flow
@@ -50,64 +61,80 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Publish-subscribe (pub/sub) is a way to send one event to many services at once. Publishers send a message to a named channel called a **topic**, not to any particular service. Services that want those events **subscribe** to the topic, and the broker delivers a copy to each of them. The publisher never learns who the subscribers are, so they are fully decoupled. Sending one message to many destinations this way is called **fan-out**.
+
 ## Why it exists
 
-When one event, like an order placed, matters to many services, calling each one directly ties the sender to all of them. Pub/sub lets the sender announce the event once and not care who listens.
+When one event, like a payment being captured, matters to several services, the payment service could call billing, then analytics, then email directly. But now it knows about all three, must handle each one being slow or down, and must be changed every time a new consumer appears. With pub/sub it instead announces the event once to a topic and moves on. Each interested service subscribes on its own, so adding or removing a consumer never touches the publisher.
 
 ## How it works
 
 <Mermaid
-  alt="Pub/sub fan-out. The order service publishes one OrderPlaced message to the orders topic. The topic copies it into three queues: billing, stock and email. Each queue feeds its own service: billing, inventory and email."
+  alt="The payment service publishes one PaymentCaptured message to the payments topic. The topic copies it into three queues, one for ledger, one for analytics and one for email. Each queue feeds its own service, so all three react to the same event."
   chart={`flowchart TD
-  P[Order service] -- "publish OrderPlaced" --> T{{"Topic: orders"}}
-  T -- copy --> S1[(Billing queue)]
-  T -- copy --> S2[(Stock queue)]
+  P[Payment service] -- "publish PaymentCaptured" --> T{{"Topic: payments"}}
+  T -- copy --> S1[(Ledger queue)]
+  T -- copy --> S2[(Analytics queue)]
   T -- copy --> S3[(Email queue)]
-  S1 --> B[Billing]
-  S2 --> I[Inventory]
+  S1 --> B[Ledger]
+  S2 --> I[Analytics]
   S3 --> E[Email]`}
 />
 
-- Each [subscription](card:subscription) gets every message. Workers that share one subscription split its messages, like a queue.
-- A common setup: the topic feeds [one queue per service](card:topic-to-queues) (SNS + SQS), so each service reads at its own pace.
-- Durable subscriptions keep messages for a subscriber that is down. [Redis Pub/Sub](card:fire-and-forget-pubsub) does not: an offline subscriber misses them.
+1. A publisher sends an event to the topic and returns; it does not wait for any subscriber.
+2. The broker copies the event once into every subscription attached to the topic.
+3. Each subscriber reads from its own copy at its own pace, so a slow subscriber does not hold up the others.
+4. If several workers share one subscription, they split that subscription's messages between them, exactly like a queue.
+5. To add a new reaction, a new service just subscribes; the publisher is unchanged.
 
 ## Analogy
 
-<Analogy title="A newspaper subscription" limit="Live pub/sub such as Redis Pub/Sub is more like radio: if you are not listening, you miss it.">
-The paper is printed once, and every subscriber gets a copy at their own door. The newsroom does not know who reads it, and a new reader just signs up.
+<Analogy title="A newspaper subscription" limit="A newspaper is fixed once printed. Live pub/sub such as Redis Pub/Sub is more like radio: if you are not tuned in at that moment, you miss the broadcast and it is gone.">
+The paper is printed once, and every subscriber gets their own copy delivered to their door. The newsroom does not know who reads it, and a new reader simply signs up without the newsroom doing anything.
 </Analogy>
 
 ## Example
 
-The fan-out from the Amazon SNS docs, with one SQS queue per service:
+A common real setup is an SNS topic with one SQS queue per service, so each service reads durably at its own pace.
 
-- The order service publishes `OrderPlaced` once to the `orders` topic.
-- Billing, inventory and email each own a queue subscribed to it: three copies.
-- Later, analytics subscribes a fourth queue. The order service does not change.
-- Email is down for an hour? Its queue keeps the messages (SQS: 4 days by default).
+- The payment service publishes `PaymentCaptured` once to the `payments` topic.
+- Ledger, analytics and email each own an SQS queue subscribed to the topic, so each gets its own copy.
+- Later, a new fraud service subscribes a fourth queue. The payment service is not changed at all.
+- If email is down for an hour, its queue holds the messages (SQS keeps them for 4 days by default), so nothing is lost.
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Who gets a message | Every subscriber, unless it sets a filter policy | Amazon SNS |
-| Ack deadline | 10 s (up to 600 s) | Google Cloud Pub/Sub |
-| How long unacked messages are kept | 7 days (10 minutes to 31 days) | Google Cloud Pub/Sub |
-| Delivery and order | At-least-once; no ordering unless you set ordering keys | Google Cloud Pub/Sub |
-| Delivery attempts before dead-lettering | 5 (5 to 100), when a dead-letter topic is set | Google Cloud Pub/Sub |
-| Delivery | At-most-once: an offline subscriber misses the message | Redis Pub/Sub |
+- The fan-out is one copy **per subscription**, not one shared pool, so every service sees every payment.
+- Giving each subscriber its own SQS queue is what makes the subscription **durable**; a down subscriber catches up later.
+- A filter policy on a subscription can drop messages it does not care about, so a service receives only the events it wants.
+
+## Rules and defaults
+
+- **Every subscription gets every message:** unless the subscription sets a filter policy to narrow it (Amazon SNS).
+- **Delivery and order:** Google Cloud Pub/Sub is at-least-once and does not keep order unless you set ordering keys. Make subscribers idempotent, or use FIFO topics with FIFO queues for strict order.
+- **Ack deadline:** Google Cloud Pub/Sub hides a delivered message for 10 s by default (up to 600 s); if the subscriber does not acknowledge in time, it is delivered again.
+- **Durable vs fire-and-forget:** a durable subscription (SNS+SQS, Google Pub/Sub) keeps messages for an offline subscriber; [Redis Pub/Sub](card:fire-and-forget-pubsub) is at-most-once, so an offline subscriber simply misses them.
+
+## Not to be confused with
+
+In a [message queue](card:message-queue), each message goes to one consumer and workers share the load. In pub/sub, each subscription gets its own copy, so many services react to one event. Rule: a queue divides work among workers; pub/sub broadcasts an event to many services. Many systems combine both: a topic fans out into one queue per service.
+
+## Common mistakes
+
+- **"A new subscriber will see the events from before it joined."** Usually not. A plain subscription receives only messages published after it subscribed; to replay older events you need a kept log, which is what an [event stream](card:event-streaming) gives you.
 
 ## Interview Qs
 
 ### How is pub/sub different from a message queue?
 
-In a queue, each message goes to one consumer: workers share the load. In pub/sub, every subscription gets its own copy: many services react to one event. Many systems combine them: a topic fans out into one queue per service.
+In a queue each message goes to one consumer, so workers share the load. In pub/sub every subscription gets its own copy, so many services react to the same event. Many systems combine them: a topic fans out into one queue per service, giving both broadcast and per-service load sharing.
 
-### How do you make sure a subscriber that is down does not lose events?
+### How do you stop a subscriber that is down from losing events?
 
-Give it a durable subscription: an SQS queue behind an SNS topic, or a Google Pub/Sub subscription, which keeps unacked messages for 7 days by default. Fire-and-forget pub/sub, like Redis Pub/Sub, drops messages for offline subscribers.
+Give it a durable subscription: an SQS queue behind an SNS topic, or a Google Pub/Sub subscription, which keeps unacknowledged messages (Google Pub/Sub for 7 days by default). The messages wait until the subscriber returns. Fire-and-forget pub/sub, like Redis Pub/Sub, drops messages for offline subscribers.
 
 ### Does pub/sub keep order and deliver each message once?
 
-Not by default. Google Pub/Sub is at-least-once and unordered unless you set ordering keys. For strict order, use ordering keys, or SNS FIFO topics with SQS FIFO queues. Either way, make subscribers idempotent.
+Not by default. Google Pub/Sub is at-least-once and unordered unless you set ordering keys. For strict order use ordering keys, or SNS FIFO topics with SQS FIFO queues. Either way make subscribers idempotent, because at-least-once delivery can repeat a message.

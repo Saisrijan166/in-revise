@@ -5,17 +5,29 @@ title: Cache-Aside (Lazy Loading)
 topic: caching
 level: intermediate
 heat: 3
-hook: "Read: check the cache; on a miss, load from the database and store it. Write: update the database, then delete the cached copy."
+hook: "Read: check the cache; on a miss, load from the database, store a copy with a TTL, and return it. Write: update the database first, then delete the cached copy."
 points:
-  - { k: "Read", v: "cache first; on a miss, read the DB and store with a TTL" }
-  - { k: "Write", v: "update the DB, then delete the cached key" }
-  - { k: "TTL", v: "limits how long old data lives; no freshness guarantee" }
-  - { k: "Cache down", v: "the app still works; the DB takes the load", kind: plus }
-  - { k: "Miss cost", v: "3 trips: cache, then DB, then cache write", kind: minus }
+  - { k: "Read path", v: "check the cache; on a miss, read the DB, store the value with a TTL, then return it" }
+  - { k: "Write path", v: "update the database first, then delete the cached key so the next read reloads it" }
+  - { k: "TTL", v: "caps how long a stale copy can live; it does not make the copy fresh" }
+  - { k: "Lazy loading", v: "the cache holds only data that was read, so it stays small", kind: plus }
+  - { k: "If the cache is down", v: "reads still work via the database, just slower", kind: plus }
+  - { k: "Miss cost", v: "three trips: check cache, read DB, write cache", kind: minus }
 trap:
-  wrong: "Delete the cached key first, then update the database."
-  right: "Update the database first, then delete the key. Otherwise a reader can put the old value back."
-sayIt: "With cache-aside the app reads from the cache, and on a miss loads from the database and caches it with a TTL. On writes it updates the database, then deletes the key. Simple, but data can be briefly stale."
+  wrong: "On a write, delete the cached key first, then update the database."
+  right: "Update the database first, then delete the key. If you delete first, a reader can reload the old value before your write lands."
+  why: "Deleting first feels safer because the stale copy is gone at once, but it opens a window where a concurrent read repopulates the cache with the old row."
+sayIt: "With cache-aside the app reads from the cache, and on a miss loads from the database and stores it with a TTL. On a write it updates the database, then deletes the key. It is simple and survives a cache outage, but a read can be briefly stale."
+cheat:
+  idea: "The app manages the cache itself: read the cache, on a miss load the database and fill the cache, and on a write update the database then delete the key."
+  flow: "Read: cache → miss → DB → fill. Write: DB → delete key"
+  remember: "Write order: database first, then delete the key. A TTL only caps staleness."
+buildsOn: [caching-strategies]
+scenarios:
+  - q: "Two requests race: one reads user 42 (a cache miss) while another updates user 42. The reader loads the old row and the writer updates the database and deletes the key. What can go wrong, and how does a TTL help?"
+    a: "The reader may write the old row back into the cache after the writer's delete, leaving a stale copy. Cache-aside does not fully prevent this race; the TTL on the key caps how long that stale copy can live, so it self-corrects when the TTL expires."
+  - q: "Your cache (Redis) goes down completely during peak traffic. With cache-aside, what happens to reads?"
+    a: "Every read misses, so it falls through to the database, which now takes the full load and gets slower, but the app keeps serving correct data. Cache-aside degrades rather than failing, which is one reason it is the common default."
 confusedWith: [cache-aside-vs-write-through]
 tags: [caching, performance, redis]
 visual: flow
@@ -34,14 +46,18 @@ sources:
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+Cache-aside, also called lazy loading, is a read strategy where the application itself manages the cache. The cache sits "aside" the database: it is not in the write path, and it does not know how to load data on its own. The app checks the cache, and when the data is not there, it reads the database, puts a copy in the cache, and returns it. This is the most common caching pattern, and the one most interviews expect you to describe.
+
 ## Why it exists
 
-Reading from a database is slow compared with memory, and most apps read the same data again and again. A cache such as Redis or Memcached keeps hot data in memory; with cache-aside, the app decides what goes in.
+Reading from a database is slow compared with reading from memory, and most apps read the same few rows again and again. You want those hot rows in a fast cache like Redis, but you do not want to cache every row, most of which are never read. Cache-aside solves this by filling the cache only when something is actually read, so the cache stays small and holds exactly the data people use. It also keeps working when the cache is down, because every path still ends at the database.
 
 ## How it works
 
 <Mermaid
-  alt="Cache-aside flow. Read path: the app checks the cache. On a hit it returns the value. On a miss it reads the database, stores the value in the cache with a TTL, then returns it. Write path: the app updates the database first, then deletes the key from the cache."
+  alt="Cache-aside has two paths. Read path: the app checks the cache. On a hit it returns the value. On a miss it reads the database, stores the value in the cache with a TTL, then returns it. Write path: the app updates the database first, then deletes the key from the cache."
   chart={`flowchart TD
   R([Read key]) --> C{In cache?}
   C -- hit --> RET([Return value])
@@ -52,9 +68,16 @@ Reading from a database is slow compared with memory, and most apps read the sam
   U --> DEL[2. Delete key from cache]`}
 />
 
-- AWS calls this **lazy loading**: data is cached only when someone reads it.
+1. On a read, the app asks the cache for the key. If it is a hit, the value is returned straight away.
+2. On a miss, the app reads the row from the database.
+3. The app stores that value in the cache with a TTL, so future reads of the same key are hits, then returns it.
+4. On a write, the app updates the database first, then deletes the key from the cache. The next read of that key misses and reloads the new value.
+
+So the app, not the cache, does all the loading, and a write clears the stale copy rather than trying to update it.
 
 ## Example
+
+The payment service caches a user record. On a read it loads lazily; on a write it invalidates the key.
 
 ```java
 User getUser(long id) {
@@ -87,20 +110,38 @@ def update_user(user_id, data):
     cache.delete(f"user:{user_id}")          # 2. then invalidate
 ```
 
+What to notice:
+
+- On a miss the value is stored with a 5-minute TTL, so a stale copy can live at most 5 minutes even if an invalidation is missed.
+- The write updates the database first, then deletes the key. Swap the two lines and a concurrent reader can refill the cache with the old row after your write, leaving it stale until the TTL.
+- The write deletes the key rather than setting the new value; deleting is simpler and avoids two racing writes leaving the wrong value behind.
+
+## Rules and defaults
+
+- **Write order:** database first, then delete the key. This is the safe order against concurrent reads.
+- **Always set a TTL:** it is the safety net. If an invalidation is ever lost, the stale key still expires on its own.
+- **Not fully race-free:** a read miss that overlaps a write can still repopulate an old value; the TTL bounds how long that lasts. Stronger freshness needs [write-through](card:write-through) or change-event invalidation.
+- **Empty cache node:** a fresh or restarted cache simply misses and refills from the database, so cache-aside survives restarts without special handling.
+
+## Not to be confused with
+
+Cache-aside and read-through both load the database on a miss, but the loader differs. In cache-aside your application code does the loading and talks to both the cache and the database. In read-through the cache does the loading through a built-in loader, and the app talks only to the cache. Rule: cache-aside keeps the load logic in your code; read-through hides it in the cache.
+
+## Common mistakes
+
+- **"A TTL keeps the cache fresh."** A TTL only caps how long a stale copy survives. For near-fresh reads you still invalidate on each write.
+- **"Update the cache on a write instead of deleting it."** Two concurrent updates can write their values to the cache out of order, leaving the older one. Deleting is idempotent and avoids this.
+
 ## Interview Qs
 
 ### Walk me through cache-aside.
 
-Read: check the cache; on a miss, load from the database, store it with a TTL, and return it. Write: update the database, then delete the key so the next read reloads it.
+On a read, check the cache; on a miss, load the row from the database, store it with a TTL, and return it. On a write, update the database first, then delete the key so the next read reloads the new value. The application does all the loading; the cache sits aside the database.
 
 ### Why delete the key after the database write, not before?
 
-If you delete first, a reader can miss, read the old row, and put it back before your write lands. The cache then stays stale until the TTL runs out.
+If you delete first, a concurrent reader can miss, read the old row, and write it back into the cache before your database write lands. The cache then holds the stale value until the TTL expires. Updating the database first and deleting after closes most of that window.
 
-### Cache-aside vs write-through?
+### A hot key expires and the database is suddenly flooded. What is happening?
 
-Cache-aside fills the cache on reads: a small cache, but slow misses and possibly stale data. Write-through updates the cache on every write: fresher data, but slower writes and a cache full of data nobody reads.
-
-### A hot key expires and the database is flooded. What do you do?
-
-That is a thundering herd. Let one request rebuild the value while the others wait (request coalescing, or leases as Facebook does), or refresh very hot keys before they expire.
+That is a cache stampede, or thundering herd: when the hot key expires, many requests miss at the same moment and all hit the database together. You let one request rebuild the value while the others wait or get the old copy, or you refresh very hot keys a little before they expire.

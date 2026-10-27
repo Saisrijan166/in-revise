@@ -5,18 +5,29 @@ title: Timeouts, Retries and Backoff
 topic: reliability
 level: intermediate
 heat: 3
-hook: "Never wait forever, never hammer a sick service: time out, then retry a few times, waiting longer and a little randomly each time."
+hook: "Never wait forever, never hammer a sick service: time out every call, then retry a few times, waiting longer and a little randomly each time."
 points:
-  - { k: "Timeout value", v: "the dependency's p99.9 latency: only ~0.1% of good calls time out" }
-  - { k: "Safe to retry", v: "idempotent calls: GET, PUT, DELETE, or a POST with an idempotency key" }
-  - { k: "Exponential backoff", v: "wait 100, 200, 400 ms... up to a cap, then give up" }
-  - { k: "Full jitter", v: "sleep a random time from 0 to the backoff, so clients spread out", kind: plus }
-  - { k: "Retries multiply", v: "3 retries at each of 3 layers: 4 x 4 x 4 = 64 tries on the DB", kind: minus }
-  - { k: "No timeout set", v: "Java HttpRequest and Python requests wait forever", kind: default }
+  - { k: "Timeout", v: "a limit on how long one call may wait; when it passes, the call is abandoned and the thread freed" }
+  - { k: "Set it from p99.9", v: "use the dependency's p99.9 latency, so only about 0.1% of healthy calls time out" }
+  - { k: "Retry only if safe", v: "retry only idempotent calls (GET, PUT, DELETE, or a POST with an idempotency key)", kind: minus }
+  - { k: "Exponential backoff", v: "wait 100ms, then 200, then 400, doubling up to a cap, then give up" }
+  - { k: "Full jitter", v: "sleep a random time between 0 and the backoff, so clients retry spread out, not together", kind: plus }
+  - { k: "Retries multiply", v: "3 retries at each of 3 nested layers means 4x4x4 = 64 calls on the bottom service", kind: minus }
 trap:
   wrong: "A payment call timed out, so it failed. Just retry it."
-  right: "A timeout means 'no answer', not 'failed'. The charge may have gone through. Retry only with an idempotency key."
-sayIt: "I set connect and request timeouts from p99.9 latency. I retry only transient errors on idempotent calls, at one layer, with capped exponential backoff, full jitter and a retry budget."
+  right: "A timeout means 'no answer', not 'it failed'. The charge may have gone through, so retry only with an idempotency key."
+  why: "A timeout feels like a failure because you get nothing back, but it only means the reply did not arrive in time, not that the server skipped the work."
+sayIt: "I put a timeout on every call, sized from the dependency's p99.9 latency. I retry only transient errors on idempotent calls, at one layer, with capped exponential backoff, full jitter and a retry budget, so a blip does not become a retry storm."
+cheat:
+  idea: "Put a timeout on every call so a hung one does not hold a thread forever. On a transient failure, retry a few times with growing, randomised waits."
+  flow: "Call with timeout → fail → backoff + jitter → retry → give up after N"
+  remember: "Retry only idempotent calls; add jitter so clients do not retry in sync."
+buildsOn: [idempotency, latency-and-throughput]
+scenarios:
+  - q: "A thousand clients all call one service that briefly fails, then all retry at exactly the same backoff. What happens, and what single change fixes it?"
+    a: "They retry together in a spike the instant each backoff ends, so the recovering service is flattened again by a synchronised wave. Adding full jitter (a random wait between 0 and the backoff) spreads the retries into a smooth trickle. In AWS's simulation, jitter more than halved the total number of calls."
+  - q: "You set a timeout of 50ms on a call whose p99.9 latency is 300ms. What goes wrong?"
+    a: "Many healthy but slightly slow calls cross 50ms and are wrongly treated as failures, so you retry calls that were about to succeed. This adds load and can cause false errors. Size the timeout from the high percentile (here about 300ms) so only the genuinely stuck calls time out."
 confusedWith: []
 tags: [reliability, retries, backoff, timeouts]
 visual: flow
@@ -26,12 +37,6 @@ sources:
     verifiedOn: "2026-10-16"
   - title: "Exponential Backoff And Jitter (AWS Architecture Blog, Marc Brooker, 2015)"
     url: "https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/"
-    verifiedOn: "2026-10-16"
-  - title: "aws-arch-backoff-simulator: backoff formulas (aws-samples, GitHub)"
-    url: "https://github.com/aws-samples/aws-arch-backoff-simulator/blob/master/src/backoff_simulator.py"
-    verifiedOn: "2026-10-16"
-  - title: "Retry behavior (AWS SDKs and Tools Reference Guide)"
-    url: "https://docs.aws.amazon.com/sdkref/latest/guide/feature-retry-behavior.html"
     verifiedOn: "2026-10-16"
   - title: "REL05-BP05 Set client timeouts (AWS Well-Architected, Reliability Pillar)"
     url: "https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/rel_mitigate_interaction_failure_client_timeouts.html"
@@ -45,9 +50,6 @@ sources:
   - title: "Handling Overload (Google SRE Book, chapter 21)"
     url: "https://sre.google/sre-book/handling-overload/"
     verifiedOn: "2026-10-16"
-  - title: "Addressing Cascading Failures (Google SRE Book, chapter 22)"
-    url: "https://sre.google/sre-book/addressing-cascading-failures/"
-    verifiedOn: "2026-10-16"
   - title: "RFC 9110 HTTP Semantics: 9.2.2 Idempotent Methods, 10.2.3 Retry-After, 15.6.4 503"
     url: "https://www.rfc-editor.org/rfc/rfc9110.html"
     verifiedOn: "2026-10-16"
@@ -57,51 +59,45 @@ sources:
   - title: "HttpRequest.Builder.timeout (Java SE 21 API)"
     url: "https://docs.oracle.com/en/java/javase/21/docs/api/java.net.http/java/net/http/HttpRequest.Builder.html"
     verifiedOn: "2026-10-16"
-  - title: "ThreadLocalRandom.nextLong (Java SE 21 API)"
-    url: "https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/concurrent/ThreadLocalRandom.html"
-    verifiedOn: "2026-10-16"
   - title: "Quickstart: Timeouts (Requests documentation)"
     url: "https://requests.readthedocs.io/en/latest/user/quickstart/#timeouts"
-    verifiedOn: "2026-10-16"
-  - title: "random.uniform (Python docs)"
-    url: "https://docs.python.org/3/library/random.html#random.uniform"
-    verifiedOn: "2026-10-16"
-  - title: "Deadlines (gRPC guides)"
-    url: "https://grpc.io/docs/guides/deadlines/"
     verifiedOn: "2026-10-16"
   - title: "Retry (Resilience4j docs)"
     url: "https://resilience4j.readme.io/docs/retry"
     verifiedOn: "2026-10-16"
-  - title: "Networking Essentials: timeouts, retries and backoff (Hello Interview)"
-    url: "https://www.hellointerview.com/learn/system-design/core-concepts/networking-essentials"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+A timeout is a limit on how long one call may wait for a reply; when the limit passes, the caller gives up on that call instead of waiting on. A retry is a fresh attempt after a failed call. Backoff means waiting longer before each retry, and jitter means adding a little randomness to that wait. Together they decide what the payment service does when a call to the card gateway hangs or fails for a moment.
 
 ## Why it exists
 
-Remote calls sometimes hang or fail for a moment. Without a timeout, a hung call holds a thread forever; with careless retries, many clients can flatten a service that was about to recover.
+Remote calls sometimes hang or fail briefly. Without a timeout, a hung call holds its thread and connection forever, and enough hung calls use up every thread until the caller itself stops responding. Retries recover from a short blip, but careless retries do the opposite harm: many clients retrying at once can flatten a service that was just about to recover. Backoff and jitter make retries gentle enough to help rather than hurt.
 
 ## How it works
 
 <Mermaid
-  alt="Retry loop. Make the call with a timeout. On success, return the result. On failure, check three things: is the error transient, is the call safe to retry, and are attempts left? If not, fail and return the error. If yes, wait a random time between 0 and the backoff, double the backoff, and call again."
+  alt="Retry loop. Make the call with a timeout. On success, return the result. On failure, check three things: is the error transient, is the call safe to retry, and are attempts left? If any is no, return the error. If all are yes, wait a random time between 0 and the current backoff, double the backoff, and call again."
   chart={`flowchart TD
   C[Call with a timeout] --> S{Success?}
   S -- yes --> R([Return result])
-  S -- no --> T{"Transient error, safe to retry, attempts left?"}
+  S -- no --> T{"Transient, safe to retry, attempts left?"}
   T -- no --> F([Return the error])
   T -- yes --> W["Wait random(0, backoff), then double the backoff"]
   W --> C`}
 />
 
-- **Timeout** frees the thread so you can decide: retry, fall back, or fail. Set a connect timeout and a request timeout.
-- **Backoff** gives the service time to recover. **Jitter** spreads out clients that failed at the same moment.
-- **Limit** retries: a few attempts, at one layer only, inside a retry budget. Google's SRE book keeps each client's retries under 10% of its requests.
-- **Deadline propagation:** pass the time left to each downstream call, so no service keeps working after the caller gave up.
+1. Make the call with both a connect timeout and a request timeout set.
+2. If it succeeds, return the result.
+3. If it fails, retry only when the error is transient (a timeout or a 503, not a 404), the call is idempotent, and attempts remain.
+4. Before each retry, sleep a random time between 0 and the current backoff, then double the backoff up to a cap.
+
+So the key is to retry at one layer only, inside a [retry budget](term:retry-budget): the Google SRE book keeps each client's retries under 10% of its requests.
 
 ## Example
 
-Capped exponential backoff with full jitter:
+Capped exponential backoff with full jitter, around a call that already has its own timeout:
 
 ```java
 <T> T callWithRetry(Supplier<T> call) throws InterruptedException {
@@ -112,7 +108,7 @@ Capped exponential backoff with full jitter:
             return call.get();                         // the call has its own timeout
         } catch (TransientException e) {               // never retry a 400 or 404
             if (attempt + 1 >= maxAttempts) throw e;
-            long backoff = Math.min(capMs, baseMs << attempt);         // 100, 200, 400...
+            long backoff = Math.min(capMs, baseMs << attempt);        // 100, 200, 400...
             Thread.sleep(ThreadLocalRandom.current().nextLong(backoff + 1)); // full jitter
         }
     }
@@ -120,8 +116,7 @@ Capped exponential backoff with full jitter:
 ```
 
 ```python
-import random
-import time
+import random, time
 
 def call_with_retry(call, max_attempts=3, base=0.1, cap=5.0):
     for attempt in range(max_attempts):          # 1 call + 2 retries
@@ -134,30 +129,35 @@ def call_with_retry(call, max_attempts=3, base=0.1, cap=5.0):
             time.sleep(random.uniform(0, backoff))    # full jitter
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Request timeout | None: waits forever | Java 21 `HttpRequest` without `timeout(...)` |
-| Request timeout | None: waits forever | Python `requests` without `timeout=` |
-| Call deadline | None: can wait forever | gRPC |
-| Retry attempts | 3 in total, fixed 500 ms wait | Resilience4j 2.x Retry |
-| Which errors are retried | Every exception, unless you configure it | Resilience4j 2.x Retry |
+- `baseMs << attempt` doubles the backoff each attempt (100, 200, 400ms), and `Math.min(capMs, ...)` stops it growing without bound.
+- The sleep is a random value between 0 and the backoff (full jitter), so two clients that failed together do not retry at the same instant.
+- Only `TransientException` is caught and retried; a 400 or 404 is rethrown at once, because repeating it would fail the same way.
+- Remove the jitter and keep a fixed wait, and all clients retry in a synchronised spike that can re-overload the service.
+
+## Rules and defaults
+
+- **Java 21 `HttpRequest`:** no request timeout unless you call `timeout(...)`; without it the call can wait forever.
+- **Python `requests`:** no timeout unless you pass `timeout=`; without it the call can wait forever.
+- **Resilience4j 2.x Retry:** 3 attempts in total with a fixed 500ms wait, and it retries every exception unless you configure which ones.
+- **Deadline propagation:** pass the time remaining to each downstream call, so no service keeps working on a request after the original caller has already given up.
+
+## Common mistakes
+
+- **"Retry every error."** A 400, 401, 403 or 404 will fail the same way on every attempt, so retrying only wastes work. Retry only transient errors: timeouts, connection resets, 502, 503, 504, and 429 after its `Retry-After` delay.
+- **"More retries means more reliable."** Stacking retries at several nested layers multiplies the load (4x4x4 = 64 calls on the bottom service) and can cause a retry storm. Retry at one layer, cap the attempts, and put a [circuit breaker](card:circuit-breaker) in front.
 
 ## Interview Qs
 
-### How do you choose a timeout?
+### How do you choose a timeout value?
 
-Measure the dependency's latency and pick a high percentile, such as p99.9, so only about 0.1% of healthy calls time out. Too high wastes threads while waiting; too low causes false failures and extra retries.
+Measure the dependency's latency and pick a high percentile, such as p99.9, so only about 0.1% of healthy calls time out. Too high wastes threads waiting on stuck calls; too low turns slightly slow but healthy calls into false failures and extra retries.
 
 ### Why add jitter to exponential backoff?
 
-Clients that failed at the same moment also back off by the same amounts, so they retry together in spikes. Jitter randomises each wait, so retries arrive as a smooth trickle. In AWS's simulation it more than halved the total number of calls.
-
-### Which errors should you retry?
-
-Transient ones: timeouts, connection resets, 502, 503 and 504, and 429 after its Retry-After delay. Not 400, 401, 403 or 404: the same request will fail again. And only when the call is idempotent.
+Clients that failed at the same moment also back off by the same amount, so they retry together in sharp spikes that can re-overload the service. Jitter randomises each wait, so retries arrive as a smooth trickle instead. In AWS's simulation, adding jitter more than halved the total number of calls.
 
 ### What is a retry storm, and how do you stop it?
 
-Many clients retry at once and keep a struggling service overloaded. Cap the attempts, use backoff with jitter, retry at one layer only, add a retry budget, and put a circuit breaker in front so calls stop while the service is down.
+Many clients retry at once and keep a struggling service overloaded, so it never recovers. Cap the attempts, use backoff with jitter, retry at one layer only, add a retry budget that limits retries to a small fraction of requests, and put a circuit breaker in front so calls stop while the service is down.

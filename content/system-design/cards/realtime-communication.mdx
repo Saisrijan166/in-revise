@@ -7,16 +7,27 @@ level: intermediate
 heat: 3
 hook: "Ask again and again (polling), wait on one open request (long polling), listen to a server stream (SSE), or open a two-way pipe (WebSockets)."
 points:
-  - { k: "Short polling", v: "simplest; most replies are empty and updates lag" }
-  - { k: "Long polling", v: "the server holds the request until news or a timeout" }
-  - { k: "SSE", v: "server to client only, over plain HTTP; reconnects by itself", kind: plus }
-  - { k: "WebSockets", v: "two-way frames over one TCP connection, after an HTTP Upgrade" }
-  - { k: "Stateful", v: "each connection lives on one server; fan out with pub/sub", kind: minus }
-  - { k: "Idle timeout", v: "60 s on AWS ALB and nginx: send pings or raise it", kind: default }
+  - { k: "Short polling", v: "the client re-asks on a timer; simplest, but most replies are empty and updates lag" }
+  - { k: "Long polling", v: "the client asks once and the server holds the request open until there is news or a timeout" }
+  - { k: "SSE", v: "one long-lived HTTP response, server to client only; the browser reconnects by itself", kind: plus }
+  - { k: "WebSockets", v: "one TCP connection carrying two-way messages, opened by an HTTP Upgrade handshake", kind: key }
+  - { k: "Connections are stateful", v: "each open connection lives on one server; fan events out to them with pub/sub", kind: minus }
+  - { k: "Idle timeout", v: "AWS ALB and nginx close a quiet connection after 60 s; send pings or raise it", kind: default }
 trap:
   wrong: "Live updates always need WebSockets."
   right: "If only the server sends (feeds, notifications, live prices), SSE is simpler: plain HTTP, and the browser reconnects and sends the last event ID for you."
-sayIt: "For one-way updates such as notifications I use SSE; for chat or games, where both sides talk, WebSockets. Connections pin users to servers, so I publish events through Redis pub/sub and the server holding each connection pushes them."
+  why: "WebSockets get all the attention as the 'real-time' technology, so people reach for them by default, even when the data only ever flows one way and SSE would do."
+sayIt: "For one-way updates such as notifications I use SSE; for chat or games, where both sides talk, WebSockets. Connections pin users to servers, so I publish events through Redis pub/sub and the server holding each connection pushes them to the client."
+cheat:
+  idea: "Four ways to deliver server updates over HTTP, differing in who can send and whether the connection stays open."
+  flow: "short poll → long poll → SSE (server→client) → WebSocket (both ways)"
+  remember: "Server-only updates: SSE. Both sides send often: WebSockets. Scale open connections with pub/sub, since each lives on one server."
+buildsOn: [transport-protocols, load-balancer]
+scenarios:
+  - q: "You are building live score updates that only the server pushes to viewers. A teammate suggests WebSockets. What would you choose and why?"
+    a: "SSE. The data flows one way, server to client, which is exactly what SSE does over plain HTTP, and the browser reconnects and resends Last-Event-ID for free. WebSockets would add a two-way protocol, an Upgrade handshake and extra proxy setup you do not need for one-way updates."
+  - q: "Chat works locally but, once you run several chat servers behind a load balancer, users on different servers stop seeing each other's messages. Why, and how do you fix it?"
+    a: "Each WebSocket connection lives on one server, so a message arriving on server A cannot reach a user connected to server B. Publish every message to a pub/sub channel, such as Redis, that all servers subscribe to; the server holding each user's connection receives it and pushes it down."
 confusedWith: [realtime-options]
 tags: [realtime, websockets, http, networking]
 visual: table
@@ -36,6 +47,9 @@ sources:
   - title: "WebSocket proxying (nginx docs)"
     url: "https://nginx.org/en/docs/http/websocket.html"
     verifiedOn: "2026-10-16"
+  - title: "Module ngx_http_v2_module: http2_max_concurrent_streams (nginx docs)"
+    url: "https://nginx.org/en/docs/http/ngx_http_v2_module.html"
+    verifiedOn: "2026-10-27"
   - title: "Module ngx_http_proxy_module (nginx docs)"
     url: "https://nginx.org/en/docs/http/ngx_http_proxy_module.html"
     verifiedOn: "2026-10-16"
@@ -54,38 +68,39 @@ sources:
   - title: "How it works: transports and upgrade (Socket.IO docs)"
     url: "https://socket.io/docs/v4/how-it-works/"
     verifiedOn: "2026-10-16"
-  - title: "WebRTC API (MDN)"
-    url: "https://developer.mozilla.org/en-US/docs/Web/API/WebRTC_API"
-    verifiedOn: "2026-10-16"
   - title: "Real-time Updates (Hello Interview, system design deep dives)"
     url: "https://www.hellointerview.com/learn/system-design/deep-dives/realtime-updates"
     verifiedOn: "2026-10-16"
-  - title: "Networking Essentials (Hello Interview, system design core concepts)"
-    url: "https://www.hellointerview.com/learn/system-design/core-concepts/networking-essentials"
-    verifiedOn: "2026-10-16"
 ---
+
+## What it is
+
+These are four ways to get updates from a server to a browser. Plain HTTP is request-and-response: the client asks and the server answers, then the exchange ends, so the server cannot speak on its own. Short polling and long polling work within that rule by having the client keep asking. [SSE](term:sse) and [WebSockets](term:websockets) instead keep a connection open: SSE streams events one way over a normal HTTP response; WebSockets open a two-way channel over one TCP connection, where either side can send at any time.
 
 ## Why it exists
 
-HTTP is request and response: the server can only answer when the client asks. Chat, notifications and live scores need the server to send data the moment something happens.
+Chat messages, notifications and live scores happen on the server's schedule, not the client's. With plain HTTP the only way to show them is to poll: ask every few seconds and hope something is new. That wastes requests and still shows updates late, by up to one poll interval. These techniques let the server deliver data the moment it has it.
 
 ## How it works
 
 <Compare id="realtime-options" />
 
-- **Long polling** works even where proxies or firewalls block WebSockets, but every message pays for a full set of HTTP headers.
-- **SSE** is one HTTP response that never ends. If it drops, the browser reconnects and sends `Last-Event-ID`, so the server can resume.
-- **Many servers:** a user's connection sits on one server. Publish events to pub/sub, such as Redis, so whichever server holds it can push.
+1. **Short polling:** the client asks on a fixed timer; the server answers at once, usually "nothing new", so most requests are wasted.
+2. **Long polling:** the client asks once; the server holds the request open until it has news or a timeout, then answers, and the client asks again.
+3. **SSE:** the client opens one GET and the server keeps the response open, writing event after event; on a drop the browser reconnects with `Last-Event-ID`.
+4. **WebSockets:** the client sends `Upgrade: websocket`; the server replies `101 Switching Protocols`, and that TCP connection then carries two-way messages.
+
+So the key is whether only the server sends (SSE) or both sides do (WebSockets).
 
 ## Analogy
 
-<Analogy title="A long car trip" limit="A car has one passenger asking; a server holds thousands of open connections at once, and each one uses server resources.">
-Short polling is a child asking "are we there yet?" every minute. Long polling is asking once and getting the answer only on arrival. SSE is the driver announcing each town as you pass. WebSockets is a real conversation: both sides talk whenever they like.
+<Analogy title="A long car trip" limit="A car has one child asking; a server holds thousands of open connections at once, and each one uses memory and a socket.">
+Short polling is a child asking "are we there yet?" every minute. Long polling is asking once and getting an answer only on arrival. SSE is the driver announcing each town as you pass it. WebSockets is a real conversation: both sides talk whenever they like.
 </Analogy>
 
 ## Example
 
-An SSE stream is plain text. Each event ends with a blank line:
+An SSE stream is just a long HTTP response made of text events, each ending with a blank line:
 
 ```text
 retry: 5000
@@ -96,42 +111,55 @@ data: {"home": 2, "away": 1}
 : a comment line every 15 s or so keeps quiet streams open
 ```
 
-Behind nginx, a WebSocket needs the upgrade headers passed on:
+What to notice:
+
+- `retry: 5000` tells the browser to wait 5 seconds before reconnecting if the stream drops; `id: 42` is the last event ID the browser resends on reconnect so the server can resume.
+- The blank line ends one event; without it the browser keeps buffering and never fires the event.
+- This is one open response, not a new request per event, which is what makes it cheaper than polling.
+
+Behind nginx, a WebSocket needs the upgrade headers forwarded, or the handshake fails:
 
 ```nginx
 location /ws/ {
     proxy_pass http://chat_servers;
-    proxy_http_version 1.1;                  # the default only from nginx 1.29.7
-    proxy_set_header Upgrade $http_upgrade;  # hop-by-hop: not forwarded by itself
+    proxy_http_version 1.1;                  # Upgrade needs HTTP/1.1
+    proxy_set_header Upgrade $http_upgrade;  # hop-by-hop: nginx drops it unless you pass it
     proxy_set_header Connection "upgrade";
-    proxy_read_timeout 1h;                   # default 60s closes quiet sockets
+    proxy_read_timeout 1h;                   # default 60s would close a quiet socket
 }
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-| --- | --- | --- |
-| Idle connection closed after | 60 s (can be 1 to 4,000 s) | AWS Application Load Balancer |
-| Quiet upstream closed after | 60 s | nginx `proxy_read_timeout` |
-| SSE connections per browser, per domain | 6 on HTTP/1.1; HTTP/2 negotiates streams (default 100) | Browsers (MDN) |
-| SSE reconnect delay | Browser-defined, "a few seconds"; `retry:` changes it | HTML Standard |
-| WebSocket ports | 80 for `ws://`, 443 for `wss://` | RFC 6455 |
+- `Upgrade` and `Connection` are hop-by-hop headers that nginx does not forward by default, so without these two lines the `101 Switching Protocols` handshake never completes.
+- `proxy_read_timeout 1h` stops nginx closing a quiet chat connection; the 60 s default is the usual cause of a socket dropping after about a minute.
+
+## Rules and defaults
+
+- **Idle timeout:** AWS ALB and nginx both close a connection after 60 s with no data; raise the timeout or send periodic pings.
+- **SSE connection limit:** HTTP/1.1 allows about 6 connections per domain, so many SSE streams can exhaust them; HTTP/2 multiplexes them over one connection (nginx caps streams at 128 by default).
+- **SSE reconnect:** the browser reconnects automatically; the delay is browser-defined ("a few seconds") unless a `retry:` field sets it.
+- **WebSocket ports:** `ws://` uses port 80 and `wss://` uses port 443, the same ports as HTTP and HTTPS (RFC 6455).
+- **Scaling:** an open connection is bound to one server, so to broadcast across servers you must publish events to a shared pub/sub such as Redis.
+
+## Not to be confused with
+
+SSE and WebSockets both keep a connection open, but SSE is one-way (server to client) over a plain HTTP response, while a WebSocket is two-way over a single TCP connection after an Upgrade handshake. Rule: polling re-asks, SSE streams one way, WebSockets talk both ways.
 
 ## Interview Qs
 
-### Long polling vs SSE vs WebSockets?
+### Long polling versus SSE versus WebSockets?
 
-Long polling: the server holds a normal request until there is news, then the client asks again. SSE: one open HTTP response, server to client only, with automatic reconnect. WebSockets: one two-way connection for frequent messages both ways, such as chat.
+Long polling: the server holds a normal request open until there is news, then the client asks again. SSE: one open HTTP response, server to client only, with automatic reconnect. WebSockets: one two-way connection for frequent messages in both directions, such as chat. Pick SSE for server-only pushes and WebSockets when the client also sends often.
 
 ### How do you scale WebSockets across many servers?
 
-Put servers behind a load balancer; each holds a share of the connections. Publish every event to pub/sub, such as Redis, so the server holding the user's connection delivers it. Send pings to keep quiet connections alive, and let clients reconnect with backoff.
+Put the servers behind a load balancer; each holds a share of the connections. Because a connection lives on one server, publish every event to a pub/sub such as Redis, so the server holding a user's connection delivers it. Send pings to keep quiet connections alive, and have clients reconnect with backoff.
 
 ### Why does a WebSocket drop after about a minute?
 
-A proxy or load balancer closed it as idle: nginx and AWS ALB both default to 60 seconds without data. Send ping frames more often, or raise `proxy_read_timeout` or the ALB idle timeout. nginx also needs the Upgrade and Connection headers set.
+A proxy or load balancer closed it as idle: nginx and AWS ALB both default to 60 seconds with no data. Fix it by sending ping frames more often than the timeout, or by raising `proxy_read_timeout` or the ALB idle timeout. nginx also needs the `Upgrade` and `Connection` headers forwarded.
 
 ### Why not use WebSockets for everything?
 
-Each connection is stateful and pinned to one server, so deploys, load balancing and scaling get harder, and proxies need extra setup. For one-way updates, SSE or long polling over plain HTTP is simpler. Use WebSockets when clients also send often.
+Each connection is stateful and pinned to one server, so deploys, load balancing and scaling get harder, and proxies need extra setup. For server-only updates, SSE or long polling over plain HTTP is simpler and reconnects for free. Use WebSockets when clients also send often.

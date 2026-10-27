@@ -7,16 +7,26 @@ level: intermediate
 heat: 3
 hook: "A stream is a log, not a mailbox: reading an event does not remove it, and each reader keeps its own bookmark, called an offset."
 points:
-  - { k: "Partitions", v: "a topic is split into ordered logs spread across brokers" }
-  - { k: "Retention", v: "events leave by age or size (Kafka default: 7 days)", kind: default }
-  - { k: "Replay", v: "move a group's offset back to read old events again" }
-  - { k: "Consumer group", v: "one partition goes to one consumer: partitions cap parallelism" }
-  - { k: "Many groups", v: "each group reads all the data; no extra copies", kind: plus }
-  - { k: "Add partitions later", v: "hash(key) % N changes, so a key may map to a new partition", kind: minus }
+  - { k: "Log, not a mailbox", v: "events are appended and kept; reading does not delete them" }
+  - { k: "Partition and offset", v: "a topic is split into ordered logs (partitions); each record's position is its offset" }
+  - { k: "Replay", v: "move a group's offset back to read old events again, for a bug fix or a new reader", kind: plus }
+  - { k: "Many groups, no copies", v: "each consumer group reads all the events on its own; adding one adds no storage", kind: plus }
+  - { k: "Order per partition only", v: "records stay in order inside a partition, not across the whole topic", kind: minus }
+  - { k: "Kafka retention", v: "events are kept 7 days by default, then removed by age (log.retention.hours=168)", kind: default }
 trap:
-  wrong: "Kafka keeps every message in order across the whole topic."
-  right: "Only within a partition. Give related events the same key, like orderId, so they share a partition and stay in order."
-sayIt: "I use a Kafka-style log when several consumers need the same events or must replay them. I key events by entity ID so each entity stays in order, size partitions for the parallelism I need, and commit offsets after processing."
+  wrong: "Kafka keeps every message of a topic in strict order."
+  right: "Order holds only within one partition. Give related events the same key, like paymentId, so they share a partition and stay in order."
+  why: "A topic looks like one list, so people expect one global order. But a topic is split into partitions for scale, and only each partition is ordered; across partitions the order is undefined."
+sayIt: "I use a Kafka-style log when several consumers need the same events or must replay them. I key events by the entity ID, like paymentId, so each entity stays in order, size partitions for the parallelism I need, and commit offsets only after processing."
+cheat:
+  idea: "An event stream is an append-only log, split into ordered partitions. Reading does not delete events; each reader tracks its own offset, and events leave by age."
+  remember: "Order is per partition: same key → same partition → in order. Many groups read the same events; replay by rewinding the offset."
+buildsOn: [pub-sub, message-queue]
+scenarios:
+  - q: "A bug corrupted your billing read model from 09:00 today. The events are in a Kafka topic. How do you recover without asking producers to resend anything?"
+    a: "Stop the billing consumer group, reset its offset back to 09:00, and restart it. Because a log keeps events until retention ends, the old events are still there, so the group re-reads and reprocesses them. Other groups keep their own offsets and are not affected."
+  - q: "Your payments topic has 4 partitions and a group of 4 consumers. You add a 5th consumer to go faster. What happens?"
+    a: "The 5th consumer gets no partition and sits idle, because each partition is read by at most one consumer in a group. One consumer per partition caps parallelism at the partition count, so you must plan partitions ahead; adding partitions later changes how keys map and can break per-key order."
 confusedWith: [queue-vs-pubsub-vs-stream]
 tags: [messaging, streaming, kafka, events]
 visual: flow
@@ -42,28 +52,26 @@ sources:
   - title: "Use cases (Apache Kafka)"
     url: "https://kafka.apache.org/uses"
     verifiedOn: "2026-10-16"
-  - title: "Apache Kafka 4.2.0 release announcement (share groups)"
-    url: "https://kafka.apache.org/blog/2026/02/17/apache-kafka-4.2.0-release-announcement/"
-    verifiedOn: "2026-10-16"
   - title: "Change the data retention period (Amazon Kinesis Data Streams docs)"
     url: "https://docs.aws.amazon.com/streams/latest/dev/kinesis-extended-retention.html"
-    verifiedOn: "2026-10-16"
-  - title: "Event Sourcing (Martin Fowler)"
-    url: "https://martinfowler.com/eaaDev/EventSourcing.html"
     verifiedOn: "2026-10-16"
   - title: "Kafka deep dive (Hello Interview)"
     url: "https://www.hellointerview.com/learn/system-design/deep-dives/kafka"
     verifiedOn: "2026-10-16"
 ---
 
+## What it is
+
+An event stream is an append-only **log** of events. A producer adds events to the end, and each one stays in the log; reading an event does not remove it. This is the big difference from a [queue](card:message-queue), where a message is deleted once handled. Each reader keeps an **offset**, saying how far it has read. Because events are kept, many readers read them at their own speed, and a reader can move its offset back to re-read old events. Apache Kafka is the best-known example.
+
 ## Why it exists
 
-A queue deletes a message once it is handled, so a new reader, or a bug fix, cannot go back to old events. A log keeps events for days, so many systems read the same data at their own pace and can replay it.
+A queue deletes a message once it is handled, so a new reader, or a bug fix, cannot go back to the events it missed. If three teams each need every payment event, you would copy the data three times. A log keeps the events for days, so many systems read the same stream independently at their own pace, and a team can replay history to rebuild a view or fix a bug, without the producer sending anything again.
 
 ## How it works
 
 <Mermaid
-  alt="Event streaming. Producers append records to a topic with two partitions; the record key decides the partition. Partition 0 holds offsets 0 to 4 and partition 1 holds offsets 0 to 3. In consumer group A, consumer 1 reads partition 0 and consumer 2 reads partition 1. Consumer group B has one consumer that reads both partitions on its own."
+  alt="Producers append records to a topic with two partitions; the record key decides the partition. Partition 0 holds offsets 0 to 4 and partition 1 holds offsets 0 to 3. In consumer group A, consumer 1 reads partition 0 and consumer 2 reads partition 1. In consumer group B, one consumer reads both partitions by itself, keeping its own offsets."
   chart={`flowchart TD
   PR[Producers] -- "key picks the partition" --> P0["Partition 0: offsets 0 1 2 3 4"]
   PR --> P1["Partition 1: offsets 0 1 2 3"]
@@ -73,50 +81,63 @@ A queue deletes a message once it is handled, so a new reader, or a bug fix, can
   P1 --> B1`}
 />
 
-- A producer appends each record to one partition, chosen by its key if it has one. In a partition, each record has a number: its offset.
-- Inside a consumer group, each partition is read by one consumer. Other groups read the same records on their own.
-- Records leave by retention (time or size), never because someone read them.
+1. A producer appends each record to one **partition** of the topic, chosen by the record's key; records with the same key always land in the same partition.
+2. Inside the partition every record gets a number, its **offset**, and the records stay in that order.
+3. A **consumer group** reads the topic; within one group each partition is read by only one consumer, so the group's parallelism is capped by the partition count.
+4. A different consumer group reads the same records on its own, with its own offsets, so adding a group adds no copies of the data.
+5. Records leave the log only when **retention** (age or size) expires, never because someone read them. To replay, a group moves its offset back.
 
 <Compare id="queue-vs-pubsub-vs-stream" />
 
 ## Example
 
-Topic `orders`, 3 partitions, key `orderId`. Partition 0 ends at offset 1,050; the `billing` group's committed offset is 1,000, so its lag is 50. A bug corrupted billing since 09:00? Fix it, stop the group's consumers, and rewind:
+The topic is `payments` with 3 partitions, keyed by `paymentId`. The `billing` group's committed offset on partition 0 is 1,000 while the partition's end is 1,050, so its **lag** is 50. A bug corrupted billing from 09:00, so you stop the group and rewind its offset:
 
 ```bash
 kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
-  --group billing --topic orders --execute \
-  --reset-offsets --to-datetime 2026-10-16T09:00:00.000
+  --group billing --topic payments --execute \
+  --reset-offsets --to-datetime 2026-10-27T09:00:00.000
 ```
 
-On restart, billing reads from 09:00 again. Other groups do not notice.
+What to notice:
 
-## Defaults
+- The reset changes only the `billing` group's offset; on restart it re-reads from 09:00 and reprocesses those events, because the log still holds them.
+- Other groups keep their own offsets, so they do not notice the rewind at all.
+- This replay is possible only within retention: once events older than 7 days are removed, you cannot rewind past that point.
 
-| What | Default | Where |
-| --- | --- | --- |
-| How long records are kept (`log.retention.hours`) | 168 h (7 days) | Apache Kafka 4.3 broker |
-| Size limit (`log.retention.bytes`) | -1: no size limit | Apache Kafka 4.3 broker |
-| Partitions for a new topic (`num.partitions`) | 1 | Apache Kafka 4.3 broker |
-| Copies of each partition (`default.replication.factor`) | 1 (3 is common in production) | Apache Kafka 4.3 broker |
-| Where a new group starts (`auto.offset.reset`) | `latest`: only records written from now on | Apache Kafka 4.3 consumer |
-| Offset commits (`enable.auto.commit`) | On, every 5 s | Apache Kafka 4.3 consumer |
-| How long records are kept | 24 h (up to 365 days) | Amazon Kinesis Data Streams |
+## Rules and defaults
+
+- **Order:** guaranteed within a partition only. Key related events the same (for example by `paymentId`) so they share a partition and stay ordered.
+- **Parallelism:** one consumer per partition in a group, so the partition count caps how many consumers in a group do work. Plan partitions ahead.
+- **Retention (`log.retention.hours`):** 168 hours (7 days) by default in Apache Kafka 4.3; `log.retention.bytes` is -1 (no size limit) by default.
+- **Where a new group starts (`auto.offset.reset`):** `latest` by default, so a brand-new group reads only events written from now on, not the whole history.
+- **Replication:** `default.replication.factor` is 1 by default; production usually sets 3 so a broker can fail without data loss.
+
+## Not to be confused with
+
+A [queue](card:message-queue) deletes a message once it is acknowledged and gives it to one worker. An event stream keeps the record and lets many groups read it. A [topic](card:pub-sub) in pub/sub fans out live copies but usually does not keep a replayable history. Rule: use a stream when readers need an ordered log they can replay, not just a one-time delivery.
+
+## Common mistakes
+
+- **"More consumers in a group always means more throughput."** Only up to the partition count. With 4 partitions a 5th consumer sits idle, so you scale by adding partitions, not just consumers.
+- **"Kafka stores events forever."** By default they are deleted after 7 days, so replay works only inside the retention window unless you raise retention or use compaction.
 
 ## Interview Qs
 
-### Kafka vs RabbitMQ or SQS?
+### Kafka vs a queue like RabbitMQ or SQS?
 
-Kafka is a log: it keeps records after they are read, many consumer groups read the same data, and order holds per partition. RabbitMQ and SQS queues delete a message once it is acked, and workers share the messages. Use Kafka for event streams and replay, a queue for jobs.
+Kafka is a log: it keeps records after they are read, many consumer groups read the same data, and order holds per partition. RabbitMQ and SQS delete a message once it is acknowledged, and workers share the messages. Use Kafka for event streams and replay, a queue to hand out jobs.
 
 ### How does Kafka keep events in order?
 
-Only within a partition. Records with the same key go to the same partition, so key by the entity, like `orderId`. Strict order for a whole topic needs one partition, which means one active consumer per group.
+Only within a partition. Records with the same key go to the same partition, so you key by the entity, like `paymentId`, to keep that entity's events ordered. Strict order across a whole topic needs a single partition, which limits you to one working consumer per group.
 
 ### How do you scale consumers, and what limits it?
 
-Add consumers to the group; Kafka spreads the partitions among them, one consumer per partition. With 4 partitions, a 5th consumer gets nothing, so plan partitions ahead. Adding partitions later changes `hash(key) % N`, so a key's new records can land in another partition.
+Add consumers to the group and Kafka spreads the partitions among them, one consumer per partition. With 4 partitions a 5th consumer gets nothing, so plan partitions ahead. Adding partitions later changes how keys map to partitions, so a key's new records can move to another partition and break per-key order.
 
-### A consumer crashes. What happens?
+### A consumer crashes. What happens to its work?
 
-The group rebalances: its partitions move to other consumers, which resume from the last committed offset. Records processed after that commit are read again, so delivery is at-least-once and processing must be idempotent.
+The group rebalances: its partitions move to the other consumers, which resume from the last committed offset. Records processed after that commit are read again, so delivery is at-least-once and processing must be idempotent.
+
+
