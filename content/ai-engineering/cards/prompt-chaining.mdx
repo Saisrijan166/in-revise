@@ -5,17 +5,28 @@ title: Prompt Chaining
 topic: prompting
 level: intermediate
 heat: 2
-hook: "Split one hard task into several small LLM calls; each output feeds the next, with code checks in between."
+hook: "Split one hard task into several small LLM calls. Each call's output feeds the next, with your code checking the result in between."
 points:
-  - { k: "Each step", v: "one small prompt that is easier to get right" }
-  - { k: "Gate", v: "code checks a step's output before the next runs" }
-  - { k: "Control", v: "easier to test, debug and swap one step", kind: plus }
-  - { k: "Price", v: "more calls: more latency, cost and failure points", kind: minus }
-  - { k: "Fixed path", v: "code decides the steps; an agent decides its own" }
+  - { k: "Each step", v: "one small prompt that does a single thing, which is easier to get right than one big prompt" }
+  - { k: "Gate", v: "code checks or fixes a step's output before the next step runs" }
+  - { k: "Control", v: "each step can be tested, debugged and swapped on its own", kind: plus }
+  - { k: "Price", v: "more calls mean more latency, cost and points where something can fail", kind: minus }
+  - { k: "Fixed path", v: "your code decides the steps and their order; an agent lets the model decide its own" }
 trap:
-  wrong: "Prompt chaining is the same as an AI agent."
-  right: "A chain is a fixed workflow written in code. An agent lets the model choose its next step and tools."
-sayIt: "Prompt chaining splits a task into a fixed sequence of LLM calls, each using the last one's output, with code checks between steps. It trades latency and cost for accuracy and control."
+  wrong: "Prompt chaining is the same thing as an AI agent."
+  right: "A chain is a fixed sequence of steps written in your code. An agent lets the model choose its next step and tools at run time."
+  why: "Both make several LLM calls to finish a task, so they look alike from outside; the difference is who decides the steps, your code or the model, and that is not visible in the output."
+sayIt: "Prompt chaining splits a task into a fixed sequence of LLM calls, each using the previous output, with code checks between steps. It trades extra latency and cost for accuracy and control, and the path is fixed in code, unlike an agent."
+cheat:
+  idea: "Prompt chaining breaks one hard task into a fixed sequence of small LLM calls. Each output feeds the next, with code checks between steps."
+  flow: "classify → extract → gate/fetch (code) → draft"
+  remember: "Your code fixes the path, which is what separates a chain from an agent. More calls buy accuracy at the cost of latency."
+buildsOn: [prompt-design]
+scenarios:
+  - q: "Your single prompt classifies the message, pulls out the order id, and drafts a reply all at once, and it is unreliable and hard to debug. How would chaining help?"
+    a: "Split it into three calls: one to classify, one to extract the order id as structured output, one to draft the reply. Each small prompt is easier to get right, and when something is wrong you can see exactly which step failed and fix or swap just that step."
+  - q: "In a chain, step 2 extracts an order id that does not belong to this customer. Why run a code gate before step 3?"
+    a: "Because a mistake in one step flows into every later step. A code gate checks the extracted id against the customer before fetching data or drafting a reply, so a wrong or malicious id is caught early instead of producing a confident but wrong answer, or leaking another customer's data."
 confusedWith: [chatbot-vs-workflow-vs-agent]
 tags: [prompt-chaining, workflow, gate]
 visual: flow
@@ -28,32 +39,84 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Prompt chaining is solving one hard task with several small LLM calls in a row, instead of one big prompt. Each call does one thing, and its output becomes the input to the next call. Between the calls, your code can check, fix or filter the output before passing it on. The whole sequence of steps is decided by your code, so the path is fixed before anything runs.
+
 ## Why it exists
 
-One big prompt that classifies, extracts and writes at once is hard to get right and to debug. Small steps can each be tested and fixed alone.
+A single prompt that must classify a message, extract an order id and write a reply all at once is hard to get right, and when it misbehaves you cannot tell which part failed. Breaking the task into steps lets you test and fix each step on its own, and insert code checks between them, so one wrong step is caught early instead of corrupting the final answer.
 
 ## How it works
+
+Here is a chain for answering a refund email in the payments assistant.
 
 <Steps label="Refund email chain">
   <Step title="1. Classify">An LLM call labels the intent: refund-status, payment-failed or other.</Step>
   <Step title="2. Extract">An LLM call returns the order id as [structured output](card:structured-output).</Step>
-  <Step title="3. Gate and fetch">Code checks the order belongs to this customer, then reads it from PostgreSQL. No LLM.</Step>
-  <Step title="4. Draft">An LLM call writes the reply from the fetched order data.</Step>
+  <Step title="3. Gate and fetch">Your code checks the order belongs to this customer, then reads it from PostgreSQL. No LLM here.</Step>
+  <Step title="4. Draft">An LLM call writes the reply using the fetched order data.</Step>
 </Steps>
 
-- Anthropic also names routing, parallelisation, orchestrator-workers and evaluator-optimiser workflows.
-- When the steps cannot be known in advance, an [agent](card:ai-agents) fits better.
+1. The classify call decides what kind of request this is, so later steps can branch.
+2. The extract call pulls out just the order id, in a fixed shape code can read.
+3. Your code gates: it verifies the id belongs to the customer and fetches the real data. This step has no LLM, so it cannot be tricked by the model.
+4. The draft call writes the final reply from trusted, fetched data.
+
+So the key is that code sits between the model calls, checking each output before the next step trusts it.
+
+## Analogy
+
+<Analogy title="An assembly line" limit="A real line never loops back or skips stations; a chain can branch on the classify result, and an agent could even reorder the stations itself.">
+Each station does one small job and hands the part to the next. A faulty part is caught at the station that made it, not at the very end, so the whole line is easier to inspect and fix than one machine doing everything at once.
+</Analogy>
+
+## Example
+
+Below, the classify step is one LLM call; its result decides whether the rest of the chain even runs. Code, not the model, routes on the label.
+
+```java
+String intent = chat.prompt()
+    .user(u -> u.text("Classify as refund-status, payment-failed or other: {msg}")
+                .param("msg", message))
+    .call().content().trim();
+
+if (intent.equals("refund-status")) {
+    String orderId = extractOrderId(message);       // step 2: another LLM call
+    Order order = gateAndFetch(orderId, customerId); // step 3: code only, no LLM
+    return draftReply(order);                        // step 4: final LLM call
+}
+return "Sorry, I can only help with refunds and payments.";
+```
+
+What to notice:
+
+- `intent` comes from the model, but the `if` that acts on it is plain Java, so the control flow is fixed and testable.
+- `gateAndFetch` runs in code with no LLM, so it cannot be talked out of its permission check by the message text.
+- Each helper is its own small, testable unit; you can swap the draft prompt without touching the classify step.
+- If step 1 returns anything but `refund-status`, the later, costlier calls never run, saving latency and tokens.
+
+## Rules and defaults
+
+- **Put a code check between steps:** validate or clean each output before the next step trusts it; a wrong early step otherwise flows through the whole chain.
+- **More calls, more cost:** each step adds latency, token cost and a new place to fail; chain only when the accuracy is worth it.
+- **Other fixed patterns exist:** Anthropic also describes routing, parallelisation, orchestrator-workers and evaluator-optimiser as workflows where code controls the structure.
+- **When the path cannot be fixed:** if the steps cannot be known in advance, an [agent](card:ai-agents) that decides them at run time fits better than a chain.
+
+## Not to be confused with
+
+A **chain** follows steps your code fixes in advance. An **[agent](card:ai-agents)** lets the model pick the next step and which tools to call, in a loop, until the task is done. Rule: in a chain your code owns the path; in an agent the model does.
 
 ## Interview Qs
 
 ### What is prompt chaining and when do you use it?
 
-Breaking a task into a fixed sequence of LLM calls, each using the previous output. Use it when the task splits cleanly into subtasks and accuracy matters more than latency.
+Breaking a task into a fixed sequence of LLM calls, each using the previous output, with code checks in between. Use it when the task splits cleanly into subtasks and accuracy matters more than latency, so each small step can be tested and fixed on its own.
 
 ### What are the downsides?
 
-More calls mean more latency, cost and places to fail. An early mistake flows into later steps, so check each step's output in code.
+More calls mean more latency, more cost, and more places to fail. A mistake in an early step flows into every later step, so you must check each step's output in code before the next one runs. If the task does not split cleanly, chaining adds overhead for little gain.
 
 ### How is a chain different from an agent?
 
-A chain follows steps fixed in code. An agent lets the model decide the next step and which tools to call, in a loop, until the task is done.
+A chain follows steps fixed in your code, so the path is known before it runs. An agent lets the model decide the next step and which tools to call, in a loop, until the goal is met. The chain is more predictable; the agent handles tasks whose path cannot be fixed in advance.

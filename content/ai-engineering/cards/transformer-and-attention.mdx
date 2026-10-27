@@ -5,17 +5,28 @@ title: Transformers and Self-Attention
 topic: llm-fundamentals
 level: intermediate
 heat: 3
-hook: "Self-attention lets every token look at every other token and decide which ones matter for its meaning."
+hook: "A transformer is the network inside an LLM; self-attention lets every token look at every other token and decide which ones matter for its meaning."
 points:
-  - { k: "Transformer", v: "a network built on attention, with no recurrence (2017)" }
-  - { k: "Self-attention", v: "each token weighs all tokens in the same input" }
-  - { k: "Parallel", v: "trains on all positions at once, unlike an RNN", kind: plus }
-  - { k: "Cost", v: "attention grows with the square of the sequence length", kind: minus }
-  - { k: "Word order", v: "added through positional encoding" }
+  - { k: "Transformer", v: "the neural-network design behind modern LLMs, built on attention, with no step-by-step recurrence (2017)" }
+  - { k: "Self-attention", v: "each token scores how relevant every other token in the same input is, and mixes in their information" }
+  - { k: "Parallel", v: "it reads all positions at once, so training runs in parallel on GPUs, unlike an RNN", kind: plus }
+  - { k: "Quadratic cost", v: "comparing every token with every other means cost grows with the square of the input length", kind: minus }
+  - { k: "Word order", v: "order is not built in, so it is added separately through positional encoding" }
 trap:
   wrong: "Attention is the model's memory of past conversations."
-  right: "Attention works only inside the current input. Past chats count only if the app sends them again."
-sayIt: "A transformer uses self-attention: each token scores how relevant every other token is and mixes in their information. It sees the whole input in parallel, so it trains fast and links distant words."
+  right: "Attention works only within the current request's tokens. Earlier chats count only if your app sends them again in this request."
+  why: "'Pays attention to context' sounds like remembering, but the context is only the tokens in this one call, not a store of past calls."
+sayIt: "A transformer uses self-attention: each token scores how relevant every other token is and blends in their information. Because it reads the whole input in parallel, it trains fast and links distant words directly."
+cheat:
+  idea: "A transformer is the network inside an LLM. Self-attention lets each token pull in the other tokens that matter for its meaning."
+  flow: "Token's query → compares with every token's key → weights → blends values"
+  remember: "It attends only within this request, in parallel. Cost grows with the square of the input length."
+buildsOn: [neural-networks, what-is-an-llm, tokens]
+scenarios:
+  - q: "In 'The customer asked about the refund because it was late', how does the model know 'it' means the refund?"
+    a: "Self-attention lets the token 'it' compare itself with every other token and score which are relevant. 'refund' scores high, so most of the new meaning blended into 'it' comes from 'refund'. The model learned these links during training."
+  - q: "Why does doubling the prompt length more than double the attention cost?"
+    a: "Standard self-attention compares every token with every other token, so the work grows with the square of the length. Double the tokens and the comparisons roughly quadruple. This is why very long context is slow and expensive."
 confusedWith: []
 tags: [transformer, attention, self-attention, architecture]
 visual: flow
@@ -31,36 +42,69 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+A transformer is the particular [neural network](card:neural-networks) design that modern [LLMs](card:what-is-an-llm) are built on. Its central part is self-attention: a step that lets each [token](card:tokens) look at all the other tokens in the same input and decide which of them matter for its own meaning. It was introduced in 2017 and replaced the older designs that read text one word at a time. When people say "the model understands context", this attention step is what they mean.
+
 ## Why it exists
 
-Older [recurrent networks](card:neural-networks) read one word at a time, so training was slow and far-apart words were hard to link. Attention connects any two positions in one step.
+Older [recurrent networks](card:neural-networks) read a sentence one word at a time, carrying a running summary forward. That had two problems: training was slow because the words had to be processed in sequence, and words far apart were hard to connect because the summary faded over distance. Self-attention removes both: it connects any two tokens directly in one step, and it looks at all positions at the same time, so training can run in parallel.
 
 ## How it works
 
-In "The customer asked about the refund because it was late", attention links "it" to "refund".
+Take "The customer asked about the refund because it was late". The model needs to tie "it" to "refund". Attention does this with three roles per token: a query (what this token is looking for), a key (what each token offers) and a value (the information each token passes on).
 
 <Mermaid
-  alt="For the token 'it', its query (what it is looking for) is compared with the key of every token (what each token offers). The match scores become weights that add up to one. The new meaning of 'it' is the weighted mix of all the tokens' values (the information each passes on), so most of it comes from 'refund'."
+  alt="For the token 'it', its query, meaning what it is looking for, is compared against the key of every token, meaning what each token offers. The comparison gives match scores, which become weights that add up to one. The new meaning of 'it' is the weighted mix of all the tokens' values, the information each passes on, so most of it comes from the token 'refund'."
   chart={`flowchart LR
-  Q["Query of 'it': what am I looking for?"] --> S["Compare with each key: what do you offer?"]
-  S --> W["Scores to weights"]
-  W --> V["Mix the values: what each passes on"]
+  Q["Query of 'it': what am I looking for?"] --> S["Compare with every token's key: what do you offer?"]
+  S --> W["Scores become weights that sum to one"]
+  W --> V["Blend the tokens' values: what each passes on"]
   V --> N["'it' now carries 'refund'"]`}
 />
 
-- Multi-head attention runs several of these in parallel; each head learns other links.
-- Most chat LLMs are decoder-only: each token sees only earlier tokens. Encoder-only models such as BERT feed [embeddings](card:embeddings) and [rerankers](card:reranking).
+1. The token "it" forms a query describing what it needs to resolve its meaning.
+2. That query is compared with the key of every token, giving a relevance score for each.
+3. The scores are turned into weights that add up to one, so "refund" gets a high weight and unrelated words get low ones.
+4. The new representation of "it" is the weighted blend of every token's value, so it now mostly carries the meaning of "refund".
+
+So the key is that each token rebuilds its meaning from the tokens it finds most relevant, and the model learned which those are during training.
+
+## Example
+
+This is what self-attention produces, written out as the weights for one token rather than code.
+
+```text
+Resolving "it" in: The customer asked about the refund because it was late
+  attention weight on "refund"   = 0.62   (highest)
+  attention weight on "customer" = 0.11
+  attention weight on "late"     = 0.09
+  ... remaining tokens share the rest ...
+New meaning of "it" = 0.62*value(refund) + 0.11*value(customer) + ...
+```
+
+What to notice:
+
+- The weights add up to one, so the new meaning of "it" is a blend, dominated here by "refund".
+- These weights are illustrative, not a measured run; the point is the shape, one token drawing most from another.
+- Multi-head attention runs several of these blends in parallel, each free to focus on a different kind of link, such as grammar in one head and subject matter in another.
+
+## Rules and defaults
+
+- **Order is added, not built in:** attention alone ignores word order, so a transformer adds positional encoding to tell tokens apart by position (Vaswani et al., 2017).
+- **Cost is quadratic:** standard self-attention compares every token with every other, so cost grows with the square of the input length; this is why long [context](card:context-window) is expensive.
+- **Decoder-only for chat:** most chat LLMs are decoder-only, so each token attends only to earlier tokens. Encoder-only models such as BERT see the whole input and power [embeddings](card:embeddings) and [rerankers](card:reranking).
 
 ## Interview Qs
 
-### Explain attention without maths.
+### Explain attention without the maths.
 
-For each token, the model asks which other tokens help explain it, gives each a weight, and blends their information. That is how "it" picks up the meaning of "refund". Skip the formulas unless asked.
+For each token, the model asks which other tokens help explain it, gives each a weight, and blends their information into that token. That is how "it" picks up the meaning of "refund". The query, key and value are just the three roles each token plays; skip the formulas unless you are asked.
 
 ### Why did transformers replace RNNs?
 
-An RNN must process tokens one after another. A transformer looks at all tokens at once, so training runs in parallel on GPUs and distant words connect directly.
+An RNN must process tokens one after another, which is slow and lets links between distant words fade. A transformer looks at all tokens at once, so training runs in parallel on GPUs, and self-attention connects any two tokens directly however far apart they are.
 
 ### Why is a long context expensive?
 
-Standard self-attention compares every token with every other token, so its cost grows with the square of the input length.
+Standard self-attention compares every token with every other token, so the work grows with the square of the input length. Doubling the number of tokens roughly quadruples the attention cost, which is why very long prompts are slow and costly.

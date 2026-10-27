@@ -5,17 +5,28 @@ title: What Is RAG?
 topic: rag
 level: beginner
 heat: 3
-hook: "RAG: retrieve the relevant text, add it to the prompt, and let the LLM answer from it. The model is not retrained."
+hook: "RAG: search your documents for the parts that match the question, add them to the prompt, and let the LLM answer from them. The model is not retrained."
 points:
-  - { k: "Retrieve", v: "search your documents for chunks that match the question" }
-  - { k: "Augment", v: "put those chunks into the prompt as context" }
-  - { k: "Generate", v: "the LLM answers from that context and can cite it" }
-  - { k: "No retraining", v: "edit a document and the next answer uses it", kind: plus }
-  - { k: "Only as good as retrieval", v: "wrong chunks in, wrong answer out", kind: minus }
+  - { k: "Retrieve", v: "search your documents for the chunks that best match the question" }
+  - { k: "Augment", v: "put those chunks into the prompt as context the model can read" }
+  - { k: "Generate", v: "the LLM answers from that context and can cite which chunk it used" }
+  - { k: "No retraining", v: "edit a document and the next answer uses it, because nothing is baked into the weights", kind: plus }
+  - { k: "Only as good as retrieval", v: "if the wrong chunks are fetched, the answer is wrong too", kind: minus }
 trap:
   wrong: "RAG trains the model on our documents."
-  right: "RAG changes only the prompt. The weights stay the same; documents are fetched fresh for every request."
-sayIt: "RAG finds the parts of our documents that match the question, puts them in the prompt and has the LLM answer from them. No retraining, so new or private documents work at once."
+  right: "RAG changes only the prompt. The weights stay the same, and the documents are fetched fresh for every request."
+  why: "The name has the word generation and the goal is a model that knows your data, so people assume the data must be learned. In fact the data is added to the input at request time, not learned."
+sayIt: "RAG finds the parts of our documents that match the question, puts them in the prompt, and has the LLM answer from them. Nothing is retrained, so new or private documents work straight away and the answer can cite its source."
+cheat:
+  idea: "RAG searches your own documents for the text that matches a question, adds that text to the prompt, and lets the LLM answer from it. The model's weights never change."
+  flow: "Retrieve → Augment → Generate"
+  remember: "RAG edits the prompt, not the model. Answers are only as good as the chunks you retrieve."
+buildsOn: [what-is-an-llm, embeddings, similarity-search]
+scenarios:
+  - q: "Your refund policy changed this morning. With RAG, what must you do so the assistant gives the new answer this afternoon?"
+    a: "Replace the document in the store (re-chunk and re-embed it). Nothing is retrained, because RAG reads documents at request time, so the next question retrieves the new text and answers from it."
+  - q: "The user asks 'what is the status of order 42?'. Is RAG the right tool?"
+    a: "No. That is a live record, so call a tool or query the database for it. RAG is for text knowledge such as policies and FAQs, not for a single current value that changes per order."
 confusedWith: [rag-vs-fine-tuning-vs-long-context, llm-vs-database-vs-search-engine]
 tags: [rag, retrieval]
 visual: table
@@ -34,39 +45,65 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+RAG stands for retrieval-augmented generation. It is a way to answer a question using your own documents without changing the model. When a question arrives, the app searches your documents for the few passages that are most relevant, puts those passages into the [prompt](card:prompt-design), and asks the [LLM](card:what-is-an-llm) to answer from them. The search reuses [embeddings](card:embeddings) and [similarity search](card:similarity-search): the question and the documents are compared by meaning, not by exact words.
+
 ## Why it exists
 
-An LLM knows only its training data: nothing after its [knowledge cutoff](card:llm-limits) and nothing private, such as your refund policy. RAG hands it the right text at request time.
+An LLM knows only what was in its training data. It knows nothing after its [knowledge cutoff](card:llm-limits), and nothing private such as your refund policy or a customer's payment history. Without RAG you would have to retrain or fine-tune the model every time a document changes, which is slow, costly and still mixes your facts into the weights where you cannot see them. RAG removes this: it hands the model the right text at request time, so the answer is grounded in a source you can point to, and updating a document is just replacing a file.
 
 ## How it works
 
 <Compare id="rag-vs-plain-llm" />
 
-- Use RAG for documents (refund policy, payment FAQ); use [tool calling](card:tool-calling) for live rows such as order 42's status.
-- The stages, offline and online, are in [the RAG pipeline](card:rag-pipeline).
+1. The app turns the user's question into an embedding and searches the document store for the chunks whose meaning is closest.
+2. It takes the top few chunks and places them in the prompt, above the question, as the context to answer from.
+3. It tells the LLM to answer using only that context and to cite the chunk it used.
+4. The LLM writes the answer from the supplied text, so a document edited yesterday is reflected today with no retraining.
+
+So the key is that RAG works on the prompt, not on the model.
 
 ## Example
 
+This shows one request to the payments support assistant. It is a trace of the three stages, not code.
+
 ```text
 Question:  Where is my refund for order 42?
-Retrieved: refund-policy.pdf, chunk 4 (fictional example policy)
+Retrieve:  refund-policy.pdf, chunk 4 (fictional example policy)
            "UPI refunds reach the customer in 5-7 working days."
-Tool:      getOrderStatus(42) -> refund ₹500 to UPI, started 18-10-2026
-Prompt:    rules + retrieved chunk + tool result + question
-Answer:    "Your ₹500 UPI refund started on 18-10-2026. UPI refunds
-            usually arrive in 5-7 working days [refund-policy#4]."
+Augment:   prompt = rules + that chunk + the question
+Generate:  "UPI refunds usually arrive in 5-7 working days [refund-policy#4]."
 ```
+
+What to notice:
+
+- The policy text came from a document search, not from the model's memory, so a model with no knowledge of your refunds can still answer correctly.
+- The answer carries `[refund-policy#4]`, a pointer back to the chunk it used, which is possible only because the chunk was in the prompt.
+- If the search had returned the wrong chunk (say the card-refund paragraph), the model would confidently give the wrong number. The answer is only as good as retrieval.
+- A live value such as whether order 42's refund has started is not in the policy; that needs a [tool call](card:tool-calling), not RAG.
+
+## Rules and defaults
+
+- **No training:** RAG never changes the model weights. It only changes the prompt for one request. Training the model itself is [fine-tuning](card:llm-training-stages).
+- **Documents are fetched per request:** the model holds no memory of them between calls, so each answer reflects the documents as they are right now.
+- **Grounding is instructed, not guaranteed:** you must tell the model to answer only from the context; it can still ignore the instruction, which is why you also check the output.
+- **Good for text knowledge:** policies, FAQs, manuals. For a single current record, use a tool or a database query instead.
+
+## Not to be confused with
+
+Fine-tuning changes the model's weights so it learns a skill or style, and it is slow and offline. RAG leaves the weights alone and adds knowledge through the prompt at request time. Rule: fine-tuning teaches behaviour; RAG supplies knowledge. RAG is also not plain search: search returns a list of documents, while RAG reads those documents and writes an answer from them.
 
 ## Interview Qs
 
-### What is RAG?
+### What is RAG and why use it?
 
-Retrieval-augmented generation: before the LLM answers, the app searches a knowledge base for relevant chunks and adds them to the prompt. The LLM answers from that text, so it can use private, recent information and cite it.
+Retrieval-augmented generation: before the LLM answers, the app searches a knowledge base for the chunks relevant to the question and adds them to the prompt. It is used so the model can answer from private or recent information it never saw in training, and cite its source, without any retraining.
 
 ### Does RAG change the model?
 
-No. The weights stay the same. RAG only changes what goes into the prompt for each request. Changing the model itself is [fine-tuning](card:llm-training-stages).
+No. The weights stay exactly the same. RAG only changes what goes into the prompt for each request. Teaching the model itself is [fine-tuning](card:llm-training-stages), which is a separate, offline process.
 
 ### When would you not use RAG?
 
-When the answer is a live record (call a tool or the database instead), or when the whole knowledge base is small enough to send every time: see [RAG, fine-tuning or long context](card:rag-or-fine-tuning).
+When the answer is a single live record, such as an order's current status, call a tool or query the database instead. Also skip RAG when the whole knowledge base is small enough to send in every prompt; see [RAG, fine-tuning or long context](card:rag-or-fine-tuning).

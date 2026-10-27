@@ -5,17 +5,30 @@ title: Similarity Search and Distance Metrics
 topic: vector-search
 level: intermediate
 heat: 3
-hook: "Similarity search returns the K stored vectors closest to the query vector; cosine similarity measures closeness by angle."
+hook: "Similarity search returns the K stored vectors closest to the query vector; a distance metric such as cosine similarity decides what 'close' means."
 points:
-  - { k: "Cosine similarity", v: "same direction = 1, unrelated ≈ 0; length is ignored" }
-  - { k: "Cosine distance", v: "1 − cosine similarity: smaller means more similar" }
-  - { k: "Unit-length vectors", v: "cosine, dot product and Euclidean give the same ranking", kind: plus }
-  - { k: "Which metric", v: "the one your embedding model's docs recommend" }
-  - { k: "Exact kNN", v: "compares against every vector: perfect recall, slow at scale", kind: minus }
+  - { k: "Cosine similarity", v: "scores two vectors by the angle between them: same direction = 1, unrelated ≈ 0; vector length is ignored" }
+  - { k: "Cosine distance", v: "1 − cosine similarity, so a smaller distance means more similar; pgvector returns distance, not similarity" }
+  - { k: "Normalised vectors", v: "when every vector has length 1, cosine, dot product and Euclidean rank the results in the same order", kind: plus }
+  - { k: "Which metric", v: "use the one the embedding model's own docs recommend, rather than guessing" }
+  - { k: "Exact search is slow", v: "comparing the query against every stored vector gives perfect results but is too slow at millions of vectors", kind: minus }
 trap:
-  wrong: "The metric choice decides search quality, so always tune it."
-  right: "For unit-length embeddings, such as OpenAI's, cosine, dot product and Euclidean rank results the same. Use the model's recommended one."
-sayIt: "I embed the question and fetch the K nearest chunk vectors. Cosine similarity compares direction. With normalised embeddings cosine and dot product rank the same, so I follow the model's advice."
+  wrong: "The distance metric decides search quality, so always tune it."
+  right: "For length-1 (normalised) embeddings, such as OpenAI's, cosine, dot product and Euclidean give the same ranking. Use the metric the model recommends."
+  why: "Distance formulas look like the important choice, so people spend time on them. For normalised embeddings the ranking is identical, so the metric rarely changes which chunks you get."
+sayIt: "I embed the question and fetch the K nearest chunk vectors. Cosine similarity compares direction and ignores length. With normalised embeddings cosine and dot product rank the same way, so I just follow the embedding model's recommendation."
+cheat:
+  idea: "Similarity search embeds the query, then returns the K stored vectors closest to it. A distance metric such as cosine similarity decides what 'closest' means."
+  code: |
+    ORDER BY embedding <=> :query  -- pgvector: smaller cosine distance first
+    LIMIT 5;
+  remember: "For normalised embeddings cosine, dot product and Euclidean rank the same; use the model's recommended metric."
+buildsOn: [embeddings]
+scenarios:
+  - q: "Your pgvector query orders by `embedding <=> query` ascending and the top row has the smallest number. Is that row the most similar or the least similar?"
+    a: "The most similar. The `<=>` operator returns cosine distance, where smaller means more alike, so ascending order puts the closest match first. If you confused it with similarity (bigger is closer) you would read the result backwards."
+  - q: "Your embeddings are all normalised to length 1. A teammate wants to switch from cosine to dot product for 'better results'. What do you tell them?"
+    a: "For length-1 vectors cosine and dot product give the same ranking, so the switch will not change which chunks are returned. Dot product is slightly faster to compute, so it is fine as a performance choice, but do not expect better relevance."
 confusedWith: []
 tags: [embeddings, similarity, vectors]
 visual: table
@@ -31,18 +44,29 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Similarity search is the step that uses [embeddings](card:embeddings) to find related text. You embed the question into a query vector, then return the K stored vectors that are closest to it. "Closest" is defined by a **distance metric**, a formula that scores how near two vectors are. The common metric is cosine similarity, which scores two vectors by the angle between them.
+
 ## Why it exists
 
-Once text is a vector, "find related text" becomes "find the nearest vectors". You need a rule for "near".
+Once text is an embedding, "find related text" turns into "find the nearest vectors". But "nearest" is not obvious: you need one agreed rule for measuring how near two lists of numbers are. A distance metric is that rule. Without it you could store vectors but could not rank them, so you could not say which chunks to send to the LLM.
 
 ## How it works
 
+Cosine, dot product and Euclidean are three ways to measure nearness; the table shows how they differ.
+
 <Compare id="cosine-vs-dot-product-vs-euclidean" />
 
-- Embed the question, score it against stored vectors, keep the top K.
-- Scoring every vector is [exact kNN](card:exact-knn); millions of vectors need an [ANN index](card:vector-databases).
+1. Embed the question with the same model used for the documents, giving one query vector.
+2. Score the query vector against each stored vector using the chosen metric.
+3. Sort by that score and keep the top K (for example the 5 nearest chunks).
+
+Comparing against every stored vector is called [exact kNN](card:exact-knn). It is perfectly accurate but gets too slow at millions of vectors, which is why large stores use an approximate [index](card:vector-databases) instead.
 
 ## Example
+
+Cosine similarity in plain Java, so you can see the two extreme scores. The score is 1 when two vectors point the same way, and 0 when they are at right angles.
 
 ```java
 public class Cosine {
@@ -53,7 +77,7 @@ public class Cosine {
     }
     public static void main(String[] args) {
         System.out.println(cosine(new double[]{1, 2, 3}, new double[]{2, 4, 6})); // same direction
-        System.out.println(cosine(new double[]{1, 0}, new double[]{0, 1}));       // unrelated
+        System.out.println(cosine(new double[]{1, 0}, new double[]{0, 1}));       // right angle
     }
 }
 ```
@@ -63,16 +87,28 @@ public class Cosine {
 0.0
 ```
 
+What to notice:
+
+- `{1,2,3}` and `{2,4,6}` point the same way (one is just twice the other), so the score is 1.0; cosine ignores length and looks only at direction.
+- `{1,0}` and `{0,1}` are at right angles, so the score is 0.0, meaning unrelated.
+- Replace cosine distance with cosine similarity in a query and you must flip the sort order, because bigger similarity means closer but smaller distance means closer.
+
+## Rules and defaults
+
+- **Metric follows the model:** use the distance the embedding model's docs recommend; OpenAI's embeddings are normalised, so cosine and dot product behave the same.
+- **Similarity vs distance:** cosine similarity is bigger when closer; cosine distance is `1 − similarity`, so it is smaller when closer. pgvector's `<=>` returns distance.
+- **Exact search as a baseline:** scoring every vector is exact but scales badly; switch to an approximate index once you have many vectors.
+
 ## Interview Qs
 
 ### What is cosine similarity?
 
-It measures the angle between two vectors. Pointing the same way gives 1, at right angles gives 0. Vector length is ignored, so it compares direction, which is where embeddings keep meaning.
+It scores two vectors by the angle between them. Pointing the same way gives 1, at right angles gives 0, opposite gives -1. Vector length is ignored, so it compares direction only, which is where an embedding keeps meaning. That makes it a natural fit for comparing embeddings.
 
-### Cosine similarity or dot product?
+### Cosine similarity or dot product: which should you use?
 
-Dot product also counts vector length. For unit-length vectors the two are equal, and computing a dot product is slightly faster. Otherwise use the metric the embedding model recommends.
+Dot product also counts vector length, while cosine looks only at direction. For normalised (length-1) vectors the two give the same ranking, and dot product is slightly faster to compute. If vectors are not normalised, follow the embedding model's recommendation rather than switching on a hunch.
 
-### Similarity vs distance?
+### What is the difference between similarity and distance?
 
-Similarity: bigger is closer. Distance: smaller is closer. Cosine distance is 1 minus cosine similarity, so both give the same order.
+Similarity is bigger when two vectors are closer; distance is smaller when they are closer. Cosine distance is `1 − cosine similarity`, so both give the same order, just reversed. The practical point: check whether your store returns distance or similarity before you sort, or you will rank results backwards.

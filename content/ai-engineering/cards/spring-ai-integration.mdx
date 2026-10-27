@@ -5,16 +5,29 @@ title: Integrating an LLM in Spring Boot
 topic: ai-in-production
 level: intermediate
 heat: 3
-hook: "The browser calls your backend; only the backend calls the model, through an AI service that owns prompts, keys and checks."
+hook: "The browser calls your backend; only the backend calls the model, through an AI service that owns the prompt, the key and the checks."
 points:
-  - { k: "Backend owns", v: "auth, prompts, model choice, tools, retries, limits, logs, validation" }
-  - { k: "Spring AI 2.0", v: "ChatClient over a portable ChatModel; supports Boot 4.0 and 4.1", kind: default }
-  - { k: "Provider SDK", v: "official OpenAI or Anthropic Java SDK: provider features first" }
-  - { k: "API key", v: "loaded on the server from a key store or env var; never in code", kind: minus }
+  - { k: "Backend owns", v: "the API key, auth, prompt, model choice, tools, retries, limits, logs and output checks" }
+  - { k: "AI service layer", v: "a Spring bean between the controller and the model; it builds the prompt and calls the model" }
+  - { k: "ChatClient", v: "Spring AI's main interface: you build a prompt, call the model, read the reply, over any provider", kind: default }
+  - { k: "Provider SDK", v: "the official OpenAI or Anthropic Java SDK: use it when you need a provider feature Spring AI lacks" }
+  - { k: "API key", v: "loaded on the server from a secrets manager or env var; never in code, Git, logs or the browser", kind: minus }
 trap:
-  wrong: "Call the provider straight from the React app to save a hop."
-  right: "Call it from the backend. In the browser the API key is exposed, and your auth, limits and checks are skipped."
-sayIt: "The model sits behind the backend: a controller calls an AI service that retrieves context, builds the prompt, calls the model through Spring AI's ChatClient, validates the reply and returns it."
+  wrong: "Call the provider straight from the React app to save a network hop."
+  right: "Call it from the backend. In the browser the API key is visible to anyone, and your auth, limits and output checks are skipped."
+  why: "People picture the LLM like any public API the frontend can call, and forget that the key is a paid secret and the backend is where the rules live."
+sayIt: "The model sits behind the backend: a controller handles auth, then calls an AI service that retrieves context, builds the prompt, calls the model through Spring AI's ChatClient, validates the reply and returns it."
+cheat:
+  idea: "Put the LLM behind your backend. A thin controller handles auth, then an AI service builds the prompt and calls the model through Spring AI's ChatClient."
+  flow: "React → controller (auth) → AI service → ChatClient → provider"
+  remember: "Only the backend holds the API key and runs the checks; the browser never calls the provider."
+buildsOn: [tool-calling, output-validation]
+scenarios:
+  - q: "A frontend engineer wants the React app to call the OpenAI API directly, so the reply skips your server. What do you say?"
+    a: "No. The API key would ship to the browser and anyone could read it and spend your budget. Auth, rate limits and output validation all live on the server, so a direct browser call bypasses them. Keep the call on the backend."
+  - q: "You need a brand-new provider feature that Spring AI's ChatClient does not expose yet. What are your options?"
+    a: "Drop to the provider's official Java SDK (OpenAI or Anthropic) for that one call, or use RestClient to hit the HTTP API yourself. You lose Spring AI's portability but gain the feature; keep the rest of the app on ChatClient."
+confusedWith: []
 tags: [spring-ai]
 visual: flow
 sources:
@@ -32,14 +45,18 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Integrating an LLM in Spring Boot means putting the model behind your own backend. The browser never talks to the model provider; it calls your Spring Boot API, and only the server calls the model. Between the controller and the model you add an **AI service**: an ordinary Spring bean that owns the prompt, the retrieval and the output checks. It reaches the model through [Spring AI](term:spring-ai)'s `ChatClient`, one interface that works across providers.
+
 ## Why it exists
 
-The model is a remote, paid service that must not hold secrets or make decisions. One backend layer keeps the key, checks the caller and controls what goes in and out.
+The model is a remote, paid service reached with a secret API key. If the React app called it directly, that key would travel to every browser, and anyone could read it and spend your budget. There would also be no place to check who is asking, cap usage or validate the reply. Putting one backend layer in front keeps the key on the server and gives auth, limits and checks a single home.
 
 ## How it works
 
 <Mermaid
-  alt="React calls a Spring Boot controller (auth, rate limit), which calls the AI service. The service retrieves pgvector chunks, sends the prompt to the provider, runs requested tools against the database with checks, and returns a validated reply."
+  alt="React or Next.js calls a Spring Boot controller that does auth and rate limiting. The controller calls the AI service. The service retrieves pgvector chunks, sends the prompt to the LLM provider API, runs any requested tool against the orders database after a check, and returns a validated reply back through the controller."
   chart={`flowchart LR
   UI[React / Next.js] --> C[Controller: auth, rate limit]
   C --> S[AI service]
@@ -50,10 +67,17 @@ The model is a remote, paid service that must not hold secrets or make decisions
   S -- 3. validated reply --> C`}
 />
 
-- Controllers stay thin; the AI service owns prompts, model calls and validation.
-- Streaming and retries: [calling LLM APIs](card:calling-llm-apis). Tools: [tool calling](card:tool-calling).
+1. The browser sends the user's question to a Spring Boot controller, which authenticates the caller and applies rate limits.
+2. The controller stays thin and hands the question to the AI service.
+3. The AI service retrieves any context it needs (for example pgvector chunks), builds the prompt and calls the model through `ChatClient`.
+4. If the model asks to run a tool, the service runs it against the database only after its own check, then sends the result back to the model.
+5. The service validates the final reply and returns it to the controller, which responds to the browser.
+
+So the controller guards the door and the AI service does the model work; see [calling LLM APIs](card:calling-llm-apis) for streaming and retries and [tool calling](card:tool-calling) for tools.
 
 ## Example
+
+The app key comes from an environment variable, and a `SupportAssistant` bean injects a ready-built `ChatClient`.
 
 ```properties
 # starter: spring-ai-starter-model-openai (Spring AI 2.0)
@@ -76,16 +100,34 @@ class SupportAssistant {
 }
 ```
 
+What to notice:
+
+- `${OPENAI_API_KEY}` reads the key from the environment, so the secret never sits in source or Git.
+- Spring AI's starter auto-configures a `ChatClient.Builder`, so the service only injects it and calls `build()`.
+- `.system(...)` sets the fixed rules, `.user(question)` adds the caller's text, and `.call().content()` returns the reply as a `String`.
+- Swap the starter and key for `spring-ai-starter-model-anthropic` and the same code calls a different provider, because `ChatClient` is portable.
+
+## Rules and defaults
+
+- **ChatClient auto-configured:** adding a Spring AI model starter and a key auto-configures a `ChatClient.Builder` bean (Spring AI 2.0).
+- **Portability:** `ChatClient` targets a provider-neutral `ChatModel`; switching provider is a starter and key change, not a code change (Spring AI 2.0).
+- **Key source:** load the key from a secrets manager or environment variable. Never in code, Git, logs or the browser.
+- **Thin controllers:** keep prompts, model calls, tools and validation in the AI service, not in the controller.
+
+## Not to be confused with
+
+Three clients can reach the model. [Spring AI](term:spring-ai)'s `ChatClient` gives one portable API with advisors, RAG and tools built in. A [provider SDK](term:provider-sdk) (the official OpenAI or Anthropic Java library) exposes the newest provider features first. A plain [RestClient](term:restclient) or [WebClient](term:webclient) gives full HTTP control but leaves you to write parsing and retries. Rule: ChatClient by default; a provider SDK or RestClient only when you need something ChatClient does not offer.
+
 ## Interview Qs
 
 ### How do you integrate an LLM into a Spring Boot app?
 
-Add a Spring AI model starter, supply the key from a secret, and inject `ChatClient.Builder` into an AI service that retrieves context, builds the prompt, calls the model and validates.
+Add a Spring AI model starter and supply the key from a secret. Inject `ChatClient.Builder` into an AI service that sits behind a thin controller. The service retrieves context, builds the prompt, calls the model and validates the reply. The controller handles auth and rate limiting. The browser never calls the provider.
 
 ### Spring AI, a provider SDK, or plain RestClient?
 
-Spring AI: one portable API with advisors, RAG and tools. Provider SDK: newest provider features first. RestClient or WebClient: full HTTP control, but you write parsing and retries.
+Spring AI gives one portable API with advisors, RAG and tools, and is the default. A provider SDK gives the newest provider features first, so use it when ChatClient lacks something. RestClient or WebClient gives full HTTP control, but you write the request, parsing and retries yourself.
 
 ### Where do you keep the API key?
 
-Server-side only: a key management service or secrets manager, or an environment variable. Never in source code, Git, logs or the browser.
+Server-side only: a secrets manager or key management service, or an environment variable read at startup. Never in source code, in Git, in logs, or in anything sent to the browser, because the key is a paid secret and a leaked key lets anyone spend your budget.

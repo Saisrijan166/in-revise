@@ -5,17 +5,28 @@ title: Temperature, Top-P and Output Limits
 topic: prompting
 level: beginner
 heat: 3
-hook: "Temperature and top-p set how random the next-token pick is; max tokens caps length. Low for facts, higher for ideas."
+hook: "Temperature and top-p set how random the next-token pick is; the max output tokens cap how long the reply can be. Low for facts, higher for ideas."
 points:
-  - { k: "Low temperature", v: "focused, repeatable: extraction, SQL, JSON" }
-  - { k: "Higher temperature", v: "more varied: brainstorming, drafts" }
-  - { k: "Change one", v: "tune temperature or top-p, not both (OpenAI)" }
-  - { k: "Max output tokens", v: "hard cap; when hit, the reply is cut off", kind: minus }
-  - { k: "Newer models", v: "some reject non-default temperature or top-p", kind: minus }
+  - { k: "Low temperature", v: "focused and repeatable; use it for extraction, SQL and JSON" }
+  - { k: "Higher temperature", v: "more varied; use it for brainstorming and draft writing" }
+  - { k: "Change one knob", v: "tune temperature or top-p, not both; OpenAI advises leaving the other at its default" }
+  - { k: "Max output tokens", v: "a hard cap on reply length; when it is hit, the reply is cut off mid-text", kind: minus }
+  - { k: "Newer models", v: "some reasoning models reject a non-default temperature or top-p, so re-check before relying on them", kind: minus }
 trap:
-  wrong: "Higher temperature makes the model smarter or more accurate."
-  right: "It only adds randomness. Accuracy comes from the model, prompt and context; keep it low for facts."
-sayIt: "Temperature reshapes token probabilities: low is focused, high is varied. Top-p samples only from the most likely tokens. I tune one, keep it low for extraction and cap length with max output tokens."
+  wrong: "A higher temperature makes the model smarter or more accurate."
+  right: "Temperature only adds randomness. Accuracy comes from the model, the prompt and the context; keep temperature low for factual work."
+  why: "Higher temperature produces more surprising, creative-sounding text, which reads as \"better\" in a demo; but the extra variety is randomness, not extra knowledge or correctness."
+sayIt: "Temperature reshapes the next-token probabilities: low is focused, high is varied. Top-p samples only from the most likely tokens up to a mass p. I tune one knob, keep temperature low for extraction, and cap length with max output tokens."
+cheat:
+  idea: "Temperature and top-p control how random the model's next-token choice is; max output tokens caps how long the reply can be."
+  flow: "low temperature → focused/repeatable ; higher → varied"
+  remember: "Temperature is not intelligence; tune one knob, keep it low for facts, and a hit max-tokens limit cuts the reply off, so check the stop reason."
+buildsOn: [tokens, how-models-learn]
+scenarios:
+  - q: "You generate SQL from a question and the same question sometimes gives different, occasionally broken, queries. What setting do you change, and does it fully fix it?"
+    a: "Lower the temperature, close to 0, so the model almost always takes the most likely token and output is far more repeatable. It does not fully fix it: even at temperature 0 the output is not guaranteed identical, so you still validate or test the generated SQL before running it."
+  - q: "Your JSON replies are sometimes cut off halfway, so parsing fails. The temperature is fine. What is the likely cause?"
+    a: "The max output tokens limit is too low, so the reply is truncated when it hits the cap. The API reports the limit as the stop reason. Raise the output limit to fit the full reply, and check the stop reason in code so you can retry when it says the cap was hit."
 confusedWith: []
 tags: [temperature, top-p, max-tokens, sampling]
 visual: table
@@ -34,45 +45,73 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+When a model generates text, it gives every possible next [token](card:tokens) a probability, then picks one and repeats. **Sampling parameters** control that picking. **Temperature** reshapes the probabilities before the pick: low makes the top token almost certain, high evens them out. **Top-p** (nucleus sampling) keeps only the smallest set of top tokens whose probabilities add up to p, then samples from that set. **Max output tokens** is a separate cap on how many tokens the reply may have.
+
 ## Why it exists
 
-The model gives a probability to every possible next token. These settings decide how to pick from them and when to stop.
+The same model should behave differently for different jobs. For extracting an order id you want the same, focused answer every time; for drafting marketing copy you want variety. These settings let you choose that behaviour without changing the model or the prompt. The output cap also protects you: it bounds reply length, so cost and latency stay predictable and a runaway reply cannot balloon.
 
 ## How it works
 
+Temperature and top-p both control randomness, but in different ways.
+
 <Compare id="temperature-vs-top-p" />
 
-- Even at temperature 0, output is not fully deterministic (Anthropic docs).
-- When the cap is hit, the reason field says so: OpenAI `max_output_tokens`, Anthropic `max_tokens`.
-- Stop sequences end the reply early when a chosen string appears.
+1. The model assigns a probability to every possible next token.
+2. Temperature reshapes those probabilities: a low value sharpens them toward the top token, a high value flattens them.
+3. Top-p then restricts the pool to the smallest set of tokens whose probabilities reach p, and the model samples from that pool only.
+4. Generation continues token by token until the model emits a stop token, hits a stop sequence, or reaches the max output tokens cap, at which point the reply is cut off.
+
+So the key is to tune one knob, usually temperature, keep it low for factual work, and set the output cap high enough to fit the full reply.
 
 ## Example
 
+In a Spring AI app these are configuration properties. Here temperature is low for consistent answers and the output length is capped.
+
 ```properties
 spring.ai.openai.api-key=${OPENAI_API_KEY}
-# a model that accepts temperature (GPT-5 reasoning models reject it)
+# use a model that accepts temperature; some reasoning models reject it
 spring.ai.openai.chat.model=${CHAT_MODEL}
 spring.ai.openai.chat.temperature=0.2
 spring.ai.openai.chat.max-tokens=300
 ```
 
-## Defaults
+What to notice:
+
+- `temperature=0.2` keeps replies focused and close to repeatable, which is what you want for support answers and extraction, not brainstorming.
+- `max-tokens=300` caps the reply; if an answer needs more, it is cut off and the stop reason reports the limit, so set it to fit the longest expected reply.
+- The comment is a real constraint: several newer reasoning models reject a non-default temperature, so the same config can fail on a different model. Re-check the model's docs; these rules change fast.
+- Leaving top-p unset uses the provider default, which is correct when you are already tuning temperature.
+
+## Rules and defaults
+
+- **Tune one, not both:** OpenAI advises changing temperature or top-p, not both, and leaving the other at its default.
+- **Low for facts:** keep temperature near 0 for extraction, SQL and JSON; even at 0 the output is not fully deterministic (Anthropic docs), so still validate.
+- **Output cap stops the reply:** when the cap is reached, the reply is cut off and the stop reason says so (OpenAI `max_output_tokens`, Anthropic `max_tokens`).
+- **Stop sequences:** a chosen string can end the reply early when it appears.
+- **Model limits change fast:** some reasoning models reject non-default temperature or top-p; re-check the provider docs before interviews and before relying on a setting.
 
 | What | Default | Where |
 |---|---|---|
-| temperature | 1.0 (range 0 to 1; deprecated on newer models) | Anthropic Messages API |
+| temperature | 1.0 (range 0 to 1; deprecated on some newer models) | Anthropic Messages API |
 | spring.ai.openai.chat.temperature | 0.8 | Spring AI 2.0 OpenAI starter |
+
+## Not to be confused with
+
+**Temperature and top-p** control randomness during generation. The **[max output tokens](card:context-window)** limit only caps length and has nothing to do with randomness. Rule: temperature and top-p decide how the next token is chosen; the output cap decides when generation must stop.
 
 ## Interview Qs
 
 ### What is the difference between temperature and top-p?
 
-Temperature reshapes the whole probability spread: low sharpens it, high flattens it. Top-p keeps only the smallest set of tokens whose probabilities add up to p. OpenAI advises changing one, not both.
+Temperature reshapes the whole probability spread: a low value sharpens it toward the top token, a high value flattens it. Top-p keeps only the smallest set of tokens whose probabilities add up to p, then samples from those. OpenAI advises tuning one and leaving the other at its default.
 
 ### What temperature would you use for SQL generation or extraction?
 
-Low, so output stays focused and repeatable. Even at 0 it is not fully deterministic, so still validate the result.
+A low temperature, near 0, so the output stays focused and close to repeatable. Even at 0 the result is not fully deterministic, so you still validate or test the generated SQL before running it, rather than trusting it blindly.
 
 ### What happens when max output tokens is too low?
 
-The reply stops mid-way and the API reports the limit as the stop reason, so JSON may be incomplete. Check the reason and retry with a higher limit.
+The reply stops part-way and the API reports the limit as the stop reason, so JSON or prose can come back incomplete. Check the stop reason in code, and retry with a higher limit. Note that for reasoning models, hidden reasoning tokens count toward this cap too.

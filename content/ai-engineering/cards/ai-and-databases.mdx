@@ -5,16 +5,28 @@ title: "AI with Databases: Tools, Text-to-SQL, pgvector"
 topic: ai-in-production
 level: intermediate
 heat: 2
-hook: "The model never touches the database: it asks for an approved tool, and the backend checks who is asking first."
+hook: "The model never touches the database directly: it asks for an approved tool, and the backend checks who is asking before running a fixed query."
 points:
-  - { k: "Approved tool", v: "a fixed query, e.g. getOrderStatus(orderId), behind backend auth" }
-  - { k: "User id", v: "from the logged-in session, never from the model" }
-  - { k: "Generated SQL", v: "untrusted input: validate and parameterise (OWASP LLM05)", kind: minus }
-  - { k: "Text-to-SQL guard", v: "read-only role, allowlisted views, one SELECT, timeout, row limit" }
+  - { k: "Approved tool", v: "a fixed query such as getOrderStatus(orderId), run by the backend after its own auth check" }
+  - { k: "User id from session", v: "the backend takes the user from the logged-in session, never from the model's arguments", kind: minus }
+  - { k: "Generated SQL is untrusted", v: "validate and parameterise any model-written SQL, like any user input (OWASP LLM05)", kind: minus }
+  - { k: "Text-to-SQL guards", v: "read-only role, allowlisted views, one SELECT, a timeout and a row limit" }
 trap:
-  wrong: "Give the LLM a database connection so it can answer anything."
-  right: "Expose narrow tools that run fixed queries as the logged-in user; the backend enforces authorisation, not the model."
-sayIt: "The model gets data only through approved tools; the backend takes the user from the session and checks access. For internal text-to-SQL: read-only role, allowlisted views, validation, timeout, row limit."
+  wrong: "Give the LLM a database connection so it can answer any question about the data."
+  right: "Expose narrow tools that run fixed queries as the logged-in user; the backend enforces who can see what, not the model."
+  why: "A raw connection looks like the most flexible design, and it is easy to forget that a prompt-injected model would then read or change rows the user may never touch."
+sayIt: "The model gets data only through approved tools; the backend takes the user from the session and checks access. For internal text-to-SQL I add a read-only role, allowlisted views, validation, a timeout and a row limit."
+cheat:
+  idea: "Never give the model a database connection. Expose narrow tools that run fixed queries, and let the backend check the logged-in user before each one."
+  flow: "model asks for getOrderStatus(42) → backend checks ownership → fixed query or refuse"
+  remember: "Identity comes from the session, not the model; generated SQL is untrusted input to validate."
+buildsOn: [tool-calling, llm-security, vector-databases]
+scenarios:
+  - q: "A support bot should answer \"show my orders\". One design gives the model a DB connection; another gives it a getMyOrders() tool. Which is safe, and why?"
+    a: "The tool. getMyOrders() reads the user id from the session and runs a fixed query for that user, so a prompt-injected model cannot widen access. A raw connection lets the model write any SQL, so an injected instruction could read or change other users' rows."
+  - q: "You build internal text-to-SQL for analysts. The model writes a query that includes DROP TABLE orders. What stops it?"
+    a: "The AI connects as a read-only role with SELECT only on allowlisted views, so DROP and writes fail at the database. You also parse the SQL to allow a single SELECT, add a LIMIT and a statement timeout. Generated SQL is untrusted, so the guard is the role, not the model."
+confusedWith: []
 tags: [databases, text-to-sql, authorisation]
 visual: flow
 sources:
@@ -32,14 +44,18 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+AI with databases is how the model reads business data safely. The model is never given a database connection or allowed to run its own SQL on the live tables. Instead the backend exposes a few **approved tools**, each a fixed, parameterised query such as `getOrderStatus(orderId)`. When the model wants data it [requests a tool](card:tool-calling); the backend checks the logged-in user first, then runs the query. The same PostgreSQL database can also hold the [pgvector](card:vector-databases) chunks used for retrieval.
+
 ## Why it exists
 
-A model with raw database access can be talked into reading or changing any row. Tools give it only what this user may see.
+A model with raw database access can be talked into reading or changing any row. Because its instructions can come from a retrieved document or the user's own text, a [prompt injection](card:prompt-injection) could tell it to run `SELECT * FROM orders` or a `DELETE`, and a raw connection would obey. Approved tools remove that risk: the model can only ask for a named, fixed query, and the backend decides, from the session and not the model, whether this user may see that data.
 
 ## How it works
 
 <Mermaid
-  alt="Bad: the LLM sends any SQL to the database. Better: the LLM asks for getOrderStatus(42); the backend checks the user owns order 42, then runs a fixed query or refuses."
+  alt="Bad design: the LLM sends any SQL straight to the database. Better design: the LLM asks for getOrderStatus(42); the backend checks whether the session user owns order 42, and if yes runs a fixed query, and if no refuses."
   chart={`flowchart LR
   subgraph Bad
     L1[LLM] -- any SQL --> D1[(Database)]
@@ -51,38 +67,54 @@ A model with raw database access can be talked into reading or changing any row.
   end`}
 />
 
-- "Show my orders": the tool reads the user id from Spring AI's `ToolContext`, not from model arguments ([tool calling](card:tool-calling)).
-- Text-to-SQL suits internal analytics; customer support uses fixed tools.
-- Orders and policy chunks can share one PostgreSQL ([pgvector](card:vector-databases)).
+1. The model decides it needs order data and requests the `getOrderStatus(42)` tool.
+2. The backend runs the tool. It reads the user id from Spring AI's `ToolContext`, filled from the session, not from the model's arguments.
+3. It checks whether that user may see order 42, and refuses if not.
+4. If allowed, it runs the fixed, parameterised query and returns only that result to the model.
+
+So the key is that identity and authorisation live in the backend tool, not in anything the model wrote. Text-to-SQL, where the model writes a query, suits internal analytics and needs its own guards; customer support uses fixed tools.
 
 ## Example
 
-Example: a read-only role for internal analytics (PostgreSQL 18).
+For internal analytics you may let the model write SQL, but it connects as a locked-down role (PostgreSQL 18).
 
 ```sql
 CREATE ROLE ai_reader LOGIN;                          -- password from a secrets manager
 CREATE VIEW order_stats AS                            -- allowlisted columns only
   SELECT id, status, total_inr, created_at FROM orders;
-GRANT SELECT ON order_stats TO ai_reader;             -- no grant on the tables
-ALTER ROLE ai_reader SET statement_timeout = '5s';    -- stop runaway queries
+GRANT SELECT ON order_stats TO ai_reader;             -- no grant on the base tables
+ALTER ROLE ai_reader SET statement_timeout = '5s';    -- stop a runaway query
 ALTER ROLE ai_reader SET default_transaction_read_only = on;   -- safety net
 ```
 
-As `ai_reader`, the view works; `orders`, `DELETE` and a 7-second query fail. Sessions can turn read-only off: the `GRANT` is the real guard.
+What to notice:
 
-## Defaults
+- `GRANT SELECT ON order_stats` is the real guard: `ai_reader` can read the view but has no grant on `orders`, so a generated `DELETE` or a query on `orders` fails.
+- The view exposes only four columns, so sensitive columns in `orders` are never reachable.
+- `statement_timeout = '5s'` cancels a query that runs too long, so a 7-second query is killed.
+- `default_transaction_read_only` is a safety net, not the main guard: a session can turn it off, so the `GRANT` must still be read-only on its own.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
 | `statement_timeout` | 0 (no timeout) | PostgreSQL 18 |
 | `default_transaction_read_only` | off | PostgreSQL 18 |
 
+- **Identity:** take the user id from the session via `ToolContext`, never from the model's tool arguments.
+- **Generated SQL:** treat as untrusted input; parse to allow a single SELECT, parameterise, and add a LIMIT (OWASP LLM05).
+- **Access:** a read-only role with SELECT on allowlisted views only, plus a statement timeout and row limit.
+
+## Not to be confused with
+
+A fixed tool and text-to-SQL are different ways for the model to reach data. A fixed tool runs a query you wrote, so the model only supplies arguments; it is the safe default for customer features. Text-to-SQL lets the model write the query itself, which is flexible for internal analytics but needs a read-only role and SQL validation. Rule: fixed tools for customer-facing features, guarded text-to-SQL for internal analytics only.
+
 ## Interview Qs
 
 ### Should an LLM query the database directly?
 
-No. It uses approved tools; the backend takes identity from the session, checks access and runs fixed, parameterised queries, so prompt injection cannot widen access.
+No. It should use approved tools. The backend takes the user's identity from the session, checks access, and runs fixed, parameterised queries. That way a prompt injection cannot widen access, because the model never chooses who it is or writes the SQL that runs on the live tables.
 
 ### How would you make text-to-SQL safe?
 
-Read-only role with SELECT on allowlisted views; parse and allow one SELECT; force a LIMIT; set a statement timeout; apply the user's permissions; log every query. Generated SQL is untrusted input.
+Connect as a read-only role with SELECT on allowlisted views only. Parse the generated SQL and allow a single SELECT. Parameterise values, force a LIMIT, and set a statement timeout. Apply the user's own permissions and log every query. Treat the generated SQL as untrusted input, because an injection could try to widen it.

@@ -366,3 +366,133 @@ Mapped), and its other parts are listed under "Details placed elsewhere or cut".
 | A44.3 (part: secrets). Never hardcode API keys; env vars, secrets manager, Vault | also: concept `llm-security` (How it works bullet: link to `spring-ai-integration`) |
 | A47.1 (part). Cost = input + output tokens + price + calls | also: concept tokens (points: billing; Example block) |
 | A73.2. Confusion: fine-tuning gives current database knowledge (part: the decision) | also: concept rag-or-fine-tuning (trap, Interview Q "Can fine-tuning keep the model up to date?") |
+
+## Template v3 rewrite (21-10-2026)
+
+Every concept and comparison was rewritten in teaching template v3 (CLAUDE.md 3.1.1) and given a cheat-sheet card; each reference item mapped above still lands in the same concept id.
+
+### Unit ai-foundations
+
+**Added from the reference**
+
+- None. The reference has no foundations section; this unit is editorial opening content (coverage rows 268–274 confirm). No reference teaching point was missing.
+
+**Corrections**
+
+- None. No fact was changed, so existing sources and their `verifiedOn: 2026-10-21` dates were kept (allowed for unchanged facts per SPEC §5). No new or changed facts, so no new sources were needed.
+
+### Unit ai-in-production
+
+**Added from the reference**
+
+Nothing new beyond what the v2 draft already covered; the rewrite only re-expressed
+existing, mapped reference content (coverage sections A42–A52, A59–A60, A48–A49) in v3 form
+(What it is, buildsOn, scenarios, cheat cards, explain/example/sayIt on comparisons).
+
+**Corrections**
+
+None. Facts unchanged from the verified v2 draft.
+
+### Unit llm-fundamentals
+
+**Added from the reference**
+
+Nothing materially new beyond the verified drafts; the reference sections for this unit (A2-A8, A56, A57, A72, plus corrections A4.1, A73.2, A73.8) were already mapped into the drafts. The rewrite made implicit teaching explicit:
+- what-is-an-llm: added an explicit "three kinds" point and a Spring AI one-call Example (reply labelled as an example, never an output panel, per tech-ai-engineering.md).
+- tokens: made the "4 chars / 0.75 words" rule a `default` point; kept the tiktoken table.
+- context-window: added a token-budget Java Example and the "raise max-tokens still cuts off" scenario (input+output share one budget).
+- llm-training-stages: added the LoRA "~10,000x fewer params" Example (Hu et al., 2021) as text (not an output panel).
+
+**Corrections**
+
+No new corrections in this pass. The drafts already carried the coverage-file corrections (A4.1 window includes tools + reasoning tokens; A73.2 LoRA freezes base weights; A73.8 LLM is not the DB). All kept and reverified against the existing primary sources; unchanged facts keep their 2026-10-21 sources per SPEC section 5.
+
+### Unit prompting
+
+**Added from the reference**
+
+Nothing new beyond the verified v2 draft. This was a teaching rewrite into template v3
+(What it is / Why it exists / numbered How it works / Rules and defaults / Not to be confused
+with / cheat cards / scenarios / explain+example+sayIt on comparisons). All facts already
+mapped to the reference in `reference/ai-engineering.coverage.md` (rows A9–A18, A70, A73.5,
+and the "Added beyond the reference" rows for prompting) were kept.
+
+**Corrections**
+
+None. No draft fact was found wrong, so every source kept its existing `verifiedOn: 2026-10-21`
+date (no fact was changed, so no 2026-10-27 re-verification was required). Where sampling and
+reasoning APIs change fast (budget_tokens deprecation, models rejecting non-default temperature),
+the cards carry a "re-check before interviews" note per the tech brief.
+
+### Unit rag-a
+
+**Added from the reference**
+
+- "Only as good as retrieval" made an explicit point and Example bullet in what-is-rag (reference stresses retrieval quality drives answer quality).
+- rag-pipeline: "documents embedded once, only the question embedded per request" raised from a trap to a first-class point and scenario (reference A26).
+- chunking: self-contained-chunk rule (prepend title/section) made a step and a scenario (reference A27/A28 context-loss point).
+- metadata-and-filtering: approximate-index under-return behaviour kept as a point, Rule and interview Q (reference A29 + pgvector).
+
+**Corrections**
+
+- None. All draft facts were already verified and matched the docs on re-check.
+
+### Unit rag-b
+
+**Added from the reference**
+
+- rag-or-fine-tuning: LoRA/PEFT freezes the base model's weights (coverage line 263, A73.2) — added as a "Rules and defaults" bullet so the "fine-tuning changes model parameters" belief is corrected.
+- rag-or-fine-tuning: dated note that provider fine-tuning platforms change (OpenAI winding down parts of fine-tuning), with a "re-check availability" caution (coverage line 263).
+- retrieval-tuning: "retrieve wide, send narrow" / fetch extra then rerank — made the explicit key line (A30, A38).
+- rag-failures: debug-retrieval-before-generation framing and the five failure types kept and expanded into step-by-step logic (A37.*, A38.1).
+
+**Corrections**
+
+- Fine-tuning "changes model parameters" (reference A73.2) corrected: with LoRA (Hu et al. 2021) base weights stay frozen; only small added weights are trained. Source: https://arxiv.org/abs/2106.09685 (verifiedOn 2026-10-27).
+- No other factual corrections; existing sources kept for unchanged facts.
+
+### Unit safety-evaluation
+
+**Added from the reference**
+
+- Excessive-Agency identity example (userId from session, not from the model) → `llm-security`
+  Example + scenario. Reference A59.2 / coverage correction (line 261): the identity must come from
+  the authenticated session via Spring AI `ToolContext`, never from the model. This is a teaching
+  example of an already-verified rule; no new standalone fact.
+- Jailbreak-vs-injection "Not to be confused with" → `prompt-injection` (reference A40 / A74.3 term
+  list; already in draft Interview Q, promoted to a v3 section).
+- "Structured output ≠ validation" distinction → `output-validation` (Common mistakes + Not to be
+  confused with), from reference A18.2 / A65 mapping.
+- Evals-vs-observability distinction → both `ai-evaluation` and `ai-observability`
+  ("Not to be confused with"), clarifying the production/pre-ship boundary.
+
+**Corrections**
+
+None. The v2 drafts already mapped the ad-hoc reference risk list onto the OWASP Top 10 for LLM
+Applications 2025 (coverage lines 257, 288, 333). The LLM01–LLM10 table in `llm-security` was kept
+as-is and confirmed against the existing OWASP sources.
+
+### Unit tools-agents
+
+**Added from the reference**
+
+- Nothing newly added beyond the already-verified draft. The reference's coverage items
+  (A19/A19.1/A19.2 tool calling, A20/A20.1/A20.2 agents, MCP and conversation-memory as
+  "missing from reference / added" per coverage lines 296–306) were already captured. The
+  rewrite expanded their teaching into v3 form (What it is, numbered How-it-works steps,
+  What-to-notice, Rules and defaults, Common mistakes, scenarios, cheat cards) without
+  adding new facts.
+
+**Corrections**
+
+- None. All facts kept from the fact-verified draft.
+
+### Unit vector-search
+
+**Added from the reference**
+
+- No new facts added beyond the draft. The reference sections mapped to this unit (A21–A24, A31–A32, A61–A63, A73.3/.4, metric/recall notes) were already covered by the verified draft; v3 rewrite made the teaching explicit (e.g. recall as a point, exact-kNN baseline, dense vs sparse, RRF worked example) without introducing new claims.
+
+**Corrections**
+
+- None. All pgvector 0.8.7 facts (HNSW m=16/ef_construction=64, hnsw.ef_search=40, ivfflat.probes=1, indexed vector ≤2000 dims / halfvec ≤4000, operators <=> <#> <->, HNSW buildable on empty table, IVFFlat built after data) were re-confirmed against the pgvector README and match the draft; existing verifiedOn 2026-10-21 kept.

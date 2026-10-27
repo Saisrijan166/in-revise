@@ -5,17 +5,28 @@ title: AI Agents
 topic: tools-agents
 level: intermediate
 heat: 3
-hook: "An agent is an LLM in a loop: it picks a tool, reads the result and decides the next step until the goal is met or a limit hits."
+hook: "An agent is an LLM in a loop: it picks a tool, reads the result, decides the next step, and repeats on its own until the goal is met or a limit stops it."
 points:
-  - { k: "Workflow", v: "your code fixes the steps; LLM calls fill them in" }
-  - { k: "Agent", v: "the model chooses the next step and tool at run time" }
-  - { k: "Start simple", v: "one call, then a workflow; an agent only when needed", kind: plus }
-  - { k: "Price of autonomy", v: "more cost and latency; errors can compound", kind: minus }
-  - { k: "Guardrails", v: "step and budget limits, few tools, approval for refunds" }
+  - { k: "Workflow", v: "your code fixes the steps in advance; each step may use an LLM, but you decide the order" }
+  - { k: "Agent", v: "the model itself decides the next step and tool at run time, based on earlier results" }
+  - { k: "Start simple", v: "use one call, then a workflow; reach for an agent only when the steps cannot be listed in advance", kind: plus }
+  - { k: "Price of autonomy", v: "an agent makes many model calls, so it costs more and is slower; one wrong step can lead to more", kind: minus }
+  - { k: "Guardrails", v: "cap the steps and spend, expose few tools, and require human approval for actions like refunds" }
 trap:
   wrong: "Any chatbot that calls a tool is an agent."
-  right: "If your code fixes the steps it is a workflow; it is an agent only when the model decides the next step in a loop."
-sayIt: "An agent is an LLM using tools in a loop on its own results until the goal is done. I use a workflow when the steps are known, and give agents step limits, few tools and human approval for refunds."
+  right: "If your code fixes the order of steps it is a workflow. It is an agent only when the model chooses the next step itself, in a loop."
+  why: "Both use tool calling, so they look the same from outside. The difference is who decides the order of steps: your code, or the model."
+sayIt: "An agent is an LLM using tools in a loop over its own results until the goal is done. I use a plain workflow when the steps are known, and give any agent step limits, few tools and human approval for refunds."
+cheat:
+  idea: "An agent is an LLM in a loop: it picks a tool, reads the result and picks the next step, until the goal is met or a limit stops it."
+  flow: "goal → pick tool → run → read → repeat or finish"
+  remember: "Workflow = your code fixes the steps. Agent = the model decides them. Prefer the simplest."
+buildsOn: [tool-calling, prompt-chaining]
+scenarios:
+  - q: "A teammate says 'our chatbot calls a getPaymentStatus tool, so it is an agent'. Is it an agent?"
+    a: "Not by itself. If your code always does the same thing (call the tool, then answer), it is a workflow. It is an agent only if the model decides, turn by turn, which tool to call next and when to stop, based on the results it sees."
+  - q: "You build an agent to resolve refund questions. What guardrails do you add before it goes live?"
+    a: "Cap the number of steps and the token budget so it cannot loop forever. Expose only a few least-privilege tools. Require human approval for the refund action itself. Validate every tool argument in the backend, and log every step so you can see what it did."
 confusedWith: []
 tags: [agents, workflows, react]
 visual: flow
@@ -28,16 +39,20 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+An AI agent is an [LLM](card:what-is-an-llm) that runs in a loop and drives its own next step. It is given a goal, it chooses a [tool](card:tool-calling) to call, your app runs the tool, the model reads the result, and then it decides what to do next. It keeps going until it thinks the goal is met or a limit stops it. The model, not your code, decides the order of steps.
+
 ## Why it exists
 
-Some tasks need steps nobody can list in advance. An agent lets the model choose those steps itself.
+In [prompt chaining](card:prompt-chaining) and other workflows, you fix the steps in advance. That works when you know the steps, such as "classify, then draft, then check". But some tasks need steps nobody can list ahead of time: the next move depends on what the last result showed. An agent lets the model choose those steps itself, so the system can handle open-ended tasks instead of only the paths you hard-coded.
 
 ## How it works
 
 <Compare id="chatbot-vs-workflow-vs-agent" />
 
 <Mermaid
-  alt="Agent loop: from the goal, the model decides; it calls a tool, the app runs it and returns the result, and the model decides again until the goal is met or a limit hits."
+  alt="Agent loop. From the goal, the model decides what to do. If it calls a tool, the app runs it and returns the result, and the model decides again. When the goal is met or a limit is hit, it produces the answer."
   chart={`flowchart LR
   G([Goal]) --> D{Model decides}
   D -- call a tool --> T[App runs the tool]
@@ -45,31 +60,60 @@ Some tasks need steps nobody can list in advance. An agent lets the model choose
   D -- goal met or limit hit --> F([Answer])`}
 />
 
-- Each tool result is ground truth for the next decision; ReAct interleaves reasoning steps with actions.
-- Stop on goal met, step limit or budget, and log every step ([observability](card:ai-observability)).
-- Too many tools or permissions is [excessive agency](card:llm-security); fixed-step patterns are in [prompt chaining](card:prompt-chaining).
+1. The agent starts with a goal and the list of tools it may use.
+2. The model decides the next step: call a tool, or stop and answer.
+3. If it calls a tool, your app runs it and sends the result back; this result is the ground truth for the next decision.
+4. The model reads the result and decides again. This reason-then-act loop is the ReAct pattern.
+5. The loop ends when the goal is met, or when a step limit or budget is reached.
+
+So the key is the loop: the model keeps deciding, instead of following a path you wrote.
 
 ## Example
 
+This is one run of the payments support agent, with a limit of 5 steps. The lines are a trace of its decisions, not program output.
+
 ```text
 Goal: "Where is my refund for order 42?"   (limit: 5 steps)
-Step 1  need the order  -> getOrderStatus(42)
-        observe: delivered; refund ₹500 to UPI, status PROCESSING
-Step 2  enough to answer -> finish
-Answer: draft explaining the ₹500 UPI refund is in progress
-refundPayment needs backend rules + human approval
+Step 1  need the status -> call getPaymentStatus(42)
+        result: delivered; refund of 500 to UPI, status PROCESSING
+Step 2  enough to answer -> stop
+Answer: explain that the 500 UPI refund for order 42 is in progress
+Note: an actual refund would call refundPayment, which needs backend rules and human approval
 ```
+
+What to notice:
+
+- The model chose to call `getPaymentStatus` first because the goal needed live data; your code did not script that.
+- The result from step 1 is what lets the model decide, in step 2, that it has enough to answer.
+- The 5-step limit is a guardrail: without it, a confused model could loop and keep calling tools.
+- Reading status is safe, but `refundPayment` moves money, so it stays behind backend rules and human approval, not the agent's free choice.
+
+## Rules and defaults
+
+- **Stop conditions are required:** an agent must stop on goal met, a step cap, or a spend/token budget; without them a loop can run forever and burn money.
+- **Least privilege:** expose only the few tools the task needs. Too many tools or permissions is excessive agency, a known risk.
+- **Human approval for risky actions:** keep money-moving or destructive tools behind a confirmation step, not the model's free choice.
+- **Log every step:** record each decision and tool call so you can see what the agent did and debug it later.
+
+## Not to be confused with
+
+A workflow fixes the order of steps in your code; an agent lets the model pick the next step in a loop. Both use [tool calling](card:tool-calling), so they look alike. Rule: known steps = workflow (cheaper, faster, easier to test); unknown steps that depend on results = agent.
+
+## Common mistakes
+
+- **"Use an agent because it sounds powerful."** An agent is slower, costs more and is harder to test. If the steps are known, a single call or a workflow is better. Add autonomy only when it clearly helps.
+- **"A smarter model does not need limits."** Any agent can get stuck repeating a step or chasing a dead end. Step caps, budgets and logging are needed no matter how good the model is.
 
 ## Interview Qs
 
 ### What is the difference between an AI agent and a workflow?
 
-A workflow follows a path your code defines. An agent lets the LLM pick the next tool in a loop, based on each result.
+A workflow follows a path your code defines: you decide the steps, even if each step uses an LLM. An agent lets the model decide the next step itself, in a loop, based on the result of each tool call, until the goal is met or a limit stops it. The model controls the order of steps.
 
 ### How do you stop an agent looping forever or doing harm?
 
-Cap steps, tool calls and spend; expose few least-privilege tools; require human approval for refunds; validate arguments in the backend; log every step.
+Cap the number of steps, tool calls and spend so it must stop. Expose only a few least-privilege tools. Require human approval for risky actions like refunds, and validate every tool argument in the backend. Log every step so you can see and debug what it did.
 
 ### When would you not use an agent?
 
-When the steps are known: a single call or a workflow is cheaper, faster and easier to test. Add complexity only when it clearly helps.
+When the steps are known. A single model call or a fixed workflow is cheaper, faster and far easier to test and debug. An agent adds cost, latency and unpredictability, so you add it only when the task truly needs steps that cannot be listed in advance.

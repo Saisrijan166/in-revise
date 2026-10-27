@@ -5,17 +5,29 @@ title: Tool Calling (Function Calling)
 topic: tools-agents
 level: intermediate
 heat: 3
-hook: "The model only asks for a function by name with JSON arguments; your code checks it, runs it and sends the result back."
+hook: "You give the model a list of functions it may use. When it needs one, it replies with the function name and JSON arguments; your code runs it and sends the result back."
 points:
-  - { k: "Tool definition", v: "name, description and a JSON Schema for the arguments" }
-  - { k: "Model's part", v: "returns a call request; it never runs code itself" }
-  - { k: "Strict mode", v: "arguments always match the schema (OpenAI, Anthropic)", kind: plus }
-  - { k: "Parallel calls", v: "several calls in one turn; can be switched off" }
-  - { k: "Token cost", v: "few tools: definitions are billed as input tokens", kind: minus }
+  - { k: "Tool definition", v: "you describe each tool with a name, a plain-English description and a JSON Schema for its arguments" }
+  - { k: "Model's part", v: "it only returns a call request; it never runs the function or touches your database" }
+  - { k: "Your part", v: "your code validates the arguments, runs the function and sends the result back" }
+  - { k: "Strict mode", v: "OpenAI and Anthropic can force the arguments to match the schema, so you get no invalid JSON", kind: plus }
+  - { k: "Parallel calls", v: "the model may ask for several tools in one turn; both providers let you switch this off" }
+  - { k: "Token cost", v: "every tool definition is sent as input tokens each call, so keep the list small", kind: minus }
 trap:
-  wrong: "The model executes the function and reads the database."
-  right: "The model only returns a call request; your app validates it, runs approved code and sends the result back."
-sayIt: "I send tool definitions with the prompt. The model replies with a call like getOrderStatus(42); my code checks the user owns that order, runs it and returns the result for the final answer."
+  wrong: "The model runs the function and reads the database itself."
+  right: "The model only returns a call request with arguments. Your application validates it, runs the approved code and sends the result back."
+  why: "The final answer reads as if the model fetched the data, so people assume it ran the code. The model only produces text, including the text that names a tool and its arguments."
+sayIt: "I send tool definitions with the prompt. The model replies with a call like getPaymentStatus(orderId=42); my code checks the signed-in user owns that order, runs it, and returns the result for the answer."
+cheat:
+  idea: "You describe functions the model may use. When it needs one, it replies with the name and JSON arguments; your code runs it and returns the result."
+  flow: "define tools → model asks → app runs → model answers"
+  remember: "The model only asks; your backend validates and runs. Never let it supply the user's id."
+buildsOn: [what-is-an-llm, structured-output]
+scenarios:
+  - q: "Your support assistant answers 'order 42 is still processing' with a correct, live status. A teammate says the LLM read your database. Is that right?"
+    a: "No. The model returned a call request getPaymentStatus(orderId=42). Your backend ran the real query and sent the status back as a tool result, and the model turned that into a sentence. The model never connects to the database."
+  - q: "The model asks for refundPayment(orderId=99) but 99 belongs to another user. The orderId came from the model's arguments. How do you stop the wrong refund?"
+    a: "Do not trust identity from the model. Pass the signed-in user id from the session (Spring AI ToolContext), look up the order for that user, and reject the call if the order is not theirs. Validate every argument in the backend."
 confusedWith: [tool-calling-vs-mcp]
 tags: [tools, function-calling, spring-ai]
 visual: flow
@@ -31,55 +43,91 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Tool calling, also called function calling, is a way to let the model use functions you write. You give the model a list of tools; each tool has a name, a short description and a [JSON Schema](term:json-schema) for its arguments. The model still only produces text, but now one kind of reply is a request to call a named tool with arguments. Your code runs the real function and sends the result back.
+
 ## Why it exists
 
-An LLM only writes text. It cannot read live order rows or start a refund. Tool calling lets it ask your backend for data or actions through code you control.
+An [LLM](card:what-is-an-llm) can only write text from what it learnt during training. It cannot read today's payment status or start a refund, and it has no access to your database. Without tool calling you would be stuck pasting live data into the prompt by hand. Tool calling lets the model ask your backend for exactly the data or action it needs, through code you control, so its answers can be live and specific.
 
 ## How it works
 
 <Mermaid
-  alt="The app sends the question and tool definitions to the model. The model returns a call getOrderStatus(orderId=42). The app checks the user owns order 42, reads the database and sends the tool result back. The model writes the answer."
+  alt="The app sends the question plus tool definitions to the model. The model replies with a call request getPaymentStatus(orderId=42). The app checks the signed-in user owns order 42, reads the database, and sends the result back. The model then writes the final answer."
   chart={`sequenceDiagram
   participant A as App (Spring Boot)
   participant M as Model
   participant D as Database
   A->>M: question + tool definitions
-  M-->>A: call getOrderStatus(orderId=42)
-  A->>A: user owns order 42?
-  A->>D: read order, payment, refund
+  M-->>A: call getPaymentStatus(orderId=42)
+  A->>A: does the signed-in user own order 42?
+  A->>D: read payment status
   A->>M: tool result
   M-->>A: final answer`}
 />
 
-- Validate every argument; identity comes from the session, not the model.
-- Keep tools few and narrow, read-only first; confirm money-moving actions and make them [idempotent](card:calling-llm-apis).
-- The model never touches the database: tool, then backend, then DB ([wiring](card:ai-and-databases)). Full risk list: [LLM security](card:llm-security).
+1. Your app sends the user's question together with the tool definitions.
+2. Instead of answering, the model replies that it wants to call `getPaymentStatus` with `orderId=42`.
+3. Your code validates the arguments and checks that the signed-in user is allowed to see order 42.
+4. Your backend runs the real function, reads the database and gets the status.
+5. Your app sends that result back to the model, which now writes the final answer.
+
+So the key is that the model decides *which* tool to call, but *your* code decides whether and how to run it.
 
 ## Example
 
-Spring AI 2.0; the user id comes through `ToolContext`, which the model never sees:
+The tool is a normal Spring bean. The user id comes from the session through `ToolContext`, which the model never sees or controls.
 
 ```java
 @Component
-class OrderTools {
-    private final OrderService orders;
-    OrderTools(OrderService orders) { this.orders = orders; }
+class PaymentTools {
+    private final PaymentService payments;
+    PaymentTools(PaymentService payments) { this.payments = payments; }
 
-    @Tool(description = "Status, payment and refund of one order")
-    OrderStatus getOrderStatus(long orderId, ToolContext ctx) {
+    @Tool(description = "Get the status of one payment by its order id")
+    PaymentStatus getPaymentStatus(long orderId, ToolContext ctx) {
         long userId = (long) ctx.getContext().get("userId"); // from the session
-        return orders.statusFor(userId, orderId);            // checks ownership
+        return payments.statusFor(userId, orderId);          // checks ownership
     }
 }
-// chatClient.prompt(q).tools(orderTools).toolContext(Map.of("userId", id)).call().content();
+// chatClient.prompt(q).tools(paymentTools).toolContext(Map.of("userId", id)).call().content();
 ```
+
+What to notice:
+
+- `@Tool`'s `description` is what the model reads to decide when to call this function, so it must be clear and specific.
+- `orderId` comes from the model, but `userId` comes from `ToolContext`, set from the session. The model cannot change it.
+- `statusFor(userId, orderId)` checks the order belongs to that user, so a model asking for someone else's order gets nothing.
+- If you removed the ownership check and trusted only the model's arguments, a crafted question could read another user's payment.
+
+## Rules and defaults
+
+- **The model never executes code:** it only returns a tool name and JSON arguments; your application runs the function.
+- **Strict schema (opt-in):** OpenAI structured tool calls and Anthropic `strict: true` make the model's arguments match your JSON Schema, so you do not get malformed JSON. OpenAI recommends enabling it.
+- **Parallel tool calls:** both providers may return several tool calls in one turn and both let you disable this when you need calls run one at a time.
+- **Cost:** tool definitions are billed as input tokens on every request, so a long tool list is slow and expensive; keep tools few and narrow.
+- **Safety:** make read-only tools the default, and require backend checks and confirmation for any action that moves money.
+
+## Not to be confused with
+
+Tool calling is a feature of the provider's LLM API: one app, one set of functions. [MCP](card:mcp) is an open protocol for sharing tools across apps, and the model still uses tool calling underneath it. Rule: tool calling = how the model asks for one function; MCP = how apps and servers share those tools.
+
+## Common mistakes
+
+- **"Give the model a tool for everything, just in case."** Each tool's definition is sent as input tokens every call, and a long list makes the model pick worse. Expose only the few tools the feature needs.
+- **"Trust the ids the model sends."** The model's arguments are untrusted input. Take identity from the session, re-check permissions in the backend, and validate every argument.
 
 ## Interview Qs
 
 ### Does the LLM execute the function?
 
-No. It returns the tool name and JSON arguments. Your application decides whether to run it, runs it, and sends the result back so the model can continue or answer.
+No. The model returns the tool name and JSON arguments as text. Your application decides whether to run it, validates the arguments, runs the real code, and sends the result back so the model can continue or write the final answer. The model never connects to your database or services.
 
 ### How do you stop the model refunding someone else's order?
 
-Never let the model supply the user id; pass it from the session (Spring AI `ToolContext`). Check ownership and business rules in the backend, ask for confirmation, and use an idempotency key.
+Never let the model supply the user's identity. Pass the signed-in user id from the session, for example with Spring AI `ToolContext`, and look up the order for that user only. Check ownership and business rules in the backend, require confirmation for money-moving actions, and use an idempotency key so a retry cannot refund twice.
+
+### Why keep the number of tools small?
+
+Each tool definition is sent as input tokens on every request, which costs money and adds latency. A long tool list also makes the model more likely to pick the wrong one. Expose only the tools the feature needs, with clear descriptions.

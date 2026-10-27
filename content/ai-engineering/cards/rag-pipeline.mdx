@@ -5,17 +5,28 @@ title: "The RAG Pipeline: Ingestion and Query"
 topic: rag
 level: intermediate
 heat: 3
-hook: "Offline: load, chunk, embed, store. Online: embed the question, fetch similar chunks, let the LLM answer from them."
+hook: "RAG has two halves. Offline, you load, chunk, embed and store documents once. Online, you embed the question, fetch similar chunks, and let the LLM answer from them."
 points:
-  - { k: "L-C-E-S-R-G", v: "Load, Chunk, Embed, Store, then Retrieve, Generate" }
-  - { k: "Ingestion (offline)", v: "load, clean, chunk, embed, store vectors with metadata" }
-  - { k: "Query time (online)", v: "embed question, top-K search, filter or rerank, prompt, LLM" }
-  - { k: "Keep it fresh", v: "re-index changed files; delete removed ones by id or filter" }
-  - { k: "Spring AI 2.0", v: "ETL: DocumentReader, TokenTextSplitter, VectorStore" }
+  - { k: "Ingestion (offline)", v: "load, clean, chunk, embed, and store the vectors with their metadata; run once per document" }
+  - { k: "Query (online)", v: "embed the question, search for the top-K chunks, filter or rerank, build the prompt, call the LLM" }
+  - { k: "Documents embedded once", v: "only the question is embedded per request, not the whole corpus again", kind: plus }
+  - { k: "Keep it fresh", v: "when a file changes, re-chunk and re-embed it, and delete its old chunks by document id" }
+  - { k: "Spring AI 2.0 pieces", v: "DocumentReader and TokenTextSplitter ingest; VectorStore and QuestionAnswerAdvisor query", kind: default }
 trap:
   wrong: "RAG embeds all the documents again for every question."
-  right: "Documents are embedded once at ingestion. Per request, only the question is embedded and searched."
-sayIt: "Offline I load, chunk and embed documents and store them with metadata in pgvector. Per request I embed the question, fetch the top-K chunks, filter or rerank them and prompt the LLM to answer with citations."
+  right: "Documents are embedded once, during ingestion. Per request, only the question is embedded and searched."
+  why: "The query looks like a fresh search over the documents, so people picture the documents being read and embedded each time. The expensive embedding of the documents already happened offline; the query only embeds the short question."
+sayIt: "RAG has an offline half and an online half. Offline I load, chunk and embed documents and store them with metadata in pgvector. Per request I embed only the question, fetch the top-K chunks, filter or rerank them, and prompt the LLM to answer with citations."
+cheat:
+  idea: "RAG is two pipelines. Ingestion runs once per document: load, chunk, embed, store. Query runs per request: embed the question, search top-K, build the prompt, answer."
+  flow: "Load → Chunk → Embed → Store ‖ Embed question → Search → Prompt → Answer"
+  remember: "Documents are embedded once offline; each request embeds only the short question."
+buildsOn: [what-is-rag, embeddings]
+scenarios:
+  - q: "A teammate worries RAG is too slow because 'it re-reads every document on each question'. What do you tell them?"
+    a: "Reading and embedding the documents is the offline ingestion step, done once. Each question only embeds the short question and runs one fast vector search, so request latency does not grow with the number of documents."
+  - q: "Your corpus has 10,000 policy pages and one page was edited. What is the cheapest correct update?"
+    a: "Re-ingest only that page: delete its old chunks by document id, then chunk and embed the new version. The other 9,999 pages are untouched, so you pay one page of embedding, not a full rebuild."
 confusedWith: []
 tags: [rag, pipeline, spring-ai, pgvector]
 visual: flow
@@ -34,14 +45,18 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+The RAG pipeline is the set of steps that turn documents into grounded answers. It has two separate flows. Ingestion is the offline flow that prepares the documents: it loads them, splits them into [chunks](card:chunking), turns each chunk into an [embedding](card:embeddings), and stores the vectors with their metadata. Query is the online flow that runs for each question: it embeds the question, searches for the closest chunks, and hands them to the LLM. [What RAG is](card:what-is-rag) explains the idea; this concept is the plumbing behind it.
+
 ## Why it exists
 
-Reading and embedding thousands of pages per question is too slow. So that work runs once, ahead of time, and each question needs only one fast search.
+If you read, chunked and embedded thousands of pages while a user waited for an answer, every question would take minutes and cost a fortune in embedding calls. Splitting the work fixes this. The heavy, slow part (preparing the documents) runs once, ahead of time, during ingestion. Each question then needs only one quick step: embed the short question and run a single vector search. So latency and cost per request stay small and do not grow with the size of the corpus.
 
 ## How it works
 
 <Mermaid
-  alt="Ingestion, offline: documents are loaded, chunked, embedded and stored with metadata in pgvector. Query time, online: the question is embedded and searched in pgvector, the top-K chunks are filtered or reranked, put into a prompt, and the LLM answers with citations."
+  alt="Ingestion, offline: documents are loaded, chunked, embedded and stored with metadata in pgvector. Query time, online: the question is embedded and searched against pgvector, the top-K chunks are filtered or reranked, placed into a prompt, and the LLM answers with citations."
   chart={`flowchart LR
   D[Documents] --> C[Load and chunk]
   C --> E[Embed]
@@ -53,10 +68,17 @@ Reading and embedding thousands of pages per question is too slow. So that work 
   P --> A([Answer + citations])`}
 />
 
-- Stage details: [chunking](card:chunking), [embeddings](card:embeddings), [vector databases](card:vector-databases), [filters](card:metadata-and-filtering), [reranking](card:reranking), [citations](card:grounding-and-citations).
-- In Spring AI the vector store calls the `EmbeddingModel` on `add`; the database only stores and searches vectors.
+1. Offline, you load each document, clean it, and split it into chunks.
+2. You embed every chunk and store the vectors, along with metadata such as tenant and document id, in the vector database.
+3. Online, when a question arrives, you embed the question with the same embedding model.
+4. You search the store for the top-K nearest chunks, then [filter](card:metadata-and-filtering) or [rerank](card:reranking) them.
+5. You put the surviving chunks into the prompt and ask the LLM to answer from them, with citations.
+
+So the key is that steps 1 and 2 happen once, while steps 3 to 5 happen on every request.
 
 ## Example
+
+Spring AI gives you one object for each half. The example wires ingestion and query in a single service.
 
 ```java
 @Service
@@ -67,23 +89,39 @@ class RefundHelp {
         this.store = store;
         this.chat = builder.defaultAdvisors(QuestionAnswerAdvisor.builder(store).build()).build();
     }
-    void ingest(Resource policy) {   // offline: load, chunk, embed + store
+    void ingest(Resource policy) {   // offline: chunk, embed, store
         store.add(TokenTextSplitter.builder().build().apply(new TextReader(policy).get()));
     }
-    String ask(String q) { return chat.prompt().user(q).call().content(); }   // online
+    String ask(String q) {           // online: retrieve + generate
+        return chat.prompt().user(q).call().content();
+    }
 }
 ```
 
+What to notice:
+
+- `ingest` is the whole offline half in one line: `TextReader` loads, `TokenTextSplitter` chunks, and `store.add` embeds and stores. You call it once per document, not per question.
+- `store.add` triggers the embedding; the vector store calls the `EmbeddingModel` for you, so the database only stores and searches vectors.
+- `ask` looks like a plain chat call, but the `QuestionAnswerAdvisor` quietly embeds the question, searches the store, and injects the top chunks into the prompt before the model sees it.
+- Remove the advisor and `ask` becomes an ordinary LLM call with no retrieval, so it would answer from the model's memory only.
+
+## Rules and defaults
+
+- **Ingestion runs once per document:** re-run it only when that document changes, not per request.
+- **Same embedding model both sides:** the question and the chunks must be embedded by the same model, or their vectors are not comparable.
+- **Freshness is your job:** nothing re-indexes automatically. When a file changes, delete its old chunks by `document_id` and add the new ones.
+- **Spring AI 2.0 defaults:** `TokenTextSplitter` chunks at 800 tokens; `QuestionAnswerAdvisor` runs the retrieve-and-stuff flow, while `RetrievalAugmentationAdvisor` exposes the same steps modularly.
+
 ## Interview Qs
 
-### How do you build RAG?
+### Walk me through building a RAG system.
 
-Ingestion: load, clean, chunk, embed, store vectors with metadata. Query: embed the question, search top-K with tenant filters, rerank, prompt the LLM to answer only from the chunks with citations. Then evaluate.
+Ingestion: load, clean, chunk, embed and store the vectors with metadata. Query: embed the question, search the top-K chunks with any tenant filters, rerank them, and prompt the LLM to answer only from those chunks with citations. Then evaluate retrieval and answers, and tune.
 
-### A refund policy changed. What do you do?
+### A refund policy document changed. What do you do, and what do you not do?
 
-Re-ingest that document: delete its old chunks by document id, then chunk and embed the new version. No model change is needed; the next question sees the new text.
+Re-ingest just that document: delete its old chunks by document id, then chunk and embed the new version. You do not retrain or fine-tune anything, because RAG reads documents at query time, so the next question automatically sees the new text.
 
-### Which Spring AI pieces do RAG?
+### Which Spring AI pieces map to each stage?
 
-Ingestion: `DocumentReader`, `TokenTextSplitter`, `VectorStore`. Query time: `QuestionAnswerAdvisor`, or `RetrievalAugmentationAdvisor` for a modular flow.
+Ingestion uses a `DocumentReader` to load, `TokenTextSplitter` to chunk, and `VectorStore` to embed and store. Query uses the `QuestionAnswerAdvisor` for the standard retrieve-and-answer flow, or `RetrievalAugmentationAdvisor` when you want to customise each step.

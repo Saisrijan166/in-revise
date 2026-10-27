@@ -5,20 +5,30 @@ title: Evaluating LLM Apps (Evals)
 topic: safety-evaluation
 level: intermediate
 heat: 3
-hook: "Evals are tests for fuzzy output: a fixed set of real questions, scored every time the prompt, data or model changes."
+hook: "An eval is a test for fuzzy output: a fixed set of real questions, scored again every time you change the prompt, data or model."
 points:
-  - { k: "Why not unit tests", v: "output varies and many answers can be right" }
-  - { k: "Golden set", v: "real questions with expected facts, edge and attack cases" }
-  - { k: "Graders", v: "code checks first, LLM-as-a-judge for nuance, humans to calibrate" }
-  - { k: "Judge biases", v: "position, verbosity, self-enhancement (Zheng 2023)", kind: minus }
-  - { k: "RAG split", v: "retrieval (context precision, recall) vs answer (faithfulness)" }
+  - { k: "Why not unit tests", v: "output varies run to run and many different answers can all be correct" }
+  - { k: "Golden set", v: "a saved set of real questions with their expected facts, plus edge and attack cases" }
+  - { k: "Graders", v: "code checks first, an LLM-as-a-judge for nuance, humans to calibrate the judge" }
+  - { k: "Judge biases", v: "a judge model favours position, length and its own style (Zheng 2023), so check it against humans", kind: minus }
+  - { k: "RAG split", v: "score retrieval (context precision, recall) apart from the answer (faithfulness)" }
 trap:
-  wrong: "I tried ten questions by hand and the answers looked good, so it works."
-  right: "Spot checks miss regressions. Use a versioned eval set, scored automatically, on every change."
-sayIt: "I build a golden set from real questions, score it with code checks and an LLM judge I have checked against humans, and run it in CI on every prompt, retrieval or model change."
+  wrong: "I tried ten questions by hand and the answers looked good, so the feature works."
+  right: "Spot checks miss regressions. Use a saved, versioned eval set, scored automatically, and run it on every change."
+  why: "A few good answers feel convincing, and manual testing is how most code is checked. But LLM output varies, so a tweak that fixes your ten cases can quietly break fifty others you did not re-test."
+sayIt: "I build a golden set from real questions, score it with code checks and an LLM judge I have calibrated against humans, and run it in CI on every prompt, retrieval or model change so quality is decided by numbers."
 confusedWith: []
 tags: [evaluation, evals, llm-as-a-judge, ragas]
 visual: flow
+cheat:
+  idea: "Evals are repeatable tests for fuzzy AI output: a saved set of real questions, scored every time the prompt, data or model changes."
+  flow: "Define success → build set → run and score → fix and re-run"
+  remember: "Spot checks miss regressions: a versioned golden set scored in CI is the safe way to compare changes."
+scenarios:
+  - q: "You tweak the system prompt and your five favourite questions now answer correctly. Is it safe to ship?"
+    a: "Not on that basis. Five hand-picked cases cannot show whether the tweak broke others. Run the full versioned eval set and compare scores before and after. Ship only if the overall numbers hold or improve, not because the cases you watched got better."
+  - q: "Your RAG answer is wrong. How do evals tell you whether to fix retrieval or the prompt?"
+    a: "Score the two halves apart. If context precision and recall are high but the answer is still wrong, the right chunks were found and the generation or prompt is at fault. If recall is low, retrieval missed the needed chunks, so fix chunking, filters or top-K first."
 sources:
   - title: "Evaluation best practices (OpenAI docs)"
     url: "https://developers.openai.com/api/docs/guides/evaluation-best-practices"
@@ -31,39 +41,71 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+An eval is a repeatable test for an AI feature. You collect a fixed set of real questions with what a good answer should contain, run them through your app, and score the results. Unlike a normal unit test, which expects one exact value, an eval must cope with output that varies and with several answers all being acceptable. Running the same eval set after every change turns "it feels better" into a number you can compare.
+
 ## Why it exists
 
-The same prompt can give different replies, and a prompt tweak that fixes one case can break five others. Evals measure quality so changes are decided by numbers, not by feel.
+The same prompt can give different replies, so a plain `assertEquals` does not fit. And a change that fixes one case often breaks others you did not look at. Without evals you ship on gut feel and discover regressions from users. An eval set measures quality on many cases at once, so a prompt, retrieval or model change is judged by its scores across the whole set before it goes live.
 
 ## How it works
 
+The work is a loop you repeat on every change.
+
 <Steps label="The eval loop">
-  <Step title="Define success">Pick criteria: correct, grounded, safe, valid format, fast, cheap enough.</Step>
-  <Step title="Build the set">Real and edge questions with expected facts, for example "refund for order 42".</Step>
-  <Step title="Run and score">Exact or schema checks, an LLM judge, a human sample.</Step>
-  <Step title="Fix and re-run">Change prompt, retrieval or model; compare scores before release.</Step>
-  <Step title="Keep going">Add production failures to the set; run it on every change.</Step>
+  <Step title="Define success">Pick the criteria that matter: correct, grounded, safe, valid format, fast and cheap enough.</Step>
+  <Step title="Build the set">Collect real and edge questions with their expected facts, for example "refund status for order 42".</Step>
+  <Step title="Run and score">Score with exact or schema checks, an LLM judge for nuance, and a human sample to calibrate.</Step>
+  <Step title="Fix and re-run">Change the prompt, retrieval or model, then compare scores before and after.</Step>
+  <Step title="Keep going">Add real production failures to the set, and run it on every change.</Step>
 </Steps>
 
-- RAG: score retrieval and answer apart, so you know which half failed ([RAG failures](card:rag-failures)).
-- A judge needs a clear rubric, pass / fail or pairwise output, and proven agreement with human labels.
-- Live signals such as user ratings come from [observability](card:ai-observability).
+1. Start from code-based graders where you can, because they are cheap and exact.
+2. Use an LLM-as-a-judge only where correctness is a matter of degree, with a clear rubric.
+3. Keep a human sample to confirm the judge agrees with people.
+4. Treat the set as living: every bug found in production becomes a new case.
+
+So the key is that changes are compared on a fixed set, not on whichever examples you happened to try.
 
 ## Example
 
-| RAG metric (Ragas) | Asks |
+For a RAG feature, standard metrics (here, from the Ragas library) split retrieval from the answer.
+
+| RAG metric (Ragas) | What it asks |
 |---|---|
-| Context precision | Are relevant chunks ranked above irrelevant ones? |
+| Context precision | Are the relevant chunks ranked above irrelevant ones? |
 | Context recall | Did retrieval find everything the reference answer needs? |
-| Faithfulness | Is every claim backed by the retrieved context? |
-| Answer relevancy | Does it address the question? (not a fact check) |
+| Faithfulness | Is every claim in the answer backed by the retrieved context? |
+| Answer relevancy | Does the answer address the question asked? (not a fact check) |
+
+What to notice:
+
+- Context precision and recall score the *retrieval* step, so a low value points at chunking, filters or top-K.
+- Faithfulness scores the *answer* against the chunks, catching claims the model invented beyond its context.
+- Answer relevancy can be high even when the answer is wrong, so it is read alongside faithfulness, not instead of it.
+
+## Rules and defaults
+
+- **Not unit tests:** output varies and many answers are valid, so grade against expected facts and criteria, not one exact string.
+- **Grader order:** prefer code checks; add an LLM judge for nuance; keep humans to calibrate the judge.
+- **Judge calibration:** an LLM judge needs a clear rubric, a pass/fail or pairwise output, and proven agreement with human labels before you trust it.
+- **Run on every change:** wire the eval set into CI, so a prompt, retrieval or model change cannot ship without a score.
+
+## Not to be confused with
+
+[Observability](card:ai-observability) watches live traffic in production: latency, cost, errors and user ratings. Evals test against a fixed, known set before and after a change. Rule: evals ask "is this change better on our saved cases?"; observability asks "how is the feature doing right now for real users?". Live failures feed back into the eval set.
 
 ## Interview Qs
 
 ### What is LLM-as-a-judge, and what are its risks?
 
-A model grades another model's answers against a rubric. It scales cheaply, but has position, verbosity and self-enhancement biases. Use pass / fail or pairwise formats and check it against human labels.
+A model grades another model's answers against a rubric. It scales cheaply and handles nuance code cannot. But it has biases: it favours the first option, longer answers, and its own writing style (Zheng 2023). Use pass/fail or pairwise formats and check its scores against human labels before trusting it.
 
 ### How do you evaluate a RAG system?
 
-Separately: retrieval (context precision and recall) and generation (faithfulness to the context, answer relevancy). A wrong answer from good chunks is a prompt problem; from bad chunks, a retrieval problem.
+Score retrieval and generation separately. Retrieval: context precision and recall. Generation: faithfulness to the retrieved context and answer relevancy. A wrong answer built from good chunks is a prompt or generation problem; a wrong answer from bad chunks is a retrieval problem.
+
+### Why not just write normal unit tests for an AI feature?
+
+Because the output varies between runs and several different answers can all be correct, so an exact-match assertion fails on good answers. Evals score against expected facts and quality criteria across many cases, and run on every change to catch regressions a handful of manual checks would miss.

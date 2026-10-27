@@ -5,16 +5,28 @@ title: Reranking
 topic: vector-search
 level: intermediate
 heat: 3
-hook: "Retrieve many candidates fast, then let a slower, smarter reranker pick the few best for the prompt."
+hook: "Retrieve many candidate chunks fast, then let a slower, smarter reranker read each one with the query and pick the few best for the prompt."
 points:
-  - { k: "Stage 1", v: "vector, keyword or hybrid search returns a shortlist" }
-  - { k: "Stage 2", v: "a cross-encoder scores each (query, candidate) pair" }
-  - { k: "Why better", v: "it reads query and text together, not as separate vectors", kind: plus }
-  - { k: "Cost", v: "one extra model call; time grows with the shortlist size", kind: minus }
+  - { k: "Stage 1: retrieve", v: "vector, keyword or hybrid search returns a shortlist of candidate chunks, fast but approximate" }
+  - { k: "Stage 2: rerank", v: "a cross-encoder scores each (query, chunk) pair by reading both texts together" }
+  - { k: "Why it is better", v: "it reads the query and chunk at the same time, instead of comparing two separate vectors", kind: plus }
+  - { k: "Cost", v: "one extra model run per candidate, so latency grows with the shortlist size", kind: minus }
+  - { k: "Keep the shortlist small", v: "rerank tens of candidates, not the whole corpus; final top K (say 5) goes to the LLM" }
 trap:
   wrong: "Rerank every document in the corpus for the best accuracy."
-  right: "Scoring every pair is far too slow. Rerank only the shortlist that fast retrieval returns."
-sayIt: "Embedding search compares the query and chunks as separate vectors, so it can return loose matches. I retrieve a shortlist, rerank it with a cross-encoder, and send only the top few chunks to the LLM."
+  right: "A cross-encoder must run once per (query, document) pair, so scoring the whole corpus is far too slow. Rerank only the shortlist that fast retrieval returns."
+  why: "If reranking improves results, more of it sounds better. But a cross-encoder cannot be pre-computed like an embedding, so each extra candidate is a fresh model run; cost grows with every document you add."
+sayIt: "Embedding search compares the query and chunks as separate vectors, so it can return loose matches. I retrieve a shortlist, rerank it with a cross-encoder that reads the query and each chunk together, and send only the top few chunks to the LLM."
+cheat:
+  idea: "Reranking is a second pass that re-scores retrieved candidates by reading the query and each chunk together, then keeps the few most relevant for the prompt."
+  flow: "retrieve ~50 candidates → cross-encoder scores each → keep top 5 → LLM"
+  remember: "A cross-encoder cannot be pre-indexed, so rerank only a shortlist, never the whole corpus."
+buildsOn: [embeddings, similarity-search, hybrid-search]
+scenarios:
+  - q: "Vector search returns 50 candidates in 20 ms. You add a cross-encoder reranker over all 50 and latency jumps to 200 ms. A teammate suggests reranking the full 100,000-chunk corpus for 'maximum accuracy'. Good idea?"
+    a: "No. The cross-encoder runs once per candidate, so 50 already cost 180 ms extra; 100,000 would take minutes per query. Reranking only works on a shortlist. Keep retrieval wide and cheap, then rerank the tens of candidates it returns."
+  - q: "Why does a cross-encoder rank results better than the embedding search that produced them?"
+    a: "Embedding search turns the query and each chunk into separate vectors and compares them, losing the interaction between the two texts. A cross-encoder reads the query and chunk together in one pass, so it can judge whether the chunk actually answers this query, not just whether it is on a similar topic."
 confusedWith: []
 tags: [reranking, cross-encoder, retrieval]
 visual: table
@@ -30,37 +42,59 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Reranking is a second pass placed after retrieval. First, fast search (vector, keyword or [hybrid](card:hybrid-search)) returns a shortlist of candidate chunks. Then a **cross-encoder** reads the query together with each candidate and gives it a fresh relevance score, and you keep only the top few for the prompt. A cross-encoder is a model that takes the (query, chunk) pair as one input, unlike the [embedding model](card:embeddings) that scores each text on its own.
+
 ## Why it exists
 
-Fast retrieval must scan millions of chunks, so it compares pre-computed vectors. That is quick but can return chunks that are not really relevant.
+Fast retrieval has to scan millions of chunks, so it compares pre-computed vectors; the query and a chunk are embedded separately and never read together. That is quick but coarse, so the shortlist often contains chunks that are on the right topic yet do not actually answer the question. Reranking adds a slower model that reads each pair properly, pushing the chunks that truly answer the query to the top before they reach the LLM.
 
 ## How it works
 
+The bi-encoder (used for retrieval) and the cross-encoder (used for reranking) differ in what they read together; the table shows it.
+
 <Compare id="bi-encoder-vs-cross-encoder" />
 
-- Options: a hosted [rerank API](card:hosted-rerank-api), an open [cross-encoder model](card:open-cross-encoder), or an [LLM as reranker](card:llm-reranker).
-- Shortlist size and final top K are tuned in [retrieval tuning](card:retrieval-tuning).
+1. Retrieve a shortlist, for example the top 50 candidates, with fast search.
+2. For each candidate, run the cross-encoder on the (query, chunk) pair to get a relevance score.
+3. Sort the candidates by that score and keep the final top K, for example 5.
+4. Put only those K chunks into the prompt and let the LLM answer.
+
+So the key is that the slow, accurate model runs only on the small shortlist, not on the whole corpus. The reranker can be a [hosted rerank API](card:hosted-rerank-api), an open [cross-encoder model](card:open-cross-encoder), or an [LLM used as a reranker](card:llm-reranker); shortlist size and final K are set in [retrieval tuning](card:retrieval-tuning).
 
 ## Example
 
-"Where is my refund for order 42?" (numbers are an example, not a rule):
+For the query "Where is my refund for order 42?". The numbers are an example, not a fixed rule.
 
 ```text
-hybrid search  -> 50 candidate chunks   (fast, approximate)
-cross-encoder  -> scores 50 (question, chunk) pairs
-keep top 5     -> into the prompt -> LLM answers
+hybrid search  -> 50 candidate chunks     (fast, approximate)
+cross-encoder  -> scores all 50 (query, chunk) pairs
+keep top 5     -> into the prompt -> LLM writes the answer
 ```
+
+What to notice:
+
+- Retrieval stays wide (50 candidates) so the right chunk is unlikely to be missed; precision is fixed later.
+- The cross-encoder runs 50 times, once per candidate, which is why the shortlist is kept to tens, not thousands.
+- Only the top 5 reach the prompt, so the LLM reads less text and the answer is grounded in the most relevant chunks.
+
+## Rules and defaults
+
+- **Two stages, not one:** retrieval is wide and fast; reranking is narrow and accurate. Do not replace retrieval with a reranker.
+- **No pre-indexing:** a cross-encoder produces a score, not a reusable vector, so it must run at query time for every candidate.
+- **Tune the shortlist:** a bigger shortlist improves recall but costs more latency; measure whether the answer quality gained is worth it.
 
 ## Interview Qs
 
 ### What is reranking and why use it?
 
-A second pass that re-scores retrieved candidates against the query and keeps the most relevant. Embedding search is fast but approximate; a cross-encoder reads both texts together and judges relevance better.
+A second pass that re-scores the chunks retrieval returned against the query and keeps the most relevant. Embedding search is fast but compares the query and chunks as separate vectors, so it is approximate. A cross-encoder reads both texts together and judges relevance more accurately, improving what the LLM finally sees.
 
 ### Why not use a cross-encoder for the whole search?
 
-It produces no vector to index, so it must run once per (query, document) pair. Over millions of documents that is far too slow; use it only on a shortlist.
+It produces no vector to index, so it cannot be pre-computed; it must run once per (query, document) pair. Over millions of documents that is far too slow for a live request. Use fast vector or hybrid search to get a shortlist, then apply the cross-encoder only to those candidates.
 
-### What does reranking cost?
+### What does reranking cost, and when is it worth it?
 
-An extra model call per query, with latency that grows with the shortlist. Keep the shortlist small and measure whether answer quality improves enough to pay for it.
+One extra model run per candidate, so latency grows with the shortlist size. It is worth it when retrieval returns topically-similar but off-target chunks and answer quality suffers. Keep the shortlist small, measure the quality gain against the added latency and cost, and drop it if the gain is marginal.

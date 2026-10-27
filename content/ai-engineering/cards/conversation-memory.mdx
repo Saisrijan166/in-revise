@@ -5,16 +5,27 @@ title: Conversation Memory and State
 topic: tools-agents
 level: intermediate
 heat: 2
-hook: "LLM APIs forget everything between calls; 'memory' is your app resending earlier messages, trimmed to fit and kept per user."
+hook: "LLM APIs forget everything between calls. 'Memory' is just your app resending the earlier messages on each call, trimmed to fit and kept separately for each user."
 points:
-  - { k: "Stateless API", v: "each call sees only the messages you send in it" }
-  - { k: "Cost", v: "resent history is billed as input tokens every turn", kind: minus }
-  - { k: "Conversation id", v: "built on the server from user + session, never shared" }
-  - { k: "Provider-stored state", v: "convenient, but still billed as input tokens", kind: minus }
+  - { k: "Stateless API", v: "each call sees only the messages you include in that call; the model keeps nothing from last time" }
+  - { k: "Cost", v: "the history you resend is billed as input tokens every single turn, so it grows the bill", kind: minus }
+  - { k: "Conversation id", v: "build it on the server from the user and session, never from client input, to keep histories apart" }
+  - { k: "Provider-stored state", v: "providers can store a conversation for you, but the stored history is still billed as input tokens", kind: minus }
 trap:
   wrong: "The model remembers me between calls."
-  right: "The model keeps nothing; the app, or a conversation the provider stores, sends the history again on every call."
-sayIt: "LLM APIs are stateless, so I store messages per conversation id and resend a window or a summary each turn. Long-term facts go in a store I search like RAG, scoped to the user."
+  right: "The model keeps nothing. Your app, or a conversation the provider stores for you, sends the earlier messages again on every call."
+  why: "A chatbot feels like it remembers, because each reply follows on from the last. That continuity comes from the app resending history, not from any memory inside the model."
+sayIt: "LLM APIs are stateless, so I store messages per conversation id and resend a recent window, or a summary of older turns, each call. Long-term facts go in a store I search like RAG, scoped to the one user."
+cheat:
+  idea: "LLM APIs are stateless: they forget between calls. 'Memory' is your app storing the messages per conversation and resending them each turn, trimmed to the context window."
+  flow: "store per id → resend window or summary → trim"
+  remember: "Resent history is billed every turn. Build the conversation id on the server so histories stay separate."
+buildsOn: [context-window, tool-calling]
+scenarios:
+  - q: "A user types 'and order 43?' right after asking about order 42. You send only that line to the model and get a useless answer. Why, and what is the fix?"
+    a: "The API is stateless, so the model never saw the order-42 turn; 'and order 43?' means nothing on its own. The fix is to resend the earlier messages for this conversation with the new one, so the model has the context."
+  - q: "A long support chat is about to overflow the context window. What do you do?"
+    a: "Stop sending the whole history. Keep a sliding window of the most recent turns, summarise the older ones into a short note, and move any durable facts (like the user's plan) into a searchable store you read on demand. This keeps the prompt within the window."
 confusedWith: []
 tags: [memory, state, chat-memory, spring-ai]
 visual: table
@@ -30,26 +41,34 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Conversation memory is how a chatbot keeps track of what was said earlier, even though the LLM API is stateless. Stateless means each call stands alone: the model sees only the messages you send in that one request and remembers nothing afterwards. So "memory" is not inside the model. It is your app saving the messages of each conversation and sending the relevant earlier ones again on the next call.
+
 ## Why it exists
 
-A follow-up like "and order 43?" means nothing alone. The API keeps no state, so the app sends earlier turns.
+A follow-up like "and order 43?" makes sense only next to the question before it. But the API keeps no state, so if you send just that line, the model has no idea what came before and answers badly. To fix this your app must resend the earlier turns with each new message. The question then becomes how much history to resend, because the [context window](card:context-window) is limited and every resent message costs tokens.
 
 ## How it works
 
-| Strategy | What is sent each turn | Watch out |
+| Strategy | What is sent each turn | Watch out for |
 |---|---|---|
-| Full history | every earlier message | tokens and cost grow each turn |
-| Sliding window | only the last N messages | early facts drop out |
-| Summary | a summary of old turns + recent turns | details can be lost |
-| Long-term store | facts found by search, read on demand | needs per-user filters |
+| Full history | every earlier message | tokens and cost grow with every turn |
+| Sliding window | only the last N messages | facts from early in the chat drop out |
+| Summary | a short summary of old turns plus the recent turns | details can be lost in the summary |
+| Long-term store | facts found by search, read on demand | needs per-user filters so histories stay separate |
 
-- The [context window](card:context-window) caps how much history fits; search-style memory works like a [RAG pipeline](card:rag-pipeline).
-- Provider-managed state exists: OpenAI `previous_response_id` or the Conversations API.
-- Follow-ups need rewriting before retrieval: see [retrieval tuning](card:retrieval-tuning).
+1. Give each conversation an id, built on the server from the user and session.
+2. Save every message under that id as the chat goes on.
+3. On a new question, load the earlier messages for that id and choose how much to include (full, window or summary).
+4. Send those messages plus the new question in one call, keeping the total within the context window.
+5. For facts that must outlive the chat, store them in a searchable store and read them back like a [RAG pipeline](card:rag-pipeline).
+
+So the key is that the app, not the model, decides what history the model sees each turn.
 
 ## Example
 
-Spring AI 2.0: a memory advisor loads and saves history by conversation id.
+Spring AI's memory advisor loads and saves the history by conversation id for you.
 
 ```java
 @Service
@@ -67,23 +86,37 @@ class SupportChat {
 }
 ```
 
-## Defaults
+What to notice:
+
+- The advisor automatically loads the stored history for the conversation id and prepends it before the model call, then saves the new turn.
+- The conversation id is `userId + ":" + sessionId`, built on the server, so one user's chat can never load another's.
+- If you reused the same id across users, histories would mix and leak; the id must include the user.
+- The default memory keeps only the last 20 messages, so older turns drop out unless you summarise them yourself.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
 | Memory type | `MessageWindowChatMemory`, last 20 messages | Spring AI 2.0 auto-configured `ChatMemory` |
-| Storage | `InMemoryChatMemoryRepository` (lost on restart) | Spring AI 2.0 |
+| Storage | `InMemoryChatMemoryRepository`, lost on restart | Spring AI 2.0 |
+
+- **Stateless API:** the model never remembers; you must resend history each call. Provider-stored state (OpenAI `previous_response_id` or the Conversations API) saves you sending it, but the stored history is still billed as input tokens.
+- **Per-user isolation:** build the conversation id on the server from user and session; only list or delete the current user's conversations.
+
+## Not to be confused with
+
+Short-term memory is the recent turns you resend each call, limited by the context window. Long-term memory is durable facts about the user, kept in a searchable store and read on demand like RAG. Rule: resend recent turns for continuity; search a store for facts that must outlive the chat.
 
 ## Interview Qs
 
 ### How does a chatbot remember earlier messages if the API is stateless?
 
-The app stores the conversation and resends the relevant earlier messages with each request. The model only seems to remember.
+It does not remember inside the model. The app stores the conversation and resends the relevant earlier messages with each request, so the model sees the context again. The model only seems to remember; the continuity comes from your app resending history every turn.
 
 ### The conversation is getting too long. What do you do?
 
-Keep a sliding window of recent turns, summarise older ones, and move durable facts to a searchable store.
+Stop sending the whole history. Keep a sliding window of the most recent turns, summarise the older turns into a short note, and move durable facts into a searchable store you read on demand. This keeps the prompt within the context window and controls token cost, at the risk of losing some detail.
 
 ### How do you keep one user's history from leaking to another?
 
-Build the conversation id on the server from user and session, never from client input, and only list or delete the current user's conversations.
+Build the conversation id on the server from the user and session, never from client input, so ids cannot be guessed or forged. When loading, listing or deleting conversations, filter to the current user only. This way one user's messages are never sent into another user's prompt.

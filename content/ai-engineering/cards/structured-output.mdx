@@ -5,17 +5,28 @@ title: Structured Output
 topic: prompting
 level: intermediate
 heat: 3
-hook: "Ask for JSON that follows your schema, so code reads fields instead of guessing from prose."
+hook: "Make the model reply as JSON that follows your schema, so your code reads named fields instead of guessing values out of prose."
 points:
-  - { k: "Prompt only", v: "\"reply in JSON\": usually works, no guarantee", kind: minus }
-  - { k: "JSON mode", v: "valid JSON, but any shape" }
-  - { k: "Structured outputs", v: "the reply follows your JSON Schema", kind: plus }
-  - { k: "Still check", v: "refusals and cut-off replies may break the schema", kind: minus }
-  - { k: "Spring AI", v: ".entity(MyRecord.class) maps the reply to a Java type" }
+  - { k: "Prompt only", v: "\"reply in JSON\" in the prompt usually works but is not guaranteed", kind: minus }
+  - { k: "JSON mode", v: "the provider guarantees valid JSON, but the field names and types are up to the model" }
+  - { k: "Structured outputs", v: "the reply is constrained to your JSON Schema, so required fields and types are present", kind: plus }
+  - { k: "Still check", v: "a refusal or a cut-off reply can break the schema, so verify before trusting it", kind: minus }
+  - { k: "Spring AI", v: ".entity(MyRecord.class) maps the JSON reply straight into a Java record" }
 trap:
-  wrong: "If the model returns valid JSON, the data is correct."
-  right: "Valid JSON can still be a refusal, cut off, or hold wrong values. Check the stop reason, then validate values in code."
-sayIt: "I use the provider's structured outputs with a JSON Schema, not just \"reply in JSON\". In Spring AI I map it to a record with .entity(). I still handle refusals and cut-off replies, then validate values."
+  wrong: "If the model returns valid JSON, the data in it is correct."
+  right: "Valid JSON can still be a refusal, a cut-off reply, or hold wrong values. Check the stop reason, then validate the values in code."
+  why: "JSON that parses feels like success, and the happy-path demo always parses; the failure cases, a refusal or a reply cut off by the token limit, only show up later under real traffic."
+sayIt: "I use the provider's structured outputs with a JSON Schema, not just \"reply in JSON\". In Spring AI I map the reply to a record with .entity(). I still handle refusals and cut-off replies, then validate the field values in code."
+cheat:
+  idea: "Structured output makes the model reply as JSON that matches a schema you give, so backend code reads named fields instead of parsing prose."
+  flow: "prompt-only → JSON mode → structured outputs (schema-constrained)"
+  remember: "Valid JSON is not valid data: check the stop reason for refusals or cut-off replies, then validate the values."
+buildsOn: [prompt-design]
+scenarios:
+  - q: "Your code does order.getString(\"status\") on the model's reply. It works in testing, then one day throws because status is missing. What went wrong and how do you prevent it?"
+    a: "Plain \"reply in JSON\" does not guarantee which fields appear, so the model dropped status on an odd input. Use structured outputs with a JSON Schema that marks status as required, so the field is always present and typed, and still validate the value before using it."
+  - q: "A structured-output call returns JSON, but the order status is wrong. Does the schema protect you?"
+    a: "No. A schema guarantees the shape, field names and types, not the truth of the values. The model can still put a wrong status in a correctly typed field. You must apply business-rule checks on the values in code after parsing."
 confusedWith: []
 tags: [structured-output, json-schema, spring-ai]
 visual: table
@@ -31,19 +42,30 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Structured output means making the model reply in a fixed, machine-readable shape, almost always JSON, instead of free prose. You tell the model the fields you want, such as `orderId`, `status` and `nextStep`, and it fills them. The strongest form, **structured outputs**, constrains the reply to a **JSON Schema** you supply, so the provider enforces the field names and types while generating. Your backend can then read named fields directly.
+
 ## Why it exists
 
-Backend code needs fields such as status and orderId, not a paragraph. Free text breaks parsers and turns every reply into a guess.
+Backend code needs specific values, like a status string and an order id, not a paragraph. If the model answers in prose, your code has to parse English, which is fragile and breaks the moment the wording changes. Worse, just asking for JSON in the prompt does not guarantee the model will actually return valid, correctly shaped JSON. A schema-constrained reply removes both problems: the JSON is valid and has the fields you asked for.
 
 ## How it works
 
+There are three levels of guarantee, from weakest to strongest.
+
 <Compare id="json-mode-vs-structured-outputs" />
 
-- OpenAI: `json_schema` format with strict mode. Anthropic: `output_config.format` (the old `output_format` is deprecated).
-- Spring AI adds format instructions and parses the reply; it can also switch on the provider's native mode.
-- Business-rule checks after parsing: [output validation](card:output-validation).
+1. Prompt-only: you ask for JSON in the text. It usually works but nothing enforces it.
+2. JSON mode: the provider guarantees the reply is valid JSON, but not which fields or types it has.
+3. Structured outputs: you pass a JSON Schema and the provider constrains the reply to it, so required fields and types are present (OpenAI `json_schema` with strict mode; Anthropic `output_config.format`).
+4. Whatever the level, you still check the stop reason and validate the values, because a refusal or a cut-off reply can break the shape.
+
+So the key is that a schema fixes the shape of the reply, not the truth of its values.
 
 ## Example
+
+In Spring AI you define a Java record for the shape and ask the client to map the reply into it with `.entity()`. Spring AI adds the format instructions and parses the JSON for you.
 
 ```java
 record RefundStatus(String orderId, String status, String nextStep) {}
@@ -61,18 +83,42 @@ class RefundAssistant {
 }
 ```
 
-Example response:
+What to notice:
+
+- The `RefundStatus` record is the schema: its three components become the required JSON fields.
+- `.entity(RefundStatus.class)` tells Spring AI to request that shape and parse the reply straight into the record, so your code gets typed fields, not a raw string.
+- If you called `.content()` instead, you would get free text and have to parse it yourself, which is exactly what this avoids.
+- The parse succeeding does not mean `status` is correct; add business checks on the value before acting on it.
+
+An example reply the model might produce (an example, not a reproducible run):
 
 ```json
-{ "orderId": "42", "status": "REFUND_INITIATED", "nextStep": "₹500 is on its way to your UPI account" }
+{ "orderId": "42", "status": "REFUND_INITIATED", "nextStep": "The 500 rupees is on its way to your UPI account" }
 ```
+
+What to notice: the three keys match the record components exactly, so Spring AI maps this straight into a `RefundStatus`; a reply missing `status` or cut off before the closing brace would fail to parse, which is why you check the stop reason too.
+
+## Rules and defaults
+
+- **Prefer schema-constrained structured outputs:** OpenAI recommends them over plain JSON mode where the model supports them.
+- **Provider shapes differ:** OpenAI uses the `json_schema` format with strict mode; Anthropic uses `output_config.format` (the older `output_format` is deprecated, verified 21-10-2026).
+- **Spring AI maps for you:** `.entity(Type.class)` adds format instructions and parses the reply; it can also use the provider's native structured mode.
+- **Always re-check output:** a refusal or a reply cut off by the token limit may not match the schema, so check the stop reason, then validate values ([output validation](card:output-validation)).
+
+## Not to be confused with
+
+**Structured output** guarantees the shape of the reply: the fields and their types. **[Output validation](card:output-validation)** checks the content: whether the values are allowed and make business sense. Rule: a schema makes the JSON the right shape; validation decides whether the values are acceptable.
 
 ## Interview Qs
 
 ### What is the difference between JSON mode and structured outputs?
 
-JSON mode only guarantees valid JSON. Structured outputs constrain the reply to your JSON Schema, so required fields and types are present. OpenAI recommends structured outputs over JSON mode where supported.
+JSON mode only guarantees the reply is valid JSON; the field names and types are up to the model. Structured outputs constrain the reply to your JSON Schema, so required fields and their types are present. OpenAI recommends structured outputs over JSON mode wherever the model supports them.
 
 ### Can structured output still fail?
 
-Yes. A refusal, or a reply cut off by the token limit, may not match the schema. Check the refusal field or stop reason, retry or fall back, then validate the values.
+Yes. A refusal, or a reply cut off because it hit the output token limit, may not match the schema at all. Check the refusal field or the stop reason first, then retry or fall back, and finally validate the actual values before your code acts on them.
+
+### If the JSON is valid and matches the schema, is the data correct?
+
+Not necessarily. The schema fixes the shape, field names and types, not the meaning of the values. The model can still place a wrong status or a made-up id in a correctly typed field, so you apply business-rule checks on the values after parsing.

@@ -5,17 +5,29 @@ title: Vector Databases and ANN Indexes
 topic: vector-search
 level: intermediate
 heat: 3
-hook: "A vector database stores embeddings and uses an ANN index to find the nearest ones fast, trading a little recall for speed."
+hook: "A vector database stores embeddings and uses an ANN index to find the nearest ones fast, giving up a little accuracy in return for speed."
 points:
-  - { k: "ANN", v: "approximate nearest neighbour: far faster, may miss a few true matches" }
-  - { k: "HNSW", v: "layered graph: best speed-recall, slower build, more memory" }
-  - { k: "IVFFlat", v: "vectors split into lists; build after loading data" }
-  - { k: "pgvector", v: "PostgreSQL extension: vectors next to orders and payments", kind: plus }
-  - { k: "Index limit", v: "pgvector 0.8: vector up to 2,000 dims, halfvec up to 4,000", kind: default }
+  - { k: "ANN index", v: "approximate nearest neighbour: checks only part of the data, so it is far faster but may miss a few matches" }
+  - { k: "Recall", v: "the share of true nearest neighbours the index returns; higher settings raise recall but slow the query" }
+  - { k: "HNSW", v: "a layered graph index: best speed-for-recall, but slower to build and uses more memory" }
+  - { k: "IVFFlat", v: "splits vectors into lists (clusters); build it after loading data, or recall drops" }
+  - { k: "pgvector", v: "a PostgreSQL extension that stores vectors in the same database as your orders and payments", kind: plus }
+  - { k: "Index dim limit", v: "pgvector 0.8.7: an indexed vector allows up to 2,000 dimensions, halfvec up to 4,000", kind: default }
 trap:
-  wrong: "A vector database replaces PostgreSQL."
-  right: "They answer different questions. Orders and payments stay relational; vectors answer 'what is similar'. pgvector keeps both in one database."
-sayIt: "A vector database finds the nearest embeddings quickly with an ANN index such as HNSW. In a Spring Boot app I often use PostgreSQL with pgvector, so policy chunks live next to orders."
+  wrong: "A vector database replaces your relational database."
+  right: "They answer different questions. Orders and payments stay relational; the vector store answers 'what text is similar?'. pgvector keeps both in one PostgreSQL."
+  why: "'Database' sounds like one category, so a new 'vector database' sounds like a replacement. In practice it adds a new query type (similarity) beside the exact-match queries you still need."
+sayIt: "A vector database stores embeddings and finds the nearest ones quickly with an ANN index such as HNSW, trading a little recall for speed. In a Spring Boot app I often use PostgreSQL with pgvector, so policy chunks sit next to orders and payments."
+cheat:
+  idea: "A vector database stores embeddings and finds the nearest ones fast with an ANN index, which checks only part of the data for a little lost accuracy."
+  flow: "query vector → ANN index (HNSW/IVFFlat) → K nearest chunks"
+  remember: "ANN trades recall for speed; raise hnsw.ef_search for more recall, lower it for more speed."
+buildsOn: [embeddings, similarity-search]
+scenarios:
+  - q: "Your embedding model returns 1,536 numbers per text. You try to add an HNSW index and it works; a colleague with 3,000-dimension vectors cannot. Why?"
+    a: "pgvector 0.8.7 allows an indexed `vector` up to 2,000 dimensions, so 1,536 is fine but 3,000 is not. The colleague must reduce the dimensions, or store the data as `halfvec` (indexable up to 4,000) to build an index on it."
+  - q: "After adding an HNSW index, a few results that exact search returned are now missing. Is this a bug?"
+    a: "No. HNSW is approximate: it checks only part of the graph, so it can miss some true nearest neighbours. That gap is measured as recall. Raise `hnsw.ef_search` to recover more of them, at the cost of a slower query."
 confusedWith: [hnsw-vs-ivfflat]
 tags: [vector-database, pgvector, hnsw, postgresql]
 visual: code
@@ -31,21 +43,30 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+A vector database stores [embeddings](card:embeddings) and answers one question quickly: which stored vectors are nearest to a given query vector. It does this with an **ANN index** (approximate nearest neighbour), a structure that finds near matches while checking only a small part of the data. The two ANN indexes you meet most are [HNSW](card:hnsw) and [IVFFlat](card:ivfflat). pgvector adds this ability to PostgreSQL, so vectors can live beside your ordinary tables.
+
 ## Why it exists
 
-Comparing a question with millions of vectors one by one is too slow. A vector index finds the nearest ones while checking only a small part.
+[Similarity search](card:similarity-search) by exact comparison looks at every stored vector. With a handful of vectors that is fine, but comparing a question against millions of vectors one by one is too slow for a live request. An ANN index groups or links vectors in advance so a search only has to look at a small slice, keeping the query fast as the data grows. The cost is that it may skip a few true matches.
 
 ## How it works
 
+A vector database keeps the embedding, the original text and any metadata together, and the ANN index sits on the embedding column.
+
 <Compare id="vector-db-vs-relational-db" />
 
-- Without an index pgvector does exact search; an [HNSW](card:hnsw) or [IVFFlat](card:ivfflat) index makes it approximate.
-- Results can differ from exact search: that gap is measured as [recall](card:ann-search).
-- Filters such as tenant are covered in [metadata filtering](card:metadata-and-filtering).
+1. At ingestion, store each chunk's vector (plus its text and metadata such as the tenant) in the table.
+2. Build an ANN index on the vector column, choosing a distance such as cosine.
+3. At query time, embed the question and ask for the nearest vectors; the index returns a shortlist without scanning every row.
+4. Apply exact filters, such as the tenant id, so one customer never sees another's chunks ([metadata filtering](card:metadata-and-filtering) covers the ordering of filter and search).
+
+So the key is that the index gives up exact completeness, measured as [recall](card:ann-search), to keep search fast at scale.
 
 ## Example
 
-Tested on PostgreSQL 18 with pgvector 0.8.7.
+This runs on PostgreSQL 18 with pgvector 0.8.7. Real vectors have 1,536 numbers; this uses 3 so the output is readable, and keeps the tenant filter that a real query needs.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -54,35 +75,54 @@ CREATE TABLE policy_chunk (
     id        bigserial PRIMARY KEY,
     tenant_id bigint NOT NULL,
     content   text NOT NULL,
-    embedding vector(1536) NOT NULL   -- size fixed by the embedding model
+    embedding vector(3) NOT NULL        -- length is fixed by the embedding model
 );
 
 CREATE INDEX ON policy_chunk USING hnsw (embedding vector_cosine_ops);
 
--- $1 = the question's embedding, $2 = the caller's tenant
+-- :q is the question's embedding; tenant comes from the logged-in user
 SELECT id, content FROM policy_chunk
-WHERE tenant_id = $2
-ORDER BY embedding <=> $1 LIMIT 5;
+WHERE tenant_id = 1
+ORDER BY embedding <=> '[0.88,0.12,0.0]' LIMIT 5;
 ```
 
-## Defaults
+```text output
+ id |                content
+----+----------------------------------------
+  1 | Refunds reach your UPI app in 5-7 days
+  2 | How to cancel a pending payment
+(2 rows)
+```
+
+What to notice:
+
+- `ORDER BY embedding <=> :q` sorts by cosine distance, so the chunk pointing most like the question comes first.
+- `WHERE tenant_id = 1` runs alongside the search, so tenant 2's row is excluded; the output shows only tenant 1's two chunks.
+- The `hnsw (embedding vector_cosine_ops)` index must name the same distance (`vector_cosine_ops`) that the `<=>` operator uses, or the index is not used.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
-| HNSW `m` / `ef_construction` | 16 / 64 | pgvector 0.8 |
-| `hnsw.ef_search` | 40 | pgvector 0.8 |
-| `ivfflat.probes` | 1 | pgvector 0.8 |
+| HNSW `m` / `ef_construction` | 16 / 64 | pgvector 0.8.7 |
+| `hnsw.ef_search` | 40 | pgvector 0.8.7 |
+| `ivfflat.probes` | 1 | pgvector 0.8.7 |
+| Indexed `vector` dimensions | up to 2,000 (halfvec up to 4,000) | pgvector 0.8.7 |
+
+- **HNSW builds on an empty table:** it has no training step, so you can create the index before loading data.
+- **IVFFlat needs data first:** it learns its clusters from existing rows, so build it after the table has data or recall drops.
+- **Recall is a knob, not a guarantee:** raise `hnsw.ef_search` (or `ivfflat.probes`) for more recall and a slower query; lower it for the opposite.
 
 ## Interview Qs
 
-### Why do we need a vector database?
+### Why do you need a vector database rather than a normal query?
 
-To find the most similar embeddings among millions quickly. An ANN index checks a small part of the data instead of every row, so search stays fast as data grows.
+To find the most similar embeddings among millions quickly. A relational `WHERE` matches exact values, not "closest in meaning". An ANN index checks only a small part of the data instead of every row, so similarity search stays fast as the data grows, which a full scan would not.
 
-### Vector database or PostgreSQL?
+### Vector database or PostgreSQL: which do you pick?
 
-Both. Keep orders and payments relational. Store embeddings with pgvector in the same PostgreSQL, or in a dedicated vector store such as Pinecone, Weaviate, Milvus or Qdrant; Spring AI's `VectorStore` supports all of these.
+Both, for different jobs. Keep orders and payments relational. Store embeddings with pgvector in the same PostgreSQL, or in a dedicated vector store such as Pinecone, Weaviate, Milvus or Qdrant when scale demands it. Spring AI's `VectorStore` abstraction supports all of these behind one interface.
 
-### What does "approximate" cost you?
+### What does "approximate" actually cost you?
 
-Recall: the index may miss some true nearest neighbours. In pgvector, raise `hnsw.ef_search` (or `ivfflat.probes`) for better recall, lower it for speed.
+Recall: the index may miss some of the true nearest neighbours, so a result exact search would have returned can be absent. In pgvector you trade this off per query: raise `hnsw.ef_search` (or `ivfflat.probes`) for better recall and slower queries, lower it for speed with a little more risk of a miss.

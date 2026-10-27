@@ -765,3 +765,17 @@ The owner approved the Spring Boot pilot, both the concept rewrite (section Q) a
 - **Protocol facts cite their RFC.** TLS 1.3 = RFC 9846 (confirmed via the IETF datatracker to obsolete RFC 8446 as the current spec; the tech note's "RFC 8446" baseline line is outdated and should be updated to 9846).
 - **Corrections:** HTTP/2 server push is disabled by default in Chrome 106 (not "removed").
 - **Run-dependent:** a StackOverflowError depth (~22,000) varies by run/JIT; the text hedges with "about".
+
+### R14. AI Engineering (rewritten in teaching template v3)
+
+AI Engineering (slug `ai-engineering`) was rewritten from v2 into teaching template v3 on 27-10-2026, with cheat-sheet cards. This supersedes the earlier v2 content described in section P; the facts in P were re-verified as part of this pass.
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Cheat sheet |
+|---|---|---|---|---|
+| 45 | 22 | 254 | ~1,020 / 0 / 0 | ~11 min |
+
+- **Order (dependency-first):** AI Foundations (what ML/DL/GenAI are, for a backend dev new to ML) → How LLMs Work → Prompt Engineering → Tools, Agents and Memory → Embeddings and Vector Search → RAG → Safety and Evaluation → AI in Java Backends.
+- **Running example:** a support assistant for the payments app — it answers payment questions using retrieval over product docs and the user's own payment records, calls a `getPaymentStatus(orderId)` tool, and runs inside a Spring Boot service. Reused across prompting, tools, embeddings, RAG, safety and production.
+- **Baseline:** Java 25, Spring Boot 4.1, Spring AI 2.0.1, PostgreSQL 18 + pgvector 0.8.7, MCP spec 2026-07-28, OWASP Top 10 for LLM Applications 2025. Vendor-neutral prose; OpenAI/Anthropic named only for a dated, sourced fact. `codeLanguages: [java]`. **No LLM reply is ever shown as a real output panel** (replies are not reproducible); example replies are labelled as examples.
+- **Verification:** ~1,020 claims checked across three outsider passes; nothing was wrong. Confirmed against primary sources: OWASP LLM Top 10 2025; Spring AI 2.0.1 pinned (TokenTextSplitter 800-token default and no overlap in 2.0.1, SearchRequest topK 4, MessageWindowChatMemory 20, ChatClient `.call()`/`.stream()`, 60s timeout / 3 retries, prompt-logging default off); pgvector 0.8.7 (m 16, ef_construction 64, ef_search 40, probes 1, `<=>`/`<#>`/`<->`, 2000/4000 dim limits, HNSW vs IVFFlat); MCP 2026-07-28 (1:1 client-server, stateless, JSON-RPC, tools/resources/prompts); LoRA freezes base weights (Hu et al. 2021); prompt caching (Anthropic 5-min default + 1-hour, OpenAI on by default); PostgreSQL 18 defaults. Runnable snippets re-run on JDK 21, tiktoken (o200k_base: 5/8/2) and real PostgreSQL 18 + pgvector 0.8.7 in Docker — all output panels match.
+- **Dated facts to re-check before interviews (flagged in prose):** sampling-parameter deprecations (Anthropic temperature deprecated on newer models; `effort` replacing `budget_tokens`; `output_config.format`); provider fine-tuning platform status; prompt-cache defaults. **For the owner:** Spring AI `main` (future 3.x) adds TokenTextSplitter overlap — re-check if the baseline is bumped.

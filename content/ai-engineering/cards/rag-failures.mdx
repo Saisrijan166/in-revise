@@ -5,17 +5,28 @@ title: Why RAG Fails and How to Improve It
 topic: rag
 level: interview
 heat: 2
-hook: "Look at the retrieved chunks first: if the right one is missing, fix retrieval; if it is there, fix the prompt or model."
+hook: "Look at the retrieved chunks first: if the right one is missing, fix retrieval; if it is there, fix the prompt or the model."
 points:
-  - { k: "Retrieval", v: "the right chunk was never found" }
-  - { k: "Ranking and context", v: "found, but ranked too low or buried in noise" }
-  - { k: "Generation", v: "the chunk was in the prompt; the model misused it" }
-  - { k: "Data", v: "the source document itself is missing, wrong or old" }
-  - { k: "Debug order", v: "inspect the retrieved chunks before blaming the model", kind: plus }
+  - { k: "Retrieval failure", v: "the chunk with the answer was never found, so it never reached the prompt" }
+  - { k: "Ranking and context", v: "the right chunk was found but ranked too low to keep, or buried among noisy chunks" }
+  - { k: "Generation failure", v: "the right chunk was in the prompt, but the model ignored or misused it" }
+  - { k: "Data failure", v: "the source document itself is missing, wrong or out of date" }
+  - { k: "Debug order", v: "always inspect the retrieved chunks before blaming the model", kind: plus }
 trap:
   wrong: "The RAG answer is wrong, so switch to a bigger model."
   right: "Check the retrieved chunks first. A bigger model cannot use a chunk that never reached the prompt."
-sayIt: "I split failures into retrieval and generation. I log the retrieved chunks, check whether the right one was there, fix data, chunking, filters or reranking if not, and the prompt if it was."
+  why: "A wrong answer looks like the model's fault, and a bigger model is an easy thing to try. But most RAG failures are in retrieval, where a stronger model changes nothing."
+sayIt: "I split RAG failures into retrieval and generation. I log the retrieved chunks, check whether the right one was there, fix data, chunking, filters or reranking if it was missing, and fix the prompt if it was present."
+cheat:
+  idea: "A wrong RAG answer has several causes across the pipeline. Naming the failure type, data, retrieval, ranking, context or generation, tells you which part to fix."
+  flow: "Inspect retrieved chunks → right one missing? fix retrieval/data : fix prompt"
+  remember: "Inspect retrieved chunks before changing the model: it cannot use a chunk that was never retrieved."
+buildsOn: [rag-pipeline, retrieval-tuning, grounding-and-citations]
+scenarios:
+  - q: "A RAG bot keeps giving the old refund window. You check and the correct chunk was in the top-K results. Where is the bug?"
+    a: "In generation, not retrieval. The right chunk reached the prompt and the model still used stale knowledge, so the fix is the prompt and grounding: instruct it to answer only from the chunks. A bigger model or better search would not help, because retrieval already worked."
+  - q: "Someone proposes fixing wrong RAG answers by upgrading to a larger model. When is that the wrong move?"
+    a: "Whenever the failure is in retrieval, ranking, context or data, which is most of the time. If the answer's chunk never reached the prompt, no model can use it. Only generation failures, where the correct chunk was present but misused, can benefit from a stronger model."
 confusedWith: []
 tags: [rag, debugging, evaluation]
 visual: table
@@ -31,9 +42,13 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+RAG failures are the distinct ways a [RAG pipeline](card:rag-pipeline) can produce a wrong answer. The same symptom, "the bot gave a wrong refund date", can come from a bad source document, a chunk that was never retrieved, a chunk ranked too low, too much noise around the right chunk, or the model misusing a chunk it did have. Sorting a failure into one of these types turns debugging from guessing into following the pipeline.
+
 ## Why it exists
 
-"The bot gave a wrong refund date" has many possible causes. Naming the failure type tells you which part of the pipeline to fix, instead of guessing.
+Without a map of failure types, every wrong answer looks the same and people reach for the easiest change, usually a bigger model. That rarely helps, because most RAG failures happen in retrieval, where the model plays no part. Naming the failure type points you straight at the stage to fix, so you stop changing things that cannot matter.
 
 ## How it works
 
@@ -41,22 +56,33 @@ sources:
 |---|---|---|
 | Data | Policy chunk still says 10 days | Fix and [re-index](card:rag-pipeline) the document |
 | Retrieval | "UPI refund" chunk not in the results | [Chunking](card:chunking), [filters](card:metadata-and-filtering), [hybrid search](card:hybrid-search) |
-| Ranking | Found at rank 9, K is 5 | [Reranking](card:reranking), [top-K](card:retrieval-tuning) |
-| Context | Right chunk among 20 noisy ones | Fewer, better chunks |
-| Generation | Chunk present, model says "3 days" | Prompt, [grounding](card:grounding-and-citations) |
+| Ranking | Found at rank 9, but K is 5 | [Reranking](card:reranking), raise [top-K](card:retrieval-tuning) |
+| Context | Right chunk sits among 20 noisy ones | Fewer, better chunks |
+| Generation | Chunk present, model still says "3 days" | Fix the prompt, add [grounding](card:grounding-and-citations) |
 
-- Measure both sides in [evals](card:ai-evaluation): context recall and precision for retrieval, faithfulness for the answer.
+1. For a failing question, log exactly which chunks were retrieved and in what order.
+2. Check whether the chunk holding the answer is in that list at all.
+3. If it is missing, the bug is upstream: fix the data, chunking, filters or search.
+4. If it is present, the bug is downstream: fix the ranking, trim the noise, or fix the prompt and grounding.
+
+So the key is to read the retrieved chunks first; their presence or absence splits every failure into a retrieval problem or a generation problem.
+
+## Rules and defaults
+
+- **Debug retrieval before generation:** inspecting the retrieved chunks is the first step; it tells you which half of the pipeline is at fault.
+- **Measure both sides in evals:** use context recall and precision for retrieval, and faithfulness for the answer (see [evals](card:ai-evaluation)), so a change is only kept if the numbers improve.
+- **RAG is never finished:** Barnett et al. found a RAG system can be validated only in operation, so keep monitoring real questions and extending the eval set.
 
 ## Interview Qs
 
 ### Your RAG bot gives wrong answers. How do you debug it?
 
-Look at what was retrieved for failing questions. Right chunk missing: fix data, chunking, filters or search. Ranked low: rerank or adjust K. Present but misused: fix the prompt and grounding. Add each case to evals.
+Start by logging what was retrieved for the failing questions. If the right chunk is missing, fix the data, chunking, filters or search. If it was found but ranked low, rerank or raise K. If it was present but misused, fix the prompt and grounding. Then add each failing case to your evals.
 
 ### How do you improve a RAG system?
 
-In order: clean documents, better chunking, a suitable embedding model, metadata filters, hybrid search, reranking, a grounded prompt with citations, and evals that show whether each change helped.
+Work in order of cheapest, most likely wins: clean the documents, improve chunking, pick a suitable embedding model, add metadata filters, use hybrid search, add reranking, write a grounded prompt with citations, and keep evals that show whether each change actually helped.
 
 ### Is RAG ever "done"?
 
-No. Barnett et al. found a RAG system can only be validated in operation, and its robustness evolves rather than being designed in, so monitor real questions and keep extending the eval set.
+No. Barnett et al. found a RAG system can only be validated in operation, and its robustness evolves rather than being designed in up front. So you monitor the real questions users ask, keep extending the eval set, and treat tuning as ongoing rather than a one-time setup.

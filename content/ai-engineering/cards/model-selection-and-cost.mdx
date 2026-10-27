@@ -5,17 +5,28 @@ title: Choosing Models and Controlling Cost
 topic: ai-in-production
 level: intermediate
 heat: 3
-hook: "Keep the lightest model that passes your evals, then cut tokens and calls: cost is tokens in and out, times price, times calls."
+hook: "Keep the lightest model that passes your evals, then cut tokens and calls: cost is tokens in and out, times price, times the number of calls."
 points:
-  - { k: "Simple rule", v: "small model for simple tasks; strong model for hard reasoning" }
-  - { k: "Cost", v: "(input × input price + output × output price) × calls" }
-  - { k: "Prompt caching", v: "provider reuses an identical prompt prefix: cheaper, faster input" }
-  - { k: "Batch API", v: "offline jobs, results within 24 h, 50% off (OpenAI, Anthropic)", kind: default }
-  - { k: "Response cache", v: "never share personal, stale or sensitive answers", kind: minus }
+  - { k: "Simple rule", v: "use a small, cheap model for simple tasks; send only hard reasoning to a strong model" }
+  - { k: "Cost formula", v: "(input tokens × input price + output tokens × output price) × number of calls" }
+  - { k: "Prompt caching", v: "the provider reuses an identical prompt prefix, so repeated input is cheaper and faster" }
+  - { k: "Batch API", v: "offline jobs return within 24 h at 50% off (OpenAI, Anthropic)", kind: default }
+  - { k: "Response cache", v: "store whole answers, but never serve a personal, stale or sensitive one to another user", kind: minus }
 trap:
-  wrong: "Always use the biggest model to be safe."
-  right: "Test on your own eval set and keep the lightest model that meets the bar; send only hard requests to a stronger one."
+  wrong: "Always use the biggest, strongest model to be safe."
+  right: "Test models on your own eval set and keep the lightest one that meets the bar; send only hard requests to a stronger model."
+  why: "The biggest model gives the best answer on any single hard example, so it feels like the safe default, and the slower speed and higher bill at volume are easy to miss until production."
 sayIt: "I keep the lightest model that passes our evals and route only hard requests to a stronger one. Then I cut tokens and calls: shorter prompts, fewer chunks, output caps, caching and batch jobs."
+cheat:
+  idea: "Do not default to the biggest model. Keep the lightest one that passes your evals, then cut tokens and calls to control cost."
+  flow: "eval set → cheapest model that passes → cut tokens → cut calls"
+  remember: "Cost = (input × in-price + output × out-price) × calls; lower any factor to lower the bill."
+buildsOn: [ai-evaluation, sampling-parameters, retrieval-tuning]
+scenarios:
+  - q: "A teammate sets the strongest model for every request, including a one-line FAQ lookup. The monthly bill is high. What do you change?"
+    a: "Route by difficulty: a small, cheap model answers the FAQ lookups, and only genuinely hard reasoning goes to the strong model. Build an eval set first so you know the small model passes the easy cases. This cuts most of the spend without hurting quality."
+  - q: "Each support call sends the same 2,000-token policy text before a short question. How do you cut that input cost?"
+    a: "Put the fixed policy text at the start of the prompt and the changing question last, so the provider's prompt caching reuses the static prefix. Repeated input then costs less and starts faster. Shortening the policy text and sending fewer chunks also helps."
 confusedWith: [response-cache-vs-prompt-cache]
 tags: [cost]
 visual: table
@@ -37,49 +48,69 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Choosing a model means picking the cheapest model that is still good enough for the task, and controlling cost means lowering the tokens and calls that drive the bill. Providers offer a range from small, fast, cheap models to large, slow, expensive ones. You bill for every token in and out, so the goal is the lightest model that passes your [evals](card:ai-evaluation), plus habits that trim how much you send and how often.
+
 ## Why it exists
 
-The biggest model is slow and dear, and most requests do not need it. Every token is billed.
+The biggest model is the slowest and the dearest, and most requests do not need it. If you default to it for every call, you pay top price for FAQ lookups and simple rewrites, and the bill grows with traffic. Because the cost is per token, a bloated prompt or a reply with no length cap quietly multiplies the spend. Picking the right model and cutting tokens turns a large bill into a small one without hurting the answers that matter.
 
 ## How it works
 
-| Factor | Ask |
+| Factor | The question to ask |
 |---|---|
-| Quality | Passes our eval set? |
-| Latency, cost | Fast and cheap enough at volume? |
-| Context, features | Prompt fits? Tools, structured output, reasoning? |
-| Data rules | Privacy, residency, self-hosting? |
-| Availability | Rate limits, regions, a fallback? |
+| Quality | Does it pass our eval set on real questions? |
+| Latency and cost | Fast and cheap enough at our volume? |
+| Context and features | Does the prompt fit? Does it support tools, structured output, reasoning? |
+| Data rules | Privacy, data residency, self-hosting needs? |
+| Availability | Rate limits, regions, and is there a fallback model? |
 
-- Fewer tokens: shorter prompts, fewer chunks ([top-K](card:retrieval-tuning)), [output caps](card:sampling-parameters).
-- Fewer calls: a response cache; a batch API for offline jobs.
+1. Build an eval set from real questions and score candidate models on it.
+2. Start from a cheap model and upgrade only the cases it fails, or start strong and step down while quality holds.
+3. Cut tokens: shorter prompts, fewer [retrieved chunks](card:retrieval-tuning), and [output length caps](card:sampling-parameters).
+4. Cut calls: a response cache for repeated answers, and a batch API for offline jobs.
+5. Make the calls you keep cheaper with prompt caching and small models where they suffice.
 
 ## Example
 
-Prompt order for prompt caching:
+Prompt caching only helps when the unchanging text comes first, so the provider can reuse that prefix.
 
 ```text
 [ system rules + refund-policy text ]          same every call: cached prefix
 [ user: "Where is my refund for order 42?" ]   changes: goes last
 ```
 
-## Defaults
+What to notice:
+
+- The policy text is identical on every call, so placing it first lets the provider reuse the work it already did on that prefix.
+- The user line changes each time, so it must come last; anything after the first changed token cannot be reused.
+- Put the question first instead and the prefix differs every call, so nothing is cached and you pay full input cost each time.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
 | Prompt caching | On for supported models | OpenAI docs |
-| Prompt cache lifetime | 5 minutes, 1-hour option | Anthropic docs |
+| Prompt cache lifetime | 5 minutes, with a 1-hour option | Anthropic docs |
+
+- **Batch discount:** offline jobs through the Batch API return within 24 hours at 50% off (OpenAI, Anthropic).
+- **Response cache keys:** key on everything that changes the answer (tenant, user, model version) and set a TTL, or you risk serving a wrong, stale or someone else's answer.
+
+## Not to be confused with
+
+A prompt cache and a response cache both save money but work differently. Prompt caching is run by the provider and reuses an identical prompt prefix, so the model still runs every call but the input is cheaper and faster. A response cache is run by you and stores whole answers, so a hit skips the model entirely but risks a stale or personal answer. Rule: prompt caching is always safe; a response cache needs careful keys and a TTL.
 
 ## Interview Qs
 
 ### How do you choose a model for a feature?
 
-Build an eval set from real questions. Start cheap and upgrade where it fails, or start strong and step down; check latency, features and data rules.
+Build an eval set from real questions and score candidate models on it. Start cheap and upgrade only where it fails, or start strong and step down while quality holds. Then check latency and cost at your volume, the features you need (tools, structured output, reasoning), and any data-residency or self-hosting rules.
 
 ### How do you reduce LLM cost?
 
-Fewer tokens: shorter prompts, fewer chunks, output caps. Fewer calls: a response cache. Cheaper calls: small models, prompt caching, batch for offline jobs.
+Three levers. Fewer tokens: shorter prompts, fewer retrieved chunks, output-length caps. Fewer calls: a response cache for repeated, non-personal answers. Cheaper calls: a smaller model where it passes, prompt caching for shared prefixes, and the Batch API for offline jobs at half price.
 
 ### What can go wrong when you cache AI answers?
 
-Another customer's answer, a stale answer after a policy change, or leaked sensitive data. Key on whatever changes the answer (tenant, user, model version); set a TTL.
+A response cache can serve another customer's answer, a stale answer after a policy change, or leaked sensitive data. Key the cache on whatever changes the answer, such as tenant, user and model version, and set a TTL so old answers expire. Prompt caching does not have this risk, because the model still generates each reply.

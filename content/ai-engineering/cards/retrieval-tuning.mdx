@@ -5,17 +5,28 @@ title: Top-K, Context Assembly and Query Rewriting
 topic: rag
 level: intermediate
 heat: 2
-hook: "Fetch a few strong chunks, not many weak ones: tune top-K and a threshold, rewrite vague questions, and pack the context neatly."
+hook: "Fetch a few strong chunks, not many weak ones: tune how many you fetch, drop weak matches, rewrite vague questions, and pack the context neatly."
 points:
-  - { k: "Top-K", v: "how many chunks to fetch; too low misses, too high adds noise" }
-  - { k: "Similarity threshold", v: "drop weak matches; none left means say 'I don't know'" }
-  - { k: "Query rewriting", v: "turn a vague or follow-up question into a standalone search" }
-  - { k: "Spring AI 2.0", v: "SearchRequest: topK 4, threshold 0.0 (accept all)", kind: default }
-  - { k: "Token budget", v: "chunks share the window with rules, history and the reply", kind: minus }
+  - { k: "Top-K", v: "the number of chunks you fetch per question; too low misses the answer, too high adds noise" }
+  - { k: "Similarity threshold", v: "a minimum score; chunks below it are dropped, and if none pass you say 'I don't know'" }
+  - { k: "Query rewriting", v: "rephrase a vague or follow-up question into one that can stand on its own as a search" }
+  - { k: "Spring AI 2.0 default", v: "SearchRequest uses topK 4 and similarityThreshold 0.0, which accepts every match", kind: default }
+  - { k: "Token budget", v: "chunks share the context window with the system rules, the history and the reply, so they must fit", kind: minus }
 trap:
-  wrong: "More chunks in the prompt means a better answer."
-  right: "Irrelevant chunks distract the model and cost tokens. Fetch more candidates, then rerank and keep the best few."
-sayIt: "I tune top-K and a similarity threshold with evals, rewrite follow-ups into standalone queries, and pass a few de-duplicated chunks labelled with source ids within a token budget."
+  wrong: "Putting more chunks in the prompt always gives a better answer."
+  right: "Irrelevant chunks distract the model and cost tokens. Fetch more candidates, rerank them, and keep only the best few."
+  why: "A bigger context window feels like free room, so people assume more context can only help. In practice the model's accuracy drops when the key fact is buried among noise."
+sayIt: "I tune top-K and a similarity threshold with evals, rewrite follow-ups into standalone queries, drop duplicates, and pass a few chunks labelled with their source ids inside a token budget."
+cheat:
+  idea: "Retrieval tuning decides what reaches the prompt: how many chunks to fetch (top-K), which weak ones to drop, how to rewrite a vague question, and how to pack the rest."
+  flow: "Rewrite → retrieve (top-K + threshold) → de-dupe + rerank → assemble"
+  remember: "Fewer, stronger chunks beat many weak ones: fetch extra, rerank, keep the best few."
+buildsOn: [rag-pipeline, metadata-and-filtering, reranking]
+scenarios:
+  - q: "A user asks 'and order 43?' right after asking about order 42, and retrieval returns nothing useful. Why, and what fixes it?"
+    a: "On its own, 'and order 43?' has no searchable meaning, so the embedding matches nothing relevant. Rewrite it with the chat history into a standalone query like 'Where is the refund for order 43?' before searching. Spring AI's CompressionQueryTransformer does this rewrite."
+  - q: "Raising top-K from 4 to 20 made answers worse, not better. What happened?"
+    a: "The extra 16 chunks were mostly weak matches. They pushed the real answer down and filled the window with noise, so the model had more to distract it and fewer tokens for the reply. Keep top-K small, or fetch many and rerank down to a few."
 confusedWith: []
 tags: [rag, top-k, query-rewriting, context]
 visual: flow
@@ -31,23 +42,28 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Retrieval tuning is the set of choices that decide which chunks actually reach the prompt in a [RAG pipeline](card:rag-pipeline). The main dials are **top-K** (how many chunks you fetch), a **similarity threshold** (the lowest match score you accept), **query rewriting** (turning the user's words into a good search query), and **context assembly** (ordering, de-duplicating and trimming the chunks to fit the window). Getting these right is often the difference between a vague answer and a correct one.
+
 ## Why it exists
 
-The raw question is often a poor search query, and stuffing every match into the prompt adds cost and noise. Tuning what goes in gives better, cheaper answers.
+The user's raw question is often a poor search query: a follow-up like "and order 43?" means nothing on its own, and a vague question matches many weak chunks. If you then stuff every match into the prompt, you pay for more tokens and the real answer gets buried among noise, which lowers accuracy. Tuning what goes in gives answers that are both better and cheaper.
 
 ## How it works
 
 <Steps label="From question to context">
-  <Step title="Rewrite">Make the question standalone using the history; optionally expand it into several queries.</Step>
-  <Step title="Retrieve">Search with top-K, a similarity threshold and the [tenant filter](card:metadata-and-filtering).</Step>
-  <Step title="Trim">Drop duplicates; [rerank](card:reranking) and keep the best few.</Step>
-  <Step title="Assemble">Order by relevance, label chunks with source ids, fit a token budget.</Step>
+  <Step title="Rewrite">Turn the question into a standalone search query using the chat history; optionally expand it into several queries.</Step>
+  <Step title="Retrieve">Search the store with top-K, the similarity threshold and the [tenant filter](card:metadata-and-filtering), getting a set of candidate chunks.</Step>
+  <Step title="Trim">Drop duplicate chunks, then [rerank](card:reranking) the candidates and keep only the best few.</Step>
+  <Step title="Assemble">Order the kept chunks by relevance, label each with its source id, and check the whole block fits the token budget.</Step>
 </Steps>
 
-- Source labels make [citations](card:grounding-and-citations) checkable.
-- History itself is kept by [conversation memory](card:conversation-memory).
+So the key is to retrieve wide but send narrow: gather candidates generously, then cut down to a few strong, labelled chunks.
 
 ## Example
+
+This shows how a follow-up question is rewritten, then turned into a small labelled context block.
 
 ```text
 History:   "Where is my refund for order 42?" -> answered
@@ -57,23 +73,29 @@ Context:   [refund-policy#4] UPI refunds reach the customer in 5-7 working days.
            [payment-faq#2]   A refund shows as a credit on the UPI app.
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| topK | 4 | Spring AI 2.0 `SearchRequest` |
-| similarityThreshold | 0.0 (accept all) | Spring AI 2.0 `SearchRequest` |
+- The rewritten line is self-contained, so its embedding matches the refund documents; the raw "and order 43?" would not.
+- Each chunk carries a source id like `refund-policy#4`. These labels let the model cite sources and let your code verify them, covered in [grounding and citations](card:grounding-and-citations).
+- Only two chunks are passed, not twenty. The chat history itself is kept by [conversation memory](card:conversation-memory); it is used to rewrite, not stuffed into the context.
+
+## Rules and defaults
+
+- **Top-K default:** Spring AI 2.0 `SearchRequest` uses `topK = 4`, so four chunks are fetched unless you change it.
+- **Threshold default:** `similarityThreshold = 0.0` accepts every match; raise it to drop weak chunks, but then handle the case where nothing passes.
+- **No match left:** when the threshold filters out all chunks, the right behaviour is to answer "I don't know", not to invent one.
+- **You must tune with evals:** there is no universal best top-K or threshold; measure them on your own questions (see [evals](card:ai-evaluation)).
 
 ## Interview Qs
 
 ### How do you pick top-K?
 
-Measure it: run real questions and check whether the right chunk is in the top K and how much noise comes with it. Often: a larger K for search, then a reranker keeps a few.
+Measure it, do not guess. Run real questions through retrieval and check whether the correct chunk appears within the top K and how much noise comes with it. A common pattern is a larger K for the first search, then a [reranker](card:reranking) that keeps only the few best chunks for the prompt.
 
 ### What is HyDE?
 
-Hypothetical Document Embeddings (Gao 2022): an LLM writes a fake answer to the question, and that answer is embedded and searched instead, because it looks more like real documents than a short question does.
+Hypothetical Document Embeddings (Gao et al. 2022). An LLM first writes a fake answer to the question, and that answer, not the short question, is embedded and searched. A full answer looks more like the real documents than a terse question does, so it often retrieves better matches.
 
-### The user asks "and order 43?" and retrieval returns nothing useful. Why?
+### A follow-up question returns nothing useful. What is wrong?
 
-Alone, the follow-up means nothing. Rewrite it with the history into a standalone query; Spring AI's `CompressionQueryTransformer` does this.
+The follow-up is not standalone, so its embedding carries no real meaning. Rewrite it together with the chat history into a complete query before searching. Spring AI's `CompressionQueryTransformer` performs exactly this rewrite, turning "and order 43?" into a full question.

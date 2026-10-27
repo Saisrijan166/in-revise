@@ -5,17 +5,27 @@ title: Chunking and Overlap
 topic: rag
 level: intermediate
 heat: 3
-hook: "Split documents into small, self-contained pieces so search returns the one paragraph that answers, not the whole PDF."
+hook: "Split documents into small, self-contained pieces, so a search returns the one paragraph that answers the question, not the whole PDF."
 points:
-  - { k: "Too small", v: "a chunk loses the context that gives it meaning", kind: minus }
-  - { k: "Too large", v: "one vector blurs many topics; extra tokens add noise", kind: minus }
-  - { k: "Overlap", v: "repeat the end of one chunk at the start of the next" }
-  - { k: "OpenAI file search", v: "800-token chunks, 400-token overlap", kind: default }
-  - { k: "Spring AI 2.0", v: "TokenTextSplitter: 800-token chunks, no overlap setting", kind: default }
+  - { k: "Chunk", v: "a small passage of a document, embedded and stored as one unit so search can return it" }
+  - { k: "Too small", v: "the passage loses the surrounding context that gave it meaning", kind: minus }
+  - { k: "Too large", v: "one vector mixes many topics, and the extra text adds noise to the prompt", kind: minus }
+  - { k: "Overlap", v: "repeat the end of one chunk at the start of the next, so a sentence on the boundary stays whole" }
+  - { k: "TokenTextSplitter default", v: "Spring AI 2.0 splits at 800-token chunks, cut at sentence ends, with no overlap setting", kind: default }
 trap:
   wrong: "Pick one chunk size, such as 500 tokens, and use it for every document."
-  right: "Size depends on the documents and the questions. Start from a default, then tune it with evals."
-sayIt: "I split documents by structure where I can, around a few hundred tokens with some overlap, add the title or section as context, and tune size and overlap with retrieval evals."
+  right: "The right size depends on the documents and the questions. Start from a documented default, then tune it with retrieval evals."
+  why: "A single number is easy to configure and feels objective, and most tutorials show one fixed value. But a chat log, a legal policy and a code file split well at very different sizes."
+sayIt: "I split documents by their structure where I can, aim for a few hundred tokens with some overlap, add the title or section so a chunk stands alone, and then tune size and overlap using retrieval evaluation."
+cheat:
+  idea: "Chunking splits a document into small passages, each embedded and stored on its own, so a search can return the exact paragraph that answers a question instead of the whole file."
+  remember: "Too small loses context, too large adds noise. Overlap keeps boundary sentences whole. Tune size with evals."
+buildsOn: [rag-pipeline, embeddings]
+scenarios:
+  - q: "A chunk reads only 'it takes 5-7 working days'. A user asks about UPI refund timing and this chunk is not retrieved. Why, and how do you fix it?"
+    a: "The chunk dropped the word that gave it meaning, so its embedding does not match 'UPI refund'. Fix it by prepending the section title (Refund policy: UPI) to the chunk, or by using overlap or larger chunks so the subject stays with the fact."
+  - q: "You set chunk size to 4000 tokens to 'keep all the context'. Retrieval quality drops. Why?"
+    a: "A huge chunk covers many topics, so its single vector matches everything weakly and nothing strongly, and it floods the prompt with unrelated text. Smaller, focused chunks match the specific question far better."
 confusedWith: []
 tags: [rag, chunking, overlap]
 visual: table
@@ -25,29 +35,41 @@ sources:
     verifiedOn: "2026-10-21"
   - title: "ETL Pipeline: TokenTextSplitter (Spring AI 2.0 reference)"
     url: "https://docs.spring.io/spring-ai/reference/api/etl-pipeline.html"
-    verifiedOn: "2026-10-21"
+    verifiedOn: "2026-10-27"
   - title: "Chunk large documents for vector search (Azure AI Search docs)"
     url: "https://learn.microsoft.com/en-us/azure/search/vector-search-how-to-chunk-documents"
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+A chunk is a small passage of a document, such as a paragraph or a section, that is embedded and stored as one unit in the vector store. Chunking is the step in [the RAG pipeline](card:rag-pipeline) that cuts each document into these passages before they are embedded. Retrieval returns whole chunks, so a chunk is the smallest thing a search can hand to the model. How you cut the document decides what the model gets to read.
+
 ## Why it exists
 
-Embedding models have an input token limit, and one vector for a 100-page PDF matches everything weakly. Small chunks let search return the exact paragraph about UPI refunds.
+You cannot embed a whole 100-page PDF as one vector. The [embedding](card:embeddings) model has an input token limit, and a single vector for 100 pages matches almost every question weakly, because it averages away the detail. If you then stuffed the whole PDF into the prompt, you would pay for thousands of tokens and bury the one relevant line in noise. Chunking fixes both: small passages fit the embedding model, and search can return the exact paragraph about UPI refunds instead of the entire document.
 
 ## How it works
+
+You choose a splitting strategy to suit the documents.
 
 | Strategy | How it splits | Good for |
 |---|---|---|
 | Fixed size | every N tokens, with overlap | plain text, a quick start |
 | Sentence-aware | fixed size, but cut at `.`, `?`, `!` or a newline | most prose |
-| By structure | headings, sections, pages | policies, FAQs, Markdown, HTML |
-| Semantic | where the meaning changes | long text that mixes topics |
+| By structure | at headings, sections or pages | policies, FAQs, Markdown, HTML |
+| Semantic | where the topic changes | long text that mixes topics |
 
-- Overlap keeps a sentence cut at a boundary whole in at least one chunk; OpenAI caps it at half the chunk size.
-- A chunk such as "it takes 5-7 days" means little alone: add the document title or section to it, or use [contextual retrieval](card:contextual-chunk-context).
+1. Pick the strategy, then split each document into chunks of a few hundred tokens.
+2. Add overlap: start each chunk with the last sentence or two of the previous one, so a fact split across a boundary appears whole in at least one chunk.
+3. Give each chunk context: prepend its document title or section, so a short chunk still carries its subject.
+4. Embed and store each chunk, then measure retrieval on real questions and adjust the size and overlap.
+
+So the key is that the cut must keep each chunk small but still self-contained.
 
 ## Example
+
+Here two consecutive chunks overlap by one sentence, so the UPI line is complete in both.
 
 ```text
 Chunk 1: ... Refunds go back to the original payment method.
@@ -57,19 +79,30 @@ Chunk 2: UPI refunds reach the customer in 5-7 working days.   <- overlap
 (fictional example policy)
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Chunk size / overlap | 800 / 400 tokens | OpenAI file search (max chunk 100-4,096 tokens) |
-| Chunk size | 800 tokens, cut at sentence ends | Spring AI 2.0 `TokenTextSplitter` |
+- The UPI sentence sits on the boundary between the two chunks, so without overlap it could be cut in half and retrieved with half its meaning.
+- Repeating it at the start of Chunk 2 means a search for "UPI refund" matches a whole, meaningful passage either way.
+- The cost is real: overlap creates more chunks, so more storage, more embedding calls, and near-duplicate hits in results that you may need to deduplicate.
+- Removing the overlap would shrink the index but risk splitting the answer across two chunks, so neither ranks well.
+
+## Rules and defaults
+
+- **Spring AI 2.0 `TokenTextSplitter`:** chunks at 800 tokens, cuts at sentence boundaries (`.`, `?`, `!`, newline), and does not support overlap; add overlap with custom logic if you need it.
+- **OpenAI file search:** defaults to 800-token chunks with 400-token overlap, and lets you set a chunk size between 100 and 4,096 tokens, capping overlap at half the chunk size.
+- **No universal size:** the best size depends on your documents and questions, so treat any default as a starting point and confirm it with evals.
+- **Keep chunks self-contained:** always store the title or section with the chunk, or use [contextual retrieval](card:contextual-chunk-context), so a retrieved chunk makes sense alone.
 
 ## Interview Qs
 
 ### How do you choose chunk size?
 
-Start from a documented default, check the document shapes, then measure retrieval recall on real questions and adjust. Smaller suits precise facts; larger keeps context.
+Start from a documented default such as a few hundred tokens, look at the shape of the documents, then measure retrieval recall on real questions and adjust. Smaller chunks suit precise, factual lookups; larger chunks keep more surrounding context for broader questions.
 
-### Why overlap, and what does it cost?
+### Why use overlap, and what does it cost?
 
-It keeps an answer split across a boundary. It costs more chunks, storage and embedding calls, and near-duplicates in results.
+Overlap keeps an answer that falls on a chunk boundary whole in at least one chunk, so it still ranks and gets retrieved. It costs more: more chunks to store and embed, higher ingestion cost, and near-duplicate results you may have to deduplicate before building the prompt.
+
+### Why does one giant chunk hurt retrieval?
+
+A large chunk covers many topics, so its single embedding matches many questions weakly and none strongly, and it fills the prompt with irrelevant text. Precise, focused chunks produce sharper vectors that match the specific question and keep the prompt clean.

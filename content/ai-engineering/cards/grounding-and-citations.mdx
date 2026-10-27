@@ -5,17 +5,28 @@ title: Grounding and Citations
 topic: rag
 level: intermediate
 heat: 2
-hook: "Grounded means the answer comes from the text you supplied, not the model's memory; a citation shows which chunk it came from."
+hook: "Grounded means the answer comes only from the text you supplied, not the model's memory; a citation shows which chunk each claim came from."
 points:
-  - { k: "Grounding", v: "answer only from the supplied chunks, or say 'I don't know'" }
-  - { k: "Citation", v: "each claim points to a chunk id or page" }
-  - { k: "Check in code", v: "every cited id must be one you actually retrieved" }
-  - { k: "Provider features", v: "Anthropic citations, OpenAI file_citation annotations", kind: plus }
-  - { k: "Not proof", v: "a cited chunk can still be misread or out of date", kind: minus }
+  - { k: "Grounding", v: "answer only from the supplied chunks, and say 'I don't know' when they do not contain the answer" }
+  - { k: "Citation", v: "each claim points to the chunk id or page it came from, so a reader can check it" }
+  - { k: "Check in code", v: "verify that every cited id was actually one of the chunks you retrieved; reject the rest" }
+  - { k: "Provider features", v: "Anthropic citations and OpenAI file_citation annotations return citations for you", kind: plus }
+  - { k: "Not proof", v: "a cited chunk can still be misread or out of date, so a citation is not a guarantee of correctness", kind: minus }
 trap:
   wrong: "The answer has a citation, so it is correct."
-  right: "A citation shows where the answer claims to come from. Whether the chunk supports it is measured as faithfulness in evals."
-sayIt: "I tell the model to answer only from the retrieved chunks, cite chunk ids and say it does not know otherwise. Then I check in code that each cited id was retrieved, and show the sources to the user."
+  right: "A citation only shows where the answer claims to come from. Whether the chunk actually supports the claim is measured as faithfulness in evals."
+  why: "A citation looks like a reference in a paper, so it feels like proof. But the model can cite a chunk and still misread it, or the chunk itself can be wrong, so the label alone guarantees nothing."
+sayIt: "I instruct the model to answer only from the retrieved chunks, cite each claim by chunk id, and say it does not know otherwise. Then my code checks that every cited id was actually retrieved, and the UI shows the sources."
+cheat:
+  idea: "Grounding ties the answer to the chunks you supplied, not the model's memory; a citation records which chunk a claim came from."
+  flow: "Instruct 'use only chunks, cite ids' → generate → reject uncited ids → show sources"
+  remember: "A citation shows where a claim came from, not that it is correct. Verify cited ids in code."
+buildsOn: [rag-pipeline, hallucination, retrieval-tuning]
+scenarios:
+  - q: "The model answers 'UPI refunds take 5-7 days [refund-policy#4]' but you never retrieved refund-policy#4. What should happen?"
+    a: "Your code rejects the answer, because the cited id was not among the retrieved chunks, so the model either invented the id or mismatched it. A grounded system treats an uncited or wrongly-cited claim as unsafe and either retries or falls back to 'I don't know'."
+  - q: "Why ask the model to quote the source text before answering?"
+    a: "Quoting first forces it to find actual supporting text in the chunks, then answer from that quote rather than from memory. It makes invented facts less likely and gives you the exact span to show as a citation."
 confusedWith: []
 tags: [rag, grounding, citations, hallucination]
 visual: code
@@ -31,29 +42,34 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+**Grounding** means the assistant builds its answer only from the text you put in the prompt, usually the chunks retrieved in a [RAG pipeline](card:rag-pipeline), and refuses when that text does not hold the answer. A **citation** is a label on each claim pointing to the chunk id or page it came from. Together they turn a fluent reply into one a reader, and your own code, can check against its sources.
+
 ## Why it exists
 
-A fluent answer can still be invented. Grounding ties it to your documents, and citations let the user and your code check where each claim came from.
+A model can write a confident, fluent answer that is simply invented; this is [hallucination](card:hallucination). In a support assistant, an invented refund date is worse than no answer. Grounding ties each statement to a supplied document so the model has less room to make things up, and citations let both the user and your code trace a claim back and reject anything that does not check out.
 
 ## How it works
 
 <Steps label="Grounded answer with sources">
-  <Step title="Instruct">"Answer only from the chunks below. Cite each claim as [chunk id]. If the answer is not there, say so and offer a human agent."</Step>
-  <Step title="Generate">The model returns the answer with chunk ids.</Step>
-  <Step title="Verify">Code rejects ids that were not retrieved; [output validation](card:output-validation) checks the rest.</Step>
-  <Step title="Show">The UI shows the answer with links to the source pages.</Step>
+  <Step title="Instruct">Tell the model: answer only from the chunks below, cite each claim as [chunk id], and if the answer is not there, say so and offer a human agent.</Step>
+  <Step title="Generate">The model returns the answer with chunk ids attached to its claims.</Step>
+  <Step title="Verify">Your code rejects any id that was not retrieved; [output validation](card:output-validation) checks the remaining answer.</Step>
+  <Step title="Show">The UI displays the answer with links to the source pages.</Step>
 </Steps>
 
-- With Anthropic citations enabled, the API returns the cited text and its location, always pointing into the documents you sent.
-- Asking the model to quote the relevant text first, then answer from the quotes, also reduces invented facts.
+So the key is that grounding is enforced in two places: the prompt asks for it, and your code checks it; the prompt alone is not enough.
 
 ## Example
 
-Example response (a fictional policy):
+First, an example reply (shown as an example, not a real model run): the model returns an answer plus the chunk ids it used.
 
 ```json
 { "answer": "UPI refunds reach you in 5-7 working days.", "citations": ["refund-policy#4"] }
 ```
+
+Then your code checks every cited id against the chunks you actually retrieved.
 
 ```java
 import java.util.*; import java.util.regex.*;
@@ -75,12 +91,22 @@ refund-policy#4 -> retrieved
 card-faq#9 -> NOT RETRIEVED, reject
 ```
 
+What to notice:
+
+- The code pulls every `[id]` out of the answer and checks it against the `retrieved` set.
+- `card-faq#9` was never retrieved, so it is flagged for rejection; this catches a claim the model attached to a source you never gave it.
+- If you removed this check, an answer citing an invented chunk would reach the user looking trustworthy. Verification in code, not just the prompt, is what makes the citation reliable.
+
 ## Interview Qs
 
 ### What is grounding?
 
-Basing the answer on trusted text supplied in the prompt, such as retrieved policy chunks, instead of the model's training memory, and refusing when that text does not contain the answer.
+Basing the answer on trusted text supplied in the prompt, such as retrieved policy chunks, instead of on the model's training memory, and refusing to answer when that text does not contain the answer. It is the main defence against a fluent but invented reply.
 
 ### How do you make citations trustworthy?
 
-Label every chunk with an id, require an id per claim, reject ids you did not retrieve, and use the provider's citation feature where it exists. Measure faithfulness in [evals](card:ai-evaluation).
+Label every chunk with an id, require the model to attach an id to each claim, and reject in code any id you did not actually retrieve. Use the provider's built-in citation feature where it exists. Then measure how often cited chunks truly support the claim as faithfulness in [evals](card:ai-evaluation).
+
+### Does a citation mean the answer is correct?
+
+No. A citation shows where the claim is supposed to come from, not that the chunk supports it or that the chunk is right. The model can misread a chunk, or the chunk can be out of date. Correctness is checked separately by measuring faithfulness against the sources.

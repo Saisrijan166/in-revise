@@ -5,17 +5,27 @@ title: Metadata, Filters and Permission-Aware Retrieval
 topic: rag
 level: interview
 heat: 3
-hook: "Tag every chunk with tenant and access metadata, and filter inside the search, never after the LLM has read the text."
+hook: "Tag every chunk with tenant and access metadata, and filter inside the vector search, never after the LLM has already read the text."
 points:
-  - { k: "Metadata", v: "tenant, document id, title, page, access group, date" }
-  - { k: "Uses", v: "filters, access control, citations, debugging, freshness" }
-  - { k: "Filter in the search", v: "WHERE tenant_id = the caller's tenant, from the login" }
-  - { k: "ANN post-filter", v: "pgvector filters after the index scan: fewer than K rows", kind: minus }
-  - { k: "pgvector 0.8+", v: "iterative index scans keep scanning until enough rows match", kind: plus }
+  - { k: "Metadata", v: "fields stored with each chunk: tenant, document id, title, page, access group, date" }
+  - { k: "Uses", v: "filter results, enforce access, build citations, debug retrieval, drop stale documents" }
+  - { k: "Filter in the search", v: "add WHERE tenant_id = the caller's tenant, taken from the login, not the prompt" }
+  - { k: "Approximate index post-filter", v: "pgvector may filter after the index scan, so a filtered search can return fewer than K rows", kind: minus }
+  - { k: "pgvector 0.8+ iterative scans", v: "keep scanning the index until enough rows pass the filter", kind: plus }
 trap:
-  wrong: "Retrieve everything and tell the LLM not to show documents the user may not see."
-  right: "The LLM is not an access-control layer. Rows the user may not see must never reach the prompt."
-sayIt: "Authorisation and tenant isolation live in the data and retrieval layer. I take the tenant and groups from the login, filter during the vector search, and never trust the LLM to hide text."
+  wrong: "Retrieve everything, and tell the LLM in the prompt not to show documents the user is not allowed to see."
+  right: "The LLM is not an access-control layer. A chunk the user may not see must never reach the prompt in the first place."
+  why: "The LLM reads the text and seems to follow instructions, so it feels like a place to put a rule. But the secret text is already in its context, and one prompt injection can make it ignore the rule and reveal it."
+sayIt: "Authorisation and tenant isolation live in the data and retrieval layer, not in the prompt. I take the tenant and access groups from the authenticated session, filter during the vector search, and never rely on the LLM to hide text it has already been given."
+cheat:
+  idea: "Store metadata such as tenant and access group on every chunk, then filter the vector search on it. The filter keeps forbidden chunks out of the prompt entirely."
+  remember: "Filter before the LLM, not after. The LLM is not an access-control layer; a chunk it can see, it can leak."
+buildsOn: [rag-pipeline, vector-databases]
+scenarios:
+  - q: "Two shops share one vector store. Shop B's customer asks a question and gets a chunk from shop A's internal notes. What went wrong and how do you prevent it?"
+    a: "No tenant filter was applied, so the search ranked all chunks together. Store tenant_id on every chunk and add tenant_id == caller's tenant to every query, taking the tenant from the login. OWASP lists this leak as LLM08."
+  - q: "You add a tenant filter and now some questions return only 3 chunks instead of 10. Why?"
+    a: "An approximate index (HNSW) finds nearest candidates first and filters after, so many candidates get dropped. Raise ef_search, enable pgvector's iterative index scans, or partition the data by tenant so the index already holds only one tenant."
 confusedWith: []
 tags: [rag, metadata, multi-tenancy, security, pgvector]
 visual: code
@@ -31,11 +41,17 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Metadata is the set of fields you store next to each chunk's vector, such as tenant, document id, page and who may read it. Filtering means using those fields to narrow a [vector search](card:vector-databases) to the rows the current user is allowed to see, so forbidden chunks are never ranked or returned. Permission-aware retrieval applies that filter using the user's identity from the login. It is how a [RAG system](card:rag-pipeline) sharing one store across many customers keeps their data apart.
+
 ## Why it exists
 
-One shared vector store holds many shops' policies and internal notes. Without filters, shop B's customer can get shop A's chunk, a leak OWASP lists as LLM08 (2025).
+One vector store usually holds many shops' policies and internal notes together. If a search ranks every chunk by similarity alone, shop B's customer can receive shop A's chunk, because similarity does not know about ownership. That is a real data leak, and OWASP lists it as LLM08 (2025), Vector and Embedding Weaknesses. The obvious-looking fix, telling the model in the prompt to hide other shops' text, fails: the text is already in the context, so one prompt injection can pull it out. Metadata filtering removes the chunk before it ever reaches the model.
 
 ## How it works
+
+Each stored chunk carries metadata you can filter on.
 
 ```json
 {
@@ -49,15 +65,21 @@ One shared vector store holds many shops' policies and internal notes. Without f
 }
 ```
 
-- **Pre-filtering** limits the search to allowed rows; **post-filtering** drops rows after the nearest-neighbour search.
-- Strong isolation: a table or partition per tenant (pgvector's advice), or [row-level security](card:pg-row-level-security).
-- Removed or replaced documents: delete their chunks by `document_id`.
+What to notice:
+
+- `tenant_id` and `access_group` are the fields the query will filter on; without them stored on the chunk, no filter is possible.
+- `document_id` lets you delete or replace a whole document's chunks when the file changes.
+- `title` and `page` feed citations and make a retrieval trace easy to debug.
+
+The query applies the filter in two possible places. Pre-filtering limits the search to allowed rows before ranking. Post-filtering ranks first and drops disallowed rows after, which can leave fewer than K results.
 
 ## Example
 
+The filter is built from the signed-in user's token, so the user can never widen it.
+
 ```java
 String ask(String question, Jwt user) {
-    String tenant = user.getClaimAsString("tenant_id");   // from the login, never from the prompt
+    String tenant = user.getClaimAsString("tenant_id");   // from the login, not the prompt
     return chat.prompt().user(question)
         .advisors(a -> a.param(QuestionAnswerAdvisor.FILTER_EXPRESSION,
             "tenant_id == '" + tenant + "' && access_group in ['customer', 'public']"))
@@ -65,18 +87,30 @@ String ask(String question, Jwt user) {
 }
 ```
 
-- In Spring AI 2.0 this per-request filter replaces the advisor's default filter, so repeat every condition.
+What to notice:
+
+- `tenant` comes from the JWT claim, so the value is set at login and the user cannot change it through the question text.
+- The filter expression runs inside the vector search, so chunks from other tenants are never ranked and never reach the prompt.
+- In Spring AI 2.0 a per-request `FILTER_EXPRESSION` replaces the advisor's default filter rather than adding to it, so you must repeat every condition you still want.
+- Drop the filter and the search ranks all tenants' chunks together, which is exactly the LLM08 leak.
+
+## Rules and defaults
+
+- **Filter before retrieval, never in the prompt:** a chunk that reaches the context can be revealed; enforce access in code and SQL.
+- **Identity from the session:** read the tenant and groups from the authenticated token, not from anything the user typed.
+- **Strong isolation options:** pgvector suggests a table or partition per tenant for hard separation, or use [row-level security](card:pg-row-level-security).
+- **Approximate indexes can under-return:** with pgvector's default `hnsw.ef_search` of 40 and a selective filter, a filtered search may return fewer than K rows; enable iterative index scans (pgvector 0.8+) or partition by tenant.
 
 ## Interview Qs
 
-### How do you stop one customer seeing another tenant's documents?
+### How do you stop one customer seeing another tenant's documents in RAG?
 
-Store `tenant_id` on every chunk and filter on it in the vector query, taking the tenant from the authenticated session. For stronger isolation, use a partition or table per tenant, or row-level security.
+Store `tenant_id` on every chunk and filter on it inside the vector query, taking the tenant from the authenticated session rather than the prompt. For stronger isolation, give each tenant its own table or partition, or use row-level security, so the search physically cannot reach other tenants' rows.
 
-### Why can a filtered vector search return fewer results than K?
+### Why can a filtered vector search return fewer than K results?
 
-Approximate indexes such as HNSW find candidates first and filter after. With pgvector's default `hnsw.ef_search` of 40 and a filter matching 10% of rows, about 4 rows survive. Enable iterative index scans or use partitions.
+An approximate index such as HNSW finds the nearest candidates first and applies the filter afterwards. With pgvector's default `hnsw.ef_search` of 40 and a filter matching only a small fraction of rows, few candidates survive. Fix it by raising `ef_search`, enabling iterative index scans, or partitioning by tenant.
 
 ### Can a system prompt enforce permissions?
 
-No. Instructions can be overridden by [prompt injection](card:prompt-injection), and the text has already leaked into the context. Enforce access in code and SQL; see [securing LLM apps](card:llm-security).
+No. A prompt instruction can be overridden by [prompt injection](card:prompt-injection), and in any case the forbidden text has already entered the context, so it can leak. Enforce access in code and SQL, before or during retrieval; see [securing LLM apps](card:llm-security).

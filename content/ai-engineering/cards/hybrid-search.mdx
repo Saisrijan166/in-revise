@@ -5,17 +5,28 @@ title: Keyword, Semantic and Hybrid Search
 topic: vector-search
 level: intermediate
 heat: 3
-hook: "Keyword search finds exact words, semantic search finds meaning; hybrid runs both and fuses the two ranked lists."
+hook: "Keyword search finds exact words, semantic search finds meaning; hybrid search runs both and fuses the two ranked lists into one."
 points:
-  - { k: "Keyword (BM25)", v: "wins on exact strings: ORD-42, UPI references, error codes" }
-  - { k: "Semantic", v: "wins on meaning: 'money not back' finds 'refund pending'" }
-  - { k: "RRF", v: "each list adds 1 / (k + rank) per document; sort by the sum" }
-  - { k: "RRF k", v: "60 by default (Elasticsearch rank_constant)", kind: default }
-  - { k: "Dense vs sparse", v: "dense: every value set (embeddings); sparse: mostly zeros, one per term" }
+  - { k: "Keyword search (BM25)", v: "ranks by matching the query's exact words; wins on ids and codes like ORD-42 or ERR_TIMEOUT" }
+  - { k: "Semantic search", v: "ranks by nearby embeddings; wins on meaning, so 'money not back' finds 'refund pending'", kind: plus }
+  - { k: "Hybrid search", v: "run both, then fuse their ranked lists so you keep exact matches and meaning matches", kind: plus }
+  - { k: "RRF (fusion rule)", v: "each list adds 1 / (k + rank) for a document; sum across lists and sort, using ranks only" }
+  - { k: "RRF k", v: "60 by default (Elasticsearch rank_constant); a larger k flattens the effect of rank", kind: default }
 trap:
   wrong: "Semantic search is better, so keyword search is no longer needed."
-  right: "Embeddings can miss exact tokens such as order ids and error codes. Hybrid search keeps both strengths."
-sayIt: "I run BM25 keyword search and vector search, then fuse the ranked lists with reciprocal rank fusion. Exact ids and error codes come from keywords, paraphrases from vectors."
+  right: "Embeddings can miss exact tokens such as order ids and error codes. Hybrid search keeps the keyword strength beside the meaning strength."
+  why: "Semantic search demos well on vague questions, so it looks like a full upgrade. But an embedding smooths over rare exact tokens, which is exactly where a user typing an order id needs a literal match."
+sayIt: "I run BM25 keyword search and vector search for the same query, then fuse the two ranked lists with reciprocal rank fusion. Exact ids and error codes come from keywords; paraphrases come from vectors."
+cheat:
+  idea: "Hybrid search runs keyword and semantic search for one query and fuses their ranked lists, so you keep both exact-word and meaning matches."
+  flow: "query → BM25 list + vector list → RRF fuse → one list"
+  remember: "Keyword wins on ids and codes; semantic wins on paraphrases; fuse with RRF (default k = 60)."
+buildsOn: [embeddings, similarity-search, vector-databases]
+scenarios:
+  - q: "Users search both 'UPI ref 4321 status' and 'my money is not back yet'. Pure semantic search handles the second well but keeps missing the first. Why, and what do you do?"
+    a: "'4321' is a rare exact token that the embedding blurs into 'some reference number', so the exact row ranks low. Add keyword (BM25) search and fuse with RRF: keywords pin the exact id, semantics handle the paraphrase, and one list serves both queries."
+  - q: "A chunk is ranked 1st by keyword search and 3rd by vector search. With RRF and k = 60, what is its fused score?"
+    a: "1/(60+1) + 1/(60+3) = 0.0164 + 0.0159 = 0.0323. RRF uses only the rank in each list, never the raw scores, so the two lists' different score scales never need to be compared."
 confusedWith: []
 tags: [hybrid-search, bm25, rrf, retrieval]
 visual: table
@@ -31,38 +42,59 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Hybrid search combines two ways of finding text. **Keyword search** ranks documents by how well they match the query's exact words; BM25 is the standard scoring formula for it. **Semantic search** is the [similarity search](card:similarity-search) over [embeddings](card:embeddings) you have already met: it ranks by meaning. Hybrid search runs both for the same query and fuses their two ranked lists into one, so a single result list carries both strengths.
+
 ## Why it exists
 
-A customer types "ORD-42 refund" or "my money is not back". No single search method handles both exact ids and loose wording well.
+A support user might type "ORD-42 refund" or "my money is not back yet", often in the same session. Keyword search nails the first but fumbles the paraphrase; semantic search nails the paraphrase but can bury an exact order id, because an embedding treats a rare code as roughly "some number". Running only one method fails half the queries. Hybrid search keeps both so neither kind of query is left behind.
 
 ## How it works
 
+The table contrasts the two methods; hybrid search is simply running both and merging.
+
 <Compare id="keyword-vs-semantic-search" />
 
-- Fuse with [RRF](card:rrf) (ranks only, no tuning) or [weighted score blending](card:weighted-score-blend).
-- In PostgreSQL, [full-text search](card:postgres-full-text) plus pgvector gives hybrid search in one database.
-- Then a [reranker](card:reranking) can reorder the fused shortlist.
+1. Send the query to keyword search (BM25) and get one ranked list.
+2. Send the same query to vector search and get a second ranked list.
+3. Fuse the lists with [reciprocal rank fusion](card:rrf): each list contributes `1 / (k + rank)` for every document it ranks.
+4. Sum each document's contributions across both lists and sort by the total; a [reranker](card:reranking) can then reorder the fused shortlist.
+
+So the key is that fusion uses each document's **rank** in each list, not its raw score, so two very different score scales never have to be compared. (A [weighted score blend](card:weighted-score-blend) is the alternative, which normalises and mixes raw scores.) In PostgreSQL, [full-text search](card:postgres-full-text) plus pgvector gives both sides in one database.
 
 ## Example
 
-RRF with k = 60; a chunk ranked 1st by keywords and 3rd by vectors:
+RRF with k = 60, for a chunk ranked 1st by keyword search and 3rd by vector search.
 
 ```text
-keyword list  rank 1  ->  1 / (60 + 1) = 0.0164
-vector list   rank 3  ->  1 / (60 + 3) = 0.0159
-RRF score              =                0.0323
+keyword list   rank 1  ->  1 / (60 + 1) = 0.0164
+vector list    rank 3  ->  1 / (60 + 3) = 0.0159
+fused RRF score                         = 0.0323
 ```
+
+What to notice:
+
+- Only the rank goes into the formula, so the keyword and vector scores, which are on different scales, are never compared directly.
+- A smaller rank (nearer the top) gives a larger term, so being high in either list helps; being high in both wins.
+- The constant k = 60 softens the gap between ranks 1 and 2; a larger k makes rank matter less, a smaller k makes the top rank dominate.
+
+## Rules and defaults
+
+- **BM25 is keyword ranking:** PostgreSQL's built-in `ts_rank` full-text search is not BM25; a BM25 engine or extension is needed for true BM25 scoring.
+- **Dense vs sparse vectors:** an embedding is a dense vector (every value is set); keyword search uses a sparse vector (mostly zeros, one weight per matched term).
+- **RRF default k:** 60 (Elasticsearch `rank_constant`); it needs no score tuning because it uses ranks only.
 
 ## Interview Qs
 
-### What is hybrid search?
+### What is hybrid search and why use it?
 
-Running keyword search (such as BM25) and vector search for the same query and merging the results, so you get both exact matches and matches by meaning.
+It runs keyword search (such as BM25) and vector search for the same query and merges the two results. You get exact-token matches (order ids, error codes) from keywords and meaning matches (paraphrases, synonyms) from vectors, so a mixed stream of real user queries is served well by one result list.
 
-### How do you merge two ranked lists with different scores?
+### How do you merge two ranked lists whose scores are on different scales?
 
-Reciprocal rank fusion uses only ranks: each list adds 1 / (k + rank). Scores on different scales never need comparing. Weighted blending first normalises scores, then mixes them.
+Use reciprocal rank fusion: each list adds `1 / (k + rank)` for a document, and you sort by the sum. Because it uses ranks and not raw scores, the different scales never need to be compared. Weighted blending is the alternative, but it first has to normalise the scores.
 
 ### When does keyword search beat semantic search?
 
-On exact tokens: order ids, transaction references, error codes, product names. An embedding may find text about error codes in general but miss the exact code.
+On exact tokens: order ids, transaction references, error codes and product names. An embedding of "ERR_TIMEOUT" sits near text about timeouts in general, so semantic search may return related text but miss the exact code. Keyword search matches the literal token, which is what the user wanted.

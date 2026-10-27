@@ -5,17 +5,30 @@ title: "Calling LLM APIs: Streaming, Timeouts, Retries, Limits"
 topic: ai-in-production
 level: intermediate
 heat: 3
-hook: "Stream for speed, time-box every call, retry only transient errors with backoff, and rate-limit users before the provider does."
+hook: "Stream the reply for speed, time-box every call, retry only transient errors with backoff, and rate-limit each user before the provider does."
 points:
-  - { k: "Retry", v: "timeouts, network errors, 429, 5xx: exponential backoff + jitter" }
-  - { k: "Retry-After", v: "when the header is present, wait at least that long" }
-  - { k: "Do not retry", v: "400, 401, 403, and quota or spend-limit 429s", kind: minus }
-  - { k: "Provider limits", v: "requests and tokens per minute (RPM, TPM)" }
-  - { k: "Per-user limits", v: "requests per minute and tokens per day, set by you", kind: plus }
+  - { k: "Streaming", v: "send tokens to the browser as they arrive, so the first words show in under a second" }
+  - { k: "Timeouts", v: "set a connect timeout and a request timeout; a stuck call otherwise holds a thread and a connection" }
+  - { k: "Retry these", v: "timeouts, network errors, 429 and 5xx, with capped exponential backoff plus jitter" }
+  - { k: "Do not retry", v: "400, 401, 403, and quota or spend-limit 429s: they will keep failing", kind: minus }
+  - { k: "Retry-After", v: "when the provider sends this header, wait at least that long before the next try" }
+  - { k: "Per-user limits", v: "cap requests per minute and tokens per day per user, so one user cannot drain the budget", kind: plus }
 trap:
-  wrong: "Retry every failed call, including refundPayment, until it succeeds."
-  right: "Retry only transient errors, and send an idempotency key with actions so a retry cannot refund twice."
+  wrong: "Retry every failed call, including a refundPayment action, until it finally succeeds."
+  right: "Retry only transient errors, and send an idempotency key with actions so a retry cannot run the refund twice."
+  why: "Retries feel safe for read-only calls, and people apply the same loop to actions without noticing a retried refund can charge or credit twice."
 sayIt: "I stream replies over SSE, set connect and request timeouts, retry 429s and 5xx with capped exponential backoff, jitter and Retry-After, and rate-limit each user by requests and tokens."
+cheat:
+  idea: "LLM calls are slow and sometimes fail. Stream the reply, time-box the call, retry only transient errors with backoff, and rate-limit each user."
+  flow: "stream → timeout → retry transient + backoff → per-user limit"
+  remember: "Retry 429 and 5xx with backoff; never retry 400/401/403 or a non-idempotent action without an idempotency key."
+buildsOn: [spring-ai-integration, llm-security]
+scenarios:
+  - q: "A long answer takes eight seconds to generate. Users complain the app looks frozen. Streaming is suggested. Does it make the answer come faster?"
+    a: "No, total generation time is the same. Streaming sends tokens as they are produced, so the first words appear in under a second and the user sees progress. It fixes the perceived wait, not the real one."
+  - q: "Your retry loop keeps hammering a call that returns 401 Unauthorized. What is wrong?"
+    a: "401 is not transient; the key is bad or missing, so every retry fails the same way and wastes time and quota. Retry only timeouts, network errors, 429 and 5xx. For 400, 401 and 403, fail fast and surface the error."
+confusedWith: [streaming-vs-blocking-response]
 tags: [streaming, resilience, rate-limiting]
 visual: table
 sources:
@@ -36,21 +49,29 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Calling an LLM API means the hardening you put around each model call so it stays fast and reliable. An LLM call is a slow HTTP request to a paid, rate-limited service that sometimes fails. Four pieces make it production-ready: **streaming** the reply so the user sees words early, **timeouts** so a stuck call does not hold resources, **retries** that fire only for errors worth retrying, and **rate limits** that cap each user. These sit in the [AI service](card:spring-ai-integration) around the `ChatClient` call.
+
 ## Why it exists
 
-LLM calls are slow, rate-limited and sometimes fail. Without streaming users stare at a spinner; without timeouts and limits, threads pile up and bills spike.
+A single `.call()` with no guards breaks under load. Without streaming, the user stares at a spinner for seconds while a long reply is generated. Without timeouts, a stuck provider holds a request thread and a connection until both pools run dry. Without careful retries, a loop can refund the same payment twice or hammer a 401 forever. Without per-user limits, one user can exhaust your [token budget](card:model-selection-and-cost) and your provider quota.
 
 ## How it works
 
 <Compare id="streaming-vs-blocking-response" />
 
-- Set a connect timeout and a request timeout; a stuck call otherwise holds a thread and a connection.
-- Retry at one layer only, with capped attempts; after repeated failures, a circuit breaker fails fast and a fallback answers.
-- Limit each user in front of the AI service; this also caps spend ([unbounded consumption](card:llm-security)).
+1. Stream the reply so the first tokens reach the browser in well under a second, even when the full answer takes several seconds.
+2. Set a connect timeout and a request timeout on every call, so a stuck provider cannot hold a thread or connection indefinitely.
+3. On a transient failure (timeout, network error, 429 or 5xx) retry at one layer only, with capped exponential backoff and jitter, honouring any `Retry-After` header.
+4. After repeated failures, let a circuit breaker fail fast and return a fallback message instead of retrying forever.
+5. In front of the AI service, rate-limit each user by requests per minute and tokens per day, which also caps spend; see [unbounded consumption](card:llm-security).
+
+So the key is to retry only what can succeed on a second try, and to protect threads, budget and other users while you do.
 
 ## Example
 
-Spring AI 2.0 streaming endpoint; it needs Reactor on the classpath, e.g. `spring-boot-starter-webflux`.
+This Spring AI 2.0 endpoint streams tokens to the browser over server-sent events; it needs Reactor on the classpath, for example `spring-boot-starter-webflux`.
 
 ```java
 @RestController
@@ -66,23 +87,38 @@ class AskStreamController {
 }
 ```
 
-## Defaults
+What to notice:
+
+- `.stream().content()` returns a `Flux<String>` of text chunks, not one `String`; each chunk is pushed as it is generated.
+- `produces = MediaType.TEXT_EVENT_STREAM_VALUE` tells Spring to send the chunks as server-sent events, which the browser reads incrementally.
+- Change `.stream()` to `.call()` and the method would block until the whole reply is ready, so the user sees nothing until the end.
+- An error can arrive mid-stream after the HTTP 200 line has been sent, so the client must handle a failure that appears partway through.
+
+## Rules and defaults
 
 | What | Default | Where |
 |---|---|---|
 | OpenAI request timeout | 60 s | Spring AI 2.0, `spring.ai.openai.timeout` |
 | OpenAI SDK retries | 3 | Spring AI 2.0, `spring.ai.openai.max-retries` (not `spring.ai.retry.*`) |
 
+- **Retry transient only:** timeouts, network errors, 429 and 5xx. Not 400, 401, 403 or billing and quota 429s.
+- **Backoff:** exponential with jitter and a max attempt count; wait at least any `Retry-After` value.
+- **Idempotency:** send an idempotency key with any action, so a retried action runs once.
+
+## Not to be confused with
+
+A provider rate limit and your own rate limit are different guards. The provider caps you in requests and tokens per minute (RPM and TPM) across your whole account, and hits you with a 429 when you cross it. Your own per-user limiter sits in front of the AI service and caps each user, so one user cannot use the whole account quota or your budget. Rule: the provider protects itself; your limiter protects you and your other users.
+
 ## Interview Qs
 
 ### Why stream LLM responses?
 
-Generation is token by token, so long replies take seconds. Streaming shows the first words early; total time does not drop. Errors can arrive mid-stream after a 200, so handle them.
+Generation is token by token, so a long reply takes several seconds. Streaming sends the first words as soon as they are produced, so the user sees progress in under a second. Total generation time does not drop. One catch: an error can arrive mid-stream after a 200, so the client must handle a failure partway through.
 
 ### Which errors do you retry, and how?
 
-Timeouts, network errors, 429 and 5xx: capped exponential backoff with jitter and a max attempts, waiting at least Retry-After. Not 400, 401, 403 or billing and quota 429s: they keep failing.
+Retry timeouts, network errors, 429 and 5xx with capped exponential backoff plus jitter and a max attempt count, waiting at least any `Retry-After` value. Do not retry 400, 401, 403 or billing and quota 429s, because they keep failing. For actions, send an idempotency key so a retry cannot run the action twice.
 
 ### How do you stop one user from burning the AI budget?
 
-A rate limiter in front of the AI service: requests per user per minute, tokens per user per day, and an output-token cap per call. Over the limit, return 429.
+Put a rate limiter in front of the AI service: requests per user per minute, tokens per user per day, and an output-token cap per call. When a user crosses a limit, return 429 instead of calling the model. This bounds both the provider quota you use and the money you spend.

@@ -5,20 +5,30 @@ title: Validating AI Output and Guardrails
 topic: safety-evaluation
 level: intermediate
 heat: 3
-hook: "Treat model output like form input from a stranger: parse it, check the rules, then act or fall back."
+hook: "Treat model output like a form filled in by a stranger: parse it, check it against your rules, then act or fall back."
 points:
-  - { k: "Schema", v: "right shape and types; enforced by structured output" }
-  - { k: "Business rules", v: "amounts, ownership and state come from the DB, not the model" }
-  - { k: "Never execute", v: "no eval, shell or raw SQL from model text", kind: minus }
-  - { k: "Escape", v: "encode text for HTML before rendering; it can carry XSS" }
-  - { k: "Fallback", v: "reject, retry, or hand to a human when a check fails", kind: plus }
+  - { k: "Schema", v: "check the reply has the right shape and types before you read its fields" }
+  - { k: "Business rules", v: "amounts, ownership and state are checked against the database, never taken from the model" }
+  - { k: "Never execute", v: "do not run model text as eval, shell or raw SQL; it may be attacker-controlled", kind: minus }
+  - { k: "Escape", v: "encode text for HTML before showing it, because it can carry an XSS payload" }
+  - { k: "Fallback", v: "when a check fails, reject, retry once, or hand the case to a human", kind: plus }
 trap:
-  wrong: "The output parsed as valid JSON, so the answer is valid."
-  right: "Valid JSON only proves the shape. The values still need business-rule and permission checks."
-sayIt: "I parse output against a schema, then check business rules and permissions with data from my database. Text is escaped before display and never executed. If a check fails, I reject, retry or ask a human."
+  wrong: "The output parsed as valid JSON, so the answer is valid and safe to act on."
+  right: "Valid JSON only proves the shape. The values inside still need business-rule and permission checks against your own data."
+  why: "Parsing succeeding feels like a green light, and in normal API work a well-formed request is usually trustworthy. But here the values were written by a model that can be wrong or injected."
+sayIt: "I parse the output against a schema, then check business rules and permissions using data from my database. Text is escaped before display and never executed. If any check fails, I reject, retry or ask a human."
 confusedWith: []
 tags: [validation, guardrails, owasp, moderation]
 visual: flow
+cheat:
+  idea: "Output validation treats the model's reply as untrusted input: parse it to a schema, check its values against your database, then act."
+  flow: "Parse → business rules → permission → act or fall back"
+  remember: "Valid JSON proves shape, not truth: amounts come from the database, and text is escaped, never executed (OWASP LLM05)."
+scenarios:
+  - q: "The model returns clean JSON {\"orderId\": 42, \"refundRupees\": 1000000}. Your code refunds it. What went wrong, and at which step?"
+    a: "The business-rule step was skipped. The JSON was well-formed, but 10,00,000 is far above the refundable balance for order 42. Valid shape is not valid value. The fix: before refunding, load the order from the database and reject any amount above its refundable balance, inside a transaction."
+  - q: "Your assistant's answer is rendered straight into an HTML page and it contains a script tag. What is the risk and the fix?"
+    a: "Stored or reflected XSS (OWASP LLM05, Improper Output Handling): the model's text runs as code in the user's browser. Fix: HTML-encode the output before rendering, so the tag shows as text. Never trust model text to be display-safe."
 sources:
   - title: "LLM05:2025 Improper Output Handling (OWASP)"
     url: "https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/"
@@ -31,27 +41,40 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Output validation is checking the model's reply before your app uses it. The model returns text, and that text might be malformed, factually wrong, or steered by [prompt injection](card:prompt-injection). So you treat the reply the way you treat a form submitted by an unknown user: parse it, confirm it obeys your rules, and only then act. A guardrail is a check placed around the model: one that screens the input before the call, or the output after it.
+
 ## Why it exists
 
-Output can be malformed, wrong or steered by [prompt injection](card:prompt-injection). Used unchecked, it causes XSS, SQL injection or bad refunds (OWASP LLM05, 2025).
+If you pass model output straight into another system, its mistakes become your mistakes. Rendered text with a script tag becomes XSS; a generated query run as-is becomes SQL injection; a suggested refund taken at face value becomes money lost. OWASP calls this Improper Output Handling (LLM05, 2025). Validation puts a gate between the model and any real action, so a bad reply is caught instead of executed.
 
 ## How it works
 
+The output passes through a fixed set of checks before anything happens.
+
 <Steps label="Checks between the model and any action">
-  <Step title="Parse">Map the reply to a typed object; reject if the schema fails ([structured output](card:structured-output)).</Step>
-  <Step title="Business rules">Compare with DB facts: order owner, refundable amount, status.</Step>
-  <Step title="Safety and permission">Is this user allowed? Is the content safe to show?</Step>
-  <Step title="Act or fall back">Act, show an error, retry once, or send to a human.</Step>
+  <Step title="Parse">Map the reply to a typed object, and reject it if the schema does not fit ([structured output](card:structured-output)).</Step>
+  <Step title="Business rules">Compare its values with facts from your database: the order owner, the refundable amount, the current status.</Step>
+  <Step title="Safety and permission">Confirm this user is allowed to do this, and that the content is safe to show or send.</Step>
+  <Step title="Act or fall back">Act, or on failure show an error, retry once, or send the case to a human.</Step>
 </Steps>
 
-- Guardrails screen input before the call and output after it, e.g. a moderation API.
+1. Parse first, so you never read fields from a reply that is the wrong shape.
+2. Check business rules against your own data, because the model's numbers and claims are not trusted.
+3. Screen for safety and permission; a moderation API can flag unsafe content here.
+4. Only then act. If any step fails, fall back instead of proceeding.
+
+So the key is that passing one check does not grant the next: shape, values and permission are each verified.
 
 ## Example
+
+The model suggests a refund. Your backend decides, using the order loaded from the database.
 
 ```java
 record Suggestion(long orderId, int refundRupees) {}
 record Order(long id, int totalRupees, int refundedRupees) {}
-static String check(Suggestion s, Order o) {      // o comes from the DB
+static String check(Suggestion s, Order o) {      // o is loaded from the database
     int refundable = o.totalRupees() - o.refundedRupees();
     if (s.orderId() != o.id()) return "REJECT: not this order";
     if (s.refundRupees() <= 0 || s.refundRupees() > refundable)
@@ -68,16 +91,40 @@ REJECT: refundable is 999
 OK: queue for approval
 ```
 
+What to notice:
+
+- `refundable` is computed from database values, so the absurd 10,00,000 suggestion is rejected without trusting the model.
+- The `orderId` is re-checked, so the model cannot refund a different order than the one in question.
+- Even a valid amount returns `queue for approval`, not an immediate payout: a human confirms high-impact actions.
+- Remove the `refundable` check and the first line would pay out 10,00,000, which is exactly the OWASP LLM05 failure.
+
+## Rules and defaults
+
+- **Parse before read:** a reply that fails the schema is rejected, never partially used.
+- **Facts from the database:** amounts, ownership and state are read from your data; the model's values are only a suggestion.
+- **Never execute model text:** no `eval`, shell command or raw SQL built from the reply.
+- **Encode for the destination:** HTML-escape before rendering, parameterise before querying, so the output cannot act as code.
+- **On failure:** reject, retry once, or route to a human; do not proceed on a failed check.
+
+## Not to be confused with
+
+[Structured output](card:structured-output) makes the model return a given shape (for example, valid JSON matching a schema). Output validation is broader: it uses that shape as the first check, then verifies the *values* and permissions. Rule: structured output gets the form right; output validation decides whether what the form says may be acted on.
+
+## Common mistakes
+
+- **"Structured output means I do not need to validate."** It guarantees shape, not correct or permitted values. A schema-valid refund can still be the wrong amount or the wrong user's order.
+- **"The model is behind our login, so its output is trusted."** The output can still be wrong or injected. Checks protect against bad output, not only bad users.
+
 ## Interview Qs
 
 ### The model says "refund ₹10,00,000". What stops it?
 
-The backend. It checks the amount against the refundable balance in the database and that the user owns the order, then refunds in a transaction. The model only suggests.
+The backend. It loads the order, checks the amount against the refundable balance in the database and confirms the user owns the order, then refunds inside a transaction. The model only suggests; code decides and acts.
 
 ### What is improper output handling?
 
-Passing model output to other systems without checks: unescaped HTML (XSS), generated SQL without parameters, file paths or shell commands. Treat the model as an untrusted user and encode output for where it goes.
+Passing model output to other systems without checks: unescaped HTML causing XSS, generated SQL run without parameters, or file paths and shell commands taken from the reply. OWASP LLM05 (2025). Treat the model as an untrusted user and encode output for wherever it is going.
 
 ### When do you add human review?
 
-For high-impact or irreversible actions such as large refunds, and when automatic checks fail. The model drafts; a person approves.
+For high-impact or irreversible actions, such as large refunds or account changes, and whenever an automatic check fails. The model drafts the action; a person approves it before it takes effect.

@@ -5,17 +5,28 @@ title: The Context Window
 topic: llm-fundamentals
 level: beginner
 heat: 3
-hook: "The context window is the model's working space per request: everything you send plus everything it writes must fit."
+hook: "The context window is how many tokens a model can handle in one request: everything you send plus everything it writes must fit inside it."
 points:
-  - { k: "Measured in", v: "tokens, for input and output together" }
-  - { k: "Fills it", v: "system prompt, tools, history, chunks, question, reply" }
-  - { k: "Overflow", v: "input too long is rejected; a long reply is cut off", kind: minus }
-  - { k: "Lost in the middle", v: "facts mid-prompt are used worse than at start or end", kind: minus }
-  - { k: "Not knowledge", v: "it holds this request only, not what the model learnt" }
+  - { k: "Measured in", v: "tokens, counting the input and the output together, not separately" }
+  - { k: "What fills it", v: "system prompt, tool definitions, chat history, retrieved chunks, the question, and the reply" }
+  - { k: "Input too long", v: "the request is rejected with an error before the model runs", kind: minus }
+  - { k: "Reply hits the edge", v: "generation stops early and the answer is cut off mid-sentence", kind: minus }
+  - { k: "Lost in the middle", v: "facts placed in the middle of a long prompt are used less reliably than those at the start or end", kind: minus }
 trap:
-  wrong: "A bigger context window always gives better answers, so send everything."
-  right: "Accuracy drops as context grows, and cost and latency rise. Send only what is relevant."
-sayIt: "The context window is the most tokens a model can handle in one request, input and output together. I keep it lean: relevant chunks only, trimmed history, and a cap on output."
+  wrong: "A bigger context window always gives better answers, so send everything you have."
+  right: "As the context grows, accuracy can drop and cost and latency rise, so send only what is relevant to this question."
+  why: "A bigger number sounds strictly better, and it is easier to dump all documents in than to pick the few relevant ones."
+sayIt: "The context window is the most tokens a model can process in one request, input and output together. I keep it lean: only relevant retrieved chunks, trimmed history, and a cap on the output length."
+cheat:
+  idea: "The context window is the token budget for one request. The system prompt, tools, history, chunks, question and reply all share it and must fit together."
+  flow: "System + tools + history + chunks + question + reply ≤ window"
+  remember: "Bigger is not automatically better: accuracy drops in the middle, cost and latency rise. Send only what is relevant."
+buildsOn: [tokens, what-is-an-llm]
+scenarios:
+  - q: "A chat has gone on for 60 turns and new messages start failing. What is happening and what do you do?"
+    a: "Each turn re-sends the whole history, so the input has grown past the window and the request is now rejected. Trim or summarise old turns, or keep only the last few, so the input fits again. Count tokens before sending to catch it early."
+  - q: "You raise max output tokens and the answer still stops mid-sentence. Why?"
+    a: "The input plus the output must both fit the window. If the input is already large, little room is left for the output, so it is cut off whatever the max-tokens setting says. Shrink the input, do not only raise the output cap."
 confusedWith: []
 tags: [context-window, tokens, long-context]
 visual: flow
@@ -34,37 +45,81 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+The context window is the maximum number of [tokens](card:tokens) a model can take in for a single request. It covers both the text you send and the text the model writes back: the two share one budget. It is not memory of past conversations. It is the working space for this one call, and it is empty again on the next call unless your app sends the history once more.
+
 ## Why it exists
 
-A model can only attend to a limited number of tokens at once. The app must decide what goes in, because anything left out does not exist for the model.
+A model cannot attend to unlimited text at once; the [transformer](card:transformer-and-attention) that runs it has a fixed size it was trained for. So there must be a hard limit on how much fits in one request. That limit forces your app to decide what to include, because anything you leave out simply does not exist for the model on that call: it cannot look past the window to find it.
 
 ## How it works
 
+Every part of a request shares the same window, from the system prompt at the top to the model's reply at the bottom.
+
 <Mermaid
-  alt="One request to the support assistant fills the context window from top to bottom: system prompt, tool definitions, conversation history, retrieved refund-policy chunks, the user's question, and finally the model's output including any reasoning tokens. All of it must fit in the window."
+  alt="One request to the support assistant fills the context window from top to bottom: system prompt, tool definitions, conversation history, retrieved refund-policy chunks, the user's question, and finally the model's output including any reasoning tokens. All of these together must fit inside the window."
   chart={`flowchart TD
   S[System prompt] --> T[Tool definitions]
   T --> H[Conversation history]
   H --> R[Retrieved policy chunks]
   R --> Q["Question: refund for order 42?"]
   Q --> O["Output + reasoning tokens"]
-  O --> L{{"Must fit the window"}}`}
+  O --> L{{"All of it must fit the window"}}`}
 />
 
-- Every turn re-sends the history, so long chats grow the input; see [conversation memory](card:conversation-memory).
-- Anthropic: input over the window returns a 400 error; a reply that reaches it stops early.
-- OpenAI: a reply that hits the limit comes back with status `incomplete`.
+1. Your app assembles the request: system prompt, tool definitions, past turns, any retrieved chunks and the new question.
+2. Those input tokens are counted; if they already exceed the window, the provider rejects the call with an error.
+3. If they fit, the model generates its reply into the remaining room.
+4. If the reply reaches the edge of the window, generation stops early and the answer is cut off.
+
+So the key is that input and output compete for one budget, and the app, not the model, decides what gets in.
+
+## Example
+
+The window is measured in tokens, so the same budgeting from [tokens](card:tokens) applies to the whole request.
+
+```java
+// Rough budget before sending, so the request fits the window
+int systemAndTools = 400;
+int history        = 1200;
+int retrievedChunks = 2500;   // trim this first when the request is too large
+int question       = 50;
+int maxOutput      = 800;     // reserve room for the reply inside the same window
+int total = systemAndTools + history + retrievedChunks + question + maxOutput;
+```
+
+What to notice:
+
+- `maxOutput` is part of the same total: reserving room for the reply is as important as trimming the input.
+- `retrievedChunks` is the largest and most adjustable part, so it is the first thing to cut when the request is too big.
+- If `total` exceeds the model's window, the request fails before the model runs; you must shrink one of these numbers.
+
+## Rules and defaults
+
+- **Input over the window:** Anthropic returns a 400 error; the call never runs.
+- **Reply reaches the window:** OpenAI returns the response with status `incomplete`; Anthropic returns `stop_reason: max_tokens`. The answer is partial.
+- **Reasoning tokens count too:** a reasoning model's hidden thinking tokens use part of the same window and the output cap.
+- **Window size varies by model:** check the model's documented context length; do not assume it from another model.
+
+## Not to be confused with
+
+The context window holds only this one request; it is working space, not the model's knowledge or its memory. What the model learned lives in its weights from [training](card:how-models-learn). Memory across calls is something your app provides by re-sending history; see [conversation memory](card:conversation-memory). Rule: window = tokens for this call; weights = what it learned; memory = history your app re-sends.
+
+## Common mistakes
+
+- **"A huge window means I can skip RAG and send every document."** Long prompts cost more, run slower, and recall facts in the middle less reliably (Liu et al., 2023). Retrieval sends only the relevant part; see [RAG](card:what-is-rag).
 
 ## Interview Qs
 
-### What happens when the conversation gets longer than the window?
+### What happens when a conversation grows longer than the window?
 
-The request fails or the reply is cut off. The app must trim or summarise old turns and send fewer, better chunks. Count tokens before sending to stay inside the limit.
+The request fails, or the reply is cut off, because input and output share one token budget. The app must trim or summarise old turns and send fewer, more relevant chunks. Counting tokens before each call keeps the request inside the limit.
 
-### If a model has a huge window, do we still need RAG?
+### If a model has a very large window, do we still need RAG?
 
-Yes, usually. Long prompts cost more, run slower and recall worse, especially in the middle. Retrieval sends only the relevant part; see [RAG](card:what-is-rag).
+Usually yes. A large window costs more and runs slower per call, and the model uses facts in the middle of a long prompt less reliably. Retrieval sends only the relevant part, which is cheaper, faster and often more accurate; see [RAG](card:what-is-rag).
 
 ### Is the context window the model's memory?
 
-Only for this one request. It is working space, separate from training data, and it is empty again on the next call unless the app re-sends the history.
+Only for this one request. It is working space that is empty again on the next call. The model's lasting knowledge is in its weights, and any memory of earlier turns exists only because the app re-sends that history.

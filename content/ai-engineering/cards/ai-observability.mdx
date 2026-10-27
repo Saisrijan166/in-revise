@@ -5,20 +5,29 @@ title: Observability for AI Features
 topic: safety-evaluation
 level: intermediate
 heat: 2
-hook: "Trace every AI request: retrieval, model call and tool call as spans, with tokens, cost and latency, but not raw PII."
+hook: "Trace every AI request as spans for retrieval, the model call and tools, recording tokens, cost and latency, but not raw PII."
 points:
-  - { k: "One trace", v: "spans for retrieval, model call, tool call and validation" }
-  - { k: "Per model call", v: "model name, input and output tokens, latency, errors, 429s" }
-  - { k: "RAG extras", v: "chunk ids and scores, so a bad answer can be traced to bad chunks" }
-  - { k: "Standard", v: "OpenTelemetry GenAI conventions; still Development status", kind: default }
-  - { k: "Prompt logging", v: "off by default in Spring AI 2.0; it may hold PII", kind: default }
+  - { k: "One trace", v: "each request becomes one trace with spans for retrieval, the model call, tools and validation" }
+  - { k: "Per model call", v: "record model name, input and output tokens, latency, errors and rate-limit (429) responses" }
+  - { k: "RAG extras", v: "record chunk ids and scores, so a bad answer can be traced back to bad chunks" }
+  - { k: "Standard", v: "OpenTelemetry GenAI semantic conventions define the span and metric names; still Development status", kind: default }
+  - { k: "Prompt logging off", v: "Spring AI 2.0 does not log full prompts or completions by default, because they may hold PII", kind: default }
 trap:
-  wrong: "Log every full prompt and response so we can debug anything later."
-  right: "Record ids, token counts, timings and scores by default. Capture content only when needed, redacted, sampled and kept briefly."
+  wrong: "Log every full prompt and response, so we can debug anything later."
+  right: "Record ids, token counts, timings and scores by default. Capture the actual content only when needed, redacted, sampled and kept briefly."
+  why: "Full logs feel like the safest way to debug, and that is true for ordinary request logs. But prompts and replies can hold user PII and secrets, so storing them all creates a privacy and leakage risk (OWASP LLM02)."
 sayIt: "I trace each request with spans for retrieval, the model call and tools, recording model, tokens, cost, latency, errors and chunk scores. Prompts are not logged by default, and user ratings feed my evals."
 confusedWith: []
 tags: [observability, opentelemetry, tracing, micrometer]
 visual: table
+cheat:
+  idea: "AI observability means tracing each AI request as one trace with spans for retrieval, the model call and tools, recording tokens, cost, latency, errors and chunk scores."
+  remember: "Record ids, counts and scores by default; capture prompts and replies only redacted, sampled and briefly, because they can hold PII (OWASP LLM02)."
+scenarios:
+  - q: "Users report the assistant is slow and sometimes answers wrong. You have one trace per request. How do you find each cause?"
+    a: "For slowness, read the span timings: if the chat span dominates, the model is slow; if retrieval does, the vector search is. For wrong answers, read the recorded chunk ids and scores: low scores mean retrieval found poor chunks; good chunks with a wrong answer points at the prompt. One trace separates the two."
+  - q: "Should you log the full prompt and completion for every request so support can debug later?"
+    a: "No. They can contain PII and secrets, so logging them all creates a leakage risk (OWASP LLM02), and Spring AI 2.0 keeps this off by default. Record ids, token counts, timings and scores always; capture actual content only when needed, redacted, sampled and with short retention."
 sources:
   - title: "Observability (Spring AI 2.0 reference)"
     url: "https://docs.spring.io/spring-ai/reference/observability/index.html"
@@ -31,27 +40,37 @@ sources:
     verifiedOn: "2026-10-21"
 ---
 
+## What it is
+
+Observability for an AI feature is being able to see, after the fact, what each request did and why. A trace is the record of one request broken into spans, where a span is one step such as retrieval, the model call or a tool call. Because an AI feature is several steps chained together, you record each step's timing, tokens and scores, so a slow or wrong answer can be traced to the step that caused it.
+
 ## Why it exists
 
-AI calls are slow, priced per token and fail quietly: a wrong answer still returns HTTP 200. Traces show whether retrieval, the model or a tool caused it.
+AI calls are slow, priced per token, and fail quietly: a wrong answer still returns HTTP 200, so normal error monitoring sees nothing. Without a trace, you cannot tell whether a bad reply came from poor retrieval, a slow or failing model, or a broken tool. Observability records each step so you can answer "which part went wrong?" and "what is this feature costing?" instead of guessing.
 
 ## How it works
 
-| Record | Why |
+Each request becomes one trace. You record a fixed set of signals on it.
+
+| Record | Why it matters |
 |---|---|
 | Latency and time to first token | Users feel the wait; streaming hides the rest |
 | Input and output tokens, cost | Spend per feature and per user |
-| Model name and version | Explains changes after a model switch |
+| Model name and version | Explains quality changes after a model switch |
 | Errors, timeouts, 429s | Tune [retries and limits](card:calling-llm-apis) |
 | Chunk ids and scores, tool calls | Find which step went wrong |
 | User ratings | Feed the [eval set](card:ai-evaluation) |
 
-- Spring AI emits Micrometer observations for ChatClient, advisors, models, tools and vector stores.
-- Spring AI names its token metric `gen_ai.client.token.usage`; newer OTel drafts use `gen_ai.client.inference.usage.*`.
+1. Start a trace when the request arrives, and open a span for each step as it runs.
+2. On the model-call span, record the model, token counts, latency and any error or 429.
+3. On the retrieval span, record the chunk ids and their scores.
+4. Attach user feedback (thumbs up or down) to the trace, so weak cases can be added to the evals.
+
+So the key is one trace per request with per-step detail, not a single flat log line.
 
 ## Example
 
-One trace for "Where is my refund for order 42?" (timings illustrative):
+One trace for "Where is my refund for order 42?" (an illustration of the shape, with sample timings):
 
 ```text
 POST /api/support/chat                      2.4 s
@@ -61,19 +80,34 @@ POST /api/support/chat                      2.4 s
 └─ validate    refund rules                 5 ms
 ```
 
-## Defaults
+What to notice:
 
-| What | Default | Where |
-|---|---|---|
-| Log prompt / completion | false | Spring AI 2.0 (`spring.ai.chat.observations.log-prompt`) |
-| Tool arguments and results | not recorded | Spring AI 2.0 (`spring.ai.tools.observations.include-content`) |
+- The chat span takes 1.9 s of the 2.4 s, so the model dominates latency; optimising retrieval would barely help here.
+- The retrieval span lists chunk ids 7 and 12, so if the answer were wrong you could inspect exactly those chunks.
+- Token counts (1,850 in / 140 out) on the chat span drive the cost for this request.
+- The trace is an illustration of the structure, not real output; the exact names follow the OpenTelemetry GenAI conventions.
+
+## Rules and defaults
+
+- **Prompt and completion logging:** off by default in Spring AI 2.0 (`spring.ai.chat.observations.log-prompt`), because the content can hold PII.
+- **Tool arguments and results:** not recorded by default in Spring AI 2.0 (`spring.ai.tools.observations.include-content`); turn on only with care.
+- **Standard names:** the OpenTelemetry GenAI semantic conventions define the span and metric names; they are still at Development status, so names can change.
+- **Metric naming:** Spring AI names its token metric `gen_ai.client.token.usage`; newer OTel drafts use `gen_ai.client.inference.usage.*`, so confirm against your collector's version.
+
+## Not to be confused with
+
+[Evals](card:ai-evaluation) run before you ship, on a fixed saved set, to compare a change. Observability runs in production, on live traffic, to see current behaviour. Rule: evals measure a change against known cases; observability watches real users right now. The two connect when a production failure, found through observability, is added to the eval set.
 
 ## Interview Qs
 
 ### What do you monitor in an LLM feature?
 
-Latency and time to first token, tokens and cost, model version, error and 429 rates, retrieval scores and tool calls, and user feedback, all linked in one trace per request.
+Latency and time to first token, input and output tokens and cost, the model name and version, error and rate-limit (429) rates, retrieval scores and tool calls, and user feedback, all linked in one trace per request so you can see which step caused a slow or wrong answer.
 
-### Should you log prompts and responses?
+### Should you log full prompts and responses?
 
-Not by default. They can hold PII and secrets. Log ids, counts and scores; capture content only where needed, redacted, sampled and with short retention.
+Not by default. They can hold PII and secrets, so logging all of them is a leakage risk (OWASP LLM02), and Spring AI 2.0 keeps it off. Log ids, token counts and scores always; capture the content only where needed, redacted, sampled and with short retention.
+
+### A user says an answer was wrong. How does observability help you investigate?
+
+Open that request's trace. The retrieval span's chunk ids and scores show whether poor chunks were found; the chat span shows the model and tokens used; tool spans show what the model called. You locate the failing step instead of re-running the whole feature blindly.
