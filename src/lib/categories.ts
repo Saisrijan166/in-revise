@@ -51,9 +51,15 @@ export const CATEGORIES: Category[] = [
   },
   {
     id: "architecture",
-    title: "Architecture & AI",
-    blurb: "Design whole systems and AI features.",
-    slugs: ["system-design", "ai-engineering"],
+    title: "Architecture",
+    blurb: "Design whole systems.",
+    slugs: ["system-design"],
+  },
+  {
+    id: "ai",
+    title: "AI",
+    blurb: "Build AI features into your apps.",
+    slugs: ["ai-engineering"],
   },
 ];
 
