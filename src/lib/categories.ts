@@ -15,9 +15,15 @@ export interface Category {
 export const CATEGORIES: Category[] = [
   {
     id: "languages",
-    title: "Languages & Fundamentals",
-    blurb: "The core you code and reason with.",
-    slugs: ["java", "dsa", "os-networking"],
+    title: "Languages",
+    blurb: "The language you write.",
+    slugs: ["java"],
+  },
+  {
+    id: "fundamentals",
+    title: "Fundamentals",
+    blurb: "The core computer science you reason with.",
+    slugs: ["dsa", "os-networking"],
   },
   {
     id: "backend",
