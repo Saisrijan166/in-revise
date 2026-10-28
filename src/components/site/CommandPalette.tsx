@@ -4,7 +4,13 @@ import Fuse from "fuse.js";
 import { useRouter } from "next/navigation";
 import { Dialog } from "radix-ui";
 import { useEffect, useId, useMemo, useRef, useState, type ComponentType } from "react";
-import { SEARCH_INDEX_URL, SEARCH_KEYS, type SearchDoc, type SearchKind } from "@/lib/search";
+import {
+  SEARCH_INDEX_URL,
+  SEARCH_KEYS,
+  relevance,
+  type SearchDoc,
+  type SearchKind,
+} from "@/lib/search";
 import { paletteStore } from "@/lib/store/ui";
 import { urls } from "@/lib/urls";
 import { cx } from "@/lib/ui";
@@ -31,7 +37,15 @@ function loadIndex() {
       docs,
       fuse: new Fuse(
         docs,
-        { keys: SEARCH_KEYS, threshold: 0.36, ignoreLocation: true, minMatchCharLength: 2 },
+        {
+          keys: SEARCH_KEYS,
+          // Fuse is used only for recall (finding candidates, including small typos). The final
+          // order comes from relevance() in src/lib/search.ts, which puts exact matches first.
+          threshold: 0.32,
+          ignoreLocation: true,
+          minMatchCharLength: 2,
+          includeScore: true,
+        },
         Fuse.parseIndex(index as Parameters<typeof Fuse.parseIndex>[0]),
       ),
     }))
@@ -61,6 +75,8 @@ interface Item {
   sub: string;
   href: string;
   group: string;
+  /** Shown as a small chip on search results (where rows are ranked, not grouped). */
+  tag?: string;
   icon: ComponentType<{ size?: number; className?: string }>;
 }
 
@@ -139,21 +155,42 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
       return [...quick, ...cards];
     }
     if (!data) return [];
-    const hits = data.fuse.search(q, { limit: 24 }).map((r) => r.item);
-    const order: SearchKind[] = ["card", "node", "compare", "term"];
-    return order.flatMap((kind) =>
-      hits
-        .filter((d) => d.kind === kind)
-        .map((d) => ({
-          key: d.key,
-          title: d.title,
-          sub: techs.length > 1 ? `${d.techName} · ${d.text}` : d.text,
-          href: d.href,
-          group: KIND_LABEL[kind],
-          icon: KIND_ICON[kind],
-        })),
-    );
+    // Fuse finds candidates (with small typos); relevance() in src/lib/search.ts decides the
+    // order, so an exact letter-for-letter title match always ranks first and fuzzy matches last.
+    const scored = data.fuse
+      .search(q, { limit: 60 })
+      .map((r) => ({ doc: r.item, score: relevance(r.item, q, r.score ?? 1) }))
+      .filter((s) => s.score > 0)
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          // Ties: prefer the current tech, then the shorter (closer) title.
+          Number(b.doc.tech === tech?.slug) - Number(a.doc.tech === tech?.slug) ||
+          a.doc.title.length - b.doc.title.length,
+      )
+      .slice(0, 24);
+
+    return scored.map(({ doc: d }) => ({
+      key: d.key,
+      title: d.title,
+      sub: techs.length > 1 ? `${d.techName} · ${d.text}` : d.text,
+      href: d.href,
+      group: "Results",
+      tag: KIND_LABEL[d.kind],
+      icon: KIND_ICON[d.kind],
+    }));
   }, [query, data, tech, techs.length]);
+
+  // The group header shows on the first row of each group; precomputed here so render stays pure.
+  const headerAt = useMemo(() => {
+    const flags: (string | null)[] = [];
+    let prev = "";
+    for (const it of items) {
+      flags.push(it.group !== prev ? it.group : null);
+      prev = it.group;
+    }
+    return flags;
+  }, [items]);
 
   useEffect(() => {
     listRef.current
@@ -181,7 +218,6 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
     }
   };
 
-  let lastGroup = "";
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Portal>
@@ -222,8 +258,7 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
             className="min-h-0 flex-1 overflow-y-auto p-2"
           >
             {items.map((item, i) => {
-              const header = item.group !== lastGroup ? item.group : null;
-              lastGroup = item.group;
+              const header = headerAt[i];
               const Icon = item.icon;
               return (
                 <li key={item.key} role="presentation">
@@ -254,10 +289,15 @@ export function CommandPalette({ techs }: { techs: TechLite[] }) {
                         i === active ? "text-accent-ink" : "text-ink-3",
                       )}
                     />
-                    <span className="min-w-0">
+                    <span className="min-w-0 flex-1">
                       <span className="block font-semibold text-ink">{item.title}</span>
                       <span className="line-clamp-1 text-sm text-ink-2">{item.sub}</span>
                     </span>
+                    {item.tag && (
+                      <span className="mt-0.5 flex-none rounded-md bg-surface-2 px-1.5 py-0.5 text-[0.7rem] font-semibold text-ink-3">
+                        {item.tag}
+                      </span>
+                    )}
                   </div>
                 </li>
               );
