@@ -100,6 +100,31 @@ export function watchSystemTheme(): () => void {
   return () => mq.removeEventListener("change", onChange);
 }
 
+/* ---------- Left sidebar (concept tree) collapsed state ---------- */
+
+// Lives on <html> as data-sidebar ("open" | "closed"), set before first paint from
+// localStorage so the grid never flashes the wrong width. Desktop only; the phone/tablet
+// tree is a separate sheet (navStore).
+const SIDEBAR_KEY = "cm-sidebar";
+
+export function getSidebarOpen(): boolean {
+  return document.documentElement.dataset.sidebar !== "closed";
+}
+
+export function setSidebarOpen(open: boolean) {
+  document.documentElement.dataset.sidebar = open ? "open" : "closed";
+  safeSet(SIDEBAR_KEY, open ? "open" : "closed");
+  emit();
+}
+
+export function toggleSidebar() {
+  setSidebarOpen(!getSidebarOpen());
+}
+
+export function useSidebarOpen(): boolean {
+  return useSyncExternalStore(subscribe, getSidebarOpen, () => true);
+}
+
 /* ---------- Code language for Java / Python tabs ---------- */
 
 const LANG_KEY = "cm-code-lang";

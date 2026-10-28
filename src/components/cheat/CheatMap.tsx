@@ -8,8 +8,15 @@ import { topicColor } from "@/lib/ui";
 import { KeyPoints } from "@/components/card/Blocks";
 import { CompareGist } from "@/components/compare/CompareView";
 import { PageHeader } from "@/components/ui/Breadcrumbs";
-import { IconArrowRight, IconCheck, IconClose, IconFlame } from "@/components/ui/icons";
+import {
+  IconArrowRight,
+  IconCheck,
+  IconChevronRight,
+  IconClose,
+  IconFlame,
+} from "@/components/ui/icons";
 import { PrintButton } from "@/components/ui/PrintButton";
+import { CheatExpandToggle } from "./CheatExpandToggle";
 import { CheatView } from "./CheatView";
 
 /**
@@ -79,28 +86,25 @@ function CheatCard({ deck, card, no }: { deck: Deck; card: Card; no: string }) {
   const types = node.children.filter((c) => !c.cardId);
   const href = urls.concept(deck.slug, m.id);
   return (
-    <article
+    <details
+      open
       id={`cs-${m.id}`}
       aria-labelledby={`csc-${m.id}`}
-      className="print-card flex min-w-0 scroll-mt-24 flex-col gap-2.5 rounded-2xl border border-line bg-surface p-4"
+      className="cheat-card print-card group/card flex min-w-0 scroll-mt-24 flex-col rounded-2xl border border-line bg-surface p-4 open:gap-2.5"
     >
-      <header className="flex items-start gap-2.5">
+      {/* The header is the collapse toggle: tap it to fold the card to just its title. */}
+      <summary className="flex cursor-pointer list-none items-start gap-2.5 [&::-webkit-details-marker]:hidden">
         <span className="mt-0.5 font-display text-sm font-bold text-ink-3 tabular-nums">{no}</span>
         <div className="min-w-0 flex-1">
-          <h3 id={`csc-${m.id}`} className="font-display text-lg leading-snug font-extrabold">
-            <Link href={href} className="text-ink hover:text-accent-ink">
-              {m.title}
-            </Link>
+          <h3
+            id={`csc-${m.id}`}
+            className="font-display text-lg leading-snug font-extrabold text-ink group-open/card:text-accent-ink"
+          >
+            {m.title}
           </h3>
           {owner && (
             <p className="text-xs text-ink-3">
-              Part of{" "}
-              <a
-                href={`#cs-${owner.meta.id}`}
-                className="underline underline-offset-2 hover:text-ink"
-              >
-                {owner.meta.title}
-              </a>
+              Part of <span className="underline underline-offset-2">{owner.meta.title}</span>
             </p>
           )}
         </div>
@@ -112,7 +116,13 @@ function CheatCard({ deck, card, no }: { deck: Deck; card: Card; no: string }) {
             <IconFlame size={12} /> Most asked
           </span>
         )}
-      </header>
+        <span
+          aria-hidden="true"
+          className="no-print mt-0.5 flex-none text-ink-3 transition-transform group-open/card:rotate-90"
+        >
+          <IconChevronRight size={17} />
+        </span>
+      </summary>
 
       {/* Full card (Learn and Quiz modes) */}
       <div data-show="learn quiz" className="flex flex-col gap-2.5">
@@ -138,9 +148,9 @@ function CheatCard({ deck, card, no }: { deck: Deck; card: Card; no: string }) {
         </span>
       </p>
 
-      <details data-show="learn quiz" className="group">
+      <details data-show="learn quiz" className="group/more">
         <summary className="no-print flex min-h-11 cursor-pointer list-none items-center gap-1.5 font-semibold text-ink-3 hover:text-ink [&::-webkit-details-marker]:hidden">
-          <span aria-hidden="true" className="transition-transform group-open:rotate-90">
+          <span aria-hidden="true" className="transition-transform group-open/more:rotate-90">
             ›
           </span>
           More details
@@ -185,7 +195,7 @@ function CheatCard({ deck, card, no }: { deck: Deck; card: Card; no: string }) {
           </Link>
         </div>
       </details>
-    </article>
+    </details>
   );
 }
 
@@ -251,6 +261,7 @@ export function CheatMap({ deck }: { deck: Deck }) {
         </p>
         <div className="no-print mt-4 flex flex-wrap items-center gap-2">
           <CheatView />
+          <CheatExpandToggle />
           <PrintButton />
         </div>
         <StagePath stages={stages} />

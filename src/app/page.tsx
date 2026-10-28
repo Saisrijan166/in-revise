@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getDecks, techSummary } from "@/lib/content";
+import { groupBySlug } from "@/lib/categories";
 import { urls } from "@/lib/urls";
 import { plural } from "@/lib/ui";
 import {
@@ -12,9 +13,13 @@ import {
 
 export default function HomePage() {
   const techs = getDecks().map(techSummary);
+  const groups = groupBySlug(techs);
+  // Feature the first tech in display order (the start of "Languages & Fundamentals"),
+  // not the alphabetical first, so the hero points at a sensible place to begin.
+  const lead = groups[0]?.items[0] ?? techs[0];
 
   return (
-    <div className="mx-auto max-w-5xl px-4 pt-6 pb-14 sm:px-6">
+    <div data-accent={lead?.accent} className="mx-auto max-w-5xl px-4 pt-6 pb-14 sm:px-6">
       <section className="grid-paper relative overflow-hidden rounded-[2rem] border border-line bg-surface px-5 py-8 sm:px-10 sm:py-12">
         <HeroLines />
         <div className="relative max-w-2xl">
@@ -30,16 +35,16 @@ export default function HomePage() {
             Every concept in one line, its types and the trap people fall into. Learn it once,
             revise it in minutes.
           </p>
-          {techs[0]?.firstHref && (
+          {lead?.firstHref && (
             <div className="mt-6 flex flex-wrap gap-2">
               <Link
-                href={techs[0].firstHref}
+                href={lead.firstHref}
                 className="inline-flex min-h-12 items-center gap-2 rounded-xl bg-accent px-5 font-bold text-on-accent shadow-[var(--shadow)] hover:bg-accent-strong"
               >
-                Start with {techs[0].name} <IconArrowRight size={18} />
+                Start with {lead.name} <IconArrowRight size={18} />
               </Link>
               <Link
-                href={urls.cheatsheet(techs[0].slug)}
+                href={urls.cheatsheet(lead.slug)}
                 className="inline-flex min-h-12 items-center gap-2 rounded-xl border-2 border-line bg-surface px-4 font-bold text-ink-2 hover:border-accent hover:text-ink"
               >
                 <IconSheet size={18} /> Quick revise
@@ -49,42 +54,62 @@ export default function HomePage() {
         </div>
       </section>
 
-      <section aria-labelledby="techs" className="mt-10">
-        <h2 id="techs" className="text-2xl font-extrabold">
-          Pick a tech
-        </h2>
-        <ul className="mt-4 flex flex-col gap-3">
-          {techs.map((t) => (
-            <li key={t.slug} data-accent={t.accent}>
-              <div className="flex flex-col gap-4 rounded-2xl border border-line bg-surface p-5 sm:flex-row sm:items-center">
-                <span
-                  aria-hidden="true"
-                  className="h-1.5 w-12 flex-none rounded-full bg-accent sm:h-12 sm:w-1.5"
-                />
-                <div className="min-w-0 flex-1">
-                  <h3 className="text-2xl font-extrabold">
-                    <Link href={urls.overview(t.slug)} className="hover:text-accent-ink">
-                      {t.name}
-                    </Link>
-                  </h3>
-                  <p className="text-ink-2">{t.summary}</p>
-                  <p className="mt-1 text-sm font-semibold text-ink-3">
-                    {plural(t.conceptCount, "concept")} · {plural(t.typeCount, "type")} and parts ·{" "}
-                    {plural(t.comparisonCount, "comparison")}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Link
-                    href={urls.overview(t.slug)}
-                    className="inline-flex min-h-11 items-center gap-1.5 rounded-xl bg-accent px-4 font-bold text-on-accent hover:bg-accent-strong"
-                  >
-                    Open <IconArrowRight size={16} />
-                  </Link>
-                </div>
+      <section aria-labelledby="techs" className="mt-12">
+        <div className="flex items-end justify-between gap-4">
+          <h2 id="techs" className="text-2xl font-extrabold">
+            Pick a tech
+          </h2>
+          <p className="hidden text-sm font-semibold text-ink-3 sm:block">
+            {techs.length} techs · {groups.length} areas
+          </p>
+        </div>
+
+        <div className="mt-5 flex flex-col gap-9">
+          {groups.map(({ category, items }) => (
+            <div key={category.id}>
+              <div className="mb-3 flex items-baseline gap-2.5 border-b border-line pb-2">
+                <h3 className="text-lg font-extrabold text-ink">{category.title}</h3>
+                {category.blurb && (
+                  <p className="hidden text-sm text-ink-3 sm:block">{category.blurb}</p>
+                )}
+                <span className="ml-auto text-xs font-bold text-ink-3 tabular-nums">
+                  {items.length}
+                </span>
               </div>
-            </li>
+              <ul className="grid gap-3 sm:grid-cols-2">
+                {items.map((t) => (
+                  <li key={t.slug} data-accent={t.accent}>
+                    <Link
+                      href={urls.overview(t.slug)}
+                      className="group flex h-full items-start gap-3 rounded-2xl border border-line bg-surface p-4 transition-colors hover:border-accent"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="mt-1 h-full min-h-[2.75rem] w-1.5 flex-none rounded-full bg-accent"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center justify-between gap-2">
+                          <span className="font-display text-lg font-extrabold text-ink group-hover:text-accent-ink">
+                            {t.name}
+                          </span>
+                          <IconArrowRight
+                            size={17}
+                            className="flex-none text-ink-3 transition-transform group-hover:translate-x-0.5 group-hover:text-accent-ink"
+                          />
+                        </span>
+                        <span className="mt-0.5 block text-sm text-ink-2">{t.summary}</span>
+                        <span className="mt-1.5 block text-xs font-semibold text-ink-3">
+                          {plural(t.conceptCount, "concept")} ·{" "}
+                          {plural(t.comparisonCount, "comparison")}
+                        </span>
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ))}
-        </ul>
+        </div>
       </section>
 
       <section aria-labelledby="how" className="mt-12">

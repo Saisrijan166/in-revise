@@ -9,6 +9,7 @@ import { IconHome, IconMenu, IconSearch } from "@/components/ui/icons";
 import { TECH_TABS, activeTab, isConceptPath } from "@/components/nav/tabs";
 import { Wordmark } from "./Logo";
 import { ModeSwitch } from "./ModeSwitch";
+import { TechSwitcher } from "./TechSwitcher";
 import { ThemeToggle } from "./ThemeToggle";
 import { useCurrentTech, type TechLite } from "./useCurrentTech";
 import { useShortcutLabel } from "./useShortcutLabel";
@@ -56,9 +57,7 @@ export function Header({ techs }: { techs: TechLite[] }) {
               aria-label={`${tech.name} pages`}
               className="flex items-center gap-0.5 rounded-2xl border border-line-strong bg-surface p-1 shadow-[var(--shadow)]"
             >
-              <span className="mr-1 inline-flex min-h-9 items-center rounded-xl bg-accent px-3 text-sm font-bold text-on-accent">
-                {tech.name}
-              </span>
+              <TechSwitcher techs={techs} current={tech} className="mr-1" />
               {TECH_TABS.map((t) => (
                 <Link
                   key={t.key}

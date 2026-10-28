@@ -8,11 +8,14 @@ import { navStore } from "@/lib/store/ui";
 import { cx } from "@/lib/ui";
 import { IconClose } from "@/components/ui/icons";
 import { ModeSwitch } from "@/components/site/ModeSwitch";
+import { TechSwitcher } from "@/components/site/TechSwitcher";
+import type { TechLite } from "@/components/site/useCurrentTech";
 import { TECH_TABS, activeTab } from "./tabs";
 import { TreeNav } from "./TreeNav";
 
 /** Phones and tablets: the tech's pages, the study mode and the whole tree in one sheet. */
-export function NavSheet({ nav }: { nav: TechNav }) {
+export function NavSheet({ nav, techs }: { nav: TechNav; techs: TechLite[] }) {
+  const current: TechLite = { slug: nav.slug, name: nav.name, accent: nav.accent };
   const open = navStore.use();
   const pathname = usePathname() ?? "";
   const tab = activeTab(pathname);
@@ -44,9 +47,9 @@ export function NavSheet({ nav }: { nav: TechNav }) {
               <ModeSwitch className="flex w-full [&>button]:flex-1" />
             </div>
             <div className="rounded-2xl border border-line-strong bg-surface p-1.5">
-              <p className="mb-1.5 inline-flex min-h-9 items-center rounded-xl bg-accent px-3 text-sm font-bold text-on-accent">
-                {nav.name}
-              </p>
+              <div className="mb-1.5">
+                <TechSwitcher techs={techs} current={current} />
+              </div>
               <ul className="grid grid-cols-2 gap-1">
                 {TECH_TABS.map((t) => {
                   const Icon = t.icon;
