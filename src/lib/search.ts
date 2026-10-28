@@ -52,19 +52,28 @@ export function relevance(doc: SearchDoc, rawQuery: string, fuseScore = 1): numb
   const tags = doc.tags.map(normalize);
   const haystacks = [title, ...akas];
 
+  const titleWordSet = new Set(titleWords);
+  // A whole title word starts with the query ("poly" → the "Polymorphism" word, "dep" → "Dependency").
+  const wordStartsWithQ = titleWords.some((tw) => tw.startsWith(q));
+
   let score = 0;
 
   // Exact match on the title or an alias — the strongest signal.
   if (haystacks.includes(q)) score += 1000;
-  // Title or alias starts with the whole query ("cache" → "Cache-Aside").
-  else if (haystacks.some((h) => h.startsWith(q + " ") || h.startsWith(q))) score += 600;
+  // The title/alias (or its first word) starts with the whole query ("cache" → "Cache-Aside"):
+  // what the user is most likely reaching for while typing.
+  else if (haystacks.some((h) => h === q || h.startsWith(q + " ")) || titleWordSet.has(q))
+    score += 700;
+  else if (haystacks.some((h) => h.startsWith(q))) score += 620;
+  // A later word in the title starts with the query ("poly" → "…and Polymorphism"): still a strong,
+  // intentional prefix match, just not at the front, so it sits just below a front-of-title prefix.
+  else if (wordStartsWithQ) score += 500;
   // The query appears as a run of whole words in the title ("write through").
   else if (title.includes(q) && new RegExp(`(^| )${escapeRe(q)}( |$)`).test(title)) score += 400;
   // The query appears anywhere in the title or an alias as a substring.
   else if (haystacks.some((h) => h.includes(q))) score += 220;
 
   // A whole query word equals a whole title word (handles multi-word queries and word order).
-  const titleWordSet = new Set(titleWords);
   const exactWordHits = qWords.filter((w) => titleWordSet.has(w)).length;
   score += exactWordHits * 60;
   // A query word is the prefix of some title word.
@@ -77,6 +86,13 @@ export function relevance(doc: SearchDoc, rawQuery: string, fuseScore = 1): numb
   if (tags.some((t) => t === q || t.includes(q))) score += 30;
   // Body text substring: a weak signal, so text-only matches sit below any title match.
   if (normalize(doc.text).includes(q)) score += 15;
+
+  // Guard against short-query fuzzy noise: for a 1–2 character query, only keep documents that
+  // actually begin a title word with it (e.g. "ec" → "EC2"), not Fuse's loose letter matches
+  // ("ec" → "Recursion", "Decorator"). Without a real prefix hit the score drops out of ranking.
+  if (q.length <= 2 && !wordStartsWithQ && !titleWordSet.has(q)) {
+    if (!tags.some((t) => splitWords(t).some((tw) => tw.startsWith(q)))) return 0;
+  }
 
   // Among equally-strong matches, Fuse's fuzzy closeness (0 best) decides the order.
   score += (1 - Math.min(1, fuseScore)) * 10;
