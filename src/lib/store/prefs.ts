@@ -125,6 +125,31 @@ export function useSidebarOpen(): boolean {
   return useSyncExternalStore(subscribe, getSidebarOpen, () => true);
 }
 
+/* ---------- Top bar (header) collapsed state ---------- */
+
+// Lives on <html> as data-topbar ("open" | "closed"), set before first paint from localStorage
+// so the header never flashes. Desktop only; on phones/tablets the header stays (it carries the
+// mode switch and menu), so the collapse control is lg-only.
+const TOPBAR_KEY = "cm-topbar";
+
+export function getTopbarOpen(): boolean {
+  return document.documentElement.dataset.topbar !== "closed";
+}
+
+export function setTopbarOpen(open: boolean) {
+  document.documentElement.dataset.topbar = open ? "open" : "closed";
+  safeSet(TOPBAR_KEY, open ? "open" : "closed");
+  emit();
+}
+
+export function toggleTopbar() {
+  setTopbarOpen(!getTopbarOpen());
+}
+
+export function useTopbarOpen(): boolean {
+  return useSyncExternalStore(subscribe, getTopbarOpen, () => true);
+}
+
 /* ---------- Code language for Java / Python tabs ---------- */
 
 const LANG_KEY = "cm-code-lang";

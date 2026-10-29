@@ -8,13 +8,7 @@ import { topicColor } from "@/lib/ui";
 import { KeyPoints } from "@/components/card/Blocks";
 import { CompareGist } from "@/components/compare/CompareView";
 import { PageHeader } from "@/components/ui/Breadcrumbs";
-import {
-  IconArrowRight,
-  IconCheck,
-  IconChevronRight,
-  IconClose,
-  IconFlame,
-} from "@/components/ui/icons";
+import { IconArrowRight, IconCheck, IconClose, IconFlame } from "@/components/ui/icons";
 import { PrintButton } from "@/components/ui/PrintButton";
 import { CheatExpandToggle } from "./CheatExpandToggle";
 import { CheatView } from "./CheatView";
@@ -86,19 +80,17 @@ function CheatCard({ deck, card, no }: { deck: Deck; card: Card; no: string }) {
   const types = node.children.filter((c) => !c.cardId);
   const href = urls.concept(deck.slug, m.id);
   return (
-    <details
-      open
+    <article
       id={`cs-${m.id}`}
       aria-labelledby={`csc-${m.id}`}
-      className="cheat-card print-card group/card flex min-w-0 scroll-mt-24 flex-col rounded-2xl border border-line bg-surface p-4 open:gap-2.5"
+      className="cheat-card print-card flex min-w-0 scroll-mt-24 flex-col gap-2.5 rounded-2xl border border-line bg-surface p-4"
     >
-      {/* The header is the collapse toggle: tap it to fold the card to just its title. */}
-      <summary className="flex cursor-pointer list-none items-start gap-2.5 [&::-webkit-details-marker]:hidden">
+      <div className="flex items-start gap-2.5">
         <span className="mt-0.5 font-display text-sm font-bold text-ink-3 tabular-nums">{no}</span>
         <div className="min-w-0 flex-1">
           <h3
             id={`csc-${m.id}`}
-            className="font-display text-lg leading-snug font-extrabold text-ink group-open/card:text-accent-ink"
+            className="font-display text-lg leading-snug font-extrabold text-ink"
           >
             {m.title}
           </h3>
@@ -116,13 +108,7 @@ function CheatCard({ deck, card, no }: { deck: Deck; card: Card; no: string }) {
             <IconFlame size={12} /> Most asked
           </span>
         )}
-        <span
-          aria-hidden="true"
-          className="no-print mt-0.5 flex-none text-ink-3 transition-transform group-open/card:rotate-90"
-        >
-          <IconChevronRight size={17} />
-        </span>
-      </summary>
+      </div>
 
       {/* Full card (Learn and Quiz modes) */}
       <div data-show="learn quiz" className="flex flex-col gap-2.5">
@@ -148,7 +134,7 @@ function CheatCard({ deck, card, no }: { deck: Deck; card: Card; no: string }) {
         </span>
       </p>
 
-      <details data-show="learn quiz" className="group/more">
+      <details data-show="learn quiz" className="cheat-more group/more">
         <summary className="no-print flex min-h-11 cursor-pointer list-none items-center gap-1.5 font-semibold text-ink-3 hover:text-ink [&::-webkit-details-marker]:hidden">
           <span aria-hidden="true" className="transition-transform group-open/more:rotate-90">
             ›
@@ -195,7 +181,7 @@ function CheatCard({ deck, card, no }: { deck: Deck; card: Card; no: string }) {
           </Link>
         </div>
       </details>
-    </details>
+    </article>
   );
 }
 
