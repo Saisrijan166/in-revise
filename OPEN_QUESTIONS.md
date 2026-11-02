@@ -794,3 +794,23 @@ System Design (slug `system-design`, accent blue) was rewritten from v2 into tea
 - **Reference-guided coverage:** `reference/system-design.coverage.md` records 68 Mapped / 2+3 Corrected / 23 Added-beyond / 27 Dropped. Six concepts the reference never covers (quorum, consensus, unique-ids, geospatial-index, bloom-filter, consistent-hashing) are kept from the prior researched content as added-beyond.
 - **Verification (~1,060 claims, 3 outsider passes):** 3 fixed — (1) HTTP/2 concurrent-stream "default 100" corrected (no spec default; nginx is 128); (2) bloom-filter output panel seeded for reproducibility (0.92% false-positive, matches the formula); (3) TTL-jitter-against-avalanche source upgraded to the AWS "Database Caching Strategies Using Redis" whitepaper, which states it directly — the earlier open question is now resolved, not softened. 0 removed. Snippets re-run on JDK 21, Python 3, real PostgreSQL 18 and real Redis (round-robin LB, idempotency handler, token-bucket limiter, LRU, bloom filter, consistent-hashing ring, Snowflake IDs, SQL) — all output panels match. Facts confirmed against DDIA, RFCs (9110/6585/9562), the Raft/Dynamo/Spanner/Saga papers, Kafka 4.3, cloud architecture centers, and Postgres/MySQL/Redis/Cassandra/Elasticsearch docs.
 - **Carried-over caveats (section D2, re-confirmed):** geohash has no formal spec; S3 max object size uses 48.8 TiB; Route 53 failover "about 2.5 minutes" is derived; "many conflicts → lock" paraphrases ORM guidance with no numeric threshold.
+
+### R16. Git (new tech, teaching template v3)
+
+Git (slug `git`, accent **sienna** — a new amber-brown, AA-tuned; added to `globals.css` and the schema ACCENTS list) was written on 02-11-2026 from `reference/git.md` (split from the owner's combined root `reference.md`, which also yielded `reference/linux.md`). Built reference-guided (coverage file added). Template v3; `codeLanguages: [java]` (Git commands are `bash`, not app code). Written by eight topic writer-agents, then an independent four-agent verification pass (different agents).
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Topics |
+|---|---|---|---|---|
+| 41 | 12 | 55 | ~2,400 / 2 / 0 | 8 |
+
+- **Order (dependency-first):** Git Basics → Everyday Changes → Branching → Combining Work (merge/rebase) → Remotes and GitHub → Undoing Changes → Stash and Tags → Under the Hood and Workflow.
+- **Running example:** a small team building a **payments feature** on a shared repo (matches the story spine).
+- **Baseline:** Git 2.x (time-based releases; latest stable ~2.56, Sep 2026). Version-specific facts state the version.
+- **Reference-guided coverage:** `reference/git.coverage.md` records 17 Mapped / 2 Corrected / 7 Added-beyond / 2 Dropped. Added beyond the reference (interview-important, missing): reflog/recovery, squash merge, pull strategies, commit --amend, branching strategies, good commits, blame and bisect.
+- **Independent verification (~2,400 items, 4 outsider passes): 2 fixed, 0 removed.**
+  - (1) **`git pull` on diverged branches** was described as "merges by default". Corrected across `pull-strategies` and `fetch-pull-push`: in current Git an unconfigured diverged pull does NOT silently merge — it stops and makes you choose a strategy (the unset default is `--ff-only`, which fails on divergence); set `pull.rebase`/`pull.ff`. The warn-and-choose behaviour is since Git 2.27. Source: git-scm.com/docs/git-pull.
+  - (2) `fetch-pull-push` bullet made consistent with the above.
+  - Confirmed and kept: the **default branch name** note — `git init` creates `master` unless `init.defaultBranch` is set, and this **changes to `main` in Git 3.0** (stated verbatim in the official git-init docs); GitHub already defaults to `main`. SHA-1 is still the default object format (SHA-256 opt-in). `git add .`/`-A` both stage deletions since Git 2.0. `--soft`/`--mixed`/`--hard` effects match the git-reset doc table. `git clean` requires `-f` (clean.requireForce default true). reflog expiry 90/30 days.
+
+**Open question for the owner (unverifiable precisely):**
+- **The exact Git release** where an unconfigured diverged `git pull` changed from "warn, then merge" (Git 2.27) to stopping with the `--ff-only` default. Confirmed it is after 2.31 and present by 2.34, but no release note states it plainly, so the cards use the safe "since Git 2.27 … makes you choose" wording. Naming the precise 2.32.x/2.33.x release needs a commit-history check.

@@ -26,6 +26,12 @@ export const CATEGORIES: Category[] = [
     slugs: ["dsa", "os-networking"],
   },
   {
+    id: "tools",
+    title: "Tools and Workflow",
+    blurb: "Version control and the command line.",
+    slugs: ["git", "linux"],
+  },
+  {
     id: "backend",
     title: "Backend & Frameworks",
     blurb: "Build and structure services.",
