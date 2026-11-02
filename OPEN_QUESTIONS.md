@@ -814,3 +814,23 @@ Git (slug `git`, accent **sienna** — a new amber-brown, AA-tuned; added to `gl
 
 **Open question for the owner (unverifiable precisely):**
 - **The exact Git release** where an unconfigured diverged `git pull` changed from "warn, then merge" (Git 2.27) to stopping with the `--ff-only` default. Confirmed it is after 2.31 and present by 2.34, but no release note states it plainly, so the cards use the safe "since Git 2.27 … makes you choose" wording. Naming the precise 2.32.x/2.33.x release needs a commit-history check.
+
+### R17. Linux (new tech, teaching template v3)
+
+Linux (slug `linux`, accent **yellow** — a new true-yellow, AA-tuned; added to `globals.css` and the schema ACCENTS list) was written on 02-11-2026 from `reference/linux.md` (split from the owner's combined root `reference.md`). Built reference-guided (coverage file added). Template v3; `codeLanguages: [java]` (shell commands are `bash`, not app code). Written by eight topic writer-agents, then an independent four-agent verification pass (different agents). Git and Linux share the new **"Tools and Workflow"** home-page category.
+
+| Concepts | Comparisons | Terms | Checked / fixed / removed | Topics |
+|---|---|---|---|---|
+| 42 | 12 | 64 | ~2,500 / ~6 / 0 | 8 |
+
+- **Order (dependency-first):** Linux Basics → Filesystem and Navigation → Working with Files → Permissions and Users → Search and Text → Processes and Jobs → Packages, Services and System → Networking.
+- **Running example:** a developer deploying and debugging a Java payment service on a Linux server (matches the story spine).
+- **Baseline:** generic Linux (Linux kernel + GNU userland), **bash** shell, **Ubuntu/Debian (apt)** and **systemd** as the examples; Fedora/RHEL (dnf) named where the reference does. Protocol/port facts cite IANA/RFC; kernel licence GPL-2.0.
+- **Reference-guided coverage:** `reference/linux.coverage.md` records 20 Mapped / 2 Corrected / 8 Added-beyond / 3 Dropped. Added beyond the reference: kernel vs user space + system calls, hard/symbolic links + inodes, wildcards/globbing, setuid/setgid/sticky bit, zombie/orphan processes, sort/uniq/cut/sed/awk, shell scripting, SSH keys/DNS tools.
+- **Independent verification (~2,500 items, 4 outsider passes): ~6 fixed, 0 removed.** Corrections made:
+  - **Ctrl+Z sends SIGTSTP (20), not SIGSTOP (19)** — the catchable terminal-stop; stated correctly in the signals and jobs cards (the reference implied SIGSTOP).
+  - **"set NAME=value"** (from the writer brief) corrected to a plain `NAME=value` shell-variable assignment vs `export NAME=value`; `set` does not create named variables.
+  - **umask** explanation fixed: new files start from base 666/777 and umask (usually 022) removes bits to give 644/755 — not "644/755 minus umask".
+  - A chmod `trap.right` editing artifact rewritten; a `find -delete` note clarified (deletes files; a directory only if empty); the load-average definition tightened to include uninterruptible-I/O tasks.
+  - Confirmed against primary sources: signal numbers and the uncatchable set (SIGKILL/SIGSTOP only); bash redirection ordering (`> file 2>&1` ≠ `2>&1 > file`); uniq collapses only adjacent lines; chmod special bits (4/2/1); chown needs root; IANA ports (22/80/443/3306/5432/6379/53); scp uses SFTP by default since OpenSSH 9.0; FHS directory purposes; glob expansion by the shell.
+- **Open questions:** none unresolved. `dig +short example.com` output in `dns-tools` is illustrative only (live DNS may differ); the "a host can block ICMP while serving HTTP" trap is correct standard behaviour though not in the ping(8) manpage itself.
