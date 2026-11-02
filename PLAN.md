@@ -1,38 +1,29 @@
-# PLAN — Git and Linux (new techs, 02-11-2026)
+# PLAN — Python (new tech, template v3)
 
-Owner added a combined reference (root `reference.md`). Split into `reference/git.md`
-and `reference/linux.md`. Two individual techs, both **template v3**. Owner choices:
-Git accent **sienna** (amber-brown, new), Linux accent **yellow** (new); both AA-tuned in
-`globals.css`. Build **Git first**, verify and push, owner reviews, then Linux.
+Reference: `reference/python.md` (owner input, 27 sections). Slug `python`, accent `cobalt` (new), Python-only code. Baseline **Python 3.14** (current stable; PEP 779 free-threading officially supported; dict ordered since 3.7; `X | None` since 3.10; `match` since 3.10).
 
-Baselines: Git 2.x (2.5x, 2026 — time-based releases, latest stable ~2.56, Sep 2026);
-Linux generic (Linux kernel + GNU userland), Ubuntu/Debian (apt) and systemd as the
-examples, bash as the shell. Java-only app code where code appears.
+## Topics (9) and 65 concepts
 
-## Git — topics (8, foundations first) and concepts (~41)
+1. Python Basics — what-is-python, python-execution-model, dynamic-and-strong-typing, variables-and-objects
+2. Data Types and Memory — builtin-data-types, mutable-vs-immutable, type-checking, memory-and-gc, shallow-vs-deep-copy, mutable-default-argument
+3. Operators and Control Flow — operators-overview, equality-vs-identity, conditionals, loops, loop-control, iteration-helpers
+4. Strings and Collections — strings, string-methods, lists, tuples, sets, dictionaries, comprehensions, unpacking-and-swapping
+5. Functions — functions-basics, function-arguments, lambda, recursion, scope-legb, closures, decorators
+6. Object-Oriented Python — class-and-object, init-new-del, encapsulation, inheritance, polymorphism, abstraction, method-types, mro, dunder-methods
+7. Iterators, Generators and Errors — iterable-vs-iterator, generators, context-managers, exceptions, custom-exceptions, file-handling, map-filter-reduce, type-hints, dataclasses
+8. Concurrency and Tooling — concurrency-vs-parallelism, threading, multiprocessing, gil, asyncio, modules-and-packages, venv-and-pip, collections-module, time-complexity
+9. Python in Practice — python-web-frameworks, testing-and-logging, regex, string-coding-problems, number-coding-problems, collection-coding-problems, python-for-java-developers
 
-1. **basics**: what-is-git, how-git-stores-data, working-staging-repo, git-config, init-and-clone
-2. **changes**: git-status, staging-and-add, git-commit, git-diff, git-log, gitignore, git-rm-and-mv
-3. **branching**: git-branches, head-and-detached-head, switching-branches
-4. **integrating**: git-merge, merge-conflicts, git-rebase, git-cherry-pick, squash-merge
-5. **remotes**: git-remotes, fetch-pull-push, tracking-branches, pull-strategies, pull-requests, forking
-6. **undoing**: git-restore, git-reset, git-revert, git-clean, git-reflog
-7. **saving**: git-stash, git-tags
-8. **internals**: git-objects, git-directory, git-hooks, commit-amend, branching-strategies, good-commits, git-blame, git-bisect
+## Comparisons (15)
 
-Comparisons (~13): git-vs-github, merge-vs-rebase, fetch-vs-pull-vs-push, reset-vs-revert,
-restore-vs-reset, reset-soft-mixed-hard, stash-apply-vs-pop, branch-vs-tag,
-merge-vs-cherry-pick, clone-vs-fork, lightweight-vs-annotated-tag,
-fast-forward-vs-merge-commit, add-vs-commit-vs-push.
+list-vs-tuple, list-set-dict, mutable-vs-immutable, is-vs-equals, shallow-vs-deep-copy, type-vs-isinstance, args-vs-kwargs, instance-class-static-method, init-vs-new, iterator-vs-generator, list-comp-vs-generator-expr, concurrency-vs-parallelism, process-vs-thread, threading-vs-multiprocessing, django-flask-fastapi
 
-Added beyond the reference (interview-important, missing from it): git-reflog (recovery),
-squash-merge, pull-strategies (ff-only / pull.rebase), commit-amend, branching-strategies
-(trunk-based vs Git Flow), good-commits, git-blame, git-bisect. All recorded in the coverage file.
+## Workflow
 
-Running example: a small team building a **payments feature** on a shared repo.
+Structural files (me) → glossary + comparisons (parallel agents) → cards topic-by-topic (parallel agents, v3 spec + gold example) → independent verification agents → coverage close → gates (validate/lint/typecheck/build) → browser QA → commit + push.
 
-## Linux — (built after Git; topics drafted, finalised at build time)
+## Decisions / notes
 
-OS/kernel/shell basics, filesystem, navigation, files, permissions, users/groups,
-text search (grep/find), pipes & redirection, processes & signals, packages, networking,
-env vars, services (systemd) & monitoring, archives, scheduling (cron). ~50 concepts.
+- Backend REST/HTTP/status-codes/security are other techs on the site; covered here only as Python-specific points/glossary, not re-taught in depth (principle: write each fact once).
+- Running example where natural: a small online-shop / orders thread (list of orders, Order class, totals, streaming).
+- Owner value-add: `python-for-java-developers` concept + 3 coding-problem concepts with practice boxes (per owner's coding emphasis).

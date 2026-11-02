@@ -28,6 +28,7 @@ export const ACCENTS = [
   "purple",
   "sienna",
   "yellow",
+  "cobalt",
 ] as const;
 
 /** Kinds of key point. Each gets its own marker so a page can be scanned, not read. */

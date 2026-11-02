@@ -17,7 +17,7 @@ export const CATEGORIES: Category[] = [
     id: "languages",
     title: "Languages",
     blurb: "The language you write.",
-    slugs: ["java"],
+    slugs: ["java", "python"],
   },
   {
     id: "fundamentals",

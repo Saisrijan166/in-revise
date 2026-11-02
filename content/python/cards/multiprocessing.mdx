@@ -1,0 +1,111 @@
+---
+id: multiprocessing
+tech: python
+title: Multiprocessing
+topic: concurrency
+level: intermediate
+heat: 3
+hook: "multiprocessing runs separate processes, each with its own memory and GIL, so CPU work runs in parallel across cores. Data is sent between them, not shared."
+points:
+  - { k: "Process", v: "a separate program with its own memory and its own GIL", kind: key }
+  - { k: "CPU-bound", v: "true parallelism: each process uses a different core", kind: plus }
+  - { k: "Communication", v: "no shared variables: send data via Queue, Pipe or shared memory", kind: key }
+  - { k: "Overhead", v: "heavier startup; arguments are pickled to cross processes", kind: minus }
+  - { k: "Guard", v: "wrap startup in if __name__ == \"__main__\" to avoid re-spawning", kind: default }
+trap:
+  wrong: "Child processes can read the parent's variables directly, like threads do."
+  right: "Each process has its own memory, so data must be passed through a Queue, Pipe or shared-memory object, usually by pickling it."
+  why: "Threads share memory, so people assume processes do too; in fact processes are isolated and must copy data across."
+sayIt: "multiprocessing runs separate processes, each with its own memory and GIL, so CPU-bound work runs in parallel across cores. The cost is heavier startup and sending data between processes, usually pickled over a Queue. Guard the launch with if __name__ == '__main__'."
+cheat:
+  idea: "multiprocessing.Process gives each worker its own memory and GIL, so CPU-bound work runs in parallel across cores. Send data via Queue or Pipe; guard startup."
+  flow: "Process(target=f) · start() · join()"
+  code: "p = Process(target=f); p.start(); p.join()"
+  remember: "Processes for CPU work; separate memory, so pass data, don't share."
+buildsOn: [concurrency-vs-parallelism]
+scenarios:
+  - q: "You run four processes that each append to a plain list defined in the parent before the fork. After they finish, is the parent's list full of their items?"
+    a: "No. Each process gets its own copy of the list, so changes stay local. To collect results, pass them back through a multiprocessing.Queue."
+  - q: "On Windows a multiprocessing script spawns endless processes and crashes. What is the usual cause?"
+    a: "The process-creating code is not inside if __name__ == '__main__'. On spawn start, each child re-imports the module and runs the launch code again, spawning more processes."
+confusedWith: []
+tags: [multiprocessing, parallelism, cpu-bound, ipc]
+visual: table
+sources:
+  - title: "multiprocessing module"
+    url: "https://docs.python.org/3/library/multiprocessing.html"
+    verifiedOn: "2026-11-02"
+  - title: "multiprocessing programming guidelines (__main__ guard)"
+    url: "https://docs.python.org/3/library/multiprocessing.html#the-spawn-and-forkserver-start-methods"
+    verifiedOn: "2026-11-02"
+---
+
+## What it is
+
+The `multiprocessing` module runs work in separate [processes](card:concurrency-vs-parallelism) instead of threads. Each process is a full program with its own memory and its own interpreter, so each has its own [GIL](card:gil). This sidesteps the GIL and lets CPU-heavy work run truly in parallel across cores. Because the processes do not share memory, they talk through inter-process communication (IPC): a `Queue`, a `Pipe`, or shared-memory objects.
+
+## Why it exists
+
+Threads cannot speed up CPU-bound work in standard CPython, because the GIL serialises Python bytecode. When you need to actually use all your cores (hashing many files, image processing, heavy maths), you need separate processes, each free of the others' GIL. `multiprocessing` gives that with an API close to `threading`, so you can parallelise compute without dropping to a lower-level tool.
+
+## How it works
+
+<Compare id="threading-vs-multiprocessing" />
+
+1. `Process(target=f)` describes a worker; `start()` launches it as a new OS process.
+2. The child gets its own copy of the needed data (pickled across on the spawn start method).
+3. Workers compute on their own core, free of the parent's GIL.
+4. Results come back through a `Queue` or `Pipe`; `join()` waits for each process to finish.
+
+## Example
+
+```python
+from multiprocessing import Process, Queue
+
+def total(order, q):
+    q.put(sum(order))
+
+if __name__ == "__main__":
+    q = Queue()
+    p = Process(target=total, args=([10, 20, 30], q))
+    p.start()
+    p.join()
+    print(q.get())
+```
+
+```text output
+60
+```
+
+What to notice: the worker cannot change the parent's variables, so it sends its result back through the `Queue`. The launch sits inside `if __name__ == "__main__"`, which stops child processes from re-running it and spawning endlessly.
+
+## Rules and defaults
+
+- Each process has its own memory and GIL, so CPU-bound work runs in parallel.
+- Arguments and results crossing processes must be picklable; they are copied, not shared.
+- The default start method is `spawn` on Windows and macOS, and (as of Python 3.14) `forkserver` on most Linux; all re-import the module, so guard startup with `if __name__ == "__main__"`.
+- Use `Queue`, `Pipe`, or `multiprocessing.shared_memory` to communicate; plain globals do not cross.
+
+## Not to be confused with
+
+A **thread** shares the process's memory and is light but limited by the GIL; a **process** has its own memory and GIL and runs CPU work in parallel. Rule: threads for I/O waits, processes for CPU crunching.
+
+## Common mistakes
+
+- Expecting child processes to see changes to the parent's variables (they get copies).
+- Leaving the launch code outside `if __name__ == "__main__"`, causing runaway spawning.
+- Passing unpicklable objects (like an open file or a lambda) as arguments.
+
+## Interview Qs
+
+### When should you use multiprocessing instead of threading?
+
+For CPU-bound work: heavy computation that should use several cores. Each process has its own GIL, so they run in parallel. Threads cannot, because the GIL serialises bytecode in standard CPython.
+
+### How do processes share data?
+
+They do not share memory directly. You pass data through IPC: a `multiprocessing.Queue` or `Pipe`, or a shared-memory object. The data is usually pickled to cross the process boundary.
+
+### Why do you need `if __name__ == "__main__"` with multiprocessing?
+
+On the spawn and forkserver start methods, each child re-imports the module. Without the guard, the module-level launch code runs again in every child, spawning more processes and often crashing.
