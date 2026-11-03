@@ -5,6 +5,7 @@ export const urls = {
   topic: (tech: string, topic: string) => `/${tech}/#topic-${topic}`,
   concept: (tech: string, id: string) => `/${tech}/${id}/`,
   blueprint: (tech: string) => `/${tech}/blueprint/`,
+  syntax: (tech: string) => `/${tech}/syntax/`,
   tree: (tech: string, node?: string) => `/${tech}/tree/${node ? `#node-${node}` : ""}`,
   compareIndex: (tech: string) => `/${tech}/compare/`,
   compare: (tech: string, id: string) => `/${tech}/compare/${id}/`,

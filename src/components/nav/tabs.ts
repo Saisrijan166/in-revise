@@ -1,9 +1,11 @@
 import type { ComponentType } from "react";
 import { urls } from "@/lib/urls";
 import { hasBlueprint } from "@/lib/blueprint";
+import { hasSyntax } from "@/lib/syntax";
 import {
   IconBook,
   IconCards,
+  IconCode,
   IconColumns,
   IconHome,
   IconMap,
@@ -63,6 +65,14 @@ export const TECH_TABS: TabDef[] = [
     href: urls.cheatsheet,
     icon: IconSheet,
     hint: "Everything on one page",
+  },
+  {
+    key: "syntax",
+    label: "Syntax",
+    href: urls.syntax,
+    icon: IconCode,
+    hint: "Daily-use methods and syntax",
+    when: hasSyntax,
   },
   { key: "quiz", label: "Quiz", href: urls.quiz, icon: IconCards, hint: "Test yourself" },
   {

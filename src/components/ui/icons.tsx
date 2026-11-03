@@ -201,6 +201,11 @@ export const IconMap = (p: IconProps) => (
     <path d="M3 9h18M9 9v11M9 4v2" />
   </Base>
 );
+export const IconCode = (p: IconProps) => (
+  <Base {...p}>
+    <path d="M8 7l-5 5 5 5M16 7l5 5-5 5M13 5l-2 14" />
+  </Base>
+);
 export const IconLinkArrow = (p: IconProps) => (
   <Base {...p}>
     <circle cx="5" cy="12" r="2.5" />
