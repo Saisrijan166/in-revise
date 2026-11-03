@@ -1,10 +1,12 @@
 import type { ComponentType } from "react";
 import { urls } from "@/lib/urls";
+import { hasBlueprint } from "@/lib/blueprint";
 import {
   IconBook,
   IconCards,
   IconColumns,
   IconHome,
+  IconMap,
   IconSheet,
   IconTree,
 } from "@/components/ui/icons";
@@ -15,6 +17,13 @@ export interface TabDef {
   href: (tech: string) => string;
   icon: ComponentType<{ size?: number; className?: string }>;
   hint: string;
+  /** When present, the tab shows only for techs where this returns true. */
+  when?: (tech: string) => boolean;
+}
+
+/** The tabs a given tech actually shows (some, like Blueprint, exist only for some techs). */
+export function tabsFor(tech: string): TabDef[] {
+  return TECH_TABS.filter((t) => !t.when || t.when(tech));
 }
 
 /** Pages of one tech, in the order they appear in the top bar and the Topics sheet. */
@@ -25,6 +34,14 @@ export const TECH_TABS: TabDef[] = [
     href: urls.overview,
     icon: IconHome,
     hint: "The story and all topics",
+  },
+  {
+    key: "blueprint",
+    label: "Blueprint",
+    href: urls.blueprint,
+    icon: IconMap,
+    hint: "The whole tech in one map",
+    when: hasBlueprint,
   },
   {
     key: "tree",

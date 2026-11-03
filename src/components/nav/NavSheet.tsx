@@ -10,7 +10,7 @@ import { IconClose } from "@/components/ui/icons";
 import { ModeSwitch } from "@/components/site/ModeSwitch";
 import { TechSwitcher } from "@/components/site/TechSwitcher";
 import type { TechLite } from "@/components/site/useCurrentTech";
-import { TECH_TABS, activeTab } from "./tabs";
+import { activeTab, tabsFor } from "./tabs";
 import { TreeNav } from "./TreeNav";
 
 /** Phones and tablets: the tech's pages, the study mode and the whole tree in one sheet. */
@@ -51,7 +51,7 @@ export function NavSheet({ nav, techs }: { nav: TechNav; techs: TechLite[] }) {
                 <TechSwitcher techs={techs} current={current} />
               </div>
               <ul className="grid grid-cols-2 gap-1">
-                {TECH_TABS.map((t) => {
+                {tabsFor(nav.slug).map((t) => {
                   const Icon = t.icon;
                   return (
                     <li key={t.key}>

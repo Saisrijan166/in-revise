@@ -7,7 +7,7 @@ import { useTopbarOpen, toggleTopbar } from "@/lib/store/prefs";
 import { urls } from "@/lib/urls";
 import { cx } from "@/lib/ui";
 import { IconChevronRight, IconHome, IconMenu, IconSearch } from "@/components/ui/icons";
-import { TECH_TABS, activeTab, isConceptPath } from "@/components/nav/tabs";
+import { activeTab, isConceptPath, tabsFor } from "@/components/nav/tabs";
 import { Wordmark } from "./Logo";
 import { ModeSwitch } from "./ModeSwitch";
 import { TechSwitcher } from "./TechSwitcher";
@@ -79,7 +79,7 @@ export function Header({ techs }: { techs: TechLite[] }) {
                 className="flex items-center gap-0.5 rounded-2xl border border-line-strong bg-surface p-1 shadow-[var(--shadow)]"
               >
                 <TechSwitcher techs={techs} current={tech} className="mr-1" />
-                {TECH_TABS.map((t) => (
+                {tabsFor(tech.slug).map((t) => (
                   <Link
                     key={t.key}
                     href={t.href(tech.slug)}

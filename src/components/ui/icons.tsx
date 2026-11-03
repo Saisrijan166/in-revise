@@ -195,6 +195,12 @@ export const IconTree = (p: IconProps) => (
     <path d="M12 8v4M6 16v-2h12v2" />
   </Base>
 );
+export const IconMap = (p: IconProps) => (
+  <Base {...p}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M3 9h18M9 9v11M9 4v2" />
+  </Base>
+);
 export const IconLinkArrow = (p: IconProps) => (
   <Base {...p}>
     <circle cx="5" cy="12" r="2.5" />
