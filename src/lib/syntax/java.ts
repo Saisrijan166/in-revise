@@ -105,7 +105,8 @@ export const java: SyntaxSheet = {
           code: `StringBuilder sb = new StringBuilder();
 sb.append("a").append(1);     // chaining
 sb.insert(0, "x");            // "xa1"
-sb.reverse();                 // "1ax"
+sb.delete(0, 1);              // "a1"  (removes [start, end))
+sb.reverse();                 // "1a"
 String result = sb.toString();`,
         },
       ],
@@ -127,6 +128,11 @@ String result = sb.toString();`,
           example: "Arrays.sort(arr, Comparator.reverseOrder());",
         },
         { syntax: "Arrays.fill(a, v)", what: "Fill every slot", example: "Arrays.fill(a, -1);" },
+        {
+          syntax: "Arrays.equals(a, b)",
+          what: "Element-by-element equality",
+          example: "Arrays.equals(a, b) // true if same contents",
+        },
         {
           syntax: "Arrays.toString(a)",
           what: "Printable form",
@@ -344,6 +350,11 @@ pq.offer(new int[]{id, count});`,
         { syntax: ".limit(n) / .skip(n)", what: "Take / drop", example: ".limit(5)" },
         { syntax: ".count()", what: "How many", example: ".filter(...).count()" },
         {
+          syntax: ".findFirst() / .findAny()",
+          what: "First / any match (Optional)",
+          example: ".filter(x -> x > 0).findFirst()",
+        },
+        {
           syntax: ".anyMatch/allMatch/noneMatch(pred)",
           what: "Boolean checks",
           example: ".anyMatch(x -> x < 0)",
@@ -379,6 +390,31 @@ pq.offer(new int[]{id, count});`,
           example: ".collect(Collectors.toMap(P::id, p -> p))",
         },
         {
+          syntax: "Collectors.toSet()",
+          what: "Collect to a Set",
+          example: ".collect(Collectors.toSet())",
+        },
+        {
+          syntax: "Collectors.counting()",
+          what: "Count per group (downstream)",
+          example: "groupingBy(P::dept, Collectors.counting())",
+        },
+        {
+          syntax: "Collectors.summingInt(fn)",
+          what: "Sum per group (also averagingInt)",
+          example: "groupingBy(P::dept, Collectors.summingInt(P::salary))",
+        },
+        {
+          syntax: "Collectors.mapping(fn, down)",
+          what: "Map then collect per group",
+          example: "groupingBy(P::dept, mapping(P::name, toList()))",
+        },
+        {
+          syntax: "Collectors.maxBy(cmp) / minBy(cmp)",
+          what: "Extreme per group (Optional)",
+          example: "groupingBy(P::dept, maxBy(comparingInt(P::salary)))",
+        },
+        {
           syntax: "IntStream.range(a, b)",
           what: "Stream of ints [a, b)",
           example: "IntStream.range(0, n).forEach(i -> {});",
@@ -395,7 +431,12 @@ Map<String, List<Person>> byDept = people.stream()
     .collect(Collectors.groupingBy(Person::dept));
 
 Map<Boolean, List<Integer>> split = nums.stream()
-    .collect(Collectors.partitioningBy(x -> x > 0));`,
+    .collect(Collectors.partitioningBy(x -> x > 0));
+
+// count per group: {HR=3, ENG=5}
+Map<String, Long> perDept = people.stream()
+    .collect(Collectors.groupingBy(
+        Person::dept, Collectors.counting()));`,
         },
       ],
     },
@@ -495,6 +536,11 @@ Map<Boolean, List<Integer>> split = nums.stream()
           example: "Character.isLetterOrDigit(c)",
         },
         {
+          syntax: "Character.isWhitespace(c)",
+          what: "Is a space/tab/newline?",
+          example: "Character.isWhitespace(' ') // true",
+        },
+        {
           syntax: "Character.toUpperCase(c)",
           what: "Change a char's case",
           example: "Character.toLowerCase('A') // 'a'",
@@ -538,6 +584,16 @@ Map<Boolean, List<Integer>> split = nums.stream()
           syntax: "Collections.reverse(list)",
           what: "Reverse in place",
           example: "Collections.reverse(list);",
+        },
+        {
+          syntax: "Collections.max(list) / min(list)",
+          what: "Largest / smallest element",
+          example: "Collections.max(list)",
+        },
+        {
+          syntax: "Collections.frequency(list, x)",
+          what: "How many times x appears",
+          example: "Collections.frequency(list, 5) // 2",
         },
       ],
       combos: [
