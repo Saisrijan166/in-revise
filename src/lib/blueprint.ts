@@ -1,216 +1,118 @@
 /**
  * Visual Learning Blueprint data (client-safe: no Node imports).
  *
- * A blueprint is one connected, color-coded map of a tech, read top to bottom:
- * pillars → Fundamentals → Core → Advanced → the execution flows.
- * It is curated per tech (not generated from the tree), so a tech has a Blueprint
- * page only when it appears in BLUEPRINTS. The nav shows the tab only for those.
+ * A blueprint is ONE large connected flowchart — a system map of a tech: boxes,
+ * arrows and branches showing how the parts connect and how execution flows,
+ * from startup to request handling to production. It is a Mermaid diagram so the
+ * site renders it theme-aware and it scrolls in its own box. Curated per tech, so
+ * a tech has a Blueprint page only when it appears in BLUEPRINTS.
  */
 
-export type BpTone = "fundamentals" | "core" | "advanced";
-
-export interface BpNode {
-  title: string;
-  /** small mono label shown beside the title */
-  tag?: string;
-  /** short term chips */
-  chips?: string[];
-  /** full-width node that shows an equation/flow of parts instead of chips */
-  wide?: boolean;
-  parts?: string[];
-  sep?: "=" | "→";
-}
-
-export interface BpTier {
-  num: string;
-  title: string;
-  sub: string;
-  tone: BpTone;
-  nodes: BpNode[];
-}
-
-export interface BpFlow {
+export interface BpLegendItem {
   label: string;
-  title: string;
-  caption: string;
-  steps: { main: string; sub?: string }[];
+  color: string;
 }
 
 export interface Blueprint {
   tagline: string;
-  pillarsLabel: string;
-  pillars: { title: string; desc: string }[];
-  tiers: BpTier[];
-  flows: BpFlow[];
+  /** Mermaid flowchart source. */
+  chart: string;
+  /** Text alternative for the diagram (accessibility + fallback). */
+  alt: string;
+  /** Colour key matching the diagram's classDef fills. */
+  legend: BpLegendItem[];
   baseline: string;
 }
 
 const springBoot: Blueprint = {
-  tagline: "One map, beginner to advanced — auto-configured Spring that runs standalone.",
-  pillarsLabel: "Why Spring Boot · the 5 pillars",
-  pillars: [
-    { title: "Auto-config", desc: "Sensible beans by default, from the classpath" },
-    { title: "Starters", desc: "One dependency pulls a whole stack" },
-    { title: "Embedded server", desc: "Tomcat inside the JAR — no WAR" },
-    { title: "Standalone", desc: "java -jar and it runs" },
-    { title: "Production-ready", desc: "Actuator: health, metrics, info" },
+  tagline: "How Spring Boot boots, wires its beans, and runs one request end to end.",
+  legend: [
+    { label: "Startup / container", color: "#1b5e20" },
+    { label: "Web layer", color: "#0d47a1" },
+    { label: "Data layer", color: "#4a148c" },
+    { label: "Cross-cutting (AOP)", color: "#8a5208" },
+    { label: "Production & scale", color: "#37474f" },
   ],
-  tiers: [
-    {
-      num: "01",
-      title: "Fundamentals",
-      sub: "Create a project, boot it up, configure it",
-      tone: "fundamentals",
-      nodes: [
-        {
-          title: "Spring Initializr",
-          tag: "start.spring.io",
-          chips: ["pick starters", "Java + Boot ver."],
-        },
-        { title: "Build tool", chips: ["Maven", "Gradle", "pom.xml"] },
-        {
-          title: "Starters",
-          tag: "spring-boot-starter-*",
-          chips: ["web", "data-jpa", "security", "validation", "test"],
-        },
-        {
-          title: "Auto-configuration",
-          chips: ["@Conditional", "classpath-driven", "override anytime"],
-        },
-        {
-          title: "Config & Profiles",
-          chips: ["application.yml", "@Value", "@ConfigurationProperties", "dev / prod"],
-        },
-        { title: "Embedded server", chips: ["Tomcat (default)", "Jetty", "Undertow"] },
-        {
-          title: "@SpringBootApplication",
-          tag: "main() → SpringApplication.run()",
-          wide: true,
-          sep: "=",
-          parts: ["@Configuration", "@EnableAutoConfiguration", "@ComponentScan"],
-        },
-      ],
-    },
-    {
-      num: "02",
-      title: "Core Concepts",
-      sub: "The container, beans, the web and data layers",
-      tone: "core",
-      nodes: [
-        {
-          title: "IoC Container",
-          tag: "ApplicationContext",
-          chips: ["creates beans", "wires them", "manages lifecycle"],
-        },
-        {
-          title: "Beans & Stereotypes",
-          chips: ["@Component", "@Service", "@Repository", "@Controller"],
-        },
-        {
-          title: "Dependency Injection",
-          chips: ["constructor (best)", "@Autowired", "@Qualifier"],
-        },
-        {
-          title: "Scope & Lifecycle",
-          chips: ["singleton (default)", "prototype", "@PostConstruct", "@PreDestroy"],
-        },
-        { title: "Java Config", chips: ["@Configuration", "@Bean"] },
-        {
-          title: "Spring MVC",
-          tag: "DispatcherServlet",
-          chips: ["front controller", "HandlerMapping", "ViewResolver"],
-        },
-        {
-          title: "REST Endpoints",
-          tag: "@RestController",
-          chips: ["@GetMapping", "@PostMapping", "@PathVariable", "@RequestBody"],
-        },
-        {
-          title: "Validation & Errors",
-          chips: ["@Valid", "jakarta.validation", "@RestControllerAdvice", "@ExceptionHandler"],
-        },
-        {
-          title: "Spring Data JPA",
-          tag: "Hibernate",
-          chips: ["@Entity", "JpaRepository", "@Transactional", "derived queries"],
-        },
-        {
-          title: "Layered architecture",
-          tag: "separation of concerns",
-          wide: true,
-          sep: "→",
-          parts: [
-            "Controller (web/DTO)",
-            "Service (logic/@Transactional)",
-            "Repository (data)",
-            "Database",
-          ],
-        },
-      ],
-    },
-    {
-      num: "03",
-      title: "Advanced",
-      sub: "Secure, observe, test and ship to production",
-      tone: "advanced",
-      nodes: [
-        { title: "Spring Security", chips: ["filter chain", "authn / authz", "JWT", "OAuth2"] },
-        { title: "AOP", tag: "cross-cutting", chips: ["@Aspect", "@Around", "logging / tx"] },
-        { title: "Actuator", tag: "Micrometer", chips: ["/health", "/metrics", "/info"] },
-        { title: "Tasks", chips: ["@Cacheable", "@Scheduled", "@Async", "@EventListener"] },
-        {
-          title: "Testing",
-          chips: ["@SpringBootTest", "@WebMvcTest", "MockMvc", "Testcontainers"],
-        },
-        { title: "Messaging", chips: ["Kafka", "RabbitMQ", "app events"] },
-        { title: "HTTP Clients", chips: ["RestClient", "WebClient", "RestTemplate"] },
-        {
-          title: "Reactive",
-          tag: "Spring WebFlux",
-          chips: ["non-blocking", "Mono / Flux", "Netty"],
-        },
-        {
-          title: "Spring Cloud",
-          tag: "microservices",
-          chips: ["Config", "Eureka", "Gateway", "Resilience4j"],
-        },
-        { title: "Package & Deploy", chips: ["fat JAR", "Docker", "GraalVM native"] },
-      ],
-    },
-  ],
-  flows: [
-    {
-      label: "Flow 1",
-      title: "Startup lifecycle",
-      caption: "What happens the moment you run the app.",
-      steps: [
-        { main: "main()", sub: "run()" },
-        { main: "ApplicationContext", sub: "created" },
-        { main: "Component scan", sub: "find beans" },
-        { main: "Auto-config", sub: "@Conditional" },
-        { main: "Beans built", sub: "& injected" },
-        { main: "Tomcat starts", sub: "port 8080" },
-        { main: "App ready", sub: "serving" },
-      ],
-    },
-    {
-      label: "Flow 2",
-      title: "HTTP request path",
-      caption: "How one request travels through the layers and back.",
-      steps: [
-        { main: "Client", sub: "HTTP" },
-        { main: "Tomcat", sub: "embedded" },
-        { main: "Filters", sub: "Security" },
-        { main: "DispatcherServlet", sub: "front ctrl" },
-        { main: "Controller", sub: "@GetMapping" },
-        { main: "Service", sub: "logic" },
-        { main: "Repository", sub: "JPA" },
-        { main: "Database", sub: "SQL" },
-        { main: "JSON response", sub: "@ResponseBody" },
-      ],
-    },
-  ],
+  alt:
+    "A system map of Spring Boot. Startup spine: java -jar runs main() and SpringApplication.run(), " +
+    "which creates the ApplicationContext (IoC container); auto-configuration reacts to starters on the " +
+    "classpath, @ComponentScan finds beans, and dependency injection wires them; config and profiles load; " +
+    "embedded Tomcat starts on 8080 and the app is ready. Request spine: an HTTP client goes through the " +
+    "Spring Security filter chain to the DispatcherServlet, HandlerMapping, then a @RestController, which " +
+    "validates with @Valid, calls a @Transactional @Service, which calls a Spring Data JPA Repository, " +
+    "Hibernate, and the Database; the controller returns JSON, and errors go to @RestControllerAdvice. The " +
+    "container injects the controller, service and repository beans. Cross-cutting AOP (@Aspect, @Cacheable, " +
+    "@Async) wraps the service. Production branches: Actuator and testing observe the context; the service " +
+    "publishes to Kafka or RabbitMQ; the controller calls Spring Cloud (Gateway, Eureka, Config, " +
+    "Resilience4j); a reactive WebFlux path is an alternative to the servlet stack; and the ready app is " +
+    "packaged as a fat JAR, Docker image or GraalVM native image.",
   baseline: "Spring Boot 4.1 · Java 17+",
+  chart: `flowchart TD
+  subgraph BOOT["1 . Startup lifecycle"]
+    direction TB
+    run["main() + SpringApplication.run()"]:::boot
+    run --> ctx["ApplicationContext (IoC container)"]:::boot
+    ctx --> acfg["Auto-configuration"]:::boot
+    acfg -->|classpath| strt[("Starters")]:::boot
+    ctx --> scan["@ComponentScan"]:::boot
+    scan --> beans["Beans: @Component @Service @Repository"]:::boot
+    acfg --> beans
+    beans --> di["Dependency Injection (constructor)"]:::boot
+    ctx --> conf["Config: application.yml . Profiles"]:::boot
+    ctx --> tom["Embedded Tomcat :8080"]:::boot
+    tom --> ready(["App ready"]):::boot
+  end
+
+  subgraph REQ["2 . Request flow"]
+    direction TB
+    cli(["HTTP request"]):::web
+    cli --> sec["Filter chain: Spring Security"]:::cross
+    sec --> disp{{"DispatcherServlet"}}:::web
+    disp --> hmap["HandlerMapping"]:::web
+    hmap --> ctrl["@RestController @GetMapping"]:::web
+    ctrl --> vld["@Valid"]:::web
+    ctrl --> serv["@Service @Transactional"]:::web
+    serv --> repo["Repository: Spring Data JPA"]:::data
+    repo --> orm["Hibernate / JPA"]:::data
+    orm --> dbs[("Database")]:::data
+    ctrl --> json["JSON @ResponseBody response"]:::web
+    ctrl -.->|on error| advc["@RestControllerAdvice"]:::web
+    cli -.->|non-blocking alt| rx["Reactive: WebFlux Mono/Flux"]:::web
+    rx -.-> serv
+  end
+
+  ready ==>|serves| cli
+  di -.->|wires| ctrl
+
+  subgraph CROSS["3 . Cross-cutting (AOP)"]
+    direction LR
+    aop["@Aspect @Around"]:::cross
+    cache["@Cacheable"]:::cross
+    asyn["@Async @Scheduled"]:::cross
+  end
+  serv -->|wrapped by| aop
+  serv --> cache
+  serv --> asyn
+
+  subgraph OPS["4 . Production and scale"]
+    direction LR
+    act["Actuator /health /metrics"]:::ops
+    test["Testing: @SpringBootTest MockMvc"]:::ops
+    mq["Messaging: Kafka / RabbitMQ"]:::ops
+    cloud["Spring Cloud: Gateway Eureka Config Resilience4j"]:::ops
+    dep["Package + Deploy: fat JAR . Docker . GraalVM"]:::ops
+  end
+  ready --> act
+  ready --> test
+  ready --> dep
+  serv -->|publish| mq
+  ctrl -->|calls| cloud
+
+  classDef boot fill:#1b5e20,color:#ffffff,stroke:#43a047,stroke-width:1px;
+  classDef web fill:#0d47a1,color:#ffffff,stroke:#1e88e5,stroke-width:1px;
+  classDef data fill:#4a148c,color:#ffffff,stroke:#8e24aa,stroke-width:1px;
+  classDef cross fill:#8a5208,color:#ffffff,stroke:#c77f1a,stroke-width:1px;
+  classDef ops fill:#37474f,color:#ffffff,stroke:#78909c,stroke-width:1px;`,
 };
 
 /** Blueprints by tech slug. A tech gets a Blueprint page only if it is here. */
