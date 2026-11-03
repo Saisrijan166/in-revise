@@ -16,6 +16,8 @@ import { microservices } from "./microservices";
 import { aiEngineering } from "./ai-engineering";
 import { dsa } from "./dsa";
 import { designPatterns } from "./design-patterns";
+import { systemDesign } from "./system-design";
+import { osNetworking } from "./os-networking";
 
 /** Syntax sheets by tech slug. A tech gets a Syntax page only if it is here. */
 export const SYNTAX: Record<string, SyntaxSheet> = {
@@ -36,4 +38,6 @@ export const SYNTAX: Record<string, SyntaxSheet> = {
   "ai-engineering": aiEngineering,
   dsa,
   "design-patterns": designPatterns,
+  "system-design": systemDesign,
+  "os-networking": osNetworking,
 };
