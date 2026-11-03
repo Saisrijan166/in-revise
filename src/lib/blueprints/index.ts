@@ -14,6 +14,10 @@ import { designPatterns } from "./design-patterns";
 import { systemDesign } from "./system-design";
 import { dsa } from "./dsa";
 import { react } from "./react";
+import { osNetworking } from "./os-networking";
+import { aiEngineering } from "./ai-engineering";
+import { git } from "./git";
+import { linux } from "./linux";
 
 /** Blueprints by tech slug. A tech gets a Blueprint page only if it is here. */
 export const BLUEPRINTS: Record<string, Blueprint> = {
@@ -32,4 +36,8 @@ export const BLUEPRINTS: Record<string, Blueprint> = {
   "system-design": systemDesign,
   dsa,
   react,
+  "os-networking": osNetworking,
+  "ai-engineering": aiEngineering,
+  git,
+  linux,
 };

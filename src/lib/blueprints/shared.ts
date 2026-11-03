@@ -7,6 +7,11 @@ import type { BpLegendItem } from "./types";
  *
  * Class names used in charts: f (foundation/entry) · c (core/processing) ·
  * d (data/storage) · x (cross-cutting/patterns) · o (ops/scale/advanced).
+ *
+ * Chart authoring notes (Mermaid): keep node labels single-line (no raw newlines
+ * or the `|` character inside a label), and never use a reserved node id — ELK
+ * layout treats `root` (and `end`, `graph`, `subgraph`, `class`, `style`) as
+ * special, which throws "edge source/target could not be found".
  */
 export const PALETTE = {
   f: "#1b5e20", // green
