@@ -35,4 +35,4 @@ export interface CheatDoc {
 }
 
 /** Techs whose Cheat sheet page uses the full reference-driven document. */
-export const FULL_CHEATSHEET = new Set<string>(["spring-boot"]);
+export const FULL_CHEATSHEET = new Set<string>(["spring-boot", "java", "microservices"]);
