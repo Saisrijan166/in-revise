@@ -12,6 +12,8 @@ import { PageHeader } from "@/components/ui/Breadcrumbs";
 import { IconCheck, IconClose } from "@/components/ui/icons";
 import { PrintButton } from "@/components/ui/PrintButton";
 import { CheatMap } from "@/components/cheat/CheatMap";
+import { FullCheatSheet } from "@/components/cheat/FullCheatSheet";
+import { FULL_CHEATSHEET } from "@/lib/cheatsheet";
 
 export const dynamicParams = false;
 
@@ -103,6 +105,8 @@ function Row({ deck, tech, n }: { deck: Deck; tech: string; n: TreeNode }) {
 export default async function CheatSheetPage({ params }: PageProps<"/[tech]/cheatsheet">) {
   const { tech } = await params;
   const deck = getDeck(tech);
+  // Techs with a full reference-driven cheat sheet get the vertical document.
+  if (FULL_CHEATSHEET.has(tech)) return <FullCheatSheet deck={deck} />;
   // Template v3 techs get the visual learning map; the others keep the compact list below.
   if (deck.template === 3) return <CheatMap deck={deck} />;
 
