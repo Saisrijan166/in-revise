@@ -1,5 +1,9 @@
 import type { ReactNode } from "react";
 import { createHighlighter, type Highlighter } from "shiki";
+import type { Deck } from "@/lib/content/load";
+import { buildMatchers, type TermMatcher } from "@/lib/content/remark-terms";
+import { termPreview } from "@/lib/content/render";
+import { PreviewLink } from "@/components/mdx/PreviewLink";
 import type { CheatDoc, MdNode } from "./types";
 
 const LANGS = [
@@ -36,7 +40,7 @@ function normLang(lang?: string): string {
   if (l === "sh" || l === "shell") return "bash";
   if (l === "ts") return "typescript";
   if (l === "js") return "javascript";
-  if (l === "properties" || l === "conf" || l === "ini") return "properties";
+  if (l === "conf" || l === "ini") return "properties";
   return LANGS.includes(l) ? l : "text";
 }
 
@@ -61,47 +65,116 @@ export async function highlightDoc(doc: CheatDoc): Promise<Map<MdNode, string>> 
   return map;
 }
 
-function Inline({ nodes }: { nodes?: MdNode[] }): ReactNode {
+export interface RenderCtx {
+  code: Map<MdNode, string>;
+  deck: Deck;
+  matchers: TermMatcher[];
+  /** Glossary ids already linked in the current section (one link per term per section). */
+  seen: Set<string>;
+}
+
+export function buildMatchersFor(deck: Deck): TermMatcher[] {
+  return buildMatchers(deck.glossary);
+}
+
+/** Split a text run, linking the first unseen mention of each glossary term (like the rest of the site). */
+function linkify(value: string, ctx: RenderCtx, keyBase: string): ReactNode[] {
+  const { matchers, seen, deck } = ctx;
+  const out: ReactNode[] = [];
+  let rest = value;
+  let n = 0;
+  // Stop early when nothing is left to match.
+  while (rest) {
+    let best: { index: number; length: number; id: string } | null = null;
+    for (const m of matchers) {
+      if (seen.has(m.id)) continue;
+      const hit = m.regex.exec(rest);
+      if (
+        hit &&
+        (!best ||
+          hit.index < best.index ||
+          (hit.index === best.index && hit[0].length > best.length))
+      )
+        best = { index: hit.index, length: hit[0].length, id: m.id };
+    }
+    if (!best) {
+      out.push(rest);
+      break;
+    }
+    seen.add(best.id);
+    if (best.index > 0) out.push(rest.slice(0, best.index));
+    const matched = rest.slice(best.index, best.index + best.length);
+    const term = deck.termById.get(best.id);
+    if (term) {
+      out.push(
+        <PreviewLink key={`${keyBase}-${n++}`} preview={termPreview(deck, term)}>
+          {matched}
+        </PreviewLink>,
+      );
+    } else {
+      out.push(matched);
+    }
+    rest = rest.slice(best.index + best.length);
+  }
+  return out;
+}
+
+function Inline({
+  nodes,
+  ctx,
+  link = true,
+  k = "i",
+}: {
+  nodes?: MdNode[];
+  ctx: RenderCtx;
+  link?: boolean;
+  k?: string;
+}): ReactNode {
   if (!nodes) return null;
   return nodes.map((n, i) => {
+    const key = `${k}-${i}`;
     switch (n.type) {
       case "text":
-        return n.value;
+        return link ? linkify(n.value ?? "", ctx, key) : (n.value ?? null);
       case "strong":
         return (
-          <strong key={i}>
-            <Inline nodes={n.children} />
+          <strong key={key}>
+            <Inline nodes={n.children} ctx={ctx} link={link} k={key} />
           </strong>
         );
       case "emphasis":
         return (
-          <em key={i}>
-            <Inline nodes={n.children} />
+          <em key={key}>
+            <Inline nodes={n.children} ctx={ctx} link={link} k={key} />
           </em>
         );
       case "delete":
         return (
-          <del key={i}>
-            <Inline nodes={n.children} />
+          <del key={key}>
+            <Inline nodes={n.children} ctx={ctx} link={link} k={key} />
           </del>
         );
       case "inlineCode":
-        return <code key={i}>{n.value}</code>;
+        return <code key={key}>{n.value}</code>;
       case "break":
-        return <br key={i} />;
+        return <br key={key} />;
       case "link":
         return (
-          <a key={i} href={n.url} target="_blank" rel="noopener noreferrer">
-            <Inline nodes={n.children} />
+          <a key={key} href={n.url} target="_blank" rel="noopener noreferrer">
+            <Inline nodes={n.children} ctx={ctx} link={false} k={key} />
           </a>
         );
       default:
-        return n.children ? <Inline key={i} nodes={n.children} /> : (n.value ?? null);
+        return n.children ? (
+          <Inline key={key} nodes={n.children} ctx={ctx} link={link} k={key} />
+        ) : (
+          (n.value ?? null)
+        );
     }
   });
 }
 
-function Table({ node }: { node: MdNode }) {
+function Table({ node, ctx }: { node: MdNode; ctx: RenderCtx }) {
   const rows = node.children ?? [];
   const [head, ...body] = rows;
   const align = node.align ?? [];
@@ -115,7 +188,7 @@ function Table({ node }: { node: MdNode }) {
             <tr>
               {(head.children ?? []).map((cell, c) => (
                 <th key={c} style={cellStyle(c)}>
-                  <Inline nodes={cell.children} />
+                  <Inline nodes={cell.children} ctx={ctx} link={false} />
                 </th>
               ))}
             </tr>
@@ -126,7 +199,7 @@ function Table({ node }: { node: MdNode }) {
             <tr key={r}>
               {(row.children ?? []).map((cell, c) => (
                 <td key={c} style={cellStyle(c)}>
-                  <Inline nodes={cell.children} />
+                  <Inline nodes={cell.children} ctx={ctx} k={`t${r}-${c}`} />
                 </td>
               ))}
             </tr>
@@ -139,72 +212,66 @@ function Table({ node }: { node: MdNode }) {
 
 export function Blocks({
   nodes,
-  code,
+  ctx,
+  k = "b",
 }: {
   nodes?: MdNode[];
-  code: Map<MdNode, string>;
+  ctx: RenderCtx;
+  k?: string;
 }): ReactNode {
   if (!nodes) return null;
   return nodes.map((n, i) => {
+    const key = `${k}-${i}`;
     switch (n.type) {
       case "paragraph":
         return (
-          <p key={i}>
-            <Inline nodes={n.children} />
+          <p key={key}>
+            <Inline nodes={n.children} ctx={ctx} k={key} />
           </p>
         );
       case "heading": {
         const d = Math.min(Math.max(n.depth ?? 3, 3), 5);
-        if (d === 4)
-          return (
-            <h4 key={i}>
-              <Inline nodes={n.children} />
-            </h4>
-          );
-        if (d === 5)
-          return (
-            <h5 key={i}>
-              <Inline nodes={n.children} />
-            </h5>
-          );
-        return (
-          <h3 key={i}>
-            <Inline nodes={n.children} />
-          </h3>
-        );
+        const inner = <Inline nodes={n.children} ctx={ctx} link={false} k={key} />;
+        if (d === 4) return <h4 key={key}>{inner}</h4>;
+        if (d === 5) return <h5 key={key}>{inner}</h5>;
+        return <h3 key={key}>{inner}</h3>;
       }
       case "list":
         return n.ordered ? (
-          <ol key={i}>
-            <Blocks nodes={n.children} code={code} />
+          <ol key={key}>
+            <Blocks nodes={n.children} ctx={ctx} k={key} />
           </ol>
         ) : (
-          <ul key={i}>
-            <Blocks nodes={n.children} code={code} />
+          <ul key={key}>
+            <Blocks nodes={n.children} ctx={ctx} k={key} />
           </ul>
         );
       case "listItem":
         return (
-          <li key={i}>
-            <Blocks nodes={n.children} code={code} />
+          <li key={key}>
+            <Blocks nodes={n.children} ctx={ctx} k={key} />
           </li>
         );
       case "code":
         return (
-          <div key={i} className="cs-pre" dangerouslySetInnerHTML={{ __html: code.get(n) ?? "" }} />
+          <div
+            key={key}
+            className="cs-pre"
+            dangerouslySetInnerHTML={{ __html: ctx.code.get(n) ?? "" }}
+          />
         );
       case "blockquote":
         return (
-          <blockquote key={i}>
-            <Blocks nodes={n.children} code={code} />
+          <blockquote key={key}>
+            <Blocks nodes={n.children} ctx={ctx} k={key} />
           </blockquote>
         );
       case "table":
-        return <Table key={i} node={n} />;
+        return <Table key={key} node={n} ctx={ctx} />;
       case "thematicBreak":
-        return <hr key={i} className="cs-hr" />;
+        return <hr key={key} className="cs-hr" />;
       default:
-        return n.children ? <Blocks key={i} nodes={n.children} code={code} /> : null;
+        return n.children ? <Blocks key={key} nodes={n.children} ctx={ctx} k={key} /> : null;
     }
   });
 }
