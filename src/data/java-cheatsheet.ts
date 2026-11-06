@@ -8619,6 +8619,24 @@ export const javaCheatsheet: CheatDoc = {
    ]
   },
   {
+   "id": "s-common-why-x-vs-y-comparisons",
+   "num": null,
+   "title": "Common \"Why X vs Y?\" Comparisons",
+   "stars": 0,
+   "chapter": "common-why-x-vs-y-comparisons",
+   "nodes": [
+    {
+     "type": "paragraph",
+     "children": [
+      {
+       "type": "text",
+       "value": "When asked \"why do we need X when Y exists?\", answer: what Y solves, what X solves differently, X's advantage, a tiny example, a one-liner."
+      }
+     ]
+    }
+   ]
+  },
+  {
    "id": "s-interface-vs-abstract-class",
    "num": null,
    "title": "Interface vs Abstract Class",

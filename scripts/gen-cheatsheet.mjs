@@ -61,7 +61,8 @@ function uniqueId(base) {
 function flush() {
   if (!cur) return;
   while (cur.nodes.length && cur.nodes[0].type === "thematicBreak") cur.nodes.shift();
-  while (cur.nodes.length && cur.nodes[cur.nodes.length - 1].type === "thematicBreak") cur.nodes.pop();
+  while (cur.nodes.length && cur.nodes[cur.nodes.length - 1].type === "thematicBreak")
+    cur.nodes.pop();
   if (cur.nodes.length) sections.push(cur);
   cur = null;
 }
@@ -81,9 +82,27 @@ for (const node of tree.children) {
       curChapter = { id: uniqueId("overview"), title: "Overview" };
       chapters.push(curChapter);
     }
-    cur = { id: uniqueId(`s-${slugify(title)}`), num: null, title, stars, chapter: curChapter.id, nodes: [] };
+    cur = {
+      id: uniqueId(`s-${slugify(title)}`),
+      num: null,
+      title,
+      stars,
+      chapter: curChapter.id,
+      nodes: [],
+    };
   } else {
-    if (!cur) continue;
+    if (!cur) {
+      if (!curChapter) continue;
+      // Content placed directly under a chapter (no ## yet): hold it in an implicit section.
+      cur = {
+        id: uniqueId(`s-${curChapter.id}`),
+        num: null,
+        title: curChapter.title,
+        stars: 0,
+        chapter: curChapter.id,
+        nodes: [],
+      };
+    }
     cur.nodes.push(strip(node));
   }
 }

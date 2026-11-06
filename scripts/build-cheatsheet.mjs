@@ -71,7 +71,8 @@ function flush() {
   if (!cur) return;
   // trim leading/trailing thematic breaks
   while (cur.nodes.length && cur.nodes[0].type === "thematicBreak") cur.nodes.shift();
-  while (cur.nodes.length && cur.nodes[cur.nodes.length - 1].type === "thematicBreak") cur.nodes.pop();
+  while (cur.nodes.length && cur.nodes[cur.nodes.length - 1].type === "thematicBreak")
+    cur.nodes.pop();
   if (cur.nodes.length) sections.push(cur);
   cur = null;
 }
@@ -80,7 +81,11 @@ for (const node of tree.children) {
   if (node.type === "heading" && node.depth === 1) {
     const raw = mdToString(node);
     // the document title + the comparisons section marker
-    if (/complete interview cheat sheet/i.test(raw)) { flush(); cur = null; continue; }
+    if (/complete interview cheat sheet/i.test(raw)) {
+      flush();
+      cur = null;
+      continue;
+    }
     if (/why do we need this/i.test(raw) || /why do we need.*exist/i.test(raw)) {
       flush();
       inComparisons = true;
@@ -95,7 +100,11 @@ for (const node of tree.children) {
     const title = (m ? m[2] : clean).trim();
     const chapter = inComparisons ? COMPARISONS.id : num !== null ? chapterFor(num) : lastChapter;
     lastChapter = chapter;
-    const id = inComparisons ? "c" + (num ?? "x" + extra++) : num !== null ? "s" + num : "sx" + extra++;
+    const id = inComparisons
+      ? "c" + (num ?? "x" + extra++)
+      : num !== null
+        ? "s" + num
+        : "sx" + extra++;
     cur = { id, num, title, stars, chapter, nodes: [] };
   } else {
     if (!cur) continue; // skip preamble before first section
@@ -106,7 +115,8 @@ flush();
 
 // chapters that actually have sections, in order
 const chapterList = [];
-for (const b of BOUNDS) if (sections.some((s) => s.chapter === b[1])) chapterList.push({ id: b[1], title: b[2] });
+for (const b of BOUNDS)
+  if (sections.some((s) => s.chapter === b[1])) chapterList.push({ id: b[1], title: b[2] });
 if (sections.some((s) => s.chapter === COMPARISONS.id)) chapterList.push(COMPARISONS);
 
 const data = {
@@ -123,5 +133,7 @@ import type { CheatDoc } from "@/lib/cheatsheet/types";
 export const springBootCheatsheet: CheatDoc = ${JSON.stringify(data, null, 1)};
 `;
 writeFileSync(OUT, header);
-console.log(`sections=${sections.length} chapters=${chapterList.length} stars-top=${sections.filter(s=>s.stars>=3).length}`);
+console.log(
+  `sections=${sections.length} chapters=${chapterList.length} stars-top=${sections.filter((s) => s.stars >= 3).length}`,
+);
 console.log("bytes=", header.length);
